@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Phasma Harness</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="../node_modules/katex/dist/katex.min.css">
+  <script defer src="../node_modules/katex/dist/katex.min.js"></script>
+  <script defer src="../node_modules/marked/lib/marked.umd.js"></script>
+  <script defer src="../node_modules/dompurify/dist/purify.min.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-mark">↗</span><span>Phasma <b>Harness</b></span></div>
+    <button id="new-session" class="new-session"><span>＋</span> New session <kbd>Ctrl N</kbd></button>
+    <button id="workspace" class="workspace" title="Choose workspace"><span class="folder-icon">▱</span><span><small>WORKSPACE</small><strong id="workspace-name">Choose a folder</strong></span><span class="chevron">⌄</span></button>
+    <label class="search"><span>⌕</span><input id="search" type="search" placeholder="Find a session" aria-label="Find a session"></label>
+    <button id="context-search" type="button">Find project context</button>
+    <div class="list-heading">SESSIONS <span id="session-count">0</span></div>
+    <nav id="sessions" aria-label="Saved sessions"></nav>
+    <div class="sidebar-bottom"><div class="account"><div class="account-summary"><span id="connection-dot" class="dot"></span><span id="connection-label">Connecting…</span></div></div><button id="settings" class="settings-button">⚙ <span>Settings</span></button></div>
+  </aside>
+  <main>
+    <header><div><h1 id="session-title">New session</h1><span id="session-path">Your workspace, your models.</span></div><div class="header-actions"><select id="quick-routing" class="rules-tag" aria-label="Model routing" title="Choose Smart or Jev routing"><option value="smart">SMART ROUTING</option><option value="jev">JEV ROUTING</option></select><button id="browse-session" class="compact-action" type="button" title="Session changes" aria-label="Session changes" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z M14 2v6h6 M8 13h8 M8 17h5"/></svg></button><button id="browse-files" class="compact-action" type="button" title="Browse workspace files" aria-label="Browse workspace files"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></svg></button><button id="browse-changes" class="compact-action" type="button" title="View Git changes" aria-label="View Git changes" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="5" r="3"/><circle cx="6" cy="19" r="3"/><circle cx="18" cy="6" r="3"/><path d="M6 8v8m12-7a10 10 0 0 1-9 10"/></svg></button></div></header>
+    <div id="banner" class="banner" role="status" hidden></div>
+    <section id="conversation" aria-label="Conversation" aria-live="polite">
+      <div id="welcome" class="welcome">
+        <div class="welcome-symbol">↗</div><div class="eyebrow">A LITTLE LESS OVERHEAD.</div>
+        <h2>Good work.<br><span>The right amount of AI.</span></h2>
+        <p>Ask naturally. Auto picks a starting preset.<br>You can take the wheel at any time.</p>
+        <div class="suggestions"><button data-prompt="Explain the structure of this workspace and where I should start."><span>⌕</span><strong>Explore this workspace</strong><small>Find the important pieces</small></button><button data-prompt="Review my current changes for correctness. Keep the review read-only."><span>⎇</span><strong>Review my changes</strong><small>Get a focused second look</small></button><button data-prompt="Help me investigate this bug: "><span>⌁</span><strong>Work through a bug</strong><small>Start with the evidence</small></button></div>
+      </div>
+      <div id="messages"></div>
+      <p id="turn-error" class="turn-error" role="status" hidden></p>
+      <div id="working" class="working" hidden><span class="pulse"></span><span id="working-text">Working…</span></div>
+    </section>
+    <div class="composer-area">
+      <div id="message-queue" aria-label="Queued messages"></div>
+      <div id="route-preview" class="route-preview"><span class="route-dot"></span><strong>Auto</strong><span>Choose a starting preset for each message.</span></div>
+      <form id="composer" class="composer"><div id="image-previews" aria-label="Attached images"></div><textarea id="prompt" rows="3" placeholder="What would you like to work on?" aria-label="Message" maxlength="200000"></textarea><div class="composer-bottom"><div class="composer-controls"><label class="preset-control"><span>↗</span><select id="preset" aria-label="Model and reasoning preset"><option value="auto">Auto · choose for me</option></select></label><select id="permissions" class="permissions-control" aria-label="Session permissions" aria-describedby="permissions-detail"></select></div><button id="send" type="submit" aria-label="Send message" title="Send message">↑</button><button id="stop" type="button" class="stop" aria-label="Stop task" title="Stop task" hidden><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1" fill="currentColor"/></svg></button></div></form>
+      <p id="permissions-detail" class="permissions-detail"></p>
+      <div class="composer-footer"><span>Enter to send <span class="separator">·</span> Shift + Enter for a new line <span class="separator">·</span> ↑ for sent history</span><div class="usage-controls"><span id="usage">Connected</span><div class="context-meter-wrap"><button id="context-meter" type="button" aria-label="Compact context" aria-describedby="context-meter-tip"><span class="context-ring" aria-hidden="true"></span></button><span id="context-meter-tip" role="tooltip">Context usage unavailable</span></div></div></div>
+    </div>
+  </main>
+  <dialog id="settings-dialog"><form id="settings-form">
+    <div class="dialog-heading"><h2>Settings</h2><button type="button" class="close-dialog icon-button" aria-label="Close settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    <div class="settings-tabs" role="tablist" aria-label="Settings sections">
+      <button type="button" class="settings-tab active" role="tab" id="tab-general" aria-selected="true" aria-controls="panel-general" data-tab="general">General</button>
+      <button type="button" class="settings-tab" role="tab" id="tab-providers" aria-selected="false" aria-controls="panel-providers" data-tab="providers">Providers</button>
+    </div>
+    <div class="settings-body">
+    <div id="panel-general" class="settings-panel" role="tabpanel" aria-labelledby="tab-general">
+    <h3 class="settings-section">General</h3>
+    <label>Font size<select id="settings-font"><option value="85">85%</option><option value="100">100%</option><option value="115">115%</option><option value="130">130%</option><option value="150">150%</option></select></label>
+    <label>Default workspace<div class="path-field"><input id="settings-workspace" readonly><button id="settings-browse" type="button">Browse</button></div></label>
+    <label>New session permissions<select id="settings-access" aria-describedby="settings-access-detail"></select></label>
+    <p id="settings-access-detail" class="hint"></p>
+    <h3 class="settings-section">Routing</h3>
+    <label>Router<select id="settings-routing" aria-describedby="router-detail"><option value="smart">Smart</option><option value="jev">Jev</option></select></label>
+    <p id="router-detail" class="hint"></p>
+    <label>Routing model<select id="settings-router-preset"></select></label>
+    <label>Jev quick answers<select id="settings-quick"><option value="on">On</option><option value="off">Off</option></select></label>
+    <div class="setting-row"><span id="benchmark-summary" class="hint"></span><button type="button" id="benchmark-open">Benchmarks</button></div>
+    <h3 class="settings-section">Tools</h3>
+    <label>Project search<select id="settings-context"><option value="local">Local</option><option value="jev">Local + Jev ranking</option></select></label>
+    <label>Tool recommendations<select id="settings-tools"><option value="off">Off</option><option value="jev">Jev</option></select></label>
+    <label>Large output<select id="settings-output"><option value="on">Capture excerpts</option><option value="off">Return directly</option></select></label>
+    <h3 class="settings-section">Jev <span id="jev-status" class="hint">No key saved</span></h3>
+    <div class="jev-note"><label>API key<input id="jev-key" type="password" autocomplete="off" spellcheck="false" maxlength="4096" placeholder="Paste a key to save or replace" aria-label="Jev API key"></label><div class="jev-actions"><button id="jev-save" type="button">Save</button><button id="jev-test" type="button">Test</button><button id="jev-remove" type="button">Remove</button></div><p id="jev-result" class="hint" role="status"></p></div>
+    </div>
+    <div id="panel-providers" class="settings-panel" role="tabpanel" aria-labelledby="tab-providers" hidden>
+      <p class="muted">Plug icon: gray = connect, green = connected. Click a connected plug to disconnect. Tick a model to enable it for Auto.</p>
+      <div id="provider-accounts" class="provider-accounts"></div>
+      <h3 class="provider-heading">Models <button type="button" id="renew-models">Renew</button></h3>
+      <div id="provider-model-list"></div>
+      <p id="provider-status" role="status"></p>
+    </div>
+    </div>
+    <div class="dialog-footer"><span id="account-detail" class="muted"></span><button class="primary" type="submit">Save</button></div>
+  </form></dialog>
+  <dialog id="rename-dialog"><form id="rename-form"><h2>Rename session</h2><input id="rename-input" aria-label="Session name" maxlength="120" required><div class="dialog-footer"><button type="button" class="close-dialog">Cancel</button><button class="primary" type="submit">Save</button></div></form></dialog>
+  <dialog id="request-dialog"><div id="request-content"></div></dialog>
+  <dialog id="context-dialog" aria-labelledby="context-heading">
+    <div class="dialog-heading"><h2 id="context-heading">Find project context</h2><button type="button" class="close-dialog" aria-label="Close context search">Close</button></div>
+    <p class="muted">Search the selected workspace source and documentation. Jev sends the question and up to 12 bounded excerpts to TypeSafe. Results are starting evidence; continue searching when needed.</p>
+    <form id="context-form"><label>Question<input id="context-query" maxlength="1000" required placeholder="How are frame resources synchronized?"></label>
+      <div class="context-controls"><select id="context-mode" aria-label="Context ranking"><option value="local">Local search</option><option value="jev">Local + Jev ranking</option></select><button id="context-run" class="primary" type="submit">Search</button><button id="context-cancel" type="button" hidden>Stop search</button></div>
+    </form>
+    <p id="context-status" class="muted" role="status"></p><div id="context-results"></div>
+    <button id="context-attach" type="button" hidden>Add results to message</button>
+  </dialog>
+  <dialog id="delete-dialog" aria-labelledby="delete-heading" aria-describedby="delete-description"><form id="delete-form">
+    <h2 id="delete-heading">Delete session?</h2>
+    <p id="delete-title"></p>
+    <p id="delete-description" class="muted">Permanently remove this conversation and its routing records from Phasma Harness. Project files and Codex's separately stored history remain. This cannot be undone in this app.</p>
+    <div class="dialog-footer"><button type="button" class="close-dialog" autofocus>Cancel</button><button id="delete-confirm" class="danger" type="submit">Delete session</button></div>
+  </form></dialog>
+  <div id="toast" role="alert" hidden></div>
+  <dialog id="browser-dialog" aria-labelledby="browser-heading">
+    <div class="dialog-heading"><h2 id="browser-heading">Workspace files</h2><div class="browser-window-actions"><button id="browser-maximize" type="button" title="Expand panel" aria-label="Expand panel">⛶</button><button type="button" class="close-dialog" aria-label="Close workspace panel">×</button></div></div>
+    <p id="browser-root" class="muted"></p>
+    <div class="workspace-actions"><select id="browser-view" aria-label="File layout"><option value="tree">Tree</option><option value="files">Files</option></select><button id="browser-refresh" type="button">Refresh</button><button id="browser-attach" type="button" disabled>Add file to message</button></div>
+    <p id="browser-status" role="status" class="muted"></p>
+    <details id="browser-diff-meta" hidden><summary>Diff details</summary><pre></pre></details>
+    <div class="browser-layout"><nav id="browser-list" aria-label="Workspace entries"></nav><pre id="browser-preview" tabindex="0" aria-label="File preview"></pre></div>
+  </dialog>
+  <dialog id="benchmark-dialog" aria-labelledby="benchmark-heading">
+    <div class="dialog-heading"><h2 id="benchmark-heading">Benchmark evidence</h2><button type="button" class="close-dialog icon-button" aria-label="Close benchmarks">×</button></div>
+    <div class="benchmark-body">
+      <p id="benchmark-status" role="status"></p>
+      <p class="muted">Separate intelligence, coding, cost and speed measurements. Unknown efforts and moving aliases receive no invented scores. API costs are not subscription quotas.</p>
+      <div id="benchmark-sources"></div>
+      <label>Refresh worker<select id="benchmark-worker" aria-label="Worker for benchmark refresh"></select></label>
+      <p class="muted">Prepare an unsent research task with sources and the current table. Review and Send to run it using the selected worker. Import its JSON here afterwards.</p>
+      <button type="button" id="benchmark-refresh">Prepare refresh</button>
+      <button type="button" id="benchmark-import">Import candidate</button>
+      <button type="button" id="benchmark-reset">Reset to bundled</button>
+      <div class="benchmark-table-wrap"><table><thead><tr><th>Model / effort</th><th>Evaluation</th><th>Measurements</th></tr></thead><tbody id="benchmark-table"></tbody></table></div>
+      <details><summary>Table JSON</summary><pre id="benchmark-preview" tabindex="0"></pre></details>
+    </div>
+    <div class="dialog-footer"><button type="button" id="benchmark-apply" class="primary" disabled>Apply candidate</button></div>
+  </dialog>
+</body>
+</html>

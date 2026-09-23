@@ -1,0 +1,19 @@
+{
+  "name": "phasma-harness",
+  "productName": "Phasma Harness",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A local Windows desktop client for Codex, Claude Code, and Cursor.",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron ."
+  },
+  "dependencies": {
+    "dompurify": "3.4.15",
+    "katex": "^0.18.7",
+    "marked": "18.0.13"
+  },
+  "devDependencies": {
+    "electron": "44.4.3"
+  }
+}
