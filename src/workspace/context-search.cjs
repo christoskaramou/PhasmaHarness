@@ -61,7 +61,7 @@ class ContextSearch {
     catch (error) {
       if (error.code === 1 && !error.stdout) stdout = '';
       else if (error.code === 'ENOENT' && process.platform === 'win32') {
-        const { findCodex } = require('./codex.cjs');
+        const { findCodex } = require('../providers/codex.cjs');
         const dir = path.dirname(findCodex().command);
         const bundled = [path.resolve(dir, '..', 'codex-path', 'rg.exe'), path.resolve(dir, '..', 'rg.exe')].find(f => fsSync.existsSync(f)) || 'rg.exe';
         try { ({ stdout } = await run(bundled, ['--files', '--', '.'], options)); }

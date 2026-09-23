@@ -22,3 +22,12 @@ npm start
 `Install Phasma Harness.cmd` installs missing Node.js LTS and Git through winget, installs Codex CLI 0.153.4 if it is missing, runs `npm ci`, checks the Codex connection, and creates a desktop shortcut. Keep the folder where the shortcut points.
 
 Sessions and settings are stored in `%APPDATA%\Phasma Harness`. The app uses your existing Codex, Claude, and Cursor logins. It does not copy those credentials.
+
+## Layout
+
+- `src/providers` — Codex, Claude, Cursor, and Jev
+- `src/routing` — model choice and benchmark evidence
+- `src/workspace` — project search
+- `src/tools` — helper tools shared with those CLIs
+- `ui` — the window
+- `benchmarks` — bundled measurements

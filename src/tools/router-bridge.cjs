@@ -2,7 +2,7 @@ const http = require('node:http');
 const { once } = require('node:events');
 const { randomBytes } = require('node:crypto');
 const path = require('node:path');
-const { TOOL: CONTEXT_TOOL } = require('./context-search.cjs');
+const { TOOL: CONTEXT_TOOL } = require('../workspace/context-search.cjs');
 const { TOOLS: HELPER_TOOLS, INSTRUCTIONS: HELPER_INSTRUCTIONS } = require('./tool-helpers.cjs');
 
 const SERVER_NAME = 'phasma_harness';

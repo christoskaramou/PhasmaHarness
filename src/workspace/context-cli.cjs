@@ -5,7 +5,7 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { ContextSearch } = require('./context-search.cjs');
 const run = promisify(execFile);
-const HELP = `Usage: node context-cli.cjs --workspace <project path> --query <question> [--jev] [--json]
+const HELP = `Usage: node src/workspace/context-cli.cjs --workspace <project path> --query <question> [--jev] [--json]
 Read-only project context search. Local ranking is the default.
 --jev sends bounded excerpts to TypeSafe, using the encrypted key saved by Phasma Harness.
 --json returns the full result as JSON; otherwise output is concise text with source locations.
@@ -103,8 +103,8 @@ async function main(args) {
       app.setName('Phasma Harness');
       if (process.env.PHASMA_HARNESS_CONTEXT_PROFILE) app.setPath('userData', process.env.PHASMA_HARNESS_CONTEXT_PROFILE);
       await app.whenReady();
-      const { JevKey } = require('./jev-key.cjs');
-      const { JevClient } = require('./jev.cjs');
+      const { JevKey } = require('../providers/jev-key.cjs');
+      const { JevClient } = require('../providers/jev.cjs');
       jev = new JevClient(new JevKey(path.join(app.getPath('appData'), 'Phasma Harness', 'jev-key.enc'), safeStorage));
     }
     result = await search(options, root, jev);

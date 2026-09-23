@@ -1,17 +1,17 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
-const { validateProvider, validateModel } = require('./providers.cjs');
-const { CursorCLI } = require('./cursor.cjs');
-const { ClaudeCLI, MODELS: CLAUDE_MODELS, handoff } = require('./claude.cjs');
+const { validateProvider, validateModel } = require('./providers/providers.cjs');
+const { CursorCLI } = require('./providers/cursor.cjs');
+const { ClaudeCLI, MODELS: CLAUDE_MODELS, handoff } = require('./providers/claude.cjs');
 const { EventEmitter } = require('node:events');
-const { CodexClient } = require('./codex.cjs');
-const { PRESETS, ROUTER_PRESETS, route } = require('./router.cjs');
-const { SmartRouter, routerModel } = require('./smart-router.cjs');
-const { MODEL: JEV_MODEL } = require('./jev.cjs');
-const { TOOL: CONTEXT_TOOL } = require('./context-search.cjs');
-const { ToolHelpers, TOOLS: HELPER_TOOLS, INSTRUCTIONS: HELPER_INSTRUCTIONS } = require('./tool-helpers.cjs');
-const { RouterBridge } = require('./router-bridge.cjs');
+const { CodexClient } = require('./providers/codex.cjs');
+const { PRESETS, ROUTER_PRESETS, route } = require('./routing/router.cjs');
+const { SmartRouter, routerModel } = require('./routing/smart-router.cjs');
+const { MODEL: JEV_MODEL } = require('./providers/jev.cjs');
+const { TOOL: CONTEXT_TOOL } = require('./workspace/context-search.cjs');
+const { ToolHelpers, TOOLS: HELPER_TOOLS, INSTRUCTIONS: HELPER_INSTRUCTIONS } = require('./tools/tool-helpers.cjs');
+const { RouterBridge } = require('./tools/router-bridge.cjs');
 
 const WORKER_INSTRUCTIONS = 'Use one agent unless the user explicitly requests delegation. Preserve unrelated work. Do not commit or push unless the user explicitly asks. Report the checks actually performed and any remaining uncertainty. ' +
   'Default response style: lead with the answer or outcome, number actual steps, keep lists short, and omit tangents and pleasantries. Give one next action only when work remains. Explain fully when asked; never omit material findings or uncertainty. Respect requests for normal mode or a different style. These behaviors and project-context, model-selection and large-response helpers are built into this app; do not install or invoke duplicate skills to provide them. ' +

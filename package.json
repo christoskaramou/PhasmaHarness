@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "A local Windows desktop client for Codex, Claude Code, and Cursor.",
-  "main": "main.cjs",
+  "main": "src/main.cjs",
   "scripts": {
     "start": "electron ."
   },

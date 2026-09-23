@@ -1,7 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID, createHash } = require('node:crypto');
-const { tokens, terms, rank: rankLocal } = require('./local-ranking.cjs');
+const { tokens, terms, rank: rankLocal } = require('../workspace/local-ranking.cjs');
 
 const TOOLS = [
   { name: 'router_find_tools', description: 'Find connected MCP tools for a task. Jev may recommend a tool; abstention returns local candidates. Does not execute tools or grant permission.', inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } },

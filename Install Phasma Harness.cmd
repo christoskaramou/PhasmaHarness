@@ -11,7 +11,7 @@ param([switch]$CheckOnly)
 $ErrorActionPreference = 'Stop'
 try {
     $folder = Split-Path -LiteralPath $env:ROUTER_INSTALLER_PATH
-    foreach ($file in @('package.json', 'package-lock.json', 'main.cjs', 'benchmarks.cjs', 'benchmarks\snapshot.json', 'benchmarks\sources.json', 'benchmarks\REFRESH.md', 'Launch Phasma Harness.vbs')) {
+    foreach ($file in @('package.json', 'package-lock.json', 'src\main.cjs', 'src\routing\benchmarks.cjs', 'benchmarks\snapshot.json', 'benchmarks\sources.json', 'benchmarks\REFRESH.md', 'Launch Phasma Harness.vbs')) {
         if (-not (Test-Path -LiteralPath (Join-Path $folder $file))) {
             throw "Missing $file. Extract the entire app ZIP first, then run this installer inside that folder."
         }
@@ -61,7 +61,7 @@ try {
     # Minimum tested app-server version; preserve newer installations.
     $minimumCodexVersion = [version]'0.153.4'
     function Get-RouterCodexVersion {
-        $reported = & node.exe -e "const {spawnSync}=require('node:child_process');try{const c=require('./codex.cjs').findCodex();const r=spawnSync(c.command,[...c.args,'--version'],{encoding:'utf8',windowsHide:true});if(r.status!==0)process.exit(1);process.stdout.write(r.stdout)}catch{process.exit(1)}"
+        $reported = & node.exe -e "const {spawnSync}=require('node:child_process');try{const c=require('./src/providers/codex.cjs').findCodex();const r=spawnSync(c.command,[...c.args,'--version'],{encoding:'utf8',windowsHide:true});if(r.status!==0)process.exit(1);process.stdout.write(r.stdout)}catch{process.exit(1)}"
         if ($LASTEXITCODE -ne 0) { return $null }
         if (($reported -join ' ') -match '^codex-cli\s+(\d+\.\d+\.\d+)(?:-[0-9A-Za-z.-]+)?\s*$') { return [version]$Matches[1] }
         return $null
@@ -95,9 +95,9 @@ try {
     if (-not (Test-Path -LiteralPath $electron)) { throw 'Electron was not downloaded. Check npm/network settings and rerun.' }
     $env:ELECTRON_RUN_AS_NODE = '1'
     try {
-        & node.exe -e "const {spawnSync}=require('node:child_process');const c=require('./codex.cjs').findCodex();const run=args=>spawnSync(c.command,[...c.args,...args],{stdio:'inherit',windowsHide:true});if(run(['login','status']).status!==0)console.log('Connect ChatGPT or add an API provider in app Settings.')"
+        & node.exe -e "const {spawnSync}=require('node:child_process');const c=require('./src/providers/codex.cjs').findCodex();const run=args=>spawnSync(c.command,[...c.args,...args],{stdio:'inherit',windowsHide:true});if(run(['login','status']).status!==0)console.log('Connect ChatGPT or add an API provider in app Settings.')"
         if ($LASTEXITCODE -ne 0) { throw 'Sign-in was not completed. Run this installer again to finish.' }
-        & $electron -e "const {CodexClient}=require('./codex.cjs'); const c=new CodexClient(process.cwd()); (async()=>{try{await c.start();await c.call('model/list');console.log('Codex app-server connection OK.')}finally{c.close(true)}})().catch(e=>{console.error(e.message);process.exitCode=1})"
+        & $electron -e "const {CodexClient}=require('./src/providers/codex.cjs'); const c=new CodexClient(process.cwd()); (async()=>{try{await c.start();await c.call('model/list');console.log('Codex app-server connection OK.')}finally{c.close(true)}})().catch(e=>{console.error(e.message);process.exitCode=1})"
         if ($LASTEXITCODE -ne 0) { throw 'Codex app-server compatibility check failed. Check the installed Codex CLI before launching.' }
     } finally { Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue }
     $shell = New-Object -ComObject WScript.Shell

@@ -4,10 +4,10 @@ const path = require('node:path');
 const os = require('node:os');
 const { pathToFileURL } = require('node:url');
 const { Controller } = require('./controller.cjs');
-const { JevKey } = require('./jev-key.cjs');
-const { JevClient } = require('./jev.cjs');
-const { ContextSearch } = require('./context-search.cjs');
-const { BenchmarkStore, validateSnapshot, MAX_BYTES } = require('./benchmarks.cjs');
+const { JevKey } = require('./providers/jev-key.cjs');
+const { JevClient } = require('./providers/jev.cjs');
+const { ContextSearch } = require('./workspace/context-search.cjs');
+const { BenchmarkStore, validateSnapshot, MAX_BYTES } = require('./routing/benchmarks.cjs');
 
 app.setPath('userData', path.join(app.getPath('appData'), 'Phasma Harness'));
 app.setName('Phasma Harness');
@@ -25,14 +25,14 @@ async function start() {
   const home = os.homedir();
   controller = new Controller(path.join(app.getPath('userData'), 'sessions.json'), home);
   controller.smartRouter.benchmarks = new BenchmarkStore(path.join(app.getPath('userData'), 'benchmarks.json'));
-  const { Providers } = require('./providers.cjs');
+  const { Providers } = require('./providers/providers.cjs');
   controller.providers = new Providers(path.join(app.getPath('userData'), 'provider-keys'), safeStorage, () => controller.data.settings.providers || [], (...args) => net.fetch(...args));
   await controller.providers.start();
   controller.smartRouter.providers = controller.providers;
   const jevKey = new JevKey(path.join(app.getPath('userData'), 'jev-key.enc'), safeStorage);
   controller.smartRouter.jev = new JevClient(jevKey, (...args) => net.fetch(...args));
   controller.contextSearch = new ContextSearch(home, controller.smartRouter.jev);
-  const rendererURL = pathToFileURL(path.join(__dirname, 'ui', 'index.html')).href;
+  const rendererURL = pathToFileURL(path.join(__dirname, '..', 'ui', 'index.html')).href;
   window = new BrowserWindow({
     width: 1320, height: 900, minWidth: 840, minHeight: 640,
     resizable: true, maximizable: true,
@@ -49,7 +49,7 @@ async function start() {
     return fn(...args);
   });
   handle('bootstrap', () => controller.snapshot());
-  handle('browseWorkspace', (id, action, relative, kind) => require('./workspace-browser.cjs').browse(
+  handle('browseWorkspace', (id, action, relative, kind) => require('./workspace/workspace-browser.cjs').browse(
     id ? controller.session(id).workspace : controller.data.settings.workspace, action, relative, kind));
   handle('settings', values => { const snapshot = controller.settings(values); controller.warmRouter(); return snapshot; });
   const benchmarkWorkers = () => controller.catalog().filter(p => p.worker && p.enabled && controller.available(p));
@@ -73,7 +73,7 @@ async function start() {
   });
   handle('benchmarkReset', () => {
     if (controller.busy) throw new Error('Finish the current turn before replacing benchmark evidence.');
-    controller.smartRouter.benchmarks.replace(require('./benchmarks/snapshot.json'));
+    controller.smartRouter.benchmarks.replace(require('../benchmarks/snapshot.json'));
     controller.changed(); return controller.snapshot();
   });
   for (const action of ['cursorLogin', 'cursorRefresh', 'cursorLogout']) handle(action, async () => {
