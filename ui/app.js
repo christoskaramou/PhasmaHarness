@@ -23,7 +23,7 @@ function claudeDetail(account) {
 // In use by the Harness: signed in to the CLI and not disconnected here. Disconnecting never signs the CLI out.
 const claudeInUse = () => !!state?.claude?.loggedIn && state.claude.enabled !== false;
 const cursorInUse = () => !!state?.cursor?.loggedIn && state.cursor.enabled !== false;
-const KEPT_SIGNED_IN = 'not used here · CLI still signed in';
+const KEPT_SIGNED_IN = 'disconnected';
 
 function connectedProviders() {
   if (!state) return [];

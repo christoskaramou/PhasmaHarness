@@ -94,8 +94,8 @@ app.whenReady().then(async () => {
   controller.data.settings.claudeEnabled = false;
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderProviders(); true');
   const providers = await window.webContents.executeJavaScript("document.querySelector('#panel-providers').textContent");
-  assert.match(providers, /ChatGPT · not used here · CLI still signed in/);
-  assert.match(providers, /Claude · not used here · CLI still signed in/);
+  assert.match(providers, /ChatGPT · disconnected/);
+  assert.match(providers, /Claude · disconnected/);
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('.provider-model-effort')"), null, 'Claude models are hidden');
   assert.doesNotMatch(await window.webContents.executeJavaScript("document.querySelector('#provider-model-list').textContent"), /gpt-6-sol/);
   console.log('Disconnected providers hide models and keep CLI logins passed');
