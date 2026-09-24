@@ -1,5 +1,11 @@
 'use strict';
 const $ = selector => document.querySelector(selector);
+// Backend capabilities come from the main process; unknown or missing providers run through Codex.
+const CODEX_CAPS = { cli: false, steer: true, compact: true, usage: true };
+function providerCaps(provider) {
+  const all = state?.providerCapabilities || {};
+  return all[provider] || all.codex || CODEX_CAPS;
+}
 const api = window.router;
 function chatgptDetail(account) {
   if (!account || account.type !== 'chatgpt') return null;
@@ -375,7 +381,7 @@ function render() {
       if (action === 'edit') button.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15Z"/></svg>';
       if (action === 'remove') button.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>';
       button.setAttribute('aria-label', action === 'remove' ? 'Remove queued message' : action === 'edit' ? 'Edit queued message' : label);
-      button.disabled = (action === 'steer' && ['claude-cli', 'cursor-cli'].includes(session.activeProvider)) || !!session.queueSending || (action !== 'remove' && (message.uncertain || (action !== 'edit' && (!ready || (state.busy && (state.busy !== selectedId || !session.turnId || session.compacting))))));
+      button.disabled = (action === 'steer' && !providerCaps(session.activeProvider).steer) || !!session.queueSending || (action !== 'remove' && (message.uncertain || (action !== 'edit' && (!ready || (state.busy && (state.busy !== selectedId || !session.turnId || session.compacting))))));
       button.title = action === 'edit' ? 'Move back to the composer to edit and resend' : button.getAttribute('aria-label');
       button.onclick = async () => {
         try {
@@ -407,17 +413,17 @@ function render() {
   const total = usage?.total;
   const contextWindow = usage?.modelContextWindow;
   const contextTokens = usage?.last?.totalTokens ?? (Number.isFinite(usage?.last?.inputTokens) && Number.isFinite(usage?.last?.outputTokens) ? usage.last.inputTokens + usage.last.outputTokens : null);
-  const contextKnown = session?.activeProvider !== 'cursor-cli' && Number.isFinite(contextTokens) && contextTokens >= 0 && Number.isFinite(contextWindow) && contextWindow > 0;
+  const contextKnown = providerCaps(session?.activeProvider).usage && Number.isFinite(contextTokens) && contextTokens >= 0 && Number.isFinite(contextWindow) && contextWindow > 0;
   const contextPercent = contextKnown ? Math.min(100, Math.max(0, contextTokens / contextWindow * 100)) : 0;
   const contextLabel = contextKnown ? `${Math.round(contextPercent)}% context used (estimate from the latest provider report: ${contextTokens.toLocaleString()} / ${contextWindow.toLocaleString()} tokens)` : 'Context usage unavailable until the provider reports the context size and token usage.';
   $('#context-meter').style.setProperty('--context-used', `${contextPercent}%`);
   $('#context-meter').classList.toggle('unknown', !contextKnown);
   $('#context-meter').setAttribute('aria-label', `${contextLabel}. Compact context`);
-  $('#context-meter-tip').textContent = session?.activeProvider === 'cursor-cli' ? 'Cursor manages context automatically and reports no token usage.' : contextLabel + (session?.compacting ? '\nCompacting context…' : '\nClick to compact context.');
+  $('#context-meter-tip').textContent = !providerCaps(session?.activeProvider).usage ? 'Cursor manages context automatically and reports no token usage.' : contextLabel + (session?.compacting ? '\nCompacting context…' : '\nClick to compact context.');
   const compact = n => new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(n);
   const hasBreakdown = Number.isFinite(total?.inputTokens) && Number.isFinite(total?.cachedInputTokens) && Number.isFinite(total?.outputTokens);
   const providerHover = providerConnectionSummary();
-  $('#usage').textContent = session?.activeProvider === 'cursor-cli' ? 'Usage tracked by Cursor' : hasBreakdown
+  $('#usage').textContent = !providerCaps(session?.activeProvider).usage ? 'Usage tracked by Cursor' : hasBreakdown
     ? `${compact(total.inputTokens)} input · ${total.inputTokens ? Math.round(total.cachedInputTokens / total.inputTokens * 100) : 0}% cached · ${compact(total.outputTokens)} output`
     : total?.totalTokens !== undefined ? `${compact(total.totalTokens)} reported tokens` : 'Connected';
   $('#usage').title = providerHover + (hasBreakdown

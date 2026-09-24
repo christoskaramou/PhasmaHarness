@@ -4,6 +4,7 @@ const { randomUUID } = require('node:crypto');
 const { validateProvider, validateModel } = require('./providers/providers.cjs');
 const { CursorCLI } = require('./providers/cursor.cjs');
 const { ClaudeCLI, handoff } = require('./providers/claude.cjs');
+const { CAPABILITIES, capabilities, isCLI } = require('./providers/capabilities.cjs');
 const { EventEmitter } = require('node:events');
 const { CodexClient } = require('./providers/codex.cjs');
 const { PRESETS, ROUTER_PRESETS, route } = require('./routing/router.cjs');
@@ -129,7 +130,7 @@ class Controller extends EventEmitter {
       this.account = null; this.models = [];
       const routerProvider = this.routerChoices().find(p => p.id === this.data.settings.routerPreset)?.provider;
       // Claude/Cursor turns and CLI routing do not use this connection; only its MCP gateway approvals die with it.
-      const independent = !this.gate && (!!this.cliAbort || (this.routing && ['claude-cli', 'cursor-cli'].includes(routerProvider)));
+      const independent = !this.gate && (!!this.cliAbort || (this.routing && isCLI(routerProvider)));
       if (independent) this.cancelHelpers('router-');
       else {
         this.cancelHelpers();
@@ -379,6 +380,7 @@ class Controller extends EventEmitter {
         note: 'Large-output capture applies to router_call_tool / project_context helper responses. It does not intercept native Codex, Claude, or Cursor tools. Claude/Cursor session MCP connects phasma_harness for project_context / router_read_output. router_find_tools / router_call_tool are intentionally Codex-scoped (Codex MCP catalog/gateway); without a Codex thread they return unsupported. Do not build parallel CLI catalogs for parity. This app does not rewrite project MCP configs or silently elevate MCP approvals.',
       },
       accessModes: ACCESS_MODES,
+      providerCapabilities: CAPABILITIES,
       requests: [...this.requests.values()].map(request => ({
         ...request,
         canAccept: request.method !== 'mcpServer/elicitation/request' || isMcpConfirmation(request.params),
@@ -606,7 +608,7 @@ class Controller extends EventEmitter {
 
   async load(id) {
     const session = this.session(id);
-    if (['claude-cli', 'cursor-cli'].includes(session.activeProvider)) return this.snapshot();
+    if (isCLI(session.activeProvider)) return this.snapshot();
     if (this.connection === 'ready' && session.threadId && !this.loaded.has(id)) {
       await this.resume(session); this.changed();
     }
@@ -694,7 +696,7 @@ class Controller extends EventEmitter {
     try {
       if (this.data.executionBlock) throw new Error('A check may still be running.');
       projectInstructions(session.workspace, permissions.id !== 'read-only');
-      if (['claude-cli', 'cursor-cli'].includes(selected.provider)) return await this.sendCLI(session, selected, text, images, clientId, task);
+      if (isCLI(selected.provider)) return await this.sendCLI(session, selected, text, images, clientId, task);
       await this.resume(session, selected);
       if (this.stopping.has(id)) throw new Error('Turn was stopped before sending.');
       if (!this.available(selected)) throw new Error(`${selected.label} is not available on your account. Choose another preset.`);
@@ -894,7 +896,7 @@ class Controller extends EventEmitter {
 
   async queuedMessage(id, messageId, action) {
     const session = this.session(id);
-    if (action === 'steer' && ['claude-cli', 'cursor-cli'].includes(session.activeProvider)) throw new Error('This CLI supports queued follow-ups here. Stop the turn to send the correction immediately.');
+    if (action === 'steer' && !capabilities(session.activeProvider).steer) throw new Error('This CLI supports queued follow-ups here. Stop the turn to send the correction immediately.');
     const message = session.queue?.find(m => m.id === messageId);
     if (!message || session.queueSending) throw new Error('This queued message is no longer available.');
     if (action === 'remove' || action === 'edit') {
@@ -964,7 +966,7 @@ class Controller extends EventEmitter {
     if (this.connection !== 'ready') throw new Error('No provider is connected.');
     if (this.busy) throw new Error('Wait for the current task to finish before compacting.');
     const session = this.session(id);
-    if (session.activeProvider === 'cursor-cli') throw new Error('Cursor manages its context automatically and has no manual compaction.');
+    if (!capabilities(session.activeProvider).compact) throw new Error('Cursor manages its context automatically and has no manual compaction.');
     if (session.activeProvider === 'claude-cli') return this.compactClaude(session);
     if (!session.threadId || !session.items.some(item => item.type === 'userMessage')) throw new Error('Send a message before compacting this chat.');
     if (this.loading.has(id)) throw new Error('Wait for this chat to finish loading.');
@@ -1014,7 +1016,7 @@ class Controller extends EventEmitter {
       this.changed();
       return;
     }
-    if (this.cliAbort && ['claude-cli', 'cursor-cli'].includes(session.activeProvider)) { this.cancelHelpers(); this.cliAbort.abort(); return; }
+    if (this.cliAbort && isCLI(session.activeProvider)) { this.cancelHelpers(); this.cliAbort.abort(); return; }
     this.stopping.add(session.id);
     this.cancelHelpers();
     this.contextSearch?.cancel();
@@ -1254,7 +1256,7 @@ class Controller extends EventEmitter {
 
   async bridgeTool(sessionId, tool, args, signal) {
     const session = this.session(sessionId);
-    if (this.busy !== session.id || this.stopping.has(session.id) || !['claude-cli', 'cursor-cli'].includes(session.activeProvider)) {
+    if (this.busy !== session.id || this.stopping.has(session.id) || !isCLI(session.activeProvider)) {
       throw new Error('Helper MCP call rejected: no active Claude/Cursor turn for this session.');
     }
     if (signal?.aborted || this.cliAbort?.signal.aborted) throw new Error('Helper call stopped.');

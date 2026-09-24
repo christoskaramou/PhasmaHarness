@@ -76,6 +76,18 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#models-loading').hidden"), true);
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#renew-models').disabled"), false);
   console.log('Model-fetch indicator, deduplication and failure cleanup passed');
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  controller.claude.models = [{ id: 'claude-cli:claude-opus-5-5', model: 'claude-opus-5-5', label: 'claude-opus-5-5', provider: 'claude-cli', effort: null,
+    efforts: ['low', 'high', 'max'], rank: 35, worker: true, router: true, images: true }];
+  controller.data.settings.claudeEfforts = { 'claude-opus-5-5': 'high' };
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderProviders(); true');
+  const effort = await window.webContents.executeJavaScript(`(() => { const s = document.querySelector('.provider-model-effort'); return s && { value: s.value, options: [...s.options].map(o => o.value) }; })()`);
+  assert.deepEqual(effort, { value: 'high', options: ['', 'low', 'high', 'max'] });
+  assert.equal(await window.webContents.executeJavaScript("providerCaps('cursor-cli').usage"), false);
+  assert.equal(await window.webContents.executeJavaScript("providerCaps('claude-cli').steer"), false);
+  assert.equal(await window.webContents.executeJavaScript("providerCaps(undefined).steer"), true);
+  console.log('Claude effort selector and provider capabilities passed');
   controller.close();
   window.destroy();
   clearTimeout(deadline);

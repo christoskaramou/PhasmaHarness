@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const { CodexClient } = require('../providers/codex.cjs');
+const { isCLI } = require('../providers/capabilities.cjs');
 const { PRESETS, ROUTER_PRESETS } = require('./router.cjs');
 const { collectWorkspace } = require('../workspace/workspace-context.cjs');
 const { MODEL: JEV_MODEL, CHECKS_POLICY } = require('../providers/jev.cjs');
@@ -114,7 +115,7 @@ class SmartRouter {
 
   // Starts app-server and runs one throwaway thread/start (no turn, no model call) so the first route skips cold startup.
   async warm(choice) {
-    if (this.abort || this.connection?.warmed || !choice?.model || ['claude-cli', 'cursor-cli'].includes(choice.provider)) return;
+    if (this.abort || this.connection?.warmed || !choice?.model || isCLI(choice.provider)) return;
     fs.mkdirSync(this.directory, { recursive: true });
     const connection = this.connect(), client = connection.client;
     try {
@@ -130,7 +131,7 @@ class SmartRouter {
 
   async classifyCodex(text, session, available, model, effort, workspace, choice, abort) {
     fs.mkdirSync(this.directory, { recursive: true });
-    if (['claude-cli', 'cursor-cli'].includes(choice?.provider)) {
+    if (isCLI(choice?.provider)) {
       const schema = { type: 'object', properties: { preset: { type: 'string', enum: available.map(p => p.id) }, reason: { type: 'string', maxLength: 240 },
         taskKind: { type: 'string', enum: TASK_KINDS }, workspaceRelevant: { type: 'boolean' }, needsChecks: { type: 'boolean' }, risk: { type: 'string', enum: RISKS }, uncertainty: { type: 'string', enum: UNCERTAINTIES } },
         required: ['preset', 'reason', 'taskKind', 'workspaceRelevant', 'needsChecks', 'risk', 'uncertainty'], additionalProperties: false };
