@@ -138,7 +138,7 @@ class SmartRouter {
       // Claude and Cursor take the router's selected effort (unset = CLI default); Cursor sets it as its reasoning option.
       const result = await this[choice.provider === 'cursor-cli' ? 'cursor' : 'claude'].run({ cwd: this.directory, model, schema,
         ...(choice.provider === 'claude-cli' && effort ? { effort } : {}),
-        ...(choice.provider === 'cursor-cli' ? { parameterized: choice.parameterized, ...(effort && choice.effortOption ? { effort, effortOption: choice.effortOption } : {}) } : {}),
+        ...(choice.provider === 'cursor-cli' ? { parameterized: choice.parameterized, parameters: choice.parameters, ...(effort && choice.effortOption ? { effort, effortOption: choice.effortOption } : {}) } : {}),
         signal: AbortSignal.any([abort.signal, AbortSignal.timeout(this.timeoutMs)]),
         prompt: INSTRUCTIONS + '\nWorker catalog: ' +
           JSON.stringify(routerCatalog(available)) + '\nTask context: ' + JSON.stringify(contextFor(text, session, workspace)) });

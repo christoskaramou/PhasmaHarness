@@ -271,10 +271,18 @@ class Controller extends EventEmitter {
   providerWorkers() {
     return (this.data.settings.providerModels || []).flatMap(entry => {
       if (entry.provider !== 'cursor-cli') return [entry];
-      const found = (this.cursor.models || []).find(m => m.id === entry.model);
-      const base = found?.parameterized ? { ...entry, parameterized: true } : entry;
-      if (!found?.efforts?.length) return [base];
-      return found.efforts.map((effort, i) => ({ ...base, baseId: entry.id, id: `cursor-cli:${entry.model}:${effort}`, effort, effortOption: found.effortOption,
+      // Older entries hold Cursor's variant ID, base[param=value,…]; the model list is keyed by the base name.
+      const baseName = String(entry.model).split('[')[0];
+      const found = (this.cursor.models || []).find(m => m.id === entry.model) || (this.cursor.models || []).find(m => m.id === baseName);
+      if (!found?.efforts?.length) return [found?.parameterized && found.id === entry.model ? { ...entry, parameterized: true } : entry];
+      // Keep the variant's other saved parameters and its level, where the model still accepts those values.
+      const saved = (/\[(.*)\]$/.exec(entry.model)?.[1] || '').split(',').map(pair => pair.split('='))
+        .filter(([id, value]) => id && value !== undefined).map(([id, value]) => ({ id: id.trim(), value: value.trim() }))
+        .filter(p => found.parameters?.[p.id]?.includes(p.value));
+      const savedEffort = saved.find(p => p.id === found.effortOption)?.value;
+      const parameters = saved.filter(p => p.id !== found.effortOption);
+      return found.efforts.map((effort, i) => ({ ...entry, parameterized: true, model: found.id, baseId: entry.id, id: `cursor-cli:${found.id}:${effort}`,
+        effort, effortOption: found.effortOption, parameters, preferred: effort === savedEffort,
         label: `${entry.label} · ${found.effortNames?.[effort] || effort}`, rank: entry.rank + i / 100 }));
     });
   }
@@ -328,7 +336,7 @@ class Controller extends EventEmitter {
     if (direct) return direct;
     // An ID saved before efforts were per worker (claude-cli:<model>, cursor-cli:<model>:default): that model at medium, else its lowest effort.
     const variants = this.catalog().filter(p => p.worker && p.baseId === id);
-    if (variants.length) return variants.find(p => p.effort === 'medium') || variants[0];
+    if (variants.length) return variants.find(p => p.preferred) || variants.find(p => p.effort === 'medium') || variants[0];
     const legacy = [...PRESETS, ...ROUTER_PRESETS].find(p => p.id === id);
     if (!legacy) return null;
     const found = this.catalog().find(p => p.provider === 'codex' && p.model === legacy.model && p.effort === legacy.effort);
@@ -922,7 +930,7 @@ class Controller extends EventEmitter {
       }
       const helpers = helpersEnabled && this.bridge.base ? this.bridge.childConfig(session.id) : null;
       const result = await this[backend].run({
-        cwd: this.workspace(session.workspace), model: selected.model, effort: selected.effort || null, effortOption: selected.effortOption, parameterized: selected.parameterized,
+        cwd: this.workspace(session.workspace), model: selected.model, effort: selected.effort || null, effortOption: selected.effortOption, parameterized: selected.parameterized, parameters: selected.parameters,
         prompt, images, instructions: this.workerInstructions(session),
         resume: session[sessionKey], access: session.access, signal: abort.signal, helpers,
         approve: (tool, options = {}) => new Promise(resolve => {

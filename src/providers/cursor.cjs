@@ -84,7 +84,11 @@ class CursorCLI {
           const option = (Array.isArray(m.configOptions) ? m.configOptions : [])
             .find(o => o?.category === 'thought_level' && typeof o.id === 'string' && Array.isArray(o.options) && o.options.length > 1);
           const values = option ? option.options.filter(o => typeof o?.value === 'string' && o.value) : [];
-          return { id: m.value, label: typeof m.name === 'string' && m.name ? m.name : m.value, parameterized: true,
+          // Every parameter this model accepts, to validate values saved in older variant IDs (grok-4.7[fast=true,…]).
+          const parameters = Object.fromEntries((Array.isArray(m.configOptions) ? m.configOptions : [])
+            .filter(o => typeof o?.id === 'string' && Array.isArray(o.options))
+            .map(o => [o.id, o.options.map(v => v?.value).filter(v => typeof v === 'string')]));
+          return { id: m.value, label: typeof m.name === 'string' && m.name ? m.name : m.value, parameterized: true, parameters,
             ...(values.length > 1 ? { efforts: values.map(o => o.value), effortOption: option.id,
               effortNames: Object.fromEntries(values.map(o => [o.value, typeof o.name === 'string' && o.name ? o.name : o.value])) } : {}) };
         });
@@ -130,7 +134,7 @@ class CursorCLI {
     signal?.addEventListener('abort', close, { once: true }); if (signal?.aborted) close();
     return { call, close };
   }
-  async run({ cwd, model, effort, effortOption, parameterized, prompt, images = [], resume, access, signal, onEvent = () => {}, approve = async () => false, schema, helpers, instructions = WORKER_INSTRUCTIONS }) {
+  async run({ cwd, model, effort, effortOption, parameterized, parameters = [], prompt, images = [], resume, access, signal, onEvent = () => {}, approve = async () => false, schema, helpers, instructions = WORKER_INSTRUCTIONS }) {
     // Models from cursor/list_available_models are base names with separate parameters: Cursor accepts them, and their
     // reasoning option, only from a client that declares the parameterized model picker.
     const setEffort = typeof effort === 'string' && effort && typeof effortOption === 'string' && effortOption;
@@ -170,6 +174,11 @@ class CursorCLI {
       if (!sessionId) throw new Error('Cursor did not return a session ID.');
       onEvent({ type: 'system', session_id: sessionId });
       await rpc.call('session/set_model', { sessionId, modelId: model });
+      // Other saved parameters of the model (e.g. context, fast), then the reasoning level.
+      if (picker) for (const p of parameters) {
+        if (typeof p?.id === 'string' && typeof p.value === 'string' && p.id !== effortOption)
+          await rpc.call('session/set_config_option', { sessionId, configId: p.id, value: p.value });
+      }
       if (setEffort) {
         const updated = await rpc.call('session/set_config_option', { sessionId, configId: effortOption, value: effort });
         const applied = (updated?.configOptions || []).find(o => o?.id === effortOption);

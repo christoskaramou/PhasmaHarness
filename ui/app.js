@@ -1081,7 +1081,10 @@ function renderProviders() {
     }
     if (group.discover) {
       const discovered = discoveredModels.get(group.id) || [];
-      const enabledByModel = new Map(group.models.map(m => [m.model, m]));
+      // Enabled entries may hold Cursor's older variant ID (grok-4.7[effort=high,…]); list them under the base model.
+      const baseName = id => String(id).split('[')[0];
+      const discoveredIds = new Set(discovered.map(d => d.id));
+      const enabledByModel = new Map(group.models.map(m => [discoveredIds.has(baseName(m.model)) ? baseName(m.model) : m.model, m]));
       const ids = new Set([...discovered.map(d => d.id), ...enabledByModel.keys()]);
       if (!ids.size) {
         list.append(element('p', 'muted', discoveredModels.has(group.id) ? 'No models returned.' : 'Fetching Cursor models…'));

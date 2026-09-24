@@ -30,9 +30,9 @@ test('Cursor discovery reads each model\'s reasoning levels from cursor/list_ava
   fake(cursor);
   const models = await cursor.discover();
   assert.deepEqual(models, [
-    { id: 'grok-4.7', label: 'Grok 4.7', parameterized: true, efforts: ['low', 'medium', 'high', 'xhigh'], effortOption: 'effort',
-      effortNames: { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra High' } },
-    { id: 'composer-2.5', label: 'Composer 2.5', parameterized: true },
+    { id: 'grok-4.7', label: 'Grok 4.7', parameterized: true, parameters: { effort: ['low', 'medium', 'high', 'xhigh'], fast: ['false', 'true'] },
+      efforts: ['low', 'medium', 'high', 'xhigh'], effortOption: 'effort', effortNames: { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra High' } },
+    { id: 'composer-2.5', label: 'Composer 2.5', parameterized: true, parameters: {} },
   ]);
   // An older CLI without the extension keeps the plain list.
   const old = new CursorCLI();
@@ -62,4 +62,13 @@ test('Cursor run sets the chosen reasoning level through the parameterized picke
   await cursor.run({ model: 'composer-2.5', parameterized: true, prompt: 'x', access: 'read-only' });
   assert.equal(calls[0].params.clientCapabilities._meta.parameterizedModelPicker, true);
   assert.equal(calls.some(c => c.method === 'session/set_config_option'), false);
+});
+
+test('Cursor run applies a variant\'s other saved parameters before the reasoning level', async () => {
+  const cursor = new CursorCLI();
+  const calls = fake(cursor);
+  await cursor.run({ model: 'grok-4.7', effort: 'high', effortOption: 'reasoning_effort', parameterized: true,
+    parameters: [{ id: 'context', value: '256k' }, { id: 'fast', value: 'true' }], prompt: 'x', access: 'read-only' });
+  assert.deepEqual(calls.filter(c => c.method === 'session/set_config_option').map(c => [c.params.configId, c.params.value]),
+    [['context', '256k'], ['fast', 'true'], ['reasoning_effort', 'high']]);
 });
