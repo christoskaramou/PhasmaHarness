@@ -81,5 +81,6 @@ test('a Claude router runs at its selected effort; unset leaves the CLI default 
   await router.classifyCodex('x', session, [worker], 'claude-haiku-4-5', 'low', evidence, { provider: 'claude-cli' }, new AbortController());
   await router.classifyCodex('x', session, [worker], 'claude-haiku-4-5', null, evidence, { provider: 'claude-cli' }, new AbortController());
   await router.classifyCodex('x', session, [worker], 'auto', 'low', evidence, { provider: 'cursor-cli' }, new AbortController());
-  assert.deepEqual(seen, [['claude', 'low'], ['claude', undefined], ['cursor', undefined]]);
+  await router.classifyCodex('x', session, [worker], 'grok-4.7', 'low', evidence, { provider: 'cursor-cli', effortOption: 'effort', parameterized: true }, new AbortController());
+  assert.deepEqual(seen, [['claude', 'low'], ['claude', undefined], ['cursor', undefined], ['cursor', 'low']], 'Cursor gets an effort only with its reasoning option');
 });

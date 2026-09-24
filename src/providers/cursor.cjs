@@ -75,7 +75,22 @@ class CursorCLI {
     try {
       await rpc.call('initialize', { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'phasma-harness', version: '0.1.0' } });
       const session = await rpc.call('session/new', { cwd: require('node:os').homedir(), mcpServers: [] });
-      this.models = (session.models?.availableModels || []).map(m => ({ id: m.modelId, label: m.name }));
+      let models = (session.models?.availableModels || []).map(m => ({ id: m.modelId, label: m.name }));
+      // Current Cursor CLIs list every base model with its parameters through this extension (read-only, no model switch).
+      // The reasoning parameter has category "thought_level"; its values are used exactly as Cursor reports them.
+      try {
+        const listed = await rpc.call('cursor/list_available_models', {});
+        const parsed = (Array.isArray(listed?.models) ? listed.models : []).filter(m => typeof m?.value === 'string' && m.value).map(m => {
+          const option = (Array.isArray(m.configOptions) ? m.configOptions : [])
+            .find(o => o?.category === 'thought_level' && typeof o.id === 'string' && Array.isArray(o.options) && o.options.length > 1);
+          const values = option ? option.options.filter(o => typeof o?.value === 'string' && o.value) : [];
+          return { id: m.value, label: typeof m.name === 'string' && m.name ? m.name : m.value, parameterized: true,
+            ...(values.length > 1 ? { efforts: values.map(o => o.value), effortOption: option.id,
+              effortNames: Object.fromEntries(values.map(o => [o.value, typeof o.name === 'string' && o.name ? o.name : o.value])) } : {}) };
+        });
+        if (parsed.length) models = parsed;
+      } catch { /* Older CLI without the extension: keep the plain model list. */ }
+      this.models = models;
       if (!this.models.length) throw new Error('Cursor returned no model IDs. Refresh its CLI and try again.');
       return this.models;
     } finally { rpc.close(); }
@@ -115,7 +130,11 @@ class CursorCLI {
     signal?.addEventListener('abort', close, { once: true }); if (signal?.aborted) close();
     return { call, close };
   }
-  async run({ cwd, model, prompt, images = [], resume, access, signal, onEvent = () => {}, approve = async () => false, schema, helpers, instructions = WORKER_INSTRUCTIONS }) {
+  async run({ cwd, model, effort, effortOption, parameterized, prompt, images = [], resume, access, signal, onEvent = () => {}, approve = async () => false, schema, helpers, instructions = WORKER_INSTRUCTIONS }) {
+    // Models from cursor/list_available_models are base names with separate parameters: Cursor accepts them, and their
+    // reasoning option, only from a client that declares the parameterized model picker.
+    const setEffort = typeof effort === 'string' && effort && typeof effortOption === 'string' && effortOption;
+    const picker = parameterized === true || setEffort;
     let sessionId, output = '', prompting = false; const messageId = randomUUID();
     const rpc = this.connect({ cwd, model, signal,
       onUpdate: p => {
@@ -140,7 +159,8 @@ class CursorCLI {
         return { outcome: 'cancelled' };
       } });
     try {
-      const init = await rpc.call('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, clientInfo: { name: 'phasma-harness', version: '0.1.0' } });
+      const init = await rpc.call('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false,
+        ...(picker ? { _meta: { parameterizedModelPicker: true } } : {}) }, clientInfo: { name: 'phasma-harness', version: '0.1.0' } });
       if (images.length && !init.agentCapabilities?.promptCapabilities?.image) throw new Error('Cursor CLI did not advertise image support.');
       // Authentication is completed by the official login command, never token extraction.
       // Classifiers keep an empty MCP list. Workers get the bundled helper MCP via session mcpServers.
@@ -150,6 +170,11 @@ class CursorCLI {
       if (!sessionId) throw new Error('Cursor did not return a session ID.');
       onEvent({ type: 'system', session_id: sessionId });
       await rpc.call('session/set_model', { sessionId, modelId: model });
+      if (setEffort) {
+        const updated = await rpc.call('session/set_config_option', { sessionId, configId: effortOption, value: effort });
+        const applied = (updated?.configOptions || []).find(o => o?.id === effortOption);
+        if (applied?.currentValue !== effort) throw new Error(`Cursor did not apply ${effortOption}=${effort} for ${model}.`);
+      }
       await rpc.call('session/set_mode', { sessionId, modeId: schema || access === 'read-only' ? 'ask' : 'agent' });
       prompting = true;
       const helperNote = (!schema && helpers?.instructions) ? '\n\nApp helper note (not Cursor system policy):' + helpers.instructions : '';

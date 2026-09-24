@@ -171,6 +171,9 @@ class Controller extends EventEmitter {
     await this.claude.refresh();
     this.migrateLegacyRouter();
     await this.cursor.refresh();
+    // Cursor reasoning levels come from its model list; load it once in the background when Cursor models are enabled.
+    if (this.cursor.status.loggedIn && this.data.settings.cursorEnabled !== false && (this.data.settings.providerModels || []).some(p => p.provider === 'cursor-cli'))
+      this.cursor.discover().then(() => this.changed(), () => {});
     try {
       this.data.settings.toolSelection ??= this.smartRouter.jev?.configured ? 'jev' : 'off';
       // One-time adoption of the requested Jev integration; subsequent explicit settings win.
@@ -260,7 +263,20 @@ class Controller extends EventEmitter {
   }
 
   catalog() {
-    return [...this.codexWorkers(), ...this.claudeWorkers(), ...(this.data.settings.providerModels || [])].sort((a, b) => a.rank - b.rank || a.id.localeCompare(b.id));
+    return [...this.codexWorkers(), ...this.claudeWorkers(), ...this.providerWorkers()].sort((a, b) => a.rank - b.rank || a.id.localeCompare(b.id));
+  }
+
+  // Enabled provider models. A Cursor model whose reasoning levels Cursor reports becomes one worker per level
+  // (cursor-cli:<model>:<level>), like Codex and Claude; enabling stays per model (its saved entry).
+  providerWorkers() {
+    return (this.data.settings.providerModels || []).flatMap(entry => {
+      if (entry.provider !== 'cursor-cli') return [entry];
+      const found = (this.cursor.models || []).find(m => m.id === entry.model);
+      const base = found?.parameterized ? { ...entry, parameterized: true } : entry;
+      if (!found?.efforts?.length) return [base];
+      return found.efforts.map((effort, i) => ({ ...base, baseId: entry.id, id: `cursor-cli:${entry.model}:${effort}`, effort, effortOption: found.effortOption,
+        label: `${entry.label} · ${found.effortNames?.[effort] || effort}`, rank: entry.rank + i / 100 }));
+    });
   }
 
   // Like Codex: one worker per Claude model and supported effort (claude-cli:<model>:<effort>), so the router picks
@@ -310,8 +326,8 @@ class Controller extends EventEmitter {
     if (!id || id === 'auto') return null;
     const direct = this.catalog().find(p => p.id === id && p.worker);
     if (direct) return direct;
-    // A Claude ID saved before efforts were per worker (claude-cli:<model>): use that model at medium, else its lowest effort.
-    const variants = this.catalog().filter(p => p.worker && p.provider === 'claude-cli' && p.baseId === id);
+    // An ID saved before efforts were per worker (claude-cli:<model>, cursor-cli:<model>:default): that model at medium, else its lowest effort.
+    const variants = this.catalog().filter(p => p.worker && p.baseId === id);
     if (variants.length) return variants.find(p => p.effort === 'medium') || variants[0];
     const legacy = [...PRESETS, ...ROUTER_PRESETS].find(p => p.id === id);
     if (!legacy) return null;
@@ -429,7 +445,7 @@ class Controller extends EventEmitter {
         // Claude models are enabled as a whole (all their efforts), like Codex.
         const key = m.baseId || m.id;
         this.data.settings.disabledModels = [...new Set([...(this.data.settings.disabledModels || []).filter(id => id !== key), ...(!value.enabled ? [key] : [])])];
-      } else this.data.settings.providerModels.find(p => p.id === m.id).enabled = value.enabled;
+      } else this.data.settings.providerModels.find(p => p.id === (m.baseId || m.id)).enabled = value.enabled;
     } else throw new Error('Unknown provider action.');
     if (!this.account && this.connection === 'signed-out' && this.catalog().some(p => p.provider !== 'codex' && this.available(p))) {
       this.connection = 'ready'; this.error = null;
@@ -906,7 +922,8 @@ class Controller extends EventEmitter {
       }
       const helpers = helpersEnabled && this.bridge.base ? this.bridge.childConfig(session.id) : null;
       const result = await this[backend].run({
-        cwd: this.workspace(session.workspace), model: selected.model, effort: selected.effort || null, prompt, images, instructions: this.workerInstructions(session),
+        cwd: this.workspace(session.workspace), model: selected.model, effort: selected.effort || null, effortOption: selected.effortOption, parameterized: selected.parameterized,
+        prompt, images, instructions: this.workerInstructions(session),
         resume: session[sessionKey], access: session.access, signal: abort.signal, helpers,
         approve: (tool, options = {}) => new Promise(resolve => {
           if (abort.signal.aborted || turnOver || options.signal?.aborted) return resolve(false);

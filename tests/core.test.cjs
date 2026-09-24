@@ -1178,3 +1178,30 @@ test('provider choices: first run records what is in use, later runs respect the
   assert.equal(d.data.settings.claudeEnabled, undefined);
   assert.equal(d.data.settings.cursorEnabled, undefined);
 });
+
+test('an enabled Cursor model with reasoning levels becomes one worker per level; enabling stays per model', async t => {
+  const { controller } = await setup(t);
+  controller.cursor.status = { installed: true, loggedIn: true };
+  controller.data.settings.cursorEnabled = true;
+  controller.cursor.models = [{ id: 'grok-4.7', label: 'Grok 4.7', parameterized: true, efforts: ['low', 'high', 'xhigh'], effortOption: 'effort', effortNames: { xhigh: 'Extra High' } },
+    { id: 'composer-2.5', label: 'Composer 2.5', parameterized: true }];
+  controller.providerSettings({ action: 'enableDiscovered', provider: 'cursor-cli', model: 'grok-4.7', label: 'Grok 4.7' });
+  controller.providerSettings({ action: 'enableDiscovered', provider: 'cursor-cli', model: 'composer-2.5', label: 'Composer 2.5' });
+  const cursor = controller.catalog().filter(p => p.provider === 'cursor-cli');
+  assert.deepEqual(cursor.map(p => [p.id, p.effort || null, p.label]), [
+    ['cursor-cli:grok-4.7:low', 'low', 'Grok 4.7 · low'], ['cursor-cli:grok-4.7:high', 'high', 'Grok 4.7 · high'], ['cursor-cli:grok-4.7:xhigh', 'xhigh', 'Grok 4.7 · Extra High'],
+    ['cursor-cli:composer-2.5:default', null, 'Composer 2.5']].sort((a, b) => cursor.findIndex(p => p.id === a[0]) - cursor.findIndex(p => p.id === b[0])));
+  assert.ok(cursor.every(p => p.parameterized));
+  assert.equal(cursor.find(p => p.id === 'cursor-cli:grok-4.7:xhigh').effortOption, 'effort');
+  assert.equal(controller.resolveWorker('cursor-cli:grok-4.7:default').id, 'cursor-cli:grok-4.7:low', 'saved pre-level ID: medium, else the lowest');
+  controller.providerSettings({ action: 'toggle', id: 'cursor-cli:grok-4.7:high', enabled: false });
+  assert.equal(controller.catalog().filter(p => p.baseId === 'cursor-cli:grok-4.7:default' && p.enabled).length, 0);
+
+  const session = controller.create();
+  session.helperTools = false;
+  controller.providerSettings({ action: 'toggle', id: 'cursor-cli:grok-4.7:default', enabled: true });
+  let run;
+  controller.cursor.run = async request => { run = request; return { result: 'ok' }; };
+  await controller.send({ id: session.id, text: 'go', mode: 'cursor-cli:grok-4.7:xhigh', task: 'off' });
+  assert.deepEqual([run.model, run.effort, run.effortOption, run.parameterized], ['grok-4.7', 'xhigh', 'effort', true]);
+});

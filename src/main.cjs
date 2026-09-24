@@ -207,7 +207,7 @@ async function start() {
   handle('providerModels', async id => {
     if (id === 'cursor-cli') {
       if (!controller.cursor.models.length) await controller.cursor.discover();
-      return controller.cursor.models.map(m => ({ id: m.id, label: m.label || m.id }));
+      return controller.cursor.models.map(m => ({ id: m.id, label: m.label || m.id, efforts: m.efforts || [] }));
     }
     if (id === 'codex') return controller.models.map(m => ({ id: m.model, label: m.model }));
     return (await controller.providers.models(id)).map(model => ({ id: model, label: model }));

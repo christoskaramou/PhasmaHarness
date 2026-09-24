@@ -20,7 +20,7 @@ The access setting applies to every provider; Codex enforces it with its OS sand
 | Workspace access | workspace-write sandbox, no network; more asks | reads, edits and filesystem commands inside the workspace run; other commands, outside edits and web ask | permission requests ask |
 | Full access | no sandbox, no prompts | `bypassPermissions` | auto-approved |
 
-Routing classifiers get no tools on any provider. An approval still open when a turn ends, is stopped, or is withdrawn by the CLI is declined. Claude's own `~/.claude` allow and deny rules still apply. Like Codex, each Claude model is offered at every effort it supports (`claude-cli:<model>:<effort>`), enabled per model in Settings → Providers, and the router picks the effort per task; a model without effort levels uses the CLI default.
+Routing classifiers get no tools on any provider. An approval still open when a turn ends, is stopped, or is withdrawn by the CLI is declined. Claude's own `~/.claude` allow and deny rules still apply. Like Codex, each Claude model is offered at every effort it supports (`claude-cli:<model>:<effort>`), enabled per model in Settings → Providers, and the router picks the effort per task; a model without effort levels uses the CLI default. Cursor models get the same treatment from the reasoning levels (`thought_level`) Cursor lists in `cursor/list_available_models`; the chosen level is set with `session/set_config_option` (parameterized model picker), and Cursor saves the last model and level as its own default, as it already did for the model.
 
 ## Run
 
