@@ -181,7 +181,25 @@ class Controller extends EventEmitter {
       await this.bridge.start();
       await this.connectCodex();
     } catch (error) { this.connection = 'disconnected'; this.error = error.message; }
+    this.recordProviderDefaults();
     this.changed();
+  }
+
+  // A saved provider choice always wins; only the plug (setProviderEnabled) changes it.
+  // Without one (first run, or a store from before this setting), record what is in use now:
+  // a provider whose CLI is signed in starts enabled. A provider whose state is unknown this run
+  // (CLI failed to start or its status could not be read) is left unset and recorded on a later run.
+  recordProviderDefaults() {
+    const settings = this.data.settings;
+    let changed = false;
+    const record = (key, known, signedIn) => {
+      if (typeof settings[key] === 'boolean' || !known) return;
+      settings[key] = !!signedIn; changed = true;
+    };
+    record('chatgptEnabled', !!this.codex?.connected && typeof this.codex.signedIn === 'boolean', this.codex?.signedIn);
+    record('claudeEnabled', this.claude.status.installed === false || !this.claude.status.error, this.claude.status.loggedIn);
+    record('cursorEnabled', this.cursor.status.installed === false || !this.cursor.status.error, this.cursor.status.loggedIn);
+    if (changed) this.save();
   }
 
   // Codex is optional: a missing CLI leaves Claude/Cursor usable.

@@ -125,8 +125,7 @@ async function start() {
   handle('claudeRefresh', async () => {
     if (controller.busy) throw new Error('Wait for the current turn to finish.');
     await controller.claude.refresh();
-    // A refresh never re-enables Claude after the user disconnected it in the Harness.
-    if (controller.claude.status.loggedIn && controller.data.settings.claudeEnabled !== false) controller.data.settings.claudeEnabled = true;
+    // A refresh never changes whether the Harness uses Claude; only the plug does.
     if (controller.claude.status.loggedIn) controller.claudeRouterFallback();
     await controller.refreshAccount(); controller.save(); return controller.snapshot();
   });

@@ -1110,9 +1110,48 @@ test('disconnecting a provider in the Harness hides its models without signing t
 
   controller.cursor.status = { installed: true, loggedIn: true };
   const cursor = { id: 'cursor-cli:auto:default', provider: 'cursor-cli', model: 'auto', enabled: true };
+  assert.equal(controller.available(cursor), false, 'first run recorded Cursor as not in use; a later CLI login does not change that');
+  controller.setProviderEnabled('cursor-cli', true);
   assert.equal(controller.available(cursor), true);
   controller.setProviderEnabled('cursor-cli', false);
   assert.equal(controller.available(cursor), false);
   assert.equal(controller.snapshot().cursor.enabled, false);
   assert.throws(() => controller.setProviderEnabled('nope', false), /Unknown provider/);
+});
+
+test('provider choices: first run records what is in use, later runs respect the saved choice', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'phasma-harness-providers-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const file = path.join(directory, 'state.json');
+  const start = async ({ claude, cursor }) => {
+    const controller = new Controller(file, directory, new Fake(), { calls: [], cancel() {}, close() {}, jev: null });
+    controller.claude.refresh = async () => (controller.claude.status = claude);
+    controller.cursor.refresh = async () => (controller.cursor.status = cursor);
+    await controller.initialize();
+    controller.close();
+    return controller;
+  };
+  // First run: ChatGPT (Fake is signed in) and Claude are signed in, Cursor is signed out.
+  let c = await start({ claude: { installed: true, loggedIn: true }, cursor: { installed: true, loggedIn: false } });
+  assert.deepEqual([c.data.settings.chatgptEnabled, c.data.settings.claudeEnabled, c.data.settings.cursorEnabled], [true, true, false]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).settings.chatgptEnabled, true, 'recorded on disk');
+
+  // The user disconnects ChatGPT; after a restart with the Codex CLI still signed in it stays disconnected.
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+  saved.settings.chatgptEnabled = false;
+  fs.writeFileSync(file, JSON.stringify(saved));
+  c = await start({ claude: { installed: true, loggedIn: true }, cursor: { installed: true, loggedIn: true } });
+  assert.equal(c.account, null, 'a saved disconnect wins over the CLI login');
+  assert.equal(c.data.settings.chatgptEnabled, false);
+  assert.equal(c.data.settings.cursorEnabled, false, 'a later Cursor login does not override the recorded choice');
+
+  // Unknown state (status could not be read) records nothing, so a transient failure cannot disable a provider.
+  const fresh = path.join(directory, 'fresh.json');
+  const d = new Controller(fresh, directory, new Fake(), { calls: [], cancel() {}, close() {}, jev: null });
+  d.claude.refresh = async () => (d.claude.status = { installed: true, loggedIn: false, error: 'Could not read Claude Code login status.' });
+  d.cursor.refresh = async () => (d.cursor.status = { installed: true, loggedIn: false, error: 'Cursor CLI timed out.' });
+  await d.initialize();
+  d.close();
+  assert.equal(d.data.settings.claudeEnabled, undefined);
+  assert.equal(d.data.settings.cursorEnabled, undefined);
 });
