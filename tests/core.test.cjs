@@ -5,12 +5,13 @@ const os = require('node:os');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
 const { Controller } = require('../src/controller.cjs');
+const { MEASURED_REAP } = require('../src/tasks.cjs');
 
 class Fake extends EventEmitter {
   constructor() { super(); this.calls = []; this.seq = 0; this.turnIds = []; }
   async start() { }
-  async call(method, params) {
-    this.calls.push({ method, params });
+  async call(method, params, timeout) {
+    this.calls.push({ method, params, timeout });
     if (method === 'account/read') return { account: { type: 'chatgpt', planType: 'pro' } };
     if (method === 'model/list') return {
       data: ['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-6-astra'].map(model => ({
@@ -26,12 +27,85 @@ class Fake extends EventEmitter {
       return { turn: { id } };
     }
     if (method === 'thread/compact/start') return {};
+    if (method === 'command/exec') return this.onExec ? this.onExec(params, timeout) : { exitCode: 0, stdout: '', stderr: '' };
+    if (method === 'command/exec/terminate') return this.onTerminate ? this.onTerminate(params) : {};
     return {};
   }
   respond() { }
   rejectRequest() { }
   close() { }
 }
+
+test('wiki proposals require an eligible task and local wiki, preserve worker through queue, and create no task', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  await controller.send({ id: session.id, text: 'implement', mode: 'terra-light', task: 'on' });
+  complete(controller, session, fake.turnIds[0]);
+  await controller.gateDone;
+  const origin = session.tasks[0];
+  await assert.rejects(controller.proposeWiki(session.id, origin.id), /wiki/);
+  fs.mkdirSync(path.join(session.workspace, 'docs', 'wiki'), { recursive: true });
+  fs.writeFileSync(path.join(session.workspace, 'docs', 'wiki', 'index.md'), '# Wiki');
+  controller.save();
+  const restored = reopen(controller);
+  t.after(() => restored.close());
+  assert.equal(restored.data.sessions[0].tasks[0].wikiAvailable, true);
+  for (const state of ['blocked', 'needs-you', 'cancelled', 'running']) {
+    origin.state = state;
+    await assert.rejects(controller.proposeWiki(session.id, origin.id), /completed task/);
+  }
+  origin.state = 'not-checked';
+  origin.attempts[0].workerOutcome = 'failed';
+  await assert.rejects(controller.proposeWiki(session.id, origin.id), /completed task/);
+  origin.attempts[0].workerOutcome = 'completed';
+  await controller.send({ id: session.id, text: 'plain turn', mode: 'terra-light', task: 'off' });
+  const busyTurn = fake.turnIds.at(-1);
+  assert.deepEqual(await controller.proposeWiki(session.id, origin.id), { queued: true });
+  assert.equal(session.queue[0].wikiTaskId, origin.id);
+  assert.equal(session.queue[0].task, 'off');
+  complete(controller, session, busyTurn);
+  await until(() => fake.turnIds.length === 3);
+  const sent = fake.calls.filter(c => c.method === 'turn/start').at(-1).params;
+  assert.equal(sent.model, origin.route.model);
+  assert.equal(sent.effort, origin.route.effort);
+  assert.match(sent.input[0].text, /do not edit files/);
+  assert.match(sent.input[0].text, new RegExp(origin.id));
+  assert.equal(session.tasks.length, 1);
+  assert.equal(session.submission.taskId, null);
+  complete(controller, session, fake.turnIds.at(-1));
+  const available = controller.available.bind(controller);
+  controller.available = () => false;
+  await assert.rejects(controller.proposeWiki(session.id, origin.id), /original task worker is unavailable/);
+  controller.available = available;
+});
+
+test('task proposals stay advisory and injected instructions stay out of live and reloaded user messages', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  const original = '[Router]\nImplement this. The user can legitimately type [Harness instruction].';
+  await controller.send({ id: session.id, text: original, mode: 'terra-light', task: 'on' });
+  const sent = fake.calls.find(c => c.method === 'turn/start').params;
+  assert.match(sent.input[0].text, /Begin your final reply/);
+  const user = session.items.find(i => i.clientId === sent.clientUserMessageId);
+  assert.notEqual(user.routeLabel, 'Router');
+  controller.notification({ method: 'item/completed', params: { threadId: session.threadId, turnId: fake.turnIds[0],
+    item: { id: 'remote-user', clientId: user.clientId, type: 'userMessage', content: sent.input } } });
+  assert.equal(session.items.find(i => i.clientId === user.clientId).content[0].text, original);
+  controller.notification({ method: 'item/completed', params: { threadId: session.threadId, turnId: fake.turnIds[0],
+    item: { id: 'answer', type: 'agentMessage', phase: 'final_answer', text: 'Done when:\n- File exists\n- Output works\n- Tests pass\n\nSee missing.js:99.' } } });
+  complete(controller, session, fake.turnIds[0]);
+  await controller.gateDone;
+  assert.equal(session.tasks[0].state, 'not-checked');
+  assert.equal(session.tasks[0].checklistStatus, 'proposed');
+  assert.equal(session.tasks[0].attempts[0].citations.references[0].status, 'unresolved');
+  const call = fake.call.bind(fake);
+  fake.call = async (method, params, timeout) => method === 'thread/items/list'
+    ? { data: [{ turnId: fake.turnIds[0], item: { id: 'remote-user', clientId: user.clientId, type: 'userMessage', content: sent.input } }], nextCursor: null }
+    : call(method, params, timeout);
+  controller.loaded.delete(session.id);
+  await controller.resume(session, session.tasks[0].route);
+  assert.equal(session.items.find(i => i.clientId === user.clientId).content[0].text, original);
+});
 
 async function setup(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'phasma-harness-test-'));
@@ -52,6 +126,46 @@ function complete(controller, session, turnId, status = 'completed') {
 async function flush() {
   for (let i = 0; i < 8; i++) await new Promise(setImmediate);
 }
+
+test('changed project instructions refresh an existing worker; unchanged entry does not reload', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  const entry = path.join(session.workspace, 'INSTRUCTIONS.md');
+  await controller.send({ id: session.id, text: 'hello', mode: 'terra-light', task: 'off' });
+  assert.ok(fs.existsSync(entry));
+  complete(controller, session, session.turnId);
+  await flush();
+  fs.writeFileSync(entry, '# Project rule\nUse the violet convention.');
+  await controller.send({ id: session.id, text: 'continue', mode: 'terra-light', task: 'off' });
+  assert.match(fake.calls.filter(c => c.method === 'thread/resume').at(-1).params.developerInstructions, /violet convention/);
+  complete(controller, session, session.turnId);
+  await flush();
+  const count = fake.calls.filter(c => c.method === 'thread/resume').length;
+  await controller.send({ id: session.id, text: 'again', mode: 'terra-light', task: 'off' });
+  assert.equal(fake.calls.filter(c => c.method === 'thread/resume').length, count);
+});
+
+test('shared worker defaults reach Codex and CLI with the selected workspace wiki', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  controller.wikiStore = { location: () => ({ root: path.join(session.workspace, 'private-wiki') }) };
+  await controller.send({ id: session.id, text: 'hello', mode: 'terra-light', task: 'off' });
+  const instructions = fake.calls.find(c => c.method === 'thread/start').params.developerInstructions;
+  assert.ok(instructions.includes('Bundled skill: caveman') && instructions.includes('Ponytail full'));
+  assert.ok(instructions.includes('private-wiki'));
+  complete(controller, session, session.turnId);
+  await flush();
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  session.helperTools = false;
+  let cli;
+  controller.claude.run = async request => { cli = request; return { result: 'ok' }; };
+  await controller.send({ id: session.id, text: 'normal mode', mode: 'claude-cli:sonnet', task: 'off' });
+  assert.ok(cli.instructions.includes('Ponytail full'));
+  assert.ok(cli.instructions.includes('private-wiki'));
+  assert.equal(cli.helpers, null);
+  assert.ok(cli.prompt.includes('normal mode'));
+});
 
 test('unrelated completion while the turn id is unknown is ignored', async t => {
   const { controller, fake } = await setup(t);
@@ -263,4 +377,474 @@ test('settle waits until queue delivery finishes', async t => {
   assert.equal(session.queue.length, 0);
   assert.equal(controller.busy, null);
   assert.deepEqual(fake.calls.filter(call => call.method === 'turn/start').map(call => call.params.input[0].text), ['first', 'second', 'third']);
+});
+
+function arm(controller, fake) {
+  fake.process = { pid: 4242 };
+  controller.lookupProcess = () => ({ pid: 4242, creationTime: 'created' });
+}
+
+function addCheck(controller, session, argv, extra = {}) {
+  controller.checks(session.workspace, [{ name: extra.name || 'unit', argv, cwd: session.workspace, timeoutMs: extra.timeoutMs || 5000, readOnlySafe: extra.readOnlySafe !== false }]);
+}
+
+async function until(fn) {
+  for (let i = 0; i < 40; i++) {
+    if (fn()) return;
+    await new Promise(setImmediate);
+  }
+  throw new Error('condition was not reached');
+}
+
+function reopen(controller, options) {
+  const filename = controller.filename;
+  const workspace = controller.data.settings.workspace;
+  controller.close();
+  return new Controller(filename, workspace, new Fake(), { cancel() {}, close() {}, jev: null, async choose() { throw new Error('unexpected route'); } }, options);
+}
+
+test('task mode is stored through queue edit and send', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  arm(controller, fake);
+  await controller.send({ id: session.id, text: 'first', mode: 'terra-light', task: 'off' });
+  const queued = await controller.send({ id: session.id, text: 'second', mode: 'terra-light', task: 'on' });
+  assert.equal(queued.queued, true);
+  const edited = await controller.queuedMessage(session.id, session.queue[0].id, 'edit');
+  assert.equal(edited.task, 'on');
+  await controller.send({ id: session.id, text: edited.text, images: edited.images, mode: edited.mode, task: edited.task });
+  complete(controller, session, fake.turnIds[0]);
+  await flush();
+  assert.equal(session.tasks.length, 1);
+  assert.equal(session.tasks[0].goal, 'second');
+  complete(controller, session, fake.turnIds[1]);
+  await controller.gateDone;
+  assert.equal(session.tasks[0].state, 'not-checked');
+});
+
+test('auto tracks an implementation assessment and direct answers are not tasks', async t => {
+  const { controller, fake, smartRouter } = await setup(t);
+  const session = controller.create();
+  arm(controller, fake);
+  smartRouter.choose = async () => ({ provider: 'codex', model: 'gpt-5.6-terra', effort: 'low', label: 'Terra', id: 'terra', images: true, assessment: { taskKind: 'implementation', workspaceRelevant: true, risk: 'medium', uncertainty: 'low' } });
+  await controller.send({ id: session.id, text: 'fix the leak', mode: 'auto', task: 'auto' });
+  assert.equal(session.tasks.length, 1);
+  complete(controller, session, fake.turnIds[0]);
+  await controller.gateDone;
+  smartRouter.choose = async () => ({ provider: 'codex', model: 'gpt-5.6-terra', effort: 'low', label: 'Terra', id: 'terra', images: true, assessment: { taskKind: 'general', workspaceRelevant: false, risk: 'low', uncertainty: 'low' } });
+  await controller.send({ id: session.id, text: 'explain a mutex', mode: 'auto', task: 'auto' });
+  assert.equal(session.tasks.length, 1);
+  smartRouter.choose = async () => ({ directAnswer: 'Just a definition.', provider: 'codex', model: 'gpt-5.6-terra', effort: 'low' });
+  await controller.send({ id: session.id, text: 'what is a mutex', mode: 'auto', task: 'auto' });
+  assert.equal(session.tasks.length, 1);
+});
+
+test('configured checks stay frozen and hold the slot', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  arm(controller, fake);
+  addCheck(controller, session, ['first']);
+  let release;
+  fake.onExec = () => new Promise(resolve => { release = resolve; });
+  await controller.send({ id: session.id, text: 'implement', mode: 'terra-light', task: 'on' });
+  controller.checks(session.workspace, [{ name: 'other', argv: ['second'], cwd: session.workspace, timeoutMs: 5000, readOnlySafe: true }]);
+  complete(controller, session, fake.turnIds[0]);
+  await until(() => controller.gate && session.tasks[0].state === 'checking');
+  assert.equal(controller.busy, session.id);
+  const other = controller.create();
+  await assert.rejects(controller.send({ id: other.id, text: 'elsewhere', mode: 'terra-light' }), /still be running/);
+  release({ exitCode: 0, stdout: 'ok', stderr: '' });
+  await controller.gateDone;
+  assert.equal(fake.calls.find(call => call.method === 'command/exec').params.command[0], 'first');
+  assert.equal(Object.hasOwn(fake.calls.find(call => call.method === 'command/exec').params, 'outputBytesCap'), false);
+  assert.equal(session.tasks[0].state, 'checks-passed');
+  assert.equal(controller.busy, null);
+});
+
+test('Stop during approval, between checks, and before correction cancels the task', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  arm(controller, fake);
+  addCheck(controller, session, ['one']);
+  await controller.send({ id: session.id, text: 'implement', mode: 'terra-light', task: 'on' });
+  complete(controller, session, fake.turnIds[0]);
+  await until(() => controller.requests.size === 1);
+  await controller.stop();
+  await controller.gateDone;
+  assert.equal(session.tasks[0].state, 'cancelled');
+  assert.equal(fake.calls.some(call => call.method === 'command/exec'), false);
+  assert.equal(session.queuePaused, true);
+
+  const between = controller.create();
+  controller.permissions(between.id, 'danger-full-access');
+  controller.checks(between.workspace, [
+    { name: 'one', argv: ['one'], cwd: between.workspace, timeoutMs: 5000, readOnlySafe: true },
+    { name: 'two', argv: ['two'], cwd: between.workspace, timeoutMs: 5000, readOnlySafe: true },
+  ]);
+  let ran = 0;
+  fake.onExec = () => {
+    ran += 1;
+    if (ran === 1) setImmediate(() => controller.stop());
+    return { exitCode: 0, stdout: 'ok', stderr: '' };
+  };
+  await controller.send({ id: between.id, text: 'implement', mode: 'terra-light', task: 'on' });
+  complete(controller, between, fake.turnIds.at(-1));
+  await controller.gateDone;
+  assert.equal(between.tasks[0].state, 'cancelled');
+  assert.equal(between.tasks[0].attempts[0].results.length, 1);
+  assert.equal(ran, 1);
+
+  const correcting = controller.create();
+  controller.permissions(correcting.id, 'danger-full-access');
+  addCheck(controller, correcting, ['unit']);
+  fake.onExec = () => {
+    setImmediate(() => controller.stop());
+    return { exitCode: 1, stdout: 'bad', stderr: '' };
+  };
+  await controller.send({ id: correcting.id, text: 'implement', mode: 'terra-light', task: 'on' });
+  const turns = fake.turnIds.length;
+  complete(controller, correcting, fake.turnIds.at(-1));
+  await controller.gateDone;
+  assert.equal(correcting.tasks[0].state, 'cancelled');
+  assert.equal(fake.turnIds.length, turns);
+});
+
+test('a late check result after Stop does not change the cancelled task', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  arm(controller, fake);
+  addCheck(controller, session, ['unit']);
+  let release;
+  fake.onExec = () => new Promise(resolve => { release = resolve; });
+  await controller.send({ id: session.id, text: 'implement', mode: 'terra-light', task: 'on' });
+  await controller.send({ id: session.id, text: 'later', mode: 'terra-light', task: 'on' });
+  complete(controller, session, fake.turnIds[0]);
+  await until(() => release);
+  await controller.stop();
+  release({ exitCode: 0, stdout: 'late', stderr: '' });
+  await controller.gateDone;
+  assert.equal(session.tasks[0].state, 'cancelled');
+  assert.equal(session.tasks[0].attempts[0].results.length, 0);
+  assert.equal(session.queuePaused, true);
+  assert.equal(session.queue[0].text, 'later');
+  await controller.send({ id: session.id, text: 'next', mode: 'terra-light', task: 'off' });
+  assert.equal(controller.busy, session.id);
+  assert.equal(fake.turnIds.length, 2);
+});
+
+test('Stop during termination still cancels when terminate is confirmed', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  arm(controller, fake);
+  addCheck(controller, session, ['unit']);
+  const holds = [];
+  fake.onExec = () => { throw new Error('command/exec timed out'); };
+  fake.onTerminate = () => new Promise(resolve => { holds.push(resolve); });
+  await controller.send({ id: session.id, text: 'implement', mode: 'terra-light', task: 'on' });
+  complete(controller, session, fake.turnIds[0]);
+  await until(() => holds.length === 1);
+  const stopping = controller.stop();
+  await until(() => holds.length === 2);
+  holds[1]();
+  await stopping;
+  holds[0]();
+  await controller.gateDone;
+  assert.equal(session.tasks[0].state, 'cancelled');
+  assert.equal(controller.data.executionBlock, null);
+});
+
+test('an unconfirmed terminate blocks every session until the parent is gone', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  arm(controller, fake);
+  addCheck(controller, session, ['unit']);
+  fake.onExec = () => { throw new Error('command/exec timed out'); };
+  fake.onTerminate = () => { throw new Error('command/exec/terminate timed out'); };
+  await controller.send({ id: session.id, text: 'implement', mode: 'terra-light', task: 'on' });
+  complete(controller, session, fake.turnIds[0]);
+  await controller.gateDone;
+  assert.equal(session.tasks[0].state, 'blocked');
+  assert.equal(session.tasks[0].reason, 'check execution unconfirmed');
+  assert.equal(controller.data.executionBlock.creationTime, 'created');
+  const other = controller.create();
+  await assert.rejects(controller.send({ id: session.id, text: 'again', mode: 'terra-light' }), /still be running/);
+  await assert.rejects(controller.send({ id: other.id, text: 'elsewhere', mode: 'terra-light' }), /still be running/);
+  controller.acknowledgeTask(session.id, session.tasks[0].id);
+  assert.equal(session.tasks[0].acknowledged, true);
+  assert.ok(controller.data.executionBlock);
+});
+
+test('disconnect during a check blocks the task', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  arm(controller, fake);
+  addCheck(controller, session, ['unit']);
+  let rejectExec;
+  fake.onExec = () => new Promise((_resolve, reject) => { rejectExec = reject; });
+  fake.onTerminate = () => { throw new Error('Codex disconnected'); };
+  await controller.send({ id: session.id, text: 'implement', mode: 'terra-light', task: 'on' });
+  complete(controller, session, fake.turnIds[0]);
+  await until(() => rejectExec);
+  fake.emit('disconnected', new Error('Codex disconnected'));
+  rejectExec(new Error('Codex disconnected'));
+  await controller.gateDone;
+  assert.equal(session.tasks[0].state, 'blocked');
+  assert.equal(session.tasks[0].reason, 'check execution unconfirmed');
+  assert.ok(controller.data.executionBlock);
+});
+
+test('a check longer than 90 seconds uses its own deadline', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  arm(controller, fake);
+  addCheck(controller, session, ['slow'], { timeoutMs: 120000 });
+  await controller.send({ id: session.id, text: 'implement', mode: 'terra-light', task: 'on' });
+  complete(controller, session, fake.turnIds[0]);
+  await controller.gateDone;
+  const exec = fake.calls.find(call => call.method === 'command/exec');
+  assert.equal(exec.params.timeoutMs, 120000);
+  assert.equal(exec.timeout, 150000);
+  assert.equal(session.tasks[0].state, 'checks-passed');
+});
+
+test('blocked checks keep failed output and do not correct', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  controller.permissions(session.id, 'read-only');
+  arm(controller, fake);
+  addCheck(controller, session, ['unit'], { readOnlySafe: false });
+  await controller.send({ id: session.id, text: 'implement', mode: 'terra-light', task: 'on' });
+  complete(controller, session, fake.turnIds[0]);
+  await controller.gateDone;
+  assert.equal(session.tasks[0].state, 'blocked');
+  assert.equal(session.tasks[0].attempts[0].results[0].detail, 'not read-only safe');
+
+  const missing = controller.create();
+  controller.permissions(missing.id, 'danger-full-access');
+  controller.checks(missing.workspace, [
+    { name: 'unit', argv: ['unit'], cwd: missing.workspace, timeoutMs: 5000, readOnlySafe: true },
+    { name: 'missing', argv: ['missing'], cwd: missing.workspace, timeoutMs: 5000, readOnlySafe: true },
+  ]);
+  let ran = 0;
+  fake.onExec = () => {
+    ran += 1;
+    if (ran === 1) return { exitCode: 1, stdout: 'boom', stderr: '' };
+    throw new Error('failed to spawn command: program not found');
+  };
+  await controller.send({ id: missing.id, text: 'implement', mode: 'terra-light', task: 'on' });
+  const turns = fake.turnIds.length;
+  complete(controller, missing, fake.turnIds.at(-1));
+  await controller.gateDone;
+  assert.equal(missing.tasks[0].state, 'blocked');
+  assert.equal(missing.tasks[0].attempts[0].results[0].stdout, 'boom');
+  assert.match(missing.tasks[0].attempts[0].results[1].detail, /program not found/);
+  assert.equal(fake.turnIds.length, turns);
+
+  const offline = controller.create();
+  controller.permissions(offline.id, 'danger-full-access');
+  addCheck(controller, offline, ['unit']);
+  await controller.send({ id: offline.id, text: 'implement', mode: 'terra-light', task: 'on' });
+  controller.connection = 'disconnected';
+  complete(controller, offline, fake.turnIds.at(-1));
+  await controller.gateDone;
+  assert.equal(offline.tasks[0].attempts.at(-1).results[0].detail, 'no provider connected');
+});
+
+test('one failed check corrects once on the same model and keeps the first evidence', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  arm(controller, fake);
+  addCheck(controller, session, ['unit']);
+  let failed = true;
+  fake.onExec = () => failed ? { exitCode: 1, stdout: 'boom', stderr: '' } : { exitCode: 0, stdout: 'ok', stderr: '' };
+  await controller.send({ id: session.id, text: 'implement', mode: 'terra-light', task: 'on' });
+  const model = fake.calls.find(call => call.method === 'turn/start').params.model;
+  complete(controller, session, fake.turnIds[0]);
+  await until(() => fake.turnIds.length === 2);
+  const evidence = path.join(path.dirname(controller.filename), 'tool-outputs', session.id, `task-${session.tasks[0].id}.json`);
+  const first = JSON.parse(fs.readFileSync(evidence, 'utf8'));
+  assert.equal(first.attempts[0].results[0].status, 'failed');
+  assert.equal(fake.calls.filter(call => call.method === 'turn/start').at(-1).params.model, model);
+  assert.match(fake.calls.filter(call => call.method === 'turn/start').at(-1).params.input[0].text, /\[Router\]/);
+  failed = false;
+  complete(controller, session, fake.turnIds[1]);
+  await controller.gateDone;
+  assert.equal(session.tasks[0].state, 'checks-passed');
+  assert.equal(JSON.parse(fs.readFileSync(evidence, 'utf8')).attempts.length, 2);
+});
+
+test('a failed correction submission settles the task', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  arm(controller, fake);
+  addCheck(controller, session, ['unit']);
+  fake.onExec = () => ({ exitCode: 1, stdout: 'boom', stderr: '' });
+  fake.beforeTurnResponse = async () => { if (fake.seq > 1) throw new Error('turn/start failed'); };
+  await controller.send({ id: session.id, text: 'implement', mode: 'terra-light', task: 'on' });
+  complete(controller, session, fake.turnIds[0]);
+  await controller.gateDone;
+  assert.equal(session.tasks[0].state, 'needs-you');
+  assert.equal(session.tasks[0].reason, 'submission rejected');
+  assert.equal(controller.busy, null);
+});
+
+test('a failed worker turn still reports passing checks', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  arm(controller, fake);
+  addCheck(controller, session, ['unit']);
+  await controller.send({ id: session.id, text: 'implement', mode: 'terra-light', task: 'on' });
+  complete(controller, session, fake.turnIds[0], 'failed');
+  await controller.gateDone;
+  assert.equal(session.tasks[0].state, 'needs-you');
+  assert.equal(session.tasks[0].reason, 'worker failed');
+  assert.match(session.tasks[0].summary, /Worker turn failed · configured checks passed/);
+  assert.equal(fake.turnIds.length, 1);
+});
+
+test('tracked threads disable native goals and subagents until the task is finished', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  arm(controller, fake);
+  await controller.send({ id: session.id, text: 'implement', mode: 'terra-light', task: 'on' });
+  const started = fake.calls.find(call => call.method === 'thread/start');
+  assert.equal(started.params.config['features.goals'], false);
+  assert.equal(started.params.config['features.multi_agent'], false);
+  complete(controller, session, fake.turnIds[0]);
+  await controller.gateDone;
+  await controller.send({ id: session.id, text: 'just talk', mode: 'terra-light', task: 'off' });
+  const resumed = fake.calls.filter(call => call.method === 'thread/resume').at(-1);
+  assert.equal(resumed.params.config['features.goals'], undefined);
+  assert.equal(resumed.params.config['features.multi_agent'], undefined);
+});
+
+test('steering amends a running task and is rejected while checks run', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  arm(controller, fake);
+  addCheck(controller, session, ['unit']);
+  await controller.send({ id: session.id, text: 'implement', mode: 'terra-light', task: 'on' });
+  await controller.send({ id: session.id, text: 'also rename it', mode: 'terra-light', task: 'on' });
+  await controller.queuedMessage(session.id, session.queue[0].id, 'steer');
+  assert.equal(session.tasks[0].amendments[0].text, 'also rename it');
+  assert.equal(session.tasks[0].goal, 'implement');
+  await controller.send({ id: session.id, text: 'steer again', mode: 'terra-light' });
+  let release;
+  fake.onExec = () => new Promise(resolve => { release = resolve; });
+  complete(controller, session, fake.turnIds[0]);
+  await until(() => session.tasks[0].state === 'checking');
+  await assert.rejects(controller.queuedMessage(session.id, session.queue.at(-1).id, 'steer'), /Checks are running/);
+  release({ exitCode: 0, stdout: '', stderr: '' });
+  await controller.gateDone;
+});
+
+test('restart marks unfinished tasks needs-you and does not rerun them', async t => {
+  const { controller } = await setup(t);
+  const session = controller.create();
+  session.tasks = ['running', 'checking', 'correcting'].map(state => ({
+    id: `task-${state}`, state, goal: state, amendments: [], checks: [], attempts: [], corrections: 0, reason: null,
+  }));
+  controller.save();
+  const next = reopen(controller);
+  t.after(() => next.close());
+  const tasks = next.data.sessions.find(item => item.id === session.id).tasks;
+  assert.deepEqual(tasks.map(task => task.state), ['needs-you', 'needs-you', 'needs-you']);
+  assert.match(tasks[0].reason, /worker turn/);
+  assert.match(tasks[1].reason, /may still be running/);
+  assert.match(tasks[2].reason, /correction/);
+  assert.equal(next.client.calls.some(call => call.method === 'command/exec'), false);
+});
+
+test('a persisted execution block refuses every session and acknowledgement does not clear it', async t => {
+  const { controller } = await setup(t);
+  const session = controller.create();
+  session.tasks = [{ id: 'task-1', state: 'checking', goal: 'g', amendments: [], checks: [], attempts: [], corrections: 0, reason: null }];
+  controller.data.executionBlock = { pid: 4242, creationTime: 'same', processId: 'p', sessionId: session.id, taskId: 'task-1', children: [] };
+  controller.save();
+  const killed = [];
+  const next = reopen(controller, {
+    lookupProcess: () => ({ pid: 4242, creationTime: 'same' }),
+    killProcessTree: () => { killed.push(4242); return false; },
+  });
+  t.after(() => next.close());
+  const restored = next.data.sessions.find(item => item.id === session.id);
+  const other = next.create();
+  await assert.rejects(next.send({ id: restored.id, text: 'again', mode: 'terra-light' }), /still be running/);
+  await assert.rejects(next.send({ id: other.id, text: 'elsewhere', mode: 'terra-light' }), /still be running/);
+  next.acknowledgeTask(restored.id, 'task-1');
+  assert.equal(restored.tasks[0].acknowledged, true);
+  assert.ok(next.data.executionBlock);
+  assert.deepEqual(killed, [4242]);
+});
+
+test('a reused pid is not killed and a surviving child keeps the block', async t => {
+  const { controller } = await setup(t);
+  const session = controller.create();
+  controller.data.executionBlock = { pid: 4242, creationTime: 'original', processId: 'p', sessionId: session.id, taskId: 'task-1', children: [], runtime: { ...MEASURED_REAP } };
+  controller.save();
+  const killed = [];
+  const reused = reopen(controller, {
+    lookupProcess: () => ({ pid: 4242, creationTime: 'reused' }),
+    killProcessTree: () => { killed.push(4242); return false; },
+  });
+  t.after(() => reused.close());
+  assert.equal(reused.data.executionBlock, null);
+  assert.deepEqual(killed, []);
+
+  const again = await setup(t);
+  const blocked = again.controller.create();
+  again.controller.data.executionBlock = {
+    pid: 50, creationTime: 'parent', processId: 'p', sessionId: blocked.id, taskId: 'task-2',
+    children: [{ pid: 99, creationTime: 'child' }], runtime: { ...MEASURED_REAP },
+  };
+  again.controller.save();
+  const childKilled = [];
+  const kept = reopen(again.controller, {
+    lookupProcess: pid => pid === 99 ? { pid: 99, creationTime: 'child' } : { status: 'absent' },
+    killProcessTree: pid => { childKilled.push(pid); return false; },
+  });
+  t.after(() => kept.close());
+  assert.equal(kept.data.executionBlock.children[0].pid, 99);
+  assert.deepEqual(childKilled, []);
+  await assert.rejects(kept.send({ id: blocked.id, text: 'no', mode: 'terra-light' }), /still be running/);
+});
+
+test('a failed process lookup or an unmeasured runtime keeps the execution block', async t => {
+  const { controller } = await setup(t);
+  const session = controller.create();
+  controller.data.executionBlock = { pid: 4242, creationTime: 'original', processId: 'p', sessionId: session.id, taskId: 'task-1', children: [], runtime: { ...MEASURED_REAP } };
+  controller.save();
+  const unknown = reopen(controller, { lookupProcess: () => ({ status: 'unknown' }), killProcessTree: () => { throw new Error('must not kill'); } });
+  t.after(() => unknown.close());
+  assert.equal(unknown.data.executionBlock.pid, 4242);
+
+  unknown.data.executionBlock = { pid: 4242, creationTime: 'original', processId: 'p', sessionId: session.id, taskId: 'task-1', children: [], runtime: { ...MEASURED_REAP, codexVersion: '0.154.0' } };
+  unknown.save();
+  const other = reopen(unknown, { lookupProcess: () => ({ status: 'absent' }), killProcessTree: () => { throw new Error('must not kill'); } });
+  t.after(() => other.close());
+  assert.equal(other.data.executionBlock.codexVersion || other.data.executionBlock.runtime.codexVersion, '0.154.0');
+});
+
+test('failed tree termination cannot clear an unmeasured runtime when its parent disappears', async t => {
+  const { controller } = await setup(t);
+  const session = controller.create();
+  controller.data.executionBlock = { pid: 4242, creationTime: 'original', processId: 'p', sessionId: session.id, children: [], runtime: { ...MEASURED_REAP, codexVersion: '0.154.0' } };
+  controller.save();
+  let probes = 0;
+  const next = reopen(controller, {
+    lookupProcess: () => ++probes === 1 ? { pid: 4242, creationTime: 'original' } : { status: 'absent' },
+    killProcessTree: () => false,
+  });
+  t.after(() => next.close());
+  assert.ok(next.data.executionBlock);
 });

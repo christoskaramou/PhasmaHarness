@@ -1,14 +1,6 @@
 'use strict';
 const $ = selector => document.querySelector(selector);
 const api = window.router;
-function accountLabel(account) {
-  if (account?.type === 'chatgpt') {
-    const plan = (account.plan || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-    return `ChatGPT${plan ? ' ' + plan : ''}${account.email ? ' as ' + account.email : ''}`;
-  }
-  return account?.type === 'apiKey' ? 'API key' : account?.type === 'amazonBedrock' ? 'Amazon Bedrock' : 'Codex';
-}
-
 function chatgptDetail(account) {
   if (!account || account.type !== 'chatgpt') return null;
   const plan = (account.plan || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
@@ -53,7 +45,10 @@ function renderImages() {
   attachedImages().forEach((url, i) => {
     const card = element('div', 'image-preview');
     const image = element('img'); image.src = url; image.alt = `Attached image ${i + 1}`;
-    const remove = element('button', '', 'Remove'); remove.type = 'button';
+    const remove = element('button', 'image-remove');
+    remove.type = 'button';
+    remove.setAttribute('aria-label', `Remove attached image ${i + 1}`);
+    remove.innerHTML = '<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1 1l8 8M9 1 1 9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
     remove.onclick = () => { imageDrafts.set(selectedId || 'new', attachedImages().filter((_, n) => n !== i)); renderImages(); updatePreview(); };
     card.append(image, remove); tray.append(card);
   });
@@ -287,7 +282,8 @@ function render() {
   $('#workspace').title = state.settings.workspace;
   $('#session-title').textContent = session?.title || 'New session';
   $('#session-path').textContent = session?.workspace || state.settings.workspace;
-  $('#context-meter').disabled = ['claude-cli', 'cursor-cli'].includes(session?.activeProvider) || !ready || !session?.threadId || !session?.items.some(item => item.type === 'userMessage') || !!state.busy || submitting;
+  const compactable = session?.activeProvider === 'claude-cli' ? !!session.claudeSessionId : session?.activeProvider !== 'cursor-cli' && !!session?.threadId;
+  $('#context-meter').disabled = !compactable || !ready || !session?.items.some(item => item.type === 'userMessage') || !!state.busy || submitting;
   $('#context-search').disabled = !!state.busy || !state.contextRoot;
   const permission = state.accessModes.find(mode => mode.id === (session?.access || draftAccess || state.settings.access));
   for (const select of [$('#permissions'), $('#settings-access')]) {
@@ -400,20 +396,20 @@ function render() {
   const turnError = state.busy === selectedId ? '' : session?.error || '';
   $('#turn-error').textContent = turnError ? `${session.status === 'interrupted' ? 'Stopped' : 'Turn failed'}: ${turnError}` : '';
   $('#turn-error').hidden = !turnError;
-  $('#renew-models').disabled = !!state.busy;
+  renderModelFetching();
   $('#working-text').textContent = session?.compacting ? 'Compacting conversation context…' : state.routing === selectedId && state.routing
     ? `Choosing a model with ${routerName(state.routerModel)}…` : `${session?.routes.at(-1)?.label || 'Codex'} is working…`;
   const usage = session?.usage;
   const total = usage?.total;
   const contextWindow = usage?.modelContextWindow;
   const contextTokens = usage?.last?.totalTokens ?? (Number.isFinite(usage?.last?.inputTokens) && Number.isFinite(usage?.last?.outputTokens) ? usage.last.inputTokens + usage.last.outputTokens : null);
-  const contextKnown = !['claude-cli', 'cursor-cli'].includes(session?.activeProvider) && Number.isFinite(contextTokens) && contextTokens >= 0 && Number.isFinite(contextWindow) && contextWindow > 0;
+  const contextKnown = session?.activeProvider !== 'cursor-cli' && Number.isFinite(contextTokens) && contextTokens >= 0 && Number.isFinite(contextWindow) && contextWindow > 0;
   const contextPercent = contextKnown ? Math.min(100, Math.max(0, contextTokens / contextWindow * 100)) : 0;
-  const contextLabel = contextKnown ? `${Math.round(contextPercent)}% context used (estimate from latest Codex report: ${contextTokens.toLocaleString()} / ${contextWindow.toLocaleString()} tokens)` : 'Context usage unavailable: waiting for Codex to report the context size and token usage.';
+  const contextLabel = contextKnown ? `${Math.round(contextPercent)}% context used (estimate from the latest provider report: ${contextTokens.toLocaleString()} / ${contextWindow.toLocaleString()} tokens)` : 'Context usage unavailable until the provider reports the context size and token usage.';
   $('#context-meter').style.setProperty('--context-used', `${contextPercent}%`);
   $('#context-meter').classList.toggle('unknown', !contextKnown);
   $('#context-meter').setAttribute('aria-label', `${contextLabel}. Compact context`);
-  $('#context-meter-tip').textContent = ['claude-cli', 'cursor-cli'].includes(session?.activeProvider) ? 'This CLI manages context compaction automatically.' : contextLabel + (session?.compacting ? '\nCompacting context…' : '\nClick to compact context.');
+  $('#context-meter-tip').textContent = session?.activeProvider === 'cursor-cli' ? 'Cursor manages context automatically and reports no token usage.' : contextLabel + (session?.compacting ? '\nCompacting context…' : '\nClick to compact context.');
   const compact = n => new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(n);
   const hasBreakdown = Number.isFinite(total?.inputTokens) && Number.isFinite(total?.cachedInputTokens) && Number.isFinite(total?.outputTokens);
   const providerHover = providerConnectionSummary();
@@ -422,19 +418,98 @@ function render() {
     : total?.totalTokens !== undefined ? `${compact(total.totalTokens)} reported tokens` : 'Connected';
   $('#usage').title = providerHover + (hasBreakdown
     ? `\n\nSession totals: ${total.inputTokens.toLocaleString()} input (${total.cachedInputTokens.toLocaleString()} cached, ${Math.max(0, total.inputTokens - total.cachedInputTokens).toLocaleString()} uncached), ${total.outputTokens.toLocaleString()} output. Reasoning is included in output. Latest request input: ${usage.last?.inputTokens?.toLocaleString() ?? 'unknown'}. These are token counts, not dollars or allowance usage.`
-    : '\n\nHover lists providers. Token totals appear after Codex reports usage.');
+    : '\n\nHover lists providers. Token totals appear after the provider reports usage.');
   renderMessages(session);
+  renderTask(session);
   renderRequest();
 }
 
 function providerConnectionSummary() {
   if (!state) return '';
   const lines = [
-    `ChatGPT · ${state.account ? 'connected' : 'not connected'}${state.account?.email ? ' · ' + state.account.email : ''}`,
+    `ChatGPT · ${state.account ? 'connected' : state.codex?.installed === false ? 'Codex CLI not installed' : 'not connected'}${state.account?.email ? ' · ' + state.account.email : ''}`,
     `Claude · ${state.claude?.loggedIn ? 'connected' : state.claude?.installed === false ? 'not installed' : 'not connected'}`,
     `Cursor · ${state.cursor?.loggedIn ? (state.cursor.email || state.cursor.identity || 'connected') : state.cursor?.installed === false ? 'not installed' : 'not connected'}`,
   ];
   return lines.join('\n');
+}
+
+function renderTask(session) {
+  const card = $('#task-card');
+  const task = (session?.tasks || []).at(-1);
+  if (!task) { card.hidden = true; card.replaceChildren(); return; }
+  card.hidden = false;
+  const heading = document.createElement('h3');
+  heading.textContent = task.summary || task.state;
+  const goal = document.createElement('p');
+  goal.textContent = task.goal;
+  card.replaceChildren(heading, goal);
+  const criteria = document.createElement('details');
+  const criteriaTitle = document.createElement('summary');
+  criteriaTitle.textContent = task.proposedChecklist?.length ? 'Proposed completion criteria · not verified'
+    : task.checklistStatus === 'pending' ? 'Awaiting proposed completion criteria'
+      : task.checklistStatus === 'unparseable' ? 'No checklist proposed in the expected format' : 'No checklist proposed';
+  criteria.append(criteriaTitle);
+  if (task.proposedChecklist?.length) {
+    const list = document.createElement('ul');
+    for (const text of task.proposedChecklist) { const item = document.createElement('li'); item.textContent = text; list.append(item); }
+    criteria.append(list);
+  }
+  card.append(criteria);
+  if (task.wikiAvailable && ['checks-passed', 'not-checked'].includes(task.state)) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = 'Propose wiki update';
+    button.title = 'Ask the same worker for a proposed wiki patch. Files are not edited automatically.';
+    button.onclick = async () => {
+      button.disabled = true;
+      try { await api.proposeWiki(session.id, task.id); }
+      catch (error) { button.disabled = false; notify(error); }
+    };
+    card.append(button);
+  }
+  const citations = task.attempts?.at(-1)?.citations;
+  if (citations) {
+    const details = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = 'File references · advisory only';
+    details.append(summary);
+    for (const reference of citations.references) {
+      const line = document.createElement('p');
+      line.textContent = `${reference.citation}: ${reference.status} · ${reference.detail}`;
+      details.append(line);
+    }
+    if (citations.note) { const note = document.createElement('p'); note.textContent = citations.note; details.append(note); }
+    card.append(details);
+  }
+  if (task.amendments?.length) {
+    const list = document.createElement('ul');
+    for (const amendment of task.amendments) {
+      const item = document.createElement('li');
+      item.textContent = amendment.text;
+      list.append(item);
+    }
+    card.append(list);
+  }
+  for (const attempt of task.attempts || []) {
+    for (const result of attempt.results || []) {
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      const seconds = result.durationMs ? ` · ${(result.durationMs / 1000).toFixed(1)}s` : '';
+      summary.textContent = `${result.name}: ${result.status}${result.detail ? ` · ${result.detail}` : ''}${seconds}`;
+      const output = document.createElement('pre');
+      output.textContent = [result.stdout, result.stderr].filter(Boolean).join('\n') || result.detail || '';
+      details.append(summary, output);
+      card.append(details);
+    }
+  }
+  if (['needs-you', 'blocked', 'checks-passed', 'not-checked', 'cancelled'].includes(task.state) && !task.acknowledged) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = 'Acknowledge';
+    button.onclick = () => api.acknowledgeTask(session.id, task.id).catch(notify);
+    card.append(button);
+  }
 }
 
 function renderMessages(session) {
@@ -557,7 +632,8 @@ function renderSendButton() {
   $('#send').innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg>';
   $('#send').title = state?.busy ? 'Queue message' : 'Send message';
   $('#send').setAttribute('aria-label', $('#send').title);
-  $('#stop').hidden = !state?.busy || hasDraft;
+  const checking = (current()?.tasks || []).some(task => task.state === 'checking' || task.state === 'correcting');
+  $('#stop').hidden = checking ? false : !state?.busy || hasDraft;
 }
 
 async function updatePreview() {
@@ -647,7 +723,7 @@ $('#composer').addEventListener('submit', async event => {
     sentHistory = null; sentHistoryIndex = -1;
     drafts.set(selectedId, ''); $('#prompt').value = ''; updatePreview();
     imageDrafts.delete(selectedId); renderImages();
-    await api.send({ id: selectedId, text, images, mode: $('#preset').value });
+    await api.send({ id: selectedId, text, images, mode: $('#preset').value, task: $('#task-mode').value });
   } catch (error) {
     if (!$('#prompt').value) { $('#prompt').value = text; drafts.set(selectedId, text); }
     if (images.length) imageDrafts.set(selectedId || 'new', images);
@@ -727,7 +803,6 @@ $('#settings').onclick = async () => {
   $('#settings-routing').onchange();
   $('#jev-key').value = '';
   $('#jev-result').textContent = '';
-  $('#account-detail').textContent = state.account ? accountLabel(state.account) : 'Not signed in';
   renderProviders();
   $('#settings-dialog').showModal();
 };
@@ -927,12 +1002,12 @@ function renderProviders() {
   accounts.replaceChildren();
   list.replaceChildren();
 
-  const addAccount = ({ id, label, connected, detail, connect, disconnect }) => {
+  const addAccount = ({ id, label, connected, installed, detail, connect, disconnect }) => {
     const row = element('div', 'provider-account-row');
     const plug = document.createElement('button');
     plug.type = 'button';
     plug.className = `provider-plug ${connected ? 'connected' : 'disconnected'}`;
-    plug.disabled = !!state.busy;
+    plug.disabled = !!state.busy || installed === false;
     plug.title = connected ? 'Connected — click to disconnect' : 'Not connected — click to connect';
     plug.setAttribute('aria-label', connected ? `Disconnect ${label}` : `Connect ${label}`);
     plug.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a6 6 0 0 1-12 0V8z"/></svg>';
@@ -952,6 +1027,21 @@ function renderProviders() {
     const text = element('div', 'provider-account-text');
     text.append(element('strong', '', label), document.createTextNode(detail ? ` · ${detail}` : ''));
     row.append(plug, text);
+    if (installed === false) {
+      const install = element('button', 'provider-install', 'Install');
+      install.type = 'button';
+      install.disabled = !!state.busy;
+      install.onclick = async () => {
+        install.disabled = true;
+        $('#provider-status').textContent = `Installing ${label}…`;
+        try {
+          applyState(await api.installProvider(id));
+          $('#provider-status').textContent = '';
+          renderProviders();
+        } catch (e) { $('#provider-status').textContent = e.message; install.disabled = false; }
+      };
+      row.append(install);
+    }
     accounts.append(row);
   };
 
@@ -959,7 +1049,9 @@ function renderProviders() {
     id: 'codex',
     label: 'ChatGPT',
     connected: !!state.account,
-    detail: state.account ? (chatgptDetail(state.account) || 'connected') : 'not connected',
+    installed: state.codex?.installed,
+    detail: state.account ? (chatgptDetail(state.account) || 'connected')
+      : state.codex?.installed === false ? 'Codex CLI not installed' : state.codex?.installed && !state.codex.connected ? 'Codex not running · restart the app' : 'not connected',
     connect: async () => { await api.connectChatGPT(); $('#provider-status').textContent = 'Complete sign-in in your browser.'; return state; },
     disconnect: () => api.logoutChatGPT(),
   });
@@ -967,6 +1059,7 @@ function renderProviders() {
     id: 'claude-cli',
     label: 'Claude',
     connected: !!state.claude?.loggedIn,
+    installed: state.claude?.installed,
     detail: state.claude?.loggedIn ? (state.claude.authMethod || 'CLI login') : (state.claude?.installed === false ? 'not installed' : 'not connected'),
     connect: () => api.claudeLogin(),
     disconnect: () => api.claudeLogout(),
@@ -975,6 +1068,7 @@ function renderProviders() {
     id: 'cursor-cli',
     label: 'Cursor',
     connected: !!state.cursor?.loggedIn,
+    installed: state.cursor?.installed,
     detail: state.cursor?.loggedIn
       ? (state.cursor.email || state.cursor.identity || 'CLI connected')
       : (state.cursor?.installed === false ? 'not installed' : 'not connected'),
@@ -984,7 +1078,7 @@ function renderProviders() {
 
   const catalog = state.providerCatalog || [];
   const groups = [
-    { id: 'codex', title: 'Codex / ChatGPT', models: catalog.filter(m => !m.provider || m.provider === 'codex') },
+    { id: 'codex', title: 'Codex / ChatGPT', models: catalog.filter(m => !m.provider || m.provider === 'codex'), gated: state.codex?.connected === false },
     { id: 'claude-cli', title: 'Claude', models: catalog.filter(m => m.provider === 'claude-cli'), gated: !state.claude?.loggedIn },
     { id: 'cursor-cli', title: 'Cursor', models: catalog.filter(m => m.provider === 'cursor-cli'), gated: !state.cursor?.loggedIn, discover: true },
   ];
@@ -1000,8 +1094,8 @@ function renderProviders() {
       const enabledByModel = new Map(group.models.map(m => [m.model, m]));
       const ids = new Set([...discovered.map(d => d.id), ...enabledByModel.keys()]);
       if (!ids.size) {
-        list.append(element('p', 'muted', 'Loading Cursor models…'));
-        loadDiscoveredModels('cursor-cli').then(() => renderProviders()).catch(e => { $('#provider-status').textContent = e.message; });
+        list.append(element('p', 'muted', discoveredModels.has(group.id) ? 'No models returned.' : 'Fetching Cursor models…'));
+        if (!discoveredModels.has(group.id)) loadDiscoveredModels(group.id).then(() => renderProviders()).catch(e => { $('#provider-status').textContent = e.message; });
       }
       for (const modelId of [...ids].sort()) {
         const existing = enabledByModel.get(modelId);
@@ -1056,15 +1150,29 @@ function renderProviders() {
 }
 
 const discoveredModels = new Map();
-async function loadDiscoveredModels(providerId) {
-  const models = await api.providerModels(providerId);
-  discoveredModels.set(providerId, models.map(m => typeof m === 'string' ? { id: m, label: m } : m));
-  return discoveredModels.get(providerId);
+const modelFetches = new Map();
+let renewingModels = false;
+function renderModelFetching() {
+  const fetching = renewingModels || modelFetches.size > 0;
+  $('#models-loading').hidden = !fetching;
+  $('#provider-model-list').setAttribute('aria-busy', String(fetching));
+  $('#renew-models').disabled = fetching || !!state?.busy;
+}
+function loadDiscoveredModels(providerId) {
+  if (modelFetches.has(providerId)) return modelFetches.get(providerId);
+  const pending = Promise.resolve().then(() => api.providerModels(providerId)).then(models => {
+    discoveredModels.set(providerId, models.map(m => typeof m === 'string' ? { id: m, label: m } : m));
+    return discoveredModels.get(providerId);
+  }).finally(() => { modelFetches.delete(providerId); renderModelFetching(); });
+  modelFetches.set(providerId, pending);
+  renderModelFetching();
+  return pending;
 }
 
 $('#renew-models').onclick = async () => {
-  const button = $('#renew-models');
-  button.disabled = true;
+  if (renewingModels || modelFetches.size) return;
+  renewingModels = true;
+  renderModelFetching();
   $('#provider-status').textContent = 'Refreshing models…';
   try {
     discoveredModels.delete('cursor-cli');
@@ -1076,7 +1184,8 @@ $('#renew-models').onclick = async () => {
   } catch (e) {
     $('#provider-status').textContent = e.message;
   } finally {
-    button.disabled = !!state?.busy;
+    renewingModels = false;
+    renderModelFetching();
   }
 };
 
@@ -1104,9 +1213,100 @@ document.querySelectorAll('.settings-tab').forEach(tab => {
     });
     $('#panel-general').hidden = name !== 'general';
     $('#panel-providers').hidden = name !== 'providers';
+    $('#panel-checks').hidden = name !== 'checks';
+    $('#panel-wiki').hidden = name !== 'wiki';
+    if (name === 'wiki') {
+      $('#wiki-kind').textContent = '';
+      $('#wiki-location').textContent = 'Loading…';
+      api.workspaceWiki(selectedId).then(showWiki).catch(error => { $('#wiki-location').textContent = error.message; });
+    }
+    if (name === 'checks') renderChecks();
     if (name === 'providers') {
       renderProviders();
       if (state.cursor?.loggedIn) loadDiscoveredModels('cursor-cli').then(() => renderProviders()).catch(e => { $('#provider-status').textContent = e.message; });
     }
   };
 });
+
+function showWiki(wiki) {
+  $('#wiki-kind').textContent = wiki.managed ? '· Default' : '· Custom';
+  $('#wiki-location').textContent = wiki.root;
+}
+$('#wiki-open').onclick = () => api.openWorkspaceWiki(selectedId).catch(notify);
+for (const [button, reset] of [['#wiki-choose', false], ['#wiki-reset', true]]) {
+  $(button).onclick = async () => {
+    try { showWiki(await api.chooseWorkspaceWiki(selectedId, reset)); } catch (error) { notify(error); }
+  };
+}
+
+function splitCommand(text) {
+  const args = [];
+  for (const match of String(text).matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)) args.push(match[1] ?? match[2] ?? match[3]);
+  return args;
+}
+
+function checkRow(check = {}) {
+  const row = document.createElement('div');
+  row.className = 'check-row';
+  const name = document.createElement('input');
+  name.className = 'check-name';
+  name.placeholder = 'Name';
+  name.value = check.name || '';
+  name.maxLength = 80;
+  const command = document.createElement('input');
+  command.className = 'check-command';
+  command.placeholder = 'Command';
+  command.value = (check.argv || []).map(part => /\s/.test(part) ? `"${part}"` : part).join(' ');
+  const timeout = document.createElement('input');
+  timeout.className = 'check-timeout';
+  timeout.type = 'number';
+  timeout.min = '1';
+  timeout.max = '1800';
+  timeout.value = String(Math.round((check.timeoutMs || 120000) / 1000));
+  timeout.setAttribute('aria-label', 'Timeout seconds');
+  const readOnly = document.createElement('label');
+  const box = document.createElement('input');
+  box.className = 'check-readonly';
+  box.type = 'checkbox';
+  box.checked = check.readOnlySafe === true;
+  readOnly.append(box, document.createTextNode(' Read-only'));
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.textContent = 'Remove';
+  remove.onclick = () => row.remove();
+  const field = (text, input, className) => {
+    const label = document.createElement('label');
+    label.className = className;
+    label.append(document.createTextNode(text), input);
+    return label;
+  };
+  readOnly.className = 'check-readonly-label';
+  row.append(field('Name', name, 'check-name-field'), field('Command', command, 'check-command-field'),
+    field('Timeout (s)', timeout, 'check-timeout-field'), readOnly, remove);
+  return row;
+}
+
+function renderChecks() {
+  const workspace = current()?.workspace || state.settings.workspace;
+  const checks = state.settings.checks?.[workspace] || [];
+  const list = $('#checks-list');
+  list.replaceChildren(...checks.map(checkRow));
+  $('#checks-workspace').textContent = workspace || 'No workspace selected';
+  $('#checks-status').textContent = '';
+}
+
+$('#checks-add').onclick = () => { $('#checks-list').append(checkRow()); };
+$('#checks-save').onclick = async () => {
+  const workspace = current()?.workspace || state.settings.workspace;
+  const list = [...$('#checks-list').children].map(row => ({
+    name: row.querySelector('.check-name').value.trim(),
+    argv: splitCommand(row.querySelector('.check-command').value),
+    cwd: workspace,
+    timeoutMs: Number(row.querySelector('.check-timeout').value) * 1000,
+    readOnlySafe: row.querySelector('.check-readonly').checked,
+  }));
+  try {
+    await api.checks(workspace, list);
+    $('#checks-status').textContent = 'Checks saved.';
+  } catch (error) { notify(error); }
+};

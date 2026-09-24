@@ -1,4 +1,5 @@
-const { spawn, spawnSync } = require('node:child_process');
+const { spawn, execFile } = require('node:child_process');
+const execFileAsync = require('node:util').promisify(execFile);
 const { EventEmitter } = require('node:events');
 const { createInterface } = require('node:readline');
 const { createRequire } = require('node:module');
@@ -75,14 +76,29 @@ function compareCodexVersions(a, b) {
   return 0;
 }
 
-function codexVersion(candidate) {
-  const result = spawnSync(candidate.command, [...(candidate.args || []), '--version'], { windowsHide: true, encoding: 'utf8', timeout: 15000 });
+function formatCodexVersion(version) {
+  if (!version?.core) return null;
+  const label = version.core.join('.');
+  return version.pre?.length ? `${label}-${version.pre.join('.')}` : label;
+}
+
+async function codexVersion(candidate) {
+  const result = await execFileAsync(candidate.command, [...(candidate.args || []), '--version'], {
+    windowsHide: true, encoding: 'utf8', timeout: 15000,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+  }).catch(error => error);
   return parseCodexVersion(`${result.stdout || ''}\n${result.stderr || ''}`);
 }
 
 let found = null;
-function findCodex() {
+let finding = null;
+async function findCodex() {
   if (found && fs.existsSync(found.command)) return found;
+  if (finding) return finding;
+  finding = discoverCodex();
+  try { return await finding; } finally { finding = null; }
+}
+async function discoverCodex() {
   const candidates = [];
   const npm = npmCodex();
   if (npm) candidates.push(npm);
@@ -93,16 +109,27 @@ function findCodex() {
       if (fs.existsSync(filename)) candidates.push({ command: filename, args: [] });
     }
   }
-  if (!candidates.length) throw new Error('Codex CLI was not found. Install Codex, run codex login, then restart this app.');
+  if (!candidates.length && process.platform !== 'win32') {
+    const shell = await execFileAsync('bash', ['-lc', 'command -v codex'], { encoding: 'utf8', timeout: 15000 }).catch(() => null);
+    const filename = shell?.stdout.trim();
+    if (filename && fs.existsSync(filename)) {
+      // npm's shim needs `node` on PATH, which a desktop-launched app may lack; Electron runs the script as node instead.
+      const real = fs.realpathSync(filename);
+      candidates.push(real.endsWith('.js') ? { command: process.execPath, args: [real] } : { command: filename, args: [] });
+    }
+  }
+  if (!candidates.length) throw Object.assign(new Error('Codex CLI is not installed. Install it from Settings → Providers.'), { code: 'ENOENT' });
   let best = candidates[0];
-  let bestVersion = codexVersion(best);
-  for (const candidate of candidates.slice(1)) {
-    const version = codexVersion(candidate);
+  const versions = await Promise.all(candidates.map(codexVersion));
+  let bestVersion = versions[0];
+  for (const [index, candidate] of candidates.entries()) {
+    const version = versions[index];
     if (version && (!bestVersion || compareCodexVersions(version, bestVersion) > 0)) {
       best = candidate;
       bestVersion = version;
     }
   }
+  best.version = bestVersion;
   return (found = best);
 }
 
@@ -117,7 +144,10 @@ class CodexClient extends EventEmitter {
   }
 
   async start() {
-    const executable = findCodex();
+    this.closed = false;
+    const executable = await findCodex();
+    if (this.closed) throw new Error('Codex connection closed during discovery.');
+    this.version = formatCodexVersion(executable.version);
     this.process = spawn(executable.command, [...executable.args, 'app-server', '--stdio'], {
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -176,6 +206,7 @@ class CodexClient extends EventEmitter {
   }
 
   close(force = false) {
+    this.closed = true;
     if (this.process && !this.process.killed) this.process.stdin.end();
     if (force) {
       this.fail(new Error('Routing connection closed.'));
@@ -187,4 +218,4 @@ class CodexClient extends EventEmitter {
   }
 }
 
-module.exports = { CodexClient, findCodex, parseCodexVersion, compareCodexVersions };
+module.exports = { CodexClient, findCodex, codexVersion, parseCodexVersion, compareCodexVersions };

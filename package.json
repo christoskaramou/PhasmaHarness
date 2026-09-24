@@ -6,7 +6,8 @@
   "description": "A local Windows desktop client for Codex, Claude Code, and Cursor.",
   "main": "src/main.cjs",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "postinstall": "node tools/fetch.cjs"
   },
   "dependencies": {
     "dompurify": "3.4.15",

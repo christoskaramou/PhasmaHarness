@@ -1,3 +1,4 @@
+const { WORKER_INSTRUCTIONS } = require('../worker-instructions.cjs');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -28,7 +29,7 @@ class ClaudeCLI {
       const result = await this.command(['auth', 'status']);
       const status = JSON.parse(result);
       this.status = { installed: true, loggedIn: status.loggedIn === true, authMethod: status.authMethod || null };
-    } catch (error) { this.status = { installed: error.code !== 'ENOENT', loggedIn: false, error: error.code === 'ENOENT' ? 'Install Claude Code first.' : 'Could not read Claude Code login status.' }; }
+    } catch (error) { this.status = { installed: error.code !== 'ENOENT', loggedIn: false, error: error.code === 'ENOENT' ? 'Claude Code is not installed. Install it from Settings → Providers.' : 'Could not read Claude Code login status.' }; }
     return this.status;
   }
   command(args, onOutput, timeout = 15000) {
@@ -62,17 +63,17 @@ class ClaudeCLI {
     try {
       await this.command(['auth', 'logout'], undefined, 30000);
     } catch (error) {
-      if (error.code === 'ENOENT') throw new Error('Install Claude Code first.');
+      if (error.code === 'ENOENT') throw new Error('Claude Code is not installed. Install it from Settings → Providers.');
       // Fall through to refresh; status may already be signed out.
     }
     return await this.refresh();
   }
-  run({ cwd, model, prompt, images = [], resume, access, signal, onEvent = () => {}, schema, helpers }) {
+  run({ cwd, model, prompt, images = [], resume, access, signal, onEvent = () => {}, schema, helpers, instructions = WORKER_INSTRUCTIONS }) {
     return new Promise((resolve, reject) => {
       if (signal?.aborted) return reject(new Error('Claude stopped.'));
       const args = ['-p', '--verbose', '--input-format', 'stream-json', '--output-format', 'stream-json', '--include-partial-messages', '--model', model];
       const basePrompt = 'Preserve unrelated changes. Do not commit or push unless explicitly requested. Use one agent unless delegation is requested. Report permission denials clearly.';
-      args.push('--append-system-prompt', basePrompt + (!schema && helpers?.instructions ? helpers.instructions : ''));
+      args.push('--append-system-prompt', (schema ? basePrompt : instructions) + (!schema && helpers?.instructions ? helpers.instructions : ''));
       if (resume) args.push('--resume', resume);
       if (schema) args.push('--tools', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--no-session-persistence', '--json-schema', JSON.stringify(schema));
       else {

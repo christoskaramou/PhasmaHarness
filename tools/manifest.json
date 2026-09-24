@@ -1,0 +1,18 @@
+{
+  "rtk": {
+    "version": "0.49.0",
+    "builds": {
+      "win32-x64": { "url": "https://github.com/rtk-ai/rtk/releases/download/v0.49.0/rtk-x86_64-pc-windows-msvc.zip", "sha256": "cb971046598f0e8bd51f6c27780fcdd2c39a4c459a811bd95b0d77ba8c0d7c9f" },
+      "linux-x64": { "url": "https://github.com/rtk-ai/rtk/releases/download/v0.49.0/rtk-x86_64-unknown-linux-musl.tar.gz", "sha256": "7278231dfd7e6a730a4ab7f847b195bcf02289c2d57622b0dab75a6411100c8f" },
+      "linux-arm64": { "url": "https://github.com/rtk-ai/rtk/releases/download/v0.49.0/rtk-aarch64-unknown-linux-gnu.tar.gz", "sha256": "c8ea4b6560841e73157c134fd4a3293914c6ede42e786ee985cf491fde691ba7" }
+    }
+  },
+  "rg": {
+    "version": "15.2.0",
+    "builds": {
+      "win32-x64": { "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-pc-windows-msvc.zip", "sha256": "71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5" },
+      "linux-x64": { "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz", "sha256": "33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c" },
+      "linux-arm64": { "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-unknown-linux-musl.tar.gz", "sha256": "800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915" }
+    }
+  }
+}

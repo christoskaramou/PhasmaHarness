@@ -1,3 +1,4 @@
+const { WORKER_INSTRUCTIONS } = require('../worker-instructions.cjs');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -13,14 +14,15 @@ function stop(child) {
 function launchCursor(args, cwd) {
   if (process.platform === 'win32') {
     const script = path.join(process.env.LOCALAPPDATA || path.join(require('node:os').homedir(), 'AppData', 'Local'), 'cursor-agent', 'cursor-agent.ps1');
-    if (!fs.existsSync(script)) throw Object.assign(new Error('Run the installer to install Cursor CLI.'), { code: 'ENOENT' });
+    if (!fs.existsSync(script)) throw Object.assign(new Error('Cursor CLI is not installed. Install it from Settings → Providers.'), { code: 'ENOENT' });
     const root = path.dirname(script);
     const version = fs.readdirSync(path.join(root, 'versions')).filter(v => /^\d{4}\.\d{2}\.\d{2}(?:-\d{2}-\d{2}-\d{2})?-[a-f0-9]+$/.test(v)).sort().at(-1);
     if (!version) throw new Error('Cursor CLI installation is incomplete. Run its installer again.');
     const directory = path.join(root, 'versions', version);
     return spawn(path.join(directory, 'node.exe'), [path.join(directory, 'index.js'), ...args], { cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   }
-  return spawn('cursor-agent', args, { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+  const local = path.join(require('node:os').homedir(), '.local', 'bin', 'cursor-agent');
+  return spawn(fs.existsSync(local) ? local : 'cursor-agent', args, { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
 }
 
 function parseStatus(output) {
@@ -64,7 +66,7 @@ class CursorCLI {
     if (this.loginPending) throw new Error('Cursor login is already running.');
     try { await this.command(['logout'], 60000); }
     catch (error) {
-      if (error.code === 'ENOENT') throw new Error('Run the installer to install Cursor CLI.');
+      if (error.code === 'ENOENT') throw new Error('Cursor CLI is not installed. Install it from Settings → Providers.');
     }
     return await this.refresh();
   }
@@ -113,7 +115,7 @@ class CursorCLI {
     signal?.addEventListener('abort', close, { once: true }); if (signal?.aborted) close();
     return { call, close };
   }
-  async run({ cwd, model, prompt, images = [], resume, access, signal, onEvent = () => {}, approve = async () => false, schema, helpers }) {
+  async run({ cwd, model, prompt, images = [], resume, access, signal, onEvent = () => {}, approve = async () => false, schema, helpers, instructions = WORKER_INSTRUCTIONS }) {
     let sessionId, output = '', prompting = false; const messageId = randomUUID();
     const rpc = this.connect({ cwd, model, signal,
       onUpdate: p => {
@@ -150,7 +152,7 @@ class CursorCLI {
       await rpc.call('session/set_mode', { sessionId, modeId: schema || access === 'read-only' ? 'ask' : 'agent' });
       prompting = true;
       const helperNote = (!schema && helpers?.instructions) ? '\n\nApp helper note (not Cursor system policy):' + helpers.instructions : '';
-      const result = await rpc.call('session/prompt', { sessionId, prompt: [{ type: 'text', text: prompt + helperNote + (schema ? '\nReturn only JSON matching this schema: ' + JSON.stringify(schema) : '') }, ...images.map(url => ({ type: 'image', mimeType: 'image/png', data: url.split(',')[1] }))] }, 0);
+      const result = await rpc.call('session/prompt', { sessionId, prompt: [{ type: 'text', text: (schema ? '' : 'Harness worker defaults (subject to user overrides):\n' + instructions + '\n\nCurrent request:\n') + prompt + helperNote + (schema ? '\nReturn only JSON matching this schema: ' + JSON.stringify(schema) : '') }, ...images.map(url => ({ type: 'image', mimeType: 'image/png', data: url.split(',')[1] }))] }, 0);
       if (result.stopReason !== 'end_turn') throw new Error(`Cursor stopped: ${result.stopReason || 'unknown reason'}`);
       return { result: output, session_id: sessionId };
     } finally { rpc.close(); }

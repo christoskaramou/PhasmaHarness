@@ -9,6 +9,8 @@ const { JevClient } = require('./providers/jev.cjs');
 const { ContextSearch } = require('./workspace/context-search.cjs');
 const { BenchmarkStore, validateSnapshot, MAX_BYTES } = require('./routing/benchmarks.cjs');
 
+// Workers and helpers inherit this, so bundled rtk/rg win over any system copies.
+process.env.PATH = path.join(__dirname, '..', 'tools', 'bin') + path.delimiter + process.env.PATH;
 app.setPath('userData', path.join(app.getPath('appData'), 'Phasma Harness'));
 app.setName('Phasma Harness');
 let window, controller, quitting = false;
@@ -23,7 +25,9 @@ else {
 
 async function start() {
   const home = os.homedir();
-  controller = new Controller(path.join(app.getPath('userData'), 'sessions.json'), home);
+  const { WikiStore } = require('./workspace/wiki-store.cjs');
+  const wikiStore = new WikiStore(path.join(app.getAppPath(), 'workspace-data'));
+  controller = new Controller(path.join(app.getPath('userData'), 'sessions.json'), home, undefined, undefined, { wikiStore });
   controller.smartRouter.benchmarks = new BenchmarkStore(path.join(app.getPath('userData'), 'benchmarks.json'));
   const { Providers } = require('./providers/providers.cjs');
   controller.providers = new Providers(path.join(app.getPath('userData'), 'provider-keys'), safeStorage, () => controller.data.settings.providers || [], (...args) => net.fetch(...args));
@@ -32,6 +36,7 @@ async function start() {
   const jevKey = new JevKey(path.join(app.getPath('userData'), 'jev-key.enc'), safeStorage);
   controller.smartRouter.jev = new JevClient(jevKey, (...args) => net.fetch(...args));
   controller.contextSearch = new ContextSearch(home, controller.smartRouter.jev);
+  controller.contextSearch.wikiStore = wikiStore;
   const rendererURL = pathToFileURL(path.join(__dirname, '..', 'ui', 'index.html')).href;
   window = new BrowserWindow({
     width: 1320, height: 900, minWidth: 840, minHeight: 640,
@@ -49,6 +54,26 @@ async function start() {
     return fn(...args);
   });
   handle('bootstrap', () => controller.snapshot());
+  handle('workspaceWiki', id => wikiStore.ensure(id ? controller.session(id).workspace : controller.data.settings.workspace));
+  handle('chooseWorkspaceWiki', async (id, reset = false) => {
+    const workspace = id ? controller.session(id).workspace : controller.data.settings.workspace;
+    if (reset === true) {
+      const answer = await dialog.showMessageBox(window, {
+        type: 'question', buttons: ['Reset', 'Cancel'], defaultId: 1, cancelId: 1,
+        message: 'Reset this workspace wiki to the default folder?',
+        detail: `The wiki will point to the app folder again. Pages in the current folder are not moved or deleted.\n\nCurrent: ${wikiStore.ensure(workspace).root}`,
+      });
+      return answer.response === 0 ? wikiStore.setLocation(workspace, null) : wikiStore.ensure(workspace);
+    }
+    const selection = await dialog.showOpenDialog(window, { title: 'Choose wiki folder for this workspace', properties: ['openDirectory'] });
+    if (selection.canceled) return wikiStore.ensure(workspace);
+    return wikiStore.setLocation(workspace, selection.filePaths[0]);
+  });
+  handle('openWorkspaceWiki', async id => {
+    const wiki = wikiStore.ensure(id ? controller.session(id).workspace : controller.data.settings.workspace);
+    const error = await shell.openPath(wiki.root);
+    if (error) throw new Error(error);
+  });
   handle('browseWorkspace', (id, action, relative, kind) => require('./workspace/workspace-browser.cjs').browse(
     id ? controller.session(id).workspace : controller.data.settings.workspace, action, relative, kind));
   handle('settings', values => { const snapshot = controller.settings(values); controller.warmRouter(); return snapshot; });
@@ -119,6 +144,31 @@ async function start() {
       throw new Error(error.message || 'Could not sign out of ChatGPT from this app. Sign out in Codex CLI if needed.');
     }
     await controller.refreshAccount(); controller.save(); return controller.snapshot();
+  });
+  let installing = null;
+  handle('installProvider', async id => {
+    if (controller.busy) throw new Error('Wait for the current turn to finish before installing.');
+    if (installing) throw new Error(`Wait for the ${installing} install to finish.`);
+    const { installer, install } = require('./providers/install.cjs');
+    const { label, command } = installer(id);
+    const answer = await dialog.showMessageBox(window, {
+      type: 'question', buttons: ['Install', 'Cancel'], defaultId: 0, cancelId: 1,
+      message: `Install ${label}?`, detail: `This runs the official installer:\n\n${command}`,
+    });
+    if (answer.response !== 0 || installing) return controller.snapshot();
+    installing = label;
+    try {
+      await install(id);
+      let installed;
+      if (id === 'codex') { await controller.connectCodex(); installed = controller.codex.installed; }
+      else {
+        installed = (await controller[id === 'claude-cli' ? 'claude' : 'cursor'].refresh()).installed;
+        await controller.refreshAccount();
+      }
+      controller.save();
+      if (!installed) throw new Error(`${label} installer finished, but ${label} is still not detected. Check the installer output or install it manually, then restart the app.`);
+      return controller.snapshot();
+    } finally { installing = null; }
   });
   handle('providerSettings', value => controller.providerSettings(value));
   handle('providerKey', (id, key) => {
@@ -192,6 +242,9 @@ async function start() {
   });
   handle('queuedMessage', (id, messageId, action) => controller.queuedMessage(id, messageId, action));
   handle('compact', id => controller.compact(id));
+  handle('checks', (workspace, list) => controller.checks(workspace, list));
+  handle('acknowledgeTask', (id, taskId) => controller.acknowledgeTask(id, taskId));
+  handle('proposeWiki', (id, taskId) => controller.proposeWiki(id, taskId));
   handle('answer', (id, answer) => controller.answer(id, answer));
   handle('chooseWorkspace', async () => {
     const selection = await dialog.showOpenDialog(window, { title: 'Choose workspace', properties: ['openDirectory'], defaultPath: controller.data.settings.workspace });
