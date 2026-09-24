@@ -80,14 +80,13 @@ app.whenReady().then(async () => {
   controller.claude.status = { installed: true, loggedIn: true };
   controller.claude.models = [{ id: 'claude-cli:claude-opus-5-5', model: 'claude-opus-5-5', label: 'claude-opus-5-5', provider: 'claude-cli', effort: null,
     efforts: ['low', 'high', 'max'], rank: 35, worker: true, router: true, images: true }];
-  controller.data.settings.claudeEfforts = { 'claude-opus-5-5': 'high' };
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderProviders(); true');
-  const effort = await window.webContents.executeJavaScript(`(() => { const s = document.querySelector('.provider-model-effort'); return s && { value: s.value, options: [...s.options].map(o => o.value) }; })()`);
-  assert.deepEqual(effort, { value: 'high', options: ['', 'low', 'high', 'max'] });
+  const models = await window.webContents.executeJavaScript("document.querySelector('#provider-model-list').textContent");
+  assert.match(models, /claude-opus-5-5 · low\/high\/max/, 'one Claude row per model listing its efforts, like Codex');
   assert.equal(await window.webContents.executeJavaScript("providerCaps('cursor-cli').usage"), false);
   assert.equal(await window.webContents.executeJavaScript("providerCaps('claude-cli').steer"), false);
   assert.equal(await window.webContents.executeJavaScript("providerCaps(undefined).steer"), true);
-  console.log('Claude effort selector and provider capabilities passed');
+  console.log('Claude per-effort model rows and provider capabilities passed');
   // Disconnected in the Harness while the CLIs stay signed in: no models listed, detail says the CLI is still signed in.
   controller.account = null; controller.models = [];
   controller.codex = { installed: true, connected: true, signedIn: true };
@@ -96,7 +95,7 @@ app.whenReady().then(async () => {
   const providers = await window.webContents.executeJavaScript("document.querySelector('#panel-providers').textContent");
   assert.match(providers, /ChatGPT · disconnected/);
   assert.match(providers, /Claude · disconnected/);
-  assert.equal(await window.webContents.executeJavaScript("document.querySelector('.provider-model-effort')"), null, 'Claude models are hidden');
+  assert.doesNotMatch(await window.webContents.executeJavaScript("document.querySelector('#provider-model-list').textContent"), /claude-opus-5-5/, 'Claude models are hidden');
   assert.doesNotMatch(await window.webContents.executeJavaScript("document.querySelector('#provider-model-list').textContent"), /gpt-6-sol/);
   console.log('Disconnected providers hide models and keep CLI logins passed');
   controller.close();

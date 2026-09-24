@@ -3,7 +3,7 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { validateProvider, validateModel } = require('./providers/providers.cjs');
 const { CursorCLI } = require('./providers/cursor.cjs');
-const { ClaudeCLI, handoff } = require('./providers/claude.cjs');
+const { ClaudeCLI, handoff, EFFORTS: CLAUDE_EFFORTS } = require('./providers/claude.cjs');
 const { CAPABILITIES, capabilities, isCLI } = require('./providers/capabilities.cjs');
 const { EventEmitter } = require('node:events');
 const { CodexClient } = require('./providers/codex.cjs');
@@ -260,13 +260,22 @@ class Controller extends EventEmitter {
   }
 
   catalog() {
-    return [...this.codexWorkers(), ...this.claude.models.map(p => {
-      // One entry per Claude model (IDs stay stable); a chosen effort applies when the model supports it, otherwise the CLI default.
-      const chosen = this.data.settings.claudeEfforts?.[p.model];
-      const effort = p.efforts?.includes(chosen) ? chosen : null;
-      return { ...p, effort, label: effort ? `${p.label} · ${effort}` : p.label,
-        enabled: !!this.data.settings.claudeEnabled && !(this.data.settings.disabledModels || []).includes(p.id) };
-    }), ...(this.data.settings.providerModels || [])].sort((a, b) => a.rank - b.rank || a.id.localeCompare(b.id));
+    return [...this.codexWorkers(), ...this.claudeWorkers(), ...(this.data.settings.providerModels || [])].sort((a, b) => a.rank - b.rank || a.id.localeCompare(b.id));
+  }
+
+  // Like Codex: one worker per Claude model and supported effort (claude-cli:<model>:<effort>), so the router picks
+  // the effort per task. A model without effort levels keeps one entry, claude-cli:<model>. Enabling is per model.
+  claudeWorkers() {
+    const disabled = new Set(this.data.settings.disabledModels || []);
+    return this.claude.models.flatMap(p => {
+      const enabled = !!this.data.settings.claudeEnabled && !disabled.has(p.id);
+      const efforts = p.efforts?.length ? p.efforts : [null];
+      return efforts.map(effort => ({
+        ...p, baseId: p.id, id: effort ? `${p.id}:${effort}` : p.id, effort, enabled,
+        label: effort ? `${p.label} · ${effort}` : p.label,
+        rank: (Number.isFinite(p.rank) ? p.rank : 35) + (effort ? CLAUDE_EFFORTS.indexOf(effort) : 0),
+      }));
+    });
   }
 
   codexWorkers() {
@@ -301,6 +310,9 @@ class Controller extends EventEmitter {
     if (!id || id === 'auto') return null;
     const direct = this.catalog().find(p => p.id === id && p.worker);
     if (direct) return direct;
+    // A Claude ID saved before efforts were per worker (claude-cli:<model>): use that model at medium, else its lowest effort.
+    const variants = this.catalog().filter(p => p.worker && p.provider === 'claude-cli' && p.baseId === id);
+    if (variants.length) return variants.find(p => p.effort === 'medium') || variants[0];
     const legacy = [...PRESETS, ...ROUTER_PRESETS].find(p => p.id === id);
     if (!legacy) return null;
     const found = this.catalog().find(p => p.provider === 'codex' && p.model === legacy.model && p.effort === legacy.effort);
@@ -340,6 +352,7 @@ class Controller extends EventEmitter {
   // Before discovery, Claude router IDs were aliases (claude-cli:haiku). Map a saved alias to a discovered model,
   // or back to the default Codex router, so routing does not fail on an ID that no longer exists.
   migrateLegacyRouter() {
+    this.migrateClaudeEfforts();
     if (!LEGACY_CLAUDE_ROUTERS.includes(this.data.settings.routerPreset)) return;
     // Keep the family the user chose: the model the CLI alias resolves to, else a discovered model of that family.
     const family = this.data.settings.routerPreset.slice('claude-cli:'.length);
@@ -350,6 +363,22 @@ class Controller extends EventEmitter {
     this.claudeRouterFallback();
     const preset = this.data.settings.routerPreset;
     if (LEGACY_CLAUDE_ROUTERS.includes(preset) && !this.routerChoices().some(p => p.id === preset)) this.data.settings.routerPreset = DEFAULT_ROUTER;
+  }
+
+  // Claude selections saved as claude-cli:<model> before efforts were per worker: the router moves to that model's
+  // lowest effort (cheapest), a manual worker selection to the effort chosen earlier in Settings, else medium.
+  migrateClaudeEfforts() {
+    const settings = this.data.settings;
+    if (!this.claude.models.length) return;
+    const variants = id => this.catalog().filter(p => p.provider === 'claude-cli' && p.baseId === id && p.id !== id);
+    const router = variants(settings.routerPreset);
+    if (router.length) settings.routerPreset = router[0].id;
+    const mode = variants(settings.mode);
+    if (mode.length) {
+      const chosen = settings.claudeEfforts?.[mode[0].model];
+      settings.mode = (mode.find(p => p.effort === chosen) || mode.find(p => p.effort === 'medium') || mode[0]).id;
+    }
+    delete settings.claudeEfforts;
   }
 
   routerChoices() {
@@ -390,20 +419,16 @@ class Controller extends EventEmitter {
       const disabled = new Set(this.data.settings.disabledCodexModels);
       if (value.enabled) disabled.delete(value.model); else disabled.add(value.model);
       this.data.settings.disabledCodexModels = [...disabled];
-    } else if (value.action === 'claudeEffort') {
-      const model = this.claude.models.find(p => p.model === value.model);
-      if (!model || !(value.effort === null || model.efforts?.includes(value.effort))) throw new Error('This Claude model does not support that effort.');
-      const efforts = { ...(this.data.settings.claudeEfforts || {}) };
-      if (value.effort) efforts[model.model] = value.effort; else delete efforts[model.model];
-      this.data.settings.claudeEfforts = efforts;
     } else if (value.action === 'toggle') {
-      const m = this.catalog().find(p => p.id === value.id) || this.routerChoices().find(p => p.id === value.id);
+      const m = this.catalog().find(p => p.id === value.id) || this.catalog().find(p => p.baseId === value.id) || this.routerChoices().find(p => p.id === value.id);
       if (!m || typeof value.enabled !== 'boolean') throw new Error('Invalid model selection.');
       if (m.provider === 'codex' && String(m.id).startsWith('codex:')) {
         return this.providerSettings({ action: 'toggleCodexModel', model: m.model, enabled: value.enabled });
       }
       if (m.provider === 'claude-cli' || ROUTER_PRESETS.some(p => p.id === m.id)) {
-        this.data.settings.disabledModels = [...new Set([...(this.data.settings.disabledModels || []).filter(id => id !== m.id), ...(!value.enabled ? [m.id] : [])])];
+        // Claude models are enabled as a whole (all their efforts), like Codex.
+        const key = m.baseId || m.id;
+        this.data.settings.disabledModels = [...new Set([...(this.data.settings.disabledModels || []).filter(id => id !== key), ...(!value.enabled ? [key] : [])])];
       } else this.data.settings.providerModels.find(p => p.id === m.id).enabled = value.enabled;
     } else throw new Error('Unknown provider action.');
     if (!this.account && this.connection === 'signed-out' && this.catalog().some(p => p.provider !== 'codex' && this.available(p))) {

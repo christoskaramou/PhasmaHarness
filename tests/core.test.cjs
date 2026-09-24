@@ -920,29 +920,52 @@ test('failed tree termination cannot clear an unmeasured runtime when its parent
   assert.ok(next.data.executionBlock);
 });
 
-test('Claude effort is chosen per model, keeps the model ID, and reaches the CLI run', async t => {
+test('Claude models become one worker per effort, like Codex; the chosen effort reaches the CLI run', async t => {
   const { controller } = await setup(t);
   controller.data.settings.claudeEnabled = true;
   controller.claude.status = { installed: true, loggedIn: true };
-  controller.claude.models = [{ id: 'claude-cli:claude-opus-5-5', model: 'claude-opus-5-5', label: 'claude-opus-5-5', provider: 'claude-cli', effort: null,
-    efforts: ['low', 'medium', 'high', 'xhigh', 'max'], rank: 35, worker: true, router: true, images: true }];
-  assert.throws(() => controller.providerSettings({ action: 'claudeEffort', model: 'claude-opus-5-5', effort: 'ultra' }), /does not support/);
-  assert.throws(() => controller.providerSettings({ action: 'claudeEffort', model: 'unknown', effort: 'low' }), /does not support/);
-  controller.providerSettings({ action: 'claudeEffort', model: 'claude-opus-5-5', effort: 'high' });
-  const entry = controller.catalog().find(p => p.provider === 'claude-cli');
-  assert.equal(entry.id, 'claude-cli:claude-opus-5-5');
-  assert.equal(entry.effort, 'high');
-  assert.equal(entry.label, 'claude-opus-5-5 · high');
+  controller.claude.models = [
+    { id: 'claude-cli:claude-opus-5-5', model: 'claude-opus-5-5', label: 'claude-opus-5-5', provider: 'claude-cli', effort: null, efforts: ['low', 'medium', 'high', 'xhigh', 'max'], rank: 35, worker: true, router: true, images: true },
+    { id: 'claude-cli:claude-haiku-4-5', model: 'claude-haiku-4-5', label: 'claude-haiku-4-5', provider: 'claude-cli', effort: null, efforts: [], rank: 35, worker: true, router: true, images: true },
+  ];
+  const claude = controller.catalog().filter(p => p.provider === 'claude-cli');
+  assert.deepEqual(claude.map(p => p.id), ['claude-cli:claude-haiku-4-5', 'claude-cli:claude-opus-5-5:low', 'claude-cli:claude-opus-5-5:medium',
+    'claude-cli:claude-opus-5-5:high', 'claude-cli:claude-opus-5-5:xhigh', 'claude-cli:claude-opus-5-5:max']);
+  assert.equal(claude.find(p => p.id.endsWith(':xhigh')).label, 'claude-opus-5-5 · xhigh');
+  assert.equal(claude[0].effort, null, 'a model without effort levels keeps one entry and the CLI default');
+  assert.ok(controller.routerChoices().some(p => p.id === 'claude-cli:claude-opus-5-5:low'), 'the router can pick any effort');
+
   const session = controller.create();
   session.helperTools = false;
   let cli;
   controller.claude.run = async request => { cli = request; return { result: 'ok' }; };
-  await controller.send({ id: session.id, text: 'go', mode: 'claude-cli:claude-opus-5-5', task: 'off' });
-  assert.equal(cli.effort, 'high');
+  await controller.send({ id: session.id, text: 'go', mode: 'claude-cli:claude-opus-5-5:xhigh', task: 'off' });
+  assert.equal(cli.effort, 'xhigh');
   assert.equal(typeof cli.approve, 'function');
-  controller.providerSettings({ action: 'claudeEffort', model: 'claude-opus-5-5', effort: null });
-  assert.equal(controller.catalog().find(p => p.provider === 'claude-cli').effort, null);
-  assert.deepEqual(controller.data.settings.claudeEfforts, {});
+  // A pre-change ID (no effort) still resolves: medium.
+  assert.equal(controller.resolveWorker('claude-cli:claude-opus-5-5').id, 'claude-cli:claude-opus-5-5:medium');
+
+  // Enabling is per model: disabling one variant disables every effort of that model.
+  controller.providerSettings({ action: 'toggle', id: 'claude-cli:claude-opus-5-5', enabled: false });
+  assert.deepEqual(controller.data.settings.disabledModels, ['claude-cli:claude-opus-5-5']);
+  assert.equal(controller.catalog().filter(p => p.baseId === 'claude-cli:claude-opus-5-5' && p.enabled).length, 0);
+  controller.providerSettings({ action: 'toggle', id: 'claude-cli:claude-opus-5-5:high', enabled: true });
+  assert.deepEqual(controller.data.settings.disabledModels, []);
+});
+
+test('Claude selections saved before per-effort workers migrate: router to the cheapest effort, manual worker to the chosen one', async t => {
+  const { controller } = await setup(t);
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  controller.claude.models = [{ id: 'claude-cli:claude-sonnet-5', model: 'claude-sonnet-5', label: 'claude-sonnet-5', provider: 'claude-cli', effort: null, efforts: ['low', 'medium', 'high'], rank: 35, worker: true, router: true, images: true }];
+  Object.assign(controller.data.settings, { routerPreset: 'claude-cli:claude-sonnet-5', mode: 'claude-cli:claude-sonnet-5', claudeEfforts: { 'claude-sonnet-5': 'high' } });
+  controller.migrateLegacyRouter();
+  assert.equal(controller.data.settings.routerPreset, 'claude-cli:claude-sonnet-5:low');
+  assert.equal(controller.data.settings.mode, 'claude-cli:claude-sonnet-5:high');
+  assert.equal(controller.data.settings.claudeEfforts, undefined);
+  controller.data.settings.mode = 'claude-cli:claude-sonnet-5';
+  controller.migrateLegacyRouter();
+  assert.equal(controller.data.settings.mode, 'claude-cli:claude-sonnet-5:medium', 'no earlier choice: medium');
 });
 
 test('Claude tool approvals use the Harness prompt and are withdrawn when the turn ends', async t => {

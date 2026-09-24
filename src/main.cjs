@@ -119,6 +119,7 @@ async function start() {
     let status = await controller.claude.refresh();
     if (!status.loggedIn) status = await controller.claude.login(url => shell.openExternal(url));
     if (status.loggedIn) controller.setProviderEnabled('claude-cli', true);
+    controller.migrateLegacyRouter();
     if (status.loggedIn) controller.claudeRouterFallback();
     await controller.refreshAccount(); controller.save(); return controller.snapshot();
   });
@@ -126,6 +127,7 @@ async function start() {
     if (controller.busy) throw new Error('Wait for the current turn to finish.');
     await controller.claude.refresh();
     // A refresh never changes whether the Harness uses Claude; only the plug does.
+    controller.migrateLegacyRouter();
     if (controller.claude.status.loggedIn) controller.claudeRouterFallback();
     await controller.refreshAccount(); controller.save(); return controller.snapshot();
   });
