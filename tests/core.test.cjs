@@ -1048,3 +1048,36 @@ test('a saved Claude router alias keeps its family when that family is discovere
   controller.migrateLegacyRouter();
   assert.equal(controller.data.settings.routerPreset, 'claude-cli:claude-haiku-4-5');
 });
+
+test('Jev failure falls back to the smart router; a stop or a missing smart router does not', async t => {
+  const { controller, fake, smartRouter } = await setup(t);
+  controller.data.settings.routing = 'jev';
+  const worker = { id: 'terra-light', provider: 'codex', model: 'gpt-5.6-terra', effort: 'low', label: 'Terra light', images: true, source: 'model', reason: 'Simple task.' };
+  const calls = [];
+  smartRouter.choose = async (_text, _session, _models, provider) => {
+    calls.push(provider);
+    if (provider === 'jev') throw new Error('Jev routing stopped: HTTP 503.');
+    return worker;
+  };
+  const session = controller.create();
+  await controller.send({ id: session.id, text: 'hello', mode: 'auto', task: 'off' });
+  assert.deepEqual(calls, ['jev', 'smart']);
+  assert.equal(fake.turnIds.length, 1, 'the worker turn started');
+  assert.match(session.routes.at(-1).routerFallback, /Jev was unavailable \(Jev routing stopped: HTTP 503\.\)/);
+  assert.match(session.routes.at(-1).reason, /smart router chose instead\. Simple task\./);
+  complete(controller, session, session.turnId);
+  await flush();
+
+  // Stop during Jev routing: no second routing call.
+  calls.length = 0;
+  smartRouter.choose = async (_text, _session, _models, provider) => { calls.push(provider); throw Object.assign(new Error('Routing stopped.'), { name: 'AbortError' }); };
+  await assert.rejects(controller.send({ id: session.id, text: 'again', mode: 'auto', task: 'off' }), /Routing stopped/);
+  assert.deepEqual(calls, ['jev']);
+
+  // No usable smart router: the Jev error is reported, nothing else is called.
+  calls.length = 0;
+  controller.data.settings.routerPreset = 'codex:missing:low';
+  smartRouter.choose = async (_text, _session, _models, provider) => { calls.push(provider); throw new Error('Jev routing stopped: timeout.'); };
+  await assert.rejects(controller.send({ id: session.id, text: 'third', mode: 'auto', task: 'off' }), /Jev routing stopped: timeout/);
+  assert.deepEqual(calls, ['jev']);
+});

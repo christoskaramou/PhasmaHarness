@@ -691,10 +691,21 @@ class Controller extends EventEmitter {
     try {
       if (this.stopping.has(id)) throw new Error('Turn was stopped before sending.');
       if (useSmart) {
-        if (provider === 'smart' && !this.routerChoices().some(p => p.id === this.data.settings.routerPreset && this.available(p))) throw new Error('The selected router model is disabled or unavailable. Choose an enabled router in Settings.');
+        const smartReady = () => this.routerChoices().some(p => p.id === this.data.settings.routerPreset && this.available(p));
+        if (provider === 'smart' && !smartReady()) throw new Error('The selected router model is disabled or unavailable. Choose an enabled router in Settings.');
         this.routing = id; this.changed();
-        try { selected = await this.smartRouter.choose(text, { ...session, ...previousState, configuredChecks: this.data.settings.checks?.[session.workspace] || [], routingCatalog: this.catalog().filter(p => p.worker && this.available(p) && (!images.length || p.images)), routerChoice: this.routerChoices().find(p => p.id === this.data.settings.routerPreset), jevQuickAnswers: this.data.settings.jevQuickAnswers, attachedImageCount: images.length }, this.models, provider, this.data.settings.routerPreset); }
-        finally { this.routing = null; this.warmRouter(); }
+        const context = { ...session, ...previousState, configuredChecks: this.data.settings.checks?.[session.workspace] || [], routingCatalog: this.catalog().filter(p => p.worker && this.available(p) && (!images.length || p.images)), routerChoice: this.routerChoices().find(p => p.id === this.data.settings.routerPreset), jevQuickAnswers: this.data.settings.jevQuickAnswers, attachedImageCount: images.length };
+        try {
+          try { selected = await this.smartRouter.choose(text, context, this.models, provider, this.data.settings.routerPreset); }
+          catch (error) {
+            // Jev unavailable (down, timeout, key removed): route the same message with the smart router instead of failing.
+            // A stop is never retried, and without a usable smart router the Jev error stands.
+            if (provider !== 'jev' || error.name === 'AbortError' || this.stopping.has(id) || !smartReady()) throw error;
+            selected = await this.smartRouter.choose(text, context, this.models, 'smart', this.data.settings.routerPreset);
+            const note = `Jev was unavailable (${String(error.message).slice(0, 160)}); the smart router chose instead.`;
+            selected = { ...selected, routerFallback: note, reason: selected.reason ? `${note} ${selected.reason}` : note };
+          }
+        } finally { this.routing = null; this.warmRouter(); }
         if (this.stopping.has(id)) throw new Error('Turn was stopped before sending.');
       }
       if (selected.directAnswer) {
