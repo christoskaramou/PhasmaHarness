@@ -16,6 +16,9 @@ app.whenReady().then(async () => {
   const sent = [];
   let failSend = false;
   ipcMain.handle('create', (_event, workspace, access) => controller.create(workspace, access));
+  const savedChecks = [];
+  ipcMain.handle('checks', (_event, workspace, list) => { savedChecks.push(list); return controller.checks(workspace, list); });
+  ipcMain.handle('settings', (_event, values) => controller.settings(values));
   ipcMain.handle('send', (_event, message) => {
     if (failSend) throw new Error('Test send failed');
     sent.push(message);
@@ -136,6 +139,18 @@ app.whenReady().then(async () => {
   const cursorRows = await window.webContents.executeJavaScript(`[...document.querySelectorAll('#provider-model-list .provider-model-row')].map(r => r.textContent).filter(t => t.endsWith('· Cursor'))`);
   assert.deepEqual(cursorRows, ['GPT-5.5 · Cursor', 'Grok 4.7 · Cursor', 'Kimi K3 · Cursor']);
   console.log('Cursor settings list the full model list, one row per model, no efforts passed');
+  // Removing a check and pressing the dialog's Save persists the removal (it used to need "Save checks").
+  controller.data.settings.checks[controller.data.settings.workspace] = [{ id: 'c1', name: 'Syntax', argv: ['node', '--check', 'demo.js'], cwd: controller.data.settings.workspace, timeoutMs: 120000, readOnlySafe: false }];
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderChecks(); true');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelectorAll('#checks-list .check-row').length"), 1);
+  await window.webContents.executeJavaScript(`(async () => {
+    [...document.querySelectorAll('#checks-list .check-row button')].find(b => b.textContent === 'Remove').click();
+    document.querySelector('#settings-form').dispatchEvent(new Event('submit', { cancelable: true }));
+    await new Promise(r => setTimeout(r, 300));
+  })()`);
+  assert.deepEqual(savedChecks.at(-1), [], 'the removal was saved');
+  assert.deepEqual(controller.data.settings.checks[controller.data.settings.workspace], []);
+  console.log('Removed checks are saved by the dialog Save passed');
   controller.close();
   window.destroy();
   clearTimeout(deadline);

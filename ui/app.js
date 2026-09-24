@@ -802,6 +802,7 @@ $('#settings').onclick = async () => {
   $('#jev-key').value = '';
   $('#jev-result').textContent = '';
   renderProviders();
+  renderChecks(); // saved checks, not leftovers from an earlier unsaved edit
   $('#settings-dialog').showModal();
 };
 $('#settings-access').onchange = () => {
@@ -908,6 +909,8 @@ $('#jev-remove').onclick = async () => {
 };
 $('#settings-form').onsubmit = async event => {
   event.preventDefault();
+  // Unsaved check edits (e.g. a removed check) are saved too; a failure keeps the dialog open.
+  if (checksDirty) { try { await saveChecks(); } catch (error) { $('#tab-checks')?.click(); notify(error); return; } }
   try { applyState(await api.settings({ jevQuickAnswers: $('#settings-quick').value === 'on', routerPreset: $('#settings-router-preset').value || undefined, workspace: $('#settings-workspace').value, fontScale: Number($('#settings-font').value), access: $('#settings-access').value, routing: $('#settings-routing').value, contextRanking: $('#settings-context').value, toolSelection: $('#settings-tools').value, largeResponses: $('#settings-output').value === 'on' })); updatePreview(); $('#settings-dialog').close(); } catch (error) { notify(error); }
 };
 $('#context-meter').onclick = async () => {
@@ -1304,7 +1307,7 @@ function checkRow(check = {}) {
   const remove = document.createElement('button');
   remove.type = 'button';
   remove.textContent = 'Remove';
-  remove.onclick = () => row.remove();
+  remove.onclick = () => { row.remove(); checksDirty = true; };
   const field = (text, input, className) => {
     const label = document.createElement('label');
     label.className = className;
@@ -1317,17 +1320,22 @@ function checkRow(check = {}) {
   return row;
 }
 
+// Edits on the Checks tab (add, remove, change) are saved by "Save checks" or by the dialog's Save button.
+let checksDirty = false;
+$('#checks-list').addEventListener('input', () => { checksDirty = true; });
+$('#checks-list').addEventListener('change', () => { checksDirty = true; });
 function renderChecks() {
   const workspace = current()?.workspace || state.settings.workspace;
   const checks = state.settings.checks?.[workspace] || [];
   const list = $('#checks-list');
   list.replaceChildren(...checks.map(checkRow));
+  checksDirty = false;
   $('#checks-workspace').textContent = workspace || 'No workspace selected';
   $('#checks-status').textContent = '';
 }
 
-$('#checks-add').onclick = () => { $('#checks-list').append(checkRow()); };
-$('#checks-save').onclick = async () => {
+$('#checks-add').onclick = () => { $('#checks-list').append(checkRow()); checksDirty = true; };
+async function saveChecks() {
   const workspace = current()?.workspace || state.settings.workspace;
   const list = [...$('#checks-list').children].map(row => ({
     name: row.querySelector('.check-name').value.trim(),
@@ -1336,8 +1344,9 @@ $('#checks-save').onclick = async () => {
     timeoutMs: Number(row.querySelector('.check-timeout').value) * 1000,
     readOnlySafe: row.querySelector('.check-readonly').checked,
   }));
-  try {
-    await api.checks(workspace, list);
-    $('#checks-status').textContent = 'Checks saved.';
-  } catch (error) { notify(error); }
-};
+  await api.checks(workspace, list);
+  state.settings.checks = { ...(state.settings.checks || {}), [workspace]: list };
+  checksDirty = false;
+  $('#checks-status').textContent = 'Checks saved.';
+}
+$('#checks-save').onclick = async () => { try { await saveChecks(); } catch (error) { notify(error); } };
