@@ -276,7 +276,7 @@ class Controller extends EventEmitter {
       if (!found?.efforts?.length) return [base];
       return found.efforts.map((effort, i) => ({ ...base, baseId: entry.id, id: `cursor-cli:${found.id}:${effort}`,
         effort, effortOption: found.effortOption, preferred: effort === entry.cursorEffort,
-        label: `${entry.label} · ${found.effortNames?.[effort] || effort}`, rank: entry.rank + i / 100 }));
+        label: `${entry.label} · ${found.effortNames?.[effort] || effort}`, modelLabel: entry.label, rank: entry.rank + i / 100 }));
     });
   }
 

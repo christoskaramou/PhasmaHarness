@@ -1086,13 +1086,14 @@ function renderProviders() {
       const discoveredIds = new Set(discovered.map(d => d.id));
       const enabledByModel = new Map(group.models.map(m => [discoveredIds.has(baseName(m.model)) ? baseName(m.model) : m.model, m]));
       const ids = new Set([...discovered.map(d => d.id), ...enabledByModel.keys()]);
-      if (!ids.size) {
-        list.append(element('p', 'muted', discoveredModels.has(group.id) ? 'No models returned.' : 'Fetching Cursor models…'));
-        if (!discoveredModels.has(group.id)) loadDiscoveredModels(group.id).then(() => renderProviders()).catch(e => { $('#provider-status').textContent = e.message; });
-      }
+      // Always load Cursor's full model list, not only when nothing is enabled yet; enabled models show meanwhile.
+      if (!discoveredModels.has(group.id) && !modelFetches.has(group.id))
+        loadDiscoveredModels(group.id).then(() => renderProviders()).catch(e => { $('#provider-status').textContent = e.message; });
+      if (!discoveredModels.has(group.id)) list.append(element('p', 'muted', 'Fetching Cursor models…'));
+      else if (!ids.size) list.append(element('p', 'muted', 'No models returned.'));
       for (const modelId of [...ids].sort()) {
         const existing = enabledByModel.get(modelId);
-        const labelText = discovered.find(d => d.id === modelId)?.label || existing?.label || modelId;
+        const labelText = discovered.find(d => d.id === modelId)?.label || existing?.modelLabel || existing?.label || modelId;
         appendModelToggle(list, {
           checked: !!(existing && existing.enabled !== false),
           label: `${labelText} · ${group.title}`,

@@ -21,12 +21,12 @@ app.whenReady().then(async () => {
     sent.push(message);
     return { queued: true };
   });
-  let modelRequests = 0, failModels = false, finishFetch;
+  let modelRequests = 0, failModels = false, finishFetch, nextModels = [];
   ipcMain.handle('providerModels', async () => {
     modelRequests++;
     await new Promise(resolve => { finishFetch = resolve; });
     if (failModels) throw new Error('Test model fetch failed');
-    return [];
+    return nextModels;
   });
   const window = new BrowserWindow({ show: false, webPreferences: { preload: path.resolve(__dirname, '../src/preload.cjs'), contextIsolation: true, sandbox: true } });
   await window.loadFile(path.resolve(__dirname, '../ui/index.html'));
@@ -117,6 +117,20 @@ app.whenReady().then(async () => {
   assert.doesNotMatch(await window.webContents.executeJavaScript("document.querySelector('#provider-model-list').textContent"), /claude-opus-5-5/, 'Claude models are hidden');
   assert.doesNotMatch(await window.webContents.executeJavaScript("document.querySelector('#provider-model-list').textContent"), /gpt-6-sol/);
   console.log('Disconnected providers hide models and keep CLI logins passed');
+  // Settings loads Cursor's full model list even when some models are already enabled; rows show model names only.
+  failModels = false; finishFetch = null;
+  nextModels = [{ id: 'grok-4.7', label: 'Grok 4.7' }, { id: 'kimi-k3', label: 'Kimi K3' }, { id: 'gpt-5.5', label: 'GPT-5.5' }];
+  controller.cursor.status = { installed: true, loggedIn: true };
+  controller.data.settings.cursorEnabled = true;
+  controller.cursor.models = [{ id: 'grok-4.7', label: 'Grok 4.7', parameterized: true, efforts: ['low', 'high'], effortOption: 'effort', parameters: {} }];
+  controller.data.settings.providerModels = [{ id: 'cursor-cli:grok-4.7:default', provider: 'cursor-cli', model: 'grok-4.7', label: 'Grok 4.7', effort: null, rank: 40, enabled: true, worker: true, router: true, images: false, description: '', parameterized: true }];
+  await window.webContents.executeJavaScript('discoveredModels.clear(); applyState(' + JSON.stringify(controller.snapshot()) + '); renderProviders(); true');
+  while (!finishFetch) await new Promise(setImmediate);
+  finishFetch();
+  await new Promise(resolve => setTimeout(resolve, 200));
+  const cursorRows = await window.webContents.executeJavaScript(`[...document.querySelectorAll('#provider-model-list .provider-model-row')].map(r => r.textContent).filter(t => t.endsWith('· Cursor'))`);
+  assert.deepEqual(cursorRows, ['GPT-5.5 · Cursor', 'Grok 4.7 · Cursor', 'Kimi K3 · Cursor']);
+  console.log('Cursor settings list the full model list, one row per model, no efforts passed');
   controller.close();
   window.destroy();
   clearTimeout(deadline);
