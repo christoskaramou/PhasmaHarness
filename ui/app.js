@@ -1093,10 +1093,9 @@ function renderProviders() {
       for (const modelId of [...ids].sort()) {
         const existing = enabledByModel.get(modelId);
         const labelText = discovered.find(d => d.id === modelId)?.label || existing?.label || modelId;
-        const efforts = discovered.find(d => d.id === modelId)?.efforts || [];
         appendModelToggle(list, {
           checked: !!(existing && existing.enabled !== false),
-          label: `${labelText}${efforts.length ? ' · ' + efforts.join('/') : ''} · ${group.title}`,
+          label: `${labelText} · ${group.title}`,
           onChange: async checked => {
             if (existing) applyState(await api.providerSettings({ action: 'toggle', id: existing.id, enabled: checked }));
             else if (checked) applyState(await api.providerSettings({ action: 'enableDiscovered', provider: group.id, model: modelId, label: labelText }));

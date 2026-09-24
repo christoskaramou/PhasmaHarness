@@ -196,7 +196,7 @@ async function start() {
     }
     if (controller.cursor.status.loggedIn) {
       controller.cursor.models = [];
-      try { await controller.cursor.discover(); }
+      try { await controller.discoverCursor(); }
       catch (error) { notes.push(error.message); }
     }
     controller.changed();
@@ -206,8 +206,8 @@ async function start() {
   });
   handle('providerModels', async id => {
     if (id === 'cursor-cli') {
-      if (!controller.cursor.models.length) await controller.cursor.discover();
-      return controller.cursor.models.map(m => ({ id: m.id, label: m.label || m.id, efforts: m.efforts || [] }));
+      if (!controller.cursor.models.length) await controller.discoverCursor();
+      return controller.cursor.models.map(m => ({ id: m.id, label: m.label || m.id }));
     }
     if (id === 'codex') return controller.models.map(m => ({ id: m.model, label: m.model }));
     return (await controller.providers.models(id)).map(model => ({ id: model, label: model }));

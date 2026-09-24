@@ -1206,28 +1206,50 @@ test('an enabled Cursor model with reasoning levels becomes one worker per level
   assert.deepEqual([run.model, run.effort, run.effortOption, run.parameterized], ['grok-4.7', 'xhigh', 'effort', true]);
 });
 
-test('Cursor entries saved as variant IDs (base[param=value,…]) get the base model\'s levels and keep their other parameters', async t => {
+test('older Cursor variant entries fold into one entry per base model; no duplicates, saved parameters and level kept', async t => {
   const { controller } = await setup(t);
   controller.cursor.status = { installed: true, loggedIn: true };
   controller.data.settings.cursorEnabled = true;
-  // As stored by the Harness before levels were supported, from Cursor's old variant list.
+  const entry = (model, label, enabled) => ({ id: `cursor-cli:${model}:default`, provider: 'cursor-cli', model, label, effort: null, rank: 40, enabled, worker: true, router: true, images: false, description: '' });
+  // The real state after the previous version: old variant entries (unticked) plus the new base entries (ticked).
   controller.data.settings.providerModels = [
-    { id: 'cursor-cli:grok-4.7[context=256k,reasoning_effort=high,fast=true]:default', provider: 'cursor-cli', model: 'grok-4.7[context=256k,reasoning_effort=high,fast=true]', label: 'grok-4.7', effort: null, rank: 40, enabled: true, worker: true, router: true, images: false, description: '' },
-    { id: 'cursor-cli:composer-2.5[fast=true]:default', provider: 'cursor-cli', model: 'composer-2.5[fast=true]', label: 'composer-2.5', effort: null, rank: 45, enabled: true, worker: true, router: true, images: false, description: '' },
+    entry('grok-4.7[context=256k,reasoning_effort=high,fast=true]', 'grok-4.7', false),
+    entry('composer-2.5[fast=true]', 'composer-2.5', true),
+    entry('grok-4.6[effort=high,fast=true]', 'grok-4.6', true),
+    entry('grok-4.7', 'Grok 4.7', true),
+    entry('old-model[x=1]', 'old-model', true),
   ];
+  controller.data.settings.mode = 'cursor-cli:grok-4.6[effort=high,fast=true]:default';
   controller.cursor.models = [
     { id: 'grok-4.7', label: 'Grok 4.7', parameterized: true, efforts: ['low', 'medium', 'high', 'xhigh'], effortOption: 'reasoning_effort',
       parameters: { reasoning_effort: ['low', 'medium', 'high', 'xhigh'], context: ['128k', '256k'], fast: ['false', 'true'] } },
+    { id: 'grok-4.6', label: 'Grok 4.6', parameterized: true, efforts: ['low', 'medium', 'high', 'xhigh'], effortOption: 'effort',
+      parameters: { effort: ['low', 'medium', 'high', 'xhigh'], fast: ['false', 'true'] } },
     { id: 'composer-2.5', label: 'Composer 2.5', parameterized: true, parameters: { fast: ['false', 'true'] } },
   ];
-  const grok = controller.catalog().filter(p => p.baseId === 'cursor-cli:grok-4.7[context=256k,reasoning_effort=high,fast=true]:default');
-  assert.deepEqual(grok.map(p => p.id), ['cursor-cli:grok-4.7:low', 'cursor-cli:grok-4.7:medium', 'cursor-cli:grok-4.7:high', 'cursor-cli:grok-4.7:xhigh']);
-  assert.ok(grok.every(p => p.model === 'grok-4.7' && p.parameterized && p.effortOption === 'reasoning_effort'));
-  assert.deepEqual(grok[0].parameters, [{ id: 'context', value: '256k' }, { id: 'fast', value: 'true' }]);
-  // The saved manual selection keeps its level (high).
-  assert.equal(controller.resolveWorker('cursor-cli:grok-4.7[context=256k,reasoning_effort=high,fast=true]:default').id, 'cursor-cli:grok-4.7:high');
-  // A model without levels keeps its saved variant ID and the old handshake.
-  const composer = controller.catalog().find(p => p.id === 'cursor-cli:composer-2.5[fast=true]:default');
-  assert.equal(composer.model, 'composer-2.5[fast=true]');
-  assert.equal(composer.parameterized, undefined);
+  assert.equal(controller.migrateCursorEntries(), true);
+  const saved = controller.data.settings.providerModels;
+  assert.deepEqual(saved.map(e => [e.id, e.model, e.label, e.enabled]), [
+    ['cursor-cli:grok-4.7:default', 'grok-4.7', 'Grok 4.7', true],
+    ['cursor-cli:composer-2.5:default', 'composer-2.5', 'Composer 2.5', true],
+    ['cursor-cli:grok-4.6:default', 'grok-4.6', 'Grok 4.6', true],
+    ['cursor-cli:old-model[x=1]:default', 'old-model[x=1]', 'old-model', true],
+  ], 'one entry per model; a model Cursor no longer lists is left as it was');
+  const grok47 = saved[0], grok46 = saved[2], composer = saved[1];
+  assert.deepEqual(grok47.cursorParameters, [], 'the enabled plain entry wins over the unticked variant');
+  assert.deepEqual(grok46.cursorParameters, [{ id: 'fast', value: 'true' }]);
+  assert.equal(grok46.cursorEffort, 'high');
+  assert.deepEqual(composer.cursorParameters, [{ id: 'fast', value: 'true' }]);
+  assert.ok(grok47.aliases.includes('cursor-cli:grok-4.7[context=256k,reasoning_effort=high,fast=true]:default'));
+  assert.equal(controller.data.settings.mode, 'cursor-cli:grok-4.6:high', 'the saved manual selection follows, at its saved level');
+
+  const ids = controller.catalog().filter(p => p.provider === 'cursor-cli').map(p => p.id);
+  assert.equal(new Set(ids).size, ids.length, 'no duplicate worker IDs');
+  assert.deepEqual(ids.filter(id => id.startsWith('cursor-cli:grok-4.7')), ['cursor-cli:grok-4.7:low', 'cursor-cli:grok-4.7:medium', 'cursor-cli:grok-4.7:high', 'cursor-cli:grok-4.7:xhigh']);
+  const high = controller.catalog().find(p => p.id === 'cursor-cli:grok-4.6:high');
+  assert.deepEqual([high.model, high.parameterized, high.effortOption, high.parameters], ['grok-4.6', true, 'effort', [{ id: 'fast', value: 'true' }]]);
+  assert.equal(controller.catalog().find(p => p.id === 'cursor-cli:composer-2.5:default').parameterized, true);
+  // Old IDs (queued messages, task routes) still resolve.
+  assert.equal(controller.resolveWorker('cursor-cli:grok-4.6[effort=high,fast=true]:default').id, 'cursor-cli:grok-4.6:high');
+  assert.equal(controller.migrateCursorEntries(), false, 'idempotent');
 });

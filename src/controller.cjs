@@ -173,7 +173,7 @@ class Controller extends EventEmitter {
     await this.cursor.refresh();
     // Cursor reasoning levels come from its model list; load it once in the background when Cursor models are enabled.
     if (this.cursor.status.loggedIn && this.data.settings.cursorEnabled !== false && (this.data.settings.providerModels || []).some(p => p.provider === 'cursor-cli'))
-      this.cursor.discover().then(() => this.changed(), () => {});
+      this.discoverCursor().catch(() => {});
     try {
       this.data.settings.toolSelection ??= this.smartRouter.jev?.configured ? 'jev' : 'off';
       // One-time adoption of the requested Jev integration; subsequent explicit settings win.
@@ -271,20 +271,66 @@ class Controller extends EventEmitter {
   providerWorkers() {
     return (this.data.settings.providerModels || []).flatMap(entry => {
       if (entry.provider !== 'cursor-cli') return [entry];
-      // Older entries hold Cursor's variant ID, base[param=value,…]; the model list is keyed by the base name.
-      const baseName = String(entry.model).split('[')[0];
-      const found = (this.cursor.models || []).find(m => m.id === entry.model) || (this.cursor.models || []).find(m => m.id === baseName);
-      if (!found?.efforts?.length) return [found?.parameterized && found.id === entry.model ? { ...entry, parameterized: true } : entry];
-      // Keep the variant's other saved parameters and its level, where the model still accepts those values.
-      const saved = (/\[(.*)\]$/.exec(entry.model)?.[1] || '').split(',').map(pair => pair.split('='))
-        .filter(([id, value]) => id && value !== undefined).map(([id, value]) => ({ id: id.trim(), value: value.trim() }))
-        .filter(p => found.parameters?.[p.id]?.includes(p.value));
-      const savedEffort = saved.find(p => p.id === found.effortOption)?.value;
-      const parameters = saved.filter(p => p.id !== found.effortOption);
-      return found.efforts.map((effort, i) => ({ ...entry, parameterized: true, model: found.id, baseId: entry.id, id: `cursor-cli:${found.id}:${effort}`,
-        effort, effortOption: found.effortOption, parameters, preferred: effort === savedEffort,
+      const found = (this.cursor.models || []).find(m => m.id === entry.model);
+      const base = entry.parameterized || found?.parameterized ? { ...entry, parameterized: true, parameters: entry.cursorParameters || [] } : entry;
+      if (!found?.efforts?.length) return [base];
+      return found.efforts.map((effort, i) => ({ ...base, baseId: entry.id, id: `cursor-cli:${found.id}:${effort}`,
+        effort, effortOption: found.effortOption, preferred: effort === entry.cursorEffort,
         label: `${entry.label} · ${found.effortNames?.[effort] || effort}`, rank: entry.rank + i / 100 }));
     });
+  }
+
+  // Older Cursor entries hold a variant ID from Cursor's old list (grok-4.7[context=256k,reasoning_effort=high,fast=true]);
+  // the current list names the base model (grok-4.7) with separate parameters. Once that list is loaded, fold every
+  // entry of a listed model into one entry per base model: enabled if any was, keeping the enabled variant's other
+  // parameters and level (where the model still accepts them). Old IDs stay as aliases, and saved selections follow.
+  migrateCursorEntries() {
+    const models = (this.cursor.models || []).filter(m => m.parameterized);
+    if (!models.length) return false;
+    const settings = this.data.settings, groups = new Map(), result = [];
+    for (const entry of settings.providerModels || []) {
+      const found = entry.provider === 'cursor-cli' && models.find(m => m.id === String(entry.model).split('[')[0]);
+      if (!found) { result.push(entry); continue; }
+      if (!groups.has(found.id)) { groups.set(found.id, { found, entries: [] }); result.push(found.id); }
+      groups.get(found.id).entries.push(entry);
+    }
+    let changed = false;
+    const renamed = new Map();
+    const merge = ({ found, entries }) => {
+      const id = `cursor-cli:${found.id}:default`;
+      const enabled = entries.filter(e => e.enabled !== false);
+      const source = enabled.find(e => String(e.model).includes('[')) || enabled[0] || entries[0];
+      const saved = (/\[(.*)\]$/.exec(source.model)?.[1] || '').split(',').map(pair => pair.split('='))
+        .filter(([key, value]) => key && value !== undefined).map(([key, value]) => ({ id: key.trim(), value: value.trim() }))
+        .filter(p => found.parameters?.[p.id]?.includes(p.value));
+      const parameters = saved.length ? saved.filter(p => p.id !== found.effortOption) : (source.cursorParameters || []);
+      const cursorEffort = saved.find(p => p.id === found.effortOption)?.value ?? source.cursorEffort;
+      const aliases = [...new Set(entries.flatMap(e => [e.id, ...(e.aliases || [])]))].filter(a => a !== id);
+      const merged = { ...(entries.find(e => e.model === found.id) || source), id, model: found.id, label: found.label, enabled: enabled.length > 0,
+        parameterized: true, cursorParameters: parameters, ...(cursorEffort ? { cursorEffort } : {}), ...(aliases.length ? { aliases } : {}) };
+      if (entries.length !== 1 || JSON.stringify(entries[0]) !== JSON.stringify(merged)) changed = true;
+      for (const e of entries) if (e.id !== id) renamed.set(e.id, { merged, found });
+      return merged;
+    };
+    settings.providerModels = result.map(item => typeof item === 'string' ? merge(groups.get(item)) : item);
+    for (const key of ['mode', 'routerPreset']) {
+      const hit = renamed.get(settings[key]);
+      if (!hit) continue;
+      const { merged, found } = hit;
+      const effort = found.efforts?.includes(merged.cursorEffort) ? merged.cursorEffort : found.efforts?.includes('medium') ? 'medium' : found.efforts?.[0];
+      settings[key] = effort ? `cursor-cli:${found.id}:${effort}` : merged.id;
+      changed = true;
+    }
+    if (changed) this.save();
+    return changed;
+  }
+
+  // Load Cursor's model list, then fold older saved entries into it.
+  async discoverCursor() {
+    const models = await this.cursor.discover();
+    if (this.migrateCursorEntries()) this.loaded.clear();
+    this.changed();
+    return models;
   }
 
   // Like Codex: one worker per Claude model and supported effort (claude-cli:<model>:<effort>), so the router picks
@@ -334,8 +380,9 @@ class Controller extends EventEmitter {
     if (!id || id === 'auto') return null;
     const direct = this.catalog().find(p => p.id === id && p.worker);
     if (direct) return direct;
-    // An ID saved before efforts were per worker (claude-cli:<model>, cursor-cli:<model>:default): that model at medium, else its lowest effort.
-    const variants = this.catalog().filter(p => p.worker && p.baseId === id);
+    // An ID saved before efforts were per worker (claude-cli:<model>, cursor-cli:<model>:default, or an older Cursor
+    // variant ID kept as an alias): that model at its saved level, else medium, else its lowest.
+    const variants = this.catalog().filter(p => p.worker && (p.baseId === id || p.aliases?.includes(id)));
     if (variants.length) return variants.find(p => p.preferred) || variants.find(p => p.effort === 'medium') || variants[0];
     const legacy = [...PRESETS, ...ROUTER_PRESETS].find(p => p.id === id);
     if (!legacy) return null;
@@ -433,6 +480,8 @@ class Controller extends EventEmitter {
         images: value.images === true,
       } : value.model;
       const m = validateModel(draft, [{ id: 'codex' }, { id: 'cursor-cli' }, ...(this.data.settings.providers || [])]);
+      // A model from Cursor's current list is a base name: it runs with the parameterized model picker.
+      if (m.provider === 'cursor-cli' && (this.cursor.models || []).some(c => c.id === m.model && c.parameterized)) m.parameterized = true;
       this.data.settings.providerModels = [...(this.data.settings.providerModels || []).filter(v => v.id !== m.id), m];
     } else if (value.action === 'toggleCodexModel') {
       if (typeof value.model !== 'string' || !value.model.trim() || typeof value.enabled !== 'boolean') throw new Error('Invalid Codex model selection.');
