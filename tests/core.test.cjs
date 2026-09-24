@@ -983,3 +983,50 @@ test('Claude router fallback uses a discovered Haiku ID and keeps a working rout
   controller.claudeRouterFallback();
   assert.equal(controller.data.settings.routerPreset, 'claude-cli:claude-opus-5-5');
 });
+
+test('router fallbacks prefer the cheapest Claude tier and migrate the old alias IDs', async t => {
+  const { controller } = await setup(t);
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  const models = ids => ids.map(model => ({ id: 'claude-cli:' + model, model, label: model, provider: 'claude-cli', effort: null, efforts: [], rank: 35, worker: true, router: true, images: true }));
+  controller.claude.models = models(['claude-fable-5-1', 'claude-opus-5-5', 'claude-sonnet-5']);
+  controller.data.settings.routerPreset = 'claude-cli:gone';
+  controller.claudeRouterFallback();
+  assert.equal(controller.data.settings.routerPreset, 'claude-cli:claude-sonnet-5', 'Sonnet before the alphabetically first Fable');
+  // Without ChatGPT, adoptRouter uses the same preference.
+  controller.account = null; controller.connection = 'ready';
+  controller.claude.models = models(['claude-fable-5-1', 'claude-haiku-4-5']);
+  controller.data.settings.routerPreset = 'claude-cli:gone';
+  controller.adoptRouter();
+  assert.equal(controller.data.settings.routerPreset, 'claude-cli:claude-haiku-4-5');
+  // A saved alias maps to a discovered model, or back to the Codex default when Claude is unavailable.
+  controller.data.settings.routerPreset = 'claude-cli:haiku';
+  controller.migrateLegacyRouter();
+  assert.equal(controller.data.settings.routerPreset, 'claude-cli:claude-haiku-4-5');
+  controller.claude.status = { installed: true, loggedIn: false };
+  controller.data.settings.routerPreset = 'claude-cli:opus';
+  controller.migrateLegacyRouter();
+  assert.equal(controller.data.settings.routerPreset, 'codex:gpt-5.6-terra:low');
+});
+
+test('a withdrawn Claude approval disappears from the Harness, and late requests after the turn are declined', async t => {
+  const { controller } = await setup(t);
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  const session = controller.create();
+  session.helperTools = false;
+  let late;
+  controller.claude.run = async ({ approve }) => {
+    const cancel = new AbortController();
+    const pending = approve({ title: 'Allow Claude to use Bash?' }, { signal: cancel.signal });
+    assert.equal([...controller.requests.keys()].filter(id => id.startsWith('cli-')).length, 1);
+    cancel.abort();
+    assert.equal(await pending, false);
+    assert.equal([...controller.requests.keys()].filter(id => id.startsWith('cli-')).length, 0);
+    late = approve;
+    return { result: 'ok' };
+  };
+  await controller.send({ id: session.id, text: 'x', mode: 'claude-cli:sonnet', task: 'off' });
+  assert.equal(await late({ title: 'late' }), false);
+  assert.equal([...controller.requests.keys()].some(id => id.startsWith('cli-')), false, 'no prompt for a finished turn');
+});

@@ -37,8 +37,16 @@ for (const [access, mode] of [['workspace-write', 'acceptEdits'], ['read-only', 
     await new Promise(setImmediate);
     assert.equal(flag(state.args, '--permission-mode'), mode);
     assert.equal(flag(state.args, '--permission-prompt-tool'), 'stdio');
-    assert.equal(flag(state.args, '--allowedTools'), 'Read,Glob,Grep');
-    assert.equal(state.args.includes('--tools'), false, 'the full tool set stays available; approval decides');
+    assert.equal(flag(state.args, '--disallowedTools'), 'AskUserQuestion,EnterPlanMode,ExitPlanMode', 'no unanswerable interactive prompts');
+    assert.match(flag(state.args, '--append-system-prompt'), /wait for the user's approval/);
+    if (access === 'read-only') {
+      // Reads outside the workspace must ask, so Read is not pre-approved; a small tool set keeps prompts cheap.
+      assert.equal(flag(state.args, '--allowedTools'), undefined);
+      assert.equal(flag(state.args, '--tools'), 'Read,Glob,Grep,Bash,Edit,Write,WebFetch,WebSearch');
+    } else {
+      assert.equal(flag(state.args, '--allowedTools'), 'Read,Glob,Grep');
+      assert.equal(state.args.includes('--tools'), false, 'Workspace keeps the tool set it had before');
+    }
     assert.equal(state.input[0].type, 'user');
     assert.equal(state.ended, false, 'stdin stays open for approval answers');
 
@@ -111,4 +119,35 @@ test('stopping during a pending approval stops Claude and declines the request',
   release(true);
   await new Promise(setImmediate);
   assert.equal(state.input.length, 1, 'no allow is sent after stopping');
+});
+
+test('Claude read-only passes helper tools as both available and pre-approved; the write helper stays out', async () => {
+  const { cli, state, send } = fake();
+  const helpers = { allowedTools: access => access === 'read-only' ? ['mcp__h__read'] : ['mcp__h__read', 'mcp__h__call'], instructions: '' };
+  const run = cli.run({ model: 'm', prompt: 'x', access: 'read-only', helpers, approve: async () => true });
+  await new Promise(setImmediate);
+  assert.equal(flag(state.args, '--tools'), 'Read,Glob,Grep,Bash,Edit,Write,WebFetch,WebSearch,mcp__h__read');
+  assert.equal(flag(state.args, '--allowedTools'), 'mcp__h__read');
+  send({ type: 'result', result: 'ok' });
+  await run;
+});
+
+test('a Claude cancel withdraws its approval, and events after the run settles are ignored', async () => {
+  const { cli, state, send, nextInput } = fake();
+  const signals = [];
+  let asks = 0;
+  const run = cli.run({ model: 'm', prompt: 'x', access: 'workspace-write',
+    approve: (tool, options) => { asks++; signals.push(options.signal); return new Promise(resolve => options.signal.addEventListener('abort', () => resolve(false))); } });
+  await new Promise(setImmediate);
+  send({ type: 'control_request', request_id: 'r1', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: { command: 'x' } } });
+  await new Promise(setImmediate);
+  send({ type: 'control_cancel_request', request_id: 'r1' });
+  await new Promise(setImmediate);
+  assert.equal(signals[0].aborted, true, 'the Harness prompt is withdrawn');
+  assert.equal(state.input.length, 1, 'no answer is written for a cancelled request');
+  state.child.stdout.write('not json\n');
+  await assert.rejects(run, /Invalid Claude Code stream event/);
+  state.child.stdout.write(JSON.stringify({ type: 'control_request', request_id: 'r2', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: {} } }) + '\n');
+  await new Promise(setImmediate);
+  assert.equal(asks, 1, 'no approval is requested after the run has settled');
 });

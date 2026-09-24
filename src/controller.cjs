@@ -36,6 +36,19 @@ const ACCESS_MODES = [
 
 const treeEntries = known => [...known].slice(-500).map(([pid, entry]) => ({ pid, startedMs: entry.startedMs, exact: entry.exact }));
 
+// Claude effort is a per-model setting that can change between turns; it does not change which worker ran a task.
+function sameEffort(worker, route) {
+  return worker.provider === 'claude-cli' || (worker.effort || null) === (route.effort || null);
+}
+
+// Prefer the cheapest tier for routing calls: Haiku, then Sonnet, then the existing order.
+function cheapRouter(choices) {
+  return choices.find(p => /haiku/i.test(p.model)) || choices.find(p => /sonnet/i.test(p.model)) || choices[0];
+}
+
+const DEFAULT_ROUTER = 'codex:gpt-5.6-terra:low';
+const LEGACY_CLAUDE_ROUTERS = ['claude-cli:haiku', 'claude-cli:sonnet', 'claude-cli:opus'];
+
 function accessMode(value) {
   const mode = ACCESS_MODES.find(mode => mode.id === value);
   if (!mode) throw new Error('Unknown access mode.');
@@ -62,7 +75,7 @@ class Controller extends EventEmitter {
     };
     if (this.data.version !== 1 || !Array.isArray(this.data.sessions)) throw new Error('Unrecognized session store. Your existing file has been preserved.');
     if (!this.data.settings.routing || this.data.settings.routing === 'rules') this.data.settings.routing = 'smart';
-    this.data.settings.routerPreset ??= 'codex:gpt-5.6-terra:low';
+    this.data.settings.routerPreset ??= DEFAULT_ROUTER;
     const legacyRouter = ROUTER_PRESETS.find(p => p.id === this.data.settings.routerPreset);
     if (legacyRouter) this.data.settings.routerPreset = `codex:${legacyRouter.model}:${legacyRouter.effort || 'default'}`;
     accessMode(this.data.settings.access);
@@ -156,6 +169,7 @@ class Controller extends EventEmitter {
 
   async initialize() {
     await this.claude.refresh();
+    this.migrateLegacyRouter();
     await this.cursor.refresh();
     try {
       this.data.settings.toolSelection ??= this.smartRouter.jev?.configured ? 'jev' : 'off';
@@ -211,7 +225,7 @@ class Controller extends EventEmitter {
   // Without ChatGPT, fall back to an available router instead of keeping an unusable Codex one.
   adoptRouter() {
     if (this.account || this.connection !== 'ready' || this.routerChoices().some(p => p.id === this.data.settings.routerPreset && this.available(p))) return;
-    const router = this.routerChoices().find(p => this.available(p));
+    const router = cheapRouter(this.routerChoices().filter(p => this.available(p)));
     if (router) this.data.settings.routerPreset = router.id;
   }
 
@@ -289,9 +303,17 @@ class Controller extends EventEmitter {
   // Keep a working router if one is set; otherwise prefer the cheapest Claude tier, Haiku.
   claudeRouterFallback() {
     if (this.routerChoices().some(p => p.id === this.data.settings.routerPreset && this.available(p))) return;
-    const claude = this.routerChoices().filter(p => p.provider === 'claude-cli' && this.available(p));
-    const router = claude.find(p => /haiku/i.test(p.model)) || claude[0];
+    const router = cheapRouter(this.routerChoices().filter(p => p.provider === 'claude-cli' && this.available(p)));
     if (router) this.data.settings.routerPreset = router.id;
+  }
+
+  // Before discovery, Claude router IDs were aliases (claude-cli:haiku). Map a saved alias to a discovered model,
+  // or back to the default Codex router, so routing does not fail on an ID that no longer exists.
+  migrateLegacyRouter() {
+    if (!LEGACY_CLAUDE_ROUTERS.includes(this.data.settings.routerPreset)) return;
+    this.claudeRouterFallback();
+    const preset = this.data.settings.routerPreset;
+    if (LEGACY_CLAUDE_ROUTERS.includes(preset) && !this.routerChoices().some(p => p.id === preset)) this.data.settings.routerPreset = DEFAULT_ROUTER;
   }
 
   routerChoices() {
@@ -630,7 +652,7 @@ class Controller extends EventEmitter {
       if (!canProposeWiki(origin) || (!this.wikiStore && !hasProjectWiki(session.workspace))) throw new Error('This task is not eligible for a wiki proposal.');
       wikiWorker = this.resolveWorker(origin.route?.id);
       const plan = this.planPreset();
-      if (!wikiWorker || !this.available(wikiWorker) || wikiWorker.provider !== origin.route.provider || wikiWorker.model !== origin.route.model || wikiWorker.effort !== origin.route.effort ||
+      if (!wikiWorker || !this.available(wikiWorker) || wikiWorker.provider !== origin.route.provider || wikiWorker.model !== origin.route.model || !sameEffort(wikiWorker, origin.route) ||
           (plan && (plan.model !== wikiWorker.model || plan.effort !== wikiWorker.effort))) throw new Error('The original task worker is unavailable. No replacement model was selected.');
       mode = wikiWorker.id;
       task = 'off';
@@ -802,7 +824,7 @@ class Controller extends EventEmitter {
       assistantIds.add(id); return item;
     };
     this.save(); this.changed();
-    let outcome = { status: 'completed', error: null };
+    let outcome = { status: 'completed', error: null }, turnOver = false;
     try {
       const helpersEnabled = session.helperTools !== false;
       const contextEnabled = helpersEnabled && !!this.contextSearch?.supports(session.workspace);
@@ -814,10 +836,15 @@ class Controller extends EventEmitter {
       const result = await this[backend].run({
         cwd: this.workspace(session.workspace), model: selected.model, effort: selected.effort || null, prompt, images, instructions: this.workerInstructions(session),
         resume: session[sessionKey], access: session.access, signal: abort.signal, helpers,
-        approve: tool => new Promise(resolve => {
-          if (abort.signal.aborted) return resolve(false);
+        approve: (tool, options = {}) => new Promise(resolve => {
+          if (abort.signal.aborted || turnOver || options.signal?.aborted) return resolve(false);
           const id = 'cli-' + randomUUID();
           this.helperApprovals.set(id, resolve);
+          // The CLI withdrew this request (or its process ended): drop the prompt.
+          options.signal?.addEventListener('abort', () => {
+            if (this.helperApprovals.get(id) !== resolve) return;
+            this.helperApprovals.delete(id); this.requests.delete(id); resolve(false); this.changed();
+          }, { once: true });
           this.requests.set(id, {
             id, method: 'router/tool/requestApproval', params: {
               threadId: session.threadId,
@@ -868,14 +895,14 @@ class Controller extends EventEmitter {
         ...(lastUsage ? { last: { ...lastUsage, totalTokens: lastUsage.inputTokens + lastUsage.outputTokens } } : {}),
         ...(main ? { modelContextWindow: main.contextWindow } : {}),
       };
-      if (result.permission_denials?.length) outcome.error = 'Claude Code could not run some tools under the selected permissions. Review the response before changing access.';
+      if (result.permission_denials?.length) outcome.error = 'Some Claude tool calls were declined or not permitted under the selected access. Review the response before changing access.';
     } catch (error) { outcome = { status: abort.signal.aborted ? 'interrupted' : 'failed', error: error.message }; }
     finally {
       const answer = session.items.filter(i => assistantIds.has(i.id)).map(i => i.text).join('\n');
       (session.directContext ||= []).push({ question: text, answer: answer || `[${backend} turn ${outcome.status}]` });
       if (outcome.status === 'completed') session[lastKey] = session.items.at(-1)?.id;
       else { session[lastKey] = null; session[sessionKey] = null; }
-      this.cliAbort = null;
+      this.cliAbort = null; turnOver = true;
       // An approval still open when the CLI turn ends can no longer be used.
       for (const [id, resolve] of this.helperApprovals) if (id.startsWith('cli-')) { resolve(false); this.requests.delete(id); this.helperApprovals.delete(id); }
       this.finishTurn(session, submission, outcome);
@@ -1477,7 +1504,7 @@ class Controller extends EventEmitter {
         this.data.executionBlock || this.stopping.has(session.id) || session.queuePaused ||
         (session.access === 'read-only' || task.access === 'read-only') || (!this.wikiStore && !hasProjectWiki(session.workspace))) return false;
     const worker = this.resolveWorker(task.route.id);
-    if (!worker || !this.available(worker) || worker.model !== task.route.model || worker.provider !== task.route.provider || worker.effort !== task.route.effort) return false;
+    if (!worker || !this.available(worker) || worker.model !== task.route.model || worker.provider !== task.route.provider || !sameEffort(worker, task.route)) return false;
     const wiki = this.wikiStore?.ensure(session.workspace) || { index: path.join(session.workspace, 'docs/wiki/index.md') };
     const attempt = task.attempts.at(-1);
     const text = `Background wiki maintenance. First assess completion against EVERY requirement in the original goal and accepted amendments below. Read the project instructions and relevant current source, diff, and check evidence. Passing commands alone is not proof of completion. For each requirement identify concrete supporting evidence; missing, ambiguous, contradictory or incomplete evidence means no wiki edits. Do not fix or extend the original task in this turn.

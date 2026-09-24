@@ -5,6 +5,11 @@ const path = require('node:path');
 const os = require('node:os');
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+// Ask mode keeps a small tool set (smaller prompts, no subagents); anything beyond reading inside the workspace asks.
+const ASK_TOOLS = ['Read', 'Glob', 'Grep', 'Bash', 'Edit', 'Write', 'WebFetch', 'WebSearch'];
+// Tools that only work with an interactive Claude Code user; in the Harness they would show as unanswerable prompts.
+const INTERACTIVE_TOOLS = ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'];
+const ASK_NOTE = '\nHarness access: tool calls outside the pre-approved set wait for the user\'s approval. Prefer Read/Glob/Grep for inspection and group shell commands to keep approvals few.';
 
 function executable() {
   const native = path.join(os.homedir(), '.local', 'bin', process.platform === 'win32' ? 'claude.exe' : 'claude');
@@ -121,17 +126,25 @@ class ClaudeCLI {
       // With an approval callback, the Harness access setting applies: pre-approved tools run, anything else asks the user in the Harness.
       const ask = !schema && typeof approve === 'function' && ['read-only', 'workspace-write'].includes(access);
       const basePrompt = 'Preserve unrelated changes. Do not commit or push unless explicitly requested. Use one agent unless delegation is requested. Report permission denials clearly.';
-      args.push('--append-system-prompt', (schema ? basePrompt : instructions) + (!schema && helpers?.instructions ? helpers.instructions : ''));
+      args.push('--append-system-prompt', (schema ? basePrompt : instructions) + (!schema && helpers?.instructions ? helpers.instructions : '') + (ask ? ASK_NOTE : ''));
       if (resume) args.push('--resume', resume);
       if (schema) args.push('--tools', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--no-session-persistence', '--json-schema', JSON.stringify(schema));
       else {
         // Do not use --strict-mcp-config here: preserve the user's Claude MCP servers and add ours.
         if (helpers?.claudeConfig) args.push('--mcp-config', JSON.stringify(helpers.claudeConfig));
         if (ask) {
-          // Read-only: reads and helpers run; commands, edits and web access ask.
-          // Workspace: acceptEdits also runs file edits inside the workspace; commands, outside paths and web access ask.
-          const allowed = ['Read', 'Glob', 'Grep', ...(helpers ? helpers.allowedTools(access) : [])];
-          args.push('--allowedTools', allowed.join(','), '--permission-prompt-tool', 'stdio');
+          const helperTools = helpers ? helpers.allowedTools(access) : [];
+          if (access === 'read-only') {
+            // Ask: reads inside the workspace and commands Claude Code classifies as read-only run;
+            // reads outside the workspace, other commands, edits and web access ask.
+            args.push('--tools', [...ASK_TOOLS, ...helperTools].join(','));
+            if (helperTools.length) args.push('--allowedTools', helperTools.join(','));
+          } else {
+            // Workspace (acceptEdits): reads anywhere, edits and filesystem commands inside the workspace run;
+            // other commands, edits outside the workspace and web access ask.
+            args.push('--allowedTools', ['Read', 'Glob', 'Grep', ...helperTools].join(','));
+          }
+          args.push('--disallowedTools', INTERACTIVE_TOOLS.join(','), '--permission-prompt-tool', 'stdio');
         } else if (access === 'read-only') {
           const allowed = ['Read', 'Glob', 'Grep', ...(helpers ? helpers.allowedTools(access) : [])];
           args.push('--tools', allowed.join(','));
@@ -143,12 +156,16 @@ class ClaudeCLI {
       }
       args.push('--permission-mode', access === 'danger-full-access' && !schema ? 'bypassPermissions'
         : ask ? (access === 'workspace-write' ? 'acceptEdits' : 'default') : 'dontAsk');
+      let settled = false;
+      const done = (fn, value) => { if (!settled) { settled = true; fn(value); } };
       const child = this.start(args, cwd); let buffer = '', result, stderr = '';
       const abort = () => child.kill(); signal?.addEventListener('abort', abort, { once: true });
       child.stdin.on('error', () => {});
       let closed = false;
+      const pending = new Map();
       const reply = (request_id, response) => {
-        if (closed || signal?.aborted || !child.stdin.writable || child.stdin.writableEnded) return;
+        pending.delete(request_id);
+        if (settled || closed || signal?.aborted || !child.stdin.writable || child.stdin.writableEnded) return;
         child.stdin.write(JSON.stringify({ type: 'control_response', response: { request_id, ...response } }) + '\n');
       };
       const permission = async event => {
@@ -156,12 +173,15 @@ class ClaudeCLI {
         if (request.subtype !== 'can_use_tool') return reply(event.request_id, { subtype: 'error', error: `Unsupported control request: ${request.subtype}` });
         const input = request.input && typeof request.input === 'object' ? request.input : {};
         let allowed = false;
+        const cancel = new AbortController();
+        pending.set(event.request_id, cancel);
         try {
           allowed = !signal?.aborted && await approve({
             title: request.title || `Allow Claude to use ${request.display_name || request.tool_name}?` + (request.blocked_path ? ` (${request.blocked_path})` : ''),
             rawInput: { tool: request.tool_name, ...input },
-          }) === true;
+          }, { signal: cancel.signal }) === true;
         } catch { allowed = false; }
+        if (cancel.signal.aborted) return pending.delete(event.request_id);
         reply(event.request_id, { subtype: 'success', response: allowed
           ? { behavior: 'allow', updatedInput: input, toolUseID: request.tool_use_id }
           : { behavior: 'deny', message: 'The user declined this in Phasma Harness.', toolUseID: request.tool_use_id } });
@@ -169,27 +189,29 @@ class ClaudeCLI {
       child.stderr.on('data', d => { stderr = (stderr + d).slice(-2000); });
       child.stdout.on('data', d => {
         buffer += d;
-        if (buffer.length > 16 * 1024 * 1024) { child.kill(); reject(new Error('Claude event exceeded the size limit.')); return; }
+        if (settled) return;
+        if (buffer.length > 16 * 1024 * 1024) { done(reject, new Error('Claude event exceeded the size limit.')); child.kill(); return; }
         let end;
         while ((end = buffer.indexOf('\n')) >= 0) {
           const line = buffer.slice(0, end).trim(); buffer = buffer.slice(end + 1);
           if (!line) continue;
           let event;
           try { event = JSON.parse(line); }
-          catch { child.kill(); reject(new Error('Invalid Claude Code stream event.')); continue; }
+          catch { done(reject, new Error('Invalid Claude Code stream event.')); child.kill(); return; }
           if (ask && event.type === 'control_request') { permission(event).catch(() => {}); continue; }
-          if (ask && event.type === 'control_cancel_request') continue;
+          if (ask && event.type === 'control_cancel_request') { pending.get(event.request_id)?.abort(); continue; }
           if (event.type === 'result') { result = event; if (ask) child.stdin.end(); }
           onEvent(event);
         }
       });
-      child.once('error', reject);
+      child.once('error', error => done(reject, error));
       child.once('close', code => {
         closed = true;
         signal?.removeEventListener('abort', abort);
-        if (signal?.aborted) reject(new Error('Claude stopped.'));
-        else if (code || !result || result.is_error) reject(new Error(result?.errors?.join('\n') || (stderr ? 'Claude Code failed. Check its login and model access.' : 'Claude Code did not complete the response.')));
-        else resolve(result);
+        for (const cancel of pending.values()) cancel.abort();
+        if (signal?.aborted) done(reject, new Error('Claude stopped.'));
+        else if (code || !result || result.is_error) done(reject, new Error(result?.errors?.join('\n') || (stderr ? 'Claude Code failed. Check its login and model access.' : 'Claude Code did not complete the response.')));
+        else done(resolve, result);
       });
       const message = JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: prompt }, ...images.map(url => ({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: url.split(',')[1] } }))] } }) + '\n';
       // Approval answers travel over stdin, so it stays open until the result arrives.

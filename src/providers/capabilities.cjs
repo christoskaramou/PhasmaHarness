@@ -6,7 +6,7 @@ const CAPABILITIES = Object.freeze({
   'cursor-cli': Object.freeze({ cli: true, steer: false, compact: false, usage: false }),
 });
 
-function capabilities(provider) { return CAPABILITIES[provider] || CAPABILITIES.codex; }
+function capabilities(provider) { return Object.hasOwn(CAPABILITIES, provider) ? CAPABILITIES[provider] : CAPABILITIES.codex; }
 // Local CLI backends (Claude Code, Cursor) run one process per turn, outside the Codex connection.
 function isCLI(provider) { return capabilities(provider).cli; }
 

@@ -4,7 +4,7 @@ const $ = selector => document.querySelector(selector);
 const CODEX_CAPS = { cli: false, steer: true, compact: true, usage: true };
 function providerCaps(provider) {
   const all = state?.providerCapabilities || {};
-  return all[provider] || all.codex || CODEX_CAPS;
+  return (Object.hasOwn(all, provider) && all[provider]) || all.codex || CODEX_CAPS;
 }
 const api = window.router;
 function chatgptDetail(account) {
