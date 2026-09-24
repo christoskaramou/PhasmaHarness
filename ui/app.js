@@ -1065,13 +1065,15 @@ function renderProviders() {
       continue;
     }
     for (const model of group.models) {
+      const efforts = group.id === 'claude-cli' && Array.isArray(model.efforts) ? model.efforts : [];
       appendModelToggle(list, {
         checked: model.enabled !== false,
-        label: `${model.label} · ${group.title}`,
+        label: `${efforts.length ? model.model : model.label} · ${group.title}`,
         onChange: async checked => {
           applyState(await api.providerSettings({ action: 'toggle', id: model.id, enabled: checked }));
           renderProviders();
         },
+        extra: efforts.length ? effortSelect(model, efforts) : null,
       });
     }
   }
@@ -1119,7 +1121,27 @@ $('#renew-models').onclick = async () => {
   }
 };
 
-function appendModelToggle(parent, { checked, label, onChange }) {
+// Claude reasoning effort per model; "CLI default" leaves Claude Code's own setting in charge.
+function effortSelect(model, efforts) {
+  const select = document.createElement('select');
+  select.className = 'provider-model-effort';
+  select.title = 'Reasoning effort';
+  select.setAttribute('aria-label', `${model.model} reasoning effort`);
+  for (const value of ['', ...efforts]) {
+    const option = document.createElement('option');
+    option.value = value; option.textContent = value || 'CLI default';
+    select.append(option);
+  }
+  select.value = model.effort || '';
+  select.disabled = !!state.busy;
+  select.onchange = async () => {
+    try { applyState(await api.providerSettings({ action: 'claudeEffort', model: model.model, effort: select.value || null })); renderProviders(); }
+    catch (e) { select.value = model.effort || ''; notify(e); }
+  };
+  return select;
+}
+
+function appendModelToggle(parent, { checked, label, onChange, extra = null }) {
   const row = element('label', 'provider-model-row');
   const input = document.createElement('input');
   input.type = 'checkbox';
@@ -1130,6 +1152,7 @@ function appendModelToggle(parent, { checked, label, onChange }) {
     catch (e) { input.checked = !input.checked; notify(e); }
   };
   row.append(input, document.createTextNode(label));
+  if (extra) row.append(extra);
   parent.append(row);
 }
 

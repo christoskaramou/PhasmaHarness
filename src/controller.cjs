@@ -215,9 +215,13 @@ class Controller extends EventEmitter {
   }
 
   catalog() {
-    return [...this.codexWorkers(), ...this.claude.models.map(p => ({
-      ...p, enabled: !!this.data.settings.claudeEnabled && !(this.data.settings.disabledModels || []).includes(p.id),
-    })), ...(this.data.settings.providerModels || [])].sort((a, b) => a.rank - b.rank || a.id.localeCompare(b.id));
+    return [...this.codexWorkers(), ...this.claude.models.map(p => {
+      // One entry per Claude model (IDs stay stable); a chosen effort applies when the model supports it, otherwise the CLI default.
+      const chosen = this.data.settings.claudeEfforts?.[p.model];
+      const effort = p.efforts?.includes(chosen) ? chosen : null;
+      return { ...p, effort, label: effort ? `${p.label} · ${effort}` : p.label,
+        enabled: !!this.data.settings.claudeEnabled && !(this.data.settings.disabledModels || []).includes(p.id) };
+    }), ...(this.data.settings.providerModels || [])].sort((a, b) => a.rank - b.rank || a.id.localeCompare(b.id));
   }
 
   codexWorkers() {
@@ -318,6 +322,12 @@ class Controller extends EventEmitter {
       const disabled = new Set(this.data.settings.disabledCodexModels);
       if (value.enabled) disabled.delete(value.model); else disabled.add(value.model);
       this.data.settings.disabledCodexModels = [...disabled];
+    } else if (value.action === 'claudeEffort') {
+      const model = this.claude.models.find(p => p.model === value.model);
+      if (!model || !(value.effort === null || model.efforts?.includes(value.effort))) throw new Error('This Claude model does not support that effort.');
+      const efforts = { ...(this.data.settings.claudeEfforts || {}) };
+      if (value.effort) efforts[model.model] = value.effort; else delete efforts[model.model];
+      this.data.settings.claudeEfforts = efforts;
     } else if (value.action === 'toggle') {
       const m = this.catalog().find(p => p.id === value.id) || this.routerChoices().find(p => p.id === value.id);
       if (!m || typeof value.enabled !== 'boolean') throw new Error('Invalid model selection.');
@@ -791,7 +801,7 @@ class Controller extends EventEmitter {
       }
       const helpers = helpersEnabled && this.bridge.base ? this.bridge.childConfig(session.id) : null;
       const result = await this[backend].run({
-        cwd: this.workspace(session.workspace), model: selected.model, prompt, images, instructions: this.workerInstructions(session),
+        cwd: this.workspace(session.workspace), model: selected.model, effort: selected.effort || null, prompt, images, instructions: this.workerInstructions(session),
         resume: session[sessionKey], access: session.access, signal: abort.signal, helpers,
         approve: tool => new Promise(resolve => {
           if (abort.signal.aborted) return resolve(false);
@@ -800,7 +810,7 @@ class Controller extends EventEmitter {
           this.requests.set(id, {
             id, method: 'router/tool/requestApproval', params: {
               threadId: session.threadId,
-              reason: tool?.title || 'Allow Cursor tool once?', command: JSON.stringify(tool?.rawInput || tool || {}, null, 2)
+              reason: tool?.title || `Allow ${backend === 'cursor' ? 'Cursor' : 'Claude'} tool once?`, command: JSON.stringify(tool?.rawInput || tool || {}, null, 2)
             }
           });
           this.changed();
@@ -855,6 +865,8 @@ class Controller extends EventEmitter {
       if (outcome.status === 'completed') session[lastKey] = session.items.at(-1)?.id;
       else { session[lastKey] = null; session[sessionKey] = null; }
       this.cliAbort = null;
+      // An approval still open when the CLI turn ends can no longer be used.
+      for (const [id, resolve] of this.helperApprovals) if (id.startsWith('cli-')) { resolve(false); this.requests.delete(id); this.helperApprovals.delete(id); }
       this.finishTurn(session, submission, outcome);
       this.save();
     }

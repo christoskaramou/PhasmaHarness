@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
 function executable() {
   const native = path.join(os.homedir(), '.local', 'bin', process.platform === 'win32' ? 'claude.exe' : 'claude');
   return fs.existsSync(native) ? native : 'claude';
@@ -64,7 +66,8 @@ class ClaudeCLI {
               let model = entry.resolvedModel || entry.value;
               if (typeof model !== 'string' || !model.trim()) throw new Error('Claude returned an invalid model.');
               if (entry.value?.endsWith('[1m]') && !model.endsWith('[1m]')) model += '[1m]';
-              models.set(model, { id: `claude-cli:${model}`, model, label: model, provider: 'claude-cli', effort: null,
+              const efforts = entry.supportsEffort && Array.isArray(entry.supportedEffortLevels) ? EFFORTS.filter(e => entry.supportedEffortLevels.includes(e)) : [];
+              models.set(model, { id: `claude-cli:${model}`, model, label: model, provider: 'claude-cli', effort: null, efforts,
                 rank: 35, worker: true, router: true, images: true });
             }
             finish(null, [...models.values()]);
@@ -110,10 +113,13 @@ class ClaudeCLI {
     }
     return await this.refresh();
   }
-  run({ cwd, model, prompt, images = [], resume, access, signal, onEvent = () => {}, schema, helpers, instructions = WORKER_INSTRUCTIONS }) {
+  run({ cwd, model, effort, prompt, images = [], resume, access, signal, onEvent = () => {}, approve, schema, helpers, instructions = WORKER_INSTRUCTIONS }) {
     return new Promise((resolve, reject) => {
       if (signal?.aborted) return reject(new Error('Claude stopped.'));
       const args = ['-p', '--verbose', '--input-format', 'stream-json', '--output-format', 'stream-json', '--include-partial-messages', '--model', model];
+      if (EFFORTS.includes(effort)) args.push('--effort', effort);
+      // With an approval callback, the Harness access setting applies: pre-approved tools run, anything else asks the user in the Harness.
+      const ask = !schema && typeof approve === 'function' && ['read-only', 'workspace-write'].includes(access);
       const basePrompt = 'Preserve unrelated changes. Do not commit or push unless explicitly requested. Use one agent unless delegation is requested. Report permission denials clearly.';
       args.push('--append-system-prompt', (schema ? basePrompt : instructions) + (!schema && helpers?.instructions ? helpers.instructions : ''));
       if (resume) args.push('--resume', resume);
@@ -121,7 +127,12 @@ class ClaudeCLI {
       else {
         // Do not use --strict-mcp-config here: preserve the user's Claude MCP servers and add ours.
         if (helpers?.claudeConfig) args.push('--mcp-config', JSON.stringify(helpers.claudeConfig));
-        if (access === 'read-only') {
+        if (ask) {
+          // Read-only: reads and helpers run; commands, edits and web access ask.
+          // Workspace: acceptEdits also runs file edits inside the workspace; commands, outside paths and web access ask.
+          const allowed = ['Read', 'Glob', 'Grep', ...(helpers ? helpers.allowedTools(access) : [])];
+          args.push('--allowedTools', allowed.join(','), '--permission-prompt-tool', 'stdio');
+        } else if (access === 'read-only') {
           const allowed = ['Read', 'Glob', 'Grep', ...(helpers ? helpers.allowedTools(access) : [])];
           args.push('--tools', allowed.join(','));
         } else if (access === 'workspace-write') {
@@ -130,10 +141,31 @@ class ClaudeCLI {
         }
         // danger-full-access: leave Claude's native tool set unrestricted; helpers arrive via mcp-config.
       }
-      args.push('--permission-mode', access === 'danger-full-access' && !schema ? 'bypassPermissions' : 'dontAsk');
+      args.push('--permission-mode', access === 'danger-full-access' && !schema ? 'bypassPermissions'
+        : ask ? (access === 'workspace-write' ? 'acceptEdits' : 'default') : 'dontAsk');
       const child = this.start(args, cwd); let buffer = '', result, stderr = '';
       const abort = () => child.kill(); signal?.addEventListener('abort', abort, { once: true });
       child.stdin.on('error', () => {});
+      let closed = false;
+      const reply = (request_id, response) => {
+        if (closed || signal?.aborted || !child.stdin.writable || child.stdin.writableEnded) return;
+        child.stdin.write(JSON.stringify({ type: 'control_response', response: { request_id, ...response } }) + '\n');
+      };
+      const permission = async event => {
+        const request = event.request || {};
+        if (request.subtype !== 'can_use_tool') return reply(event.request_id, { subtype: 'error', error: `Unsupported control request: ${request.subtype}` });
+        const input = request.input && typeof request.input === 'object' ? request.input : {};
+        let allowed = false;
+        try {
+          allowed = !signal?.aborted && await approve({
+            title: request.title || `Allow Claude to use ${request.display_name || request.tool_name}?` + (request.blocked_path ? ` (${request.blocked_path})` : ''),
+            rawInput: { tool: request.tool_name, ...input },
+          }) === true;
+        } catch { allowed = false; }
+        reply(event.request_id, { subtype: 'success', response: allowed
+          ? { behavior: 'allow', updatedInput: input, toolUseID: request.tool_use_id }
+          : { behavior: 'deny', message: 'The user declined this in Phasma Harness.', toolUseID: request.tool_use_id } });
+      };
       child.stderr.on('data', d => { stderr = (stderr + d).slice(-2000); });
       child.stdout.on('data', d => {
         buffer += d;
@@ -142,18 +174,26 @@ class ClaudeCLI {
         while ((end = buffer.indexOf('\n')) >= 0) {
           const line = buffer.slice(0, end).trim(); buffer = buffer.slice(end + 1);
           if (!line) continue;
-          try { const event = JSON.parse(line); if (event.type === 'result') result = event; onEvent(event); }
-          catch { child.kill(); reject(new Error('Invalid Claude Code stream event.')); }
+          let event;
+          try { event = JSON.parse(line); }
+          catch { child.kill(); reject(new Error('Invalid Claude Code stream event.')); continue; }
+          if (ask && event.type === 'control_request') { permission(event).catch(() => {}); continue; }
+          if (ask && event.type === 'control_cancel_request') continue;
+          if (event.type === 'result') { result = event; if (ask) child.stdin.end(); }
+          onEvent(event);
         }
       });
       child.once('error', reject);
       child.once('close', code => {
+        closed = true;
         signal?.removeEventListener('abort', abort);
         if (signal?.aborted) reject(new Error('Claude stopped.'));
         else if (code || !result || result.is_error) reject(new Error(result?.errors?.join('\n') || (stderr ? 'Claude Code failed. Check its login and model access.' : 'Claude Code did not complete the response.')));
         else resolve(result);
       });
-      child.stdin.end(JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: prompt }, ...images.map(url => ({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: url.split(',')[1] } }))] } }) + '\n');
+      const message = JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: prompt }, ...images.map(url => ({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: url.split(',')[1] } }))] } }) + '\n';
+      // Approval answers travel over stdin, so it stays open until the result arrives.
+      if (ask) child.stdin.write(message); else child.stdin.end(message);
     });
   }
   close() { for (const child of this.children) child.kill(); }
@@ -168,4 +208,4 @@ function handoff(items) {
   if (text.length > 1000000) throw new Error('Conversation is too large to transfer. Start a new chat or compact it before switching backends.');
   return messages.length ? `Earlier conversation, supplied as history:\n${text}\n\nCurrent request:\n` : '';
 }
-module.exports = { ClaudeCLI, handoff };
+module.exports = { ClaudeCLI, handoff, EFFORTS };

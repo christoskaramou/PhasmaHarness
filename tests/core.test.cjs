@@ -919,3 +919,51 @@ test('failed tree termination cannot clear an unmeasured runtime when its parent
   t.after(() => next.close());
   assert.ok(next.data.executionBlock);
 });
+
+test('Claude effort is chosen per model, keeps the model ID, and reaches the CLI run', async t => {
+  const { controller } = await setup(t);
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  controller.claude.models = [{ id: 'claude-cli:claude-opus-5-5', model: 'claude-opus-5-5', label: 'claude-opus-5-5', provider: 'claude-cli', effort: null,
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'], rank: 35, worker: true, router: true, images: true }];
+  assert.throws(() => controller.providerSettings({ action: 'claudeEffort', model: 'claude-opus-5-5', effort: 'ultra' }), /does not support/);
+  assert.throws(() => controller.providerSettings({ action: 'claudeEffort', model: 'unknown', effort: 'low' }), /does not support/);
+  controller.providerSettings({ action: 'claudeEffort', model: 'claude-opus-5-5', effort: 'high' });
+  const entry = controller.catalog().find(p => p.provider === 'claude-cli');
+  assert.equal(entry.id, 'claude-cli:claude-opus-5-5');
+  assert.equal(entry.effort, 'high');
+  assert.equal(entry.label, 'claude-opus-5-5 · high');
+  const session = controller.create();
+  session.helperTools = false;
+  let cli;
+  controller.claude.run = async request => { cli = request; return { result: 'ok' }; };
+  await controller.send({ id: session.id, text: 'go', mode: 'claude-cli:claude-opus-5-5', task: 'off' });
+  assert.equal(cli.effort, 'high');
+  assert.equal(typeof cli.approve, 'function');
+  controller.providerSettings({ action: 'claudeEffort', model: 'claude-opus-5-5', effort: null });
+  assert.equal(controller.catalog().find(p => p.provider === 'claude-cli').effort, null);
+  assert.deepEqual(controller.data.settings.claudeEfforts, {});
+});
+
+test('Claude tool approvals use the Harness prompt and are withdrawn when the turn ends', async t => {
+  const { controller } = await setup(t);
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  const session = controller.create();
+  session.helperTools = false;
+  let second;
+  controller.claude.run = async ({ approve }) => {
+    const first = approve({ title: 'Allow Claude to use Bash?', rawInput: { tool: 'Bash', command: 'ninja' } });
+    const [id, request] = [...controller.requests].find(([key]) => key.startsWith('cli-'));
+    assert.equal(request.params.reason, 'Allow Claude to use Bash?');
+    assert.match(request.params.command, /ninja/);
+    controller.answer(id, { decision: 'accept' });
+    assert.equal(await first, true);
+    second = approve({ rawInput: { tool: 'WebFetch' } });
+    assert.equal([...controller.requests.values()].at(-1).params.reason, 'Allow Claude tool once?');
+    return { result: 'ok' };
+  };
+  await controller.send({ id: session.id, text: 'build', mode: 'claude-cli:sonnet', task: 'off' });
+  assert.equal(await second, false, 'an unanswered approval is declined when the turn ends');
+  assert.equal([...controller.requests.keys()].some(id => id.startsWith('cli-')), false);
+});
