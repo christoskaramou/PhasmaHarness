@@ -130,7 +130,8 @@ class CursorCLI {
       },
       onRequest: async (method, p) => {
         if (method === 'session/request_permission') {
-          const allowed = !schema && access !== 'read-only' && (access === 'danger-full-access' || await approve(p.toolCall));
+          // Ask and Workspace access both ask the user in the Harness, like Codex and Claude; classifiers never get tools.
+          const allowed = !schema && (access === 'danger-full-access' || await approve(p.toolCall) === true);
           const option = p.options?.find(o => o.kind === (allowed ? 'allow_once' : 'reject_once'));
           return { outcome: option ? { outcome: 'selected', optionId: option.optionId } : { outcome: 'cancelled' } };
         }
