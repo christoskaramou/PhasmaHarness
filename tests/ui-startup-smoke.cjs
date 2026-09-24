@@ -88,6 +88,17 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript("providerCaps('claude-cli').steer"), false);
   assert.equal(await window.webContents.executeJavaScript("providerCaps(undefined).steer"), true);
   console.log('Claude effort selector and provider capabilities passed');
+  // Disconnected in the Harness while the CLIs stay signed in: no models listed, detail says the CLI is still signed in.
+  controller.account = null; controller.models = [];
+  controller.codex = { installed: true, connected: true, signedIn: true };
+  controller.data.settings.claudeEnabled = false;
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderProviders(); true');
+  const providers = await window.webContents.executeJavaScript("document.querySelector('#panel-providers').textContent");
+  assert.match(providers, /ChatGPT · not used here · CLI still signed in/);
+  assert.match(providers, /Claude · not used here · CLI still signed in/);
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('.provider-model-effort')"), null, 'Claude models are hidden');
+  assert.doesNotMatch(await window.webContents.executeJavaScript("document.querySelector('#provider-model-list').textContent"), /gpt-6-sol/);
+  console.log('Disconnected providers hide models and keep CLI logins passed');
   controller.close();
   window.destroy();
   clearTimeout(deadline);

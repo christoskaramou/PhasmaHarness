@@ -103,33 +103,43 @@ async function start() {
   });
   for (const action of ['cursorLogin', 'cursorRefresh', 'cursorLogout']) handle(action, async () => {
     if (controller.busy) throw new Error('Wait for the current turn to finish.');
-    if (action === 'cursorLogin') await controller.cursor.login();
-    else if (action === 'cursorLogout') await controller.cursor.logout();
-    else await controller.cursor.refresh();
+    if (action === 'cursorLogin') {
+      // Use the existing Cursor CLI login when there is one; sign in only when it is signed out.
+      controller.setProviderEnabled('cursor-cli', true);
+      if (!(await controller.cursor.refresh()).loggedIn) await controller.cursor.login();
+    } else if (action === 'cursorLogout') {
+      controller.setProviderEnabled('cursor-cli', false);
+      await controller.cursor.refresh();
+    } else await controller.cursor.refresh();
     await controller.refreshAccount(); controller.save(); return controller.snapshot();
   });
   handle('claudeLogin', async () => {
     if (controller.busy) throw new Error('Wait for the current turn to finish before signing in.');
-    const status = await controller.claude.login(url => shell.openExternal(url));
-    if (status.loggedIn) controller.data.settings.claudeEnabled = true;
+    // Use the existing Claude Code login when there is one; sign in only when it is signed out.
+    let status = await controller.claude.refresh();
+    if (!status.loggedIn) status = await controller.claude.login(url => shell.openExternal(url));
+    if (status.loggedIn) controller.setProviderEnabled('claude-cli', true);
     if (status.loggedIn) controller.claudeRouterFallback();
     await controller.refreshAccount(); controller.save(); return controller.snapshot();
   });
   handle('claudeRefresh', async () => {
     if (controller.busy) throw new Error('Wait for the current turn to finish.');
     await controller.claude.refresh();
-    if (controller.claude.status.loggedIn) controller.data.settings.claudeEnabled = true;
+    // A refresh never re-enables Claude after the user disconnected it in the Harness.
+    if (controller.claude.status.loggedIn && controller.data.settings.claudeEnabled !== false) controller.data.settings.claudeEnabled = true;
     if (controller.claude.status.loggedIn) controller.claudeRouterFallback();
     await controller.refreshAccount(); controller.save(); return controller.snapshot();
   });
   handle('claudeLogout', async () => {
-    if (controller.busy) throw new Error('Wait for the current turn to finish.');
-    await controller.claude.logout();
-    controller.data.settings.claudeEnabled = false;
+    controller.setProviderEnabled('claude-cli', false);
     await controller.refreshAccount(); controller.save(); return controller.snapshot();
   });
   handle('connectChatGPT', async () => {
     if (controller.busy) throw new Error('Stop the current turn before changing accounts.');
+    // Use the existing Codex CLI login when there is one; start the ChatGPT sign-in only when it is signed out.
+    controller.setProviderEnabled('codex', true);
+    await controller.refreshAccount(); controller.save();
+    if (controller.account) return controller.snapshot();
     const login = await controller.client.call('account/login/start', { type: 'chatgpt' });
     const url = new URL(login.authUrl);
     if (url.protocol !== 'https:') throw new Error('Unexpected login URL.');
@@ -137,12 +147,8 @@ async function start() {
     return { started: true };
   });
   handle('logoutChatGPT', async () => {
-    if (controller.busy) throw new Error('Stop the current turn before changing accounts.');
-    try {
-      await controller.client.call('account/logout', {});
-    } catch (error) {
-      throw new Error(error.message || 'Could not sign out of ChatGPT from this app. Sign out in Codex CLI if needed.');
-    }
+    // Stops using ChatGPT in the Harness only; the Codex CLI and other Codex apps stay signed in.
+    controller.setProviderEnabled('codex', false);
     await controller.refreshAccount(); controller.save(); return controller.snapshot();
   });
   let installing = null;

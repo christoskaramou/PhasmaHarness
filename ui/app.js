@@ -20,12 +20,17 @@ function claudeDetail(account) {
   return plan && account?.email ? `${plan} as ${account.email}` : account?.email || plan || account?.authMethod || 'connected';
 }
 
+// In use by the Harness: signed in to the CLI and not disconnected here. Disconnecting never signs the CLI out.
+const claudeInUse = () => !!state?.claude?.loggedIn && state.claude.enabled !== false;
+const cursorInUse = () => !!state?.cursor?.loggedIn && state.cursor.enabled !== false;
+const KEPT_SIGNED_IN = 'not used here · CLI still signed in';
+
 function connectedProviders() {
   if (!state) return [];
   const rows = [];
   if (state.account) rows.push('ChatGPT');
-  if (state.claude?.loggedIn) rows.push('Claude');
-  if (state.cursor?.loggedIn) rows.push('Cursor');
+  if (claudeInUse()) rows.push('Claude');
+  if (cursorInUse()) rows.push('Cursor');
   return rows;
 }
 marked.use({ extensions: [{
@@ -437,8 +442,8 @@ function providerConnectionSummary() {
   if (!state) return '';
   const lines = [
     `ChatGPT · ${state.account ? 'connected' : state.codex?.installed === false ? 'Codex CLI not installed' : 'not connected'}${state.account?.email ? ' · ' + state.account.email : ''}`,
-    `Claude · ${state.claude?.loggedIn ? claudeDetail(state.claude) : state.claude?.installed === false ? 'not installed' : 'not connected'}`,
-    `Cursor · ${state.cursor?.loggedIn ? (state.cursor.email || state.cursor.identity || 'connected') : state.cursor?.installed === false ? 'not installed' : 'not connected'}`,
+    `Claude · ${claudeInUse() ? claudeDetail(state.claude) : state.claude?.loggedIn ? KEPT_SIGNED_IN : state.claude?.installed === false ? 'not installed' : 'not connected'}`,
+    `Cursor · ${cursorInUse() ? (state.cursor.email || state.cursor.identity || 'connected') : state.cursor?.loggedIn ? KEPT_SIGNED_IN : state.cursor?.installed === false ? 'not installed' : 'not connected'}`,
   ];
   return lines.join('\n');
 }
@@ -984,36 +989,41 @@ function renderProviders() {
     connected: !!state.account,
     installed: state.codex?.installed,
     detail: state.account ? (chatgptDetail(state.account) || 'connected')
-      : state.codex?.installed === false ? 'Codex CLI not installed' : state.codex?.installed && !state.codex.connected ? 'Codex not running · restart the app' : 'not connected',
-    connect: async () => { await api.connectChatGPT(); $('#provider-status').textContent = 'Complete sign-in in your browser.'; return state; },
+      : state.codex?.installed === false ? 'Codex CLI not installed' : state.codex?.installed && !state.codex.connected ? 'Codex not running · restart the app'
+        : state.codex?.signedIn ? KEPT_SIGNED_IN : 'not connected',
+    connect: async () => {
+      const result = await api.connectChatGPT();
+      if (!result?.started) return result; // The existing Codex login was reused.
+      $('#provider-status').textContent = 'Complete sign-in in your browser.'; return state;
+    },
     disconnect: () => api.logoutChatGPT(),
   });
   addAccount({
     id: 'claude-cli',
     label: 'Claude',
-    connected: !!state.claude?.loggedIn,
+    connected: claudeInUse(),
     installed: state.claude?.installed,
-    detail: state.claude?.loggedIn ? claudeDetail(state.claude) : (state.claude?.installed === false ? 'not installed' : 'not connected'),
+    detail: claudeInUse() ? claudeDetail(state.claude) : state.claude?.loggedIn ? KEPT_SIGNED_IN : (state.claude?.installed === false ? 'not installed' : 'not connected'),
     connect: () => api.claudeLogin(),
     disconnect: () => api.claudeLogout(),
   });
   addAccount({
     id: 'cursor-cli',
     label: 'Cursor',
-    connected: !!state.cursor?.loggedIn,
+    connected: cursorInUse(),
     installed: state.cursor?.installed,
-    detail: state.cursor?.loggedIn
+    detail: cursorInUse()
       ? (state.cursor.email || state.cursor.identity || 'CLI connected')
-      : (state.cursor?.installed === false ? 'not installed' : 'not connected'),
+      : state.cursor?.loggedIn ? KEPT_SIGNED_IN : (state.cursor?.installed === false ? 'not installed' : 'not connected'),
     connect: () => api.cursorLogin(),
     disconnect: () => api.cursorLogout(),
   });
 
   const catalog = state.providerCatalog || [];
   const groups = [
-    { id: 'codex', title: 'Codex / ChatGPT', models: catalog.filter(m => !m.provider || m.provider === 'codex'), gated: state.codex?.connected === false },
-    { id: 'claude-cli', title: 'Claude', models: catalog.filter(m => m.provider === 'claude-cli'), gated: !state.claude?.loggedIn },
-    { id: 'cursor-cli', title: 'Cursor', models: catalog.filter(m => m.provider === 'cursor-cli'), gated: !state.cursor?.loggedIn, discover: true },
+    { id: 'codex', title: 'Codex / ChatGPT', models: catalog.filter(m => !m.provider || m.provider === 'codex'), gated: !state.account },
+    { id: 'claude-cli', title: 'Claude', models: catalog.filter(m => m.provider === 'claude-cli'), gated: !claudeInUse() },
+    { id: 'cursor-cli', title: 'Cursor', models: catalog.filter(m => m.provider === 'cursor-cli'), gated: !cursorInUse(), discover: true },
   ];
 
   for (const group of groups) {
@@ -1116,7 +1126,7 @@ $('#renew-models').onclick = async () => {
     discoveredModels.delete('cursor-cli');
     const next = await api.renewModels();
     applyState(next);
-    if (state.cursor?.loggedIn) await loadDiscoveredModels('cursor-cli');
+    if (cursorInUse()) await loadDiscoveredModels('cursor-cli');
     renderProviders();
     $('#provider-status').textContent = next.modelRefreshNote || 'Models refreshed.';
   } catch (e) {
@@ -1182,7 +1192,7 @@ document.querySelectorAll('.settings-tab').forEach(tab => {
     if (name === 'checks') renderChecks();
     if (name === 'providers') {
       renderProviders();
-      if (state.cursor?.loggedIn) loadDiscoveredModels('cursor-cli').then(() => renderProviders()).catch(e => { $('#provider-status').textContent = e.message; });
+      if (cursorInUse()) loadDiscoveredModels('cursor-cli').then(() => renderProviders()).catch(e => { $('#provider-status').textContent = e.message; });
     }
   };
 });

@@ -201,15 +201,18 @@ class Controller extends EventEmitter {
       // A failed Codex load only removes Codex for this refresh; Claude/Cursor stay usable and a later refresh can recover.
       try {
         account = (await this.client.call('account/read', { refreshToken: false })).account;
+        this.codex.signedIn = !!account;
+        // Disconnected in the Harness: the Codex CLI stays signed in, but ChatGPT and its models are not used here.
+        if (this.data.settings.chatgptEnabled === false) account = null;
         let cursor = null;
-        do {
+        if (account) do {
           const page = await this.client.call('model/list', { limit: 100, includeHidden: true, ...(cursor ? { cursor } : {}) });
           models.push(...(page.data || []));
           cursor = page.nextCursor || null;
         } while (cursor && models.length < 500);
         delete this.codex.error;
       } catch (error) { account = null; models = []; this.codex.error = error.message; }
-    }
+    } else if (this.codex) this.codex.signedIn = false;
     const nextAccount = account ? { type: account.type, plan: account.planType, email: account.email || null } : null;
     if (JSON.stringify(this.account) !== JSON.stringify(nextAccount)) this.smartRouter.close?.();
     this.account = nextAccount;
@@ -220,6 +223,15 @@ class Controller extends EventEmitter {
         : 'No provider is connected. Install or connect one in Settings → Providers.';
     this.adoptRouter();
     this.changed();
+  }
+
+  // Disconnect only stops the Harness from using a provider. The CLI logins are shared with Codex CLI, Claude Code
+  // and Cursor outside the Harness, so they are never signed out from here.
+  setProviderEnabled(id, enabled) {
+    if (this.busy) throw new Error('Stop the current turn before changing providers.');
+    const key = { codex: 'chatgptEnabled', 'claude-cli': 'claudeEnabled', 'cursor-cli': 'cursorEnabled' }[id];
+    if (!key || typeof enabled !== 'boolean') throw new Error('Unknown provider.');
+    this.data.settings[key] = enabled;
   }
 
   // Without ChatGPT, fall back to an available router instead of keeping an unusable Codex one.
@@ -280,7 +292,7 @@ class Controller extends EventEmitter {
   }
 
   available(p) {
-    if (p.provider === 'cursor-cli') return p.enabled !== false && this.cursor.status.loggedIn;
+    if (p.provider === 'cursor-cli') return p.enabled !== false && this.data.settings.cursorEnabled !== false && this.cursor.status.loggedIn;
     if (p.provider === 'claude-cli') return p.enabled !== false && !!this.data.settings.claudeEnabled && this.claude.status.loggedIn;
     if (p.provider && p.provider !== 'codex') {
       // API providers run through the Codex app-server.
@@ -394,7 +406,7 @@ class Controller extends EventEmitter {
   snapshot() {
     return {
       benchmarks: this.smartRouter.benchmarks?.summary(this.catalog().filter(p => p.worker && p.enabled && this.available(p))),
-      cursor: this.cursor.status,
+      cursor: { ...this.cursor.status, enabled: this.data.settings.cursorEnabled !== false },
       claude: { ...this.claude.status, enabled: !!this.data.settings.claudeEnabled },
       codex: this.codex,
       ...this.data, settings: { ...this.data.settings, mode: this.planPreset() ? 'auto' : this.data.settings.mode }, planRouting: this.planPreset(), connection: this.connection, error: this.error, account: this.account, busy: this.busy,

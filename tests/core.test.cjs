@@ -1081,3 +1081,38 @@ test('Jev failure falls back to the smart router; a stop or a missing smart rout
   await assert.rejects(controller.send({ id: session.id, text: 'third', mode: 'auto', task: 'off' }), /Jev routing stopped: timeout/);
   assert.deepEqual(calls, ['jev']);
 });
+
+test('disconnecting a provider in the Harness hides its models without signing the CLI out', async t => {
+  const { controller, fake } = await setup(t);
+  assert.ok(controller.account);
+  assert.ok(controller.catalog().some(p => p.provider === 'codex'));
+  controller.setProviderEnabled('codex', false);
+  fake.calls.length = 0;
+  await controller.refreshAccount();
+  assert.equal(controller.account, null, 'ChatGPT is not used by the Harness');
+  assert.deepEqual(controller.models, []);
+  assert.equal(controller.catalog().some(p => p.provider === 'codex'), false, 'no ChatGPT models are listed');
+  assert.equal(controller.codex.signedIn, true, 'the Codex CLI is still signed in');
+  assert.equal(fake.calls.some(c => c.method === 'account/logout'), false);
+  assert.equal(fake.calls.some(c => c.method === 'model/list'), false);
+  controller.setProviderEnabled('codex', true);
+  await controller.refreshAccount();
+  assert.ok(controller.account, 'reconnecting reuses the existing login');
+  assert.ok(controller.models.length);
+
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  const claude = controller.catalog().find(p => p.provider === 'claude-cli');
+  assert.equal(controller.available(claude), true);
+  controller.setProviderEnabled('claude-cli', false);
+  assert.equal(controller.available(claude), false);
+  assert.equal(controller.claude.status.loggedIn, true);
+
+  controller.cursor.status = { installed: true, loggedIn: true };
+  const cursor = { id: 'cursor-cli:auto:default', provider: 'cursor-cli', model: 'auto', enabled: true };
+  assert.equal(controller.available(cursor), true);
+  controller.setProviderEnabled('cursor-cli', false);
+  assert.equal(controller.available(cursor), false);
+  assert.equal(controller.snapshot().cursor.enabled, false);
+  assert.throws(() => controller.setProviderEnabled('nope', false), /Unknown provider/);
+});
