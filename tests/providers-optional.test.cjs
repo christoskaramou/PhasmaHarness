@@ -399,3 +399,9 @@ test('provider installer runs the official command and reports failures', async 
   else assert.deepEqual([file, args], ['bash', ['-lc', 'set -o pipefail; curl -fsSL https://claude.ai/install.sh | bash']]);
   await assert.rejects(install('codex', { spawnProcess: fakeSpawn(1) }), /Codex CLI install failed \(exit 1\)\. permission denied/);
 });
+
+test('Codex installs the single pinned version', () => {
+  const { CODEX_VERSION } = require('../src/providers/install.cjs');
+  assert.match(CODEX_VERSION, /^\d+\.\d+\.\d+$/);
+  assert.equal(installer('codex').command, `npm install --global @openai/codex@${CODEX_VERSION}`);
+});

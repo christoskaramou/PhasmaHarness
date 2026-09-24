@@ -1,8 +1,9 @@
 const { spawn } = require('node:child_process');
 
-// Official vendor installers. Codex stays on the tested app-server version used by Install Phasma Harness.cmd.
+// Official vendor installers. Codex is pinned to the app-server version the Harness is tested with; bump it here only.
+const CODEX_VERSION = '0.156.1';
 const INSTALLERS = {
-  codex: { label: 'Codex CLI', win32: 'npm install --global @openai/codex@0.153.4', posix: 'npm install --global @openai/codex@0.153.4' },
+  codex: { label: 'Codex CLI', win32: `npm install --global @openai/codex@${CODEX_VERSION}`, posix: `npm install --global @openai/codex@${CODEX_VERSION}` },
   'claude-cli': { label: 'Claude Code', win32: 'irm https://claude.ai/install.ps1 | iex', posix: 'curl -fsSL https://claude.ai/install.sh | bash' },
   'cursor-cli': { label: 'Cursor CLI', win32: "irm 'https://cursor.com/install?win32=true' | iex", posix: 'curl -fsS https://cursor.com/install | bash' },
 };
@@ -53,4 +54,4 @@ function install(id, options) {
   return run(label, file, args, options);
 }
 
-module.exports = { install, installer, run, INSTALLERS };
+module.exports = { install, installer, run, INSTALLERS, CODEX_VERSION };
