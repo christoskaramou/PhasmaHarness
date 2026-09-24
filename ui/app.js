@@ -1320,7 +1320,7 @@ function checkRow(check = {}) {
   return row;
 }
 
-// Edits on the Checks tab (add, remove, change) are saved by "Save checks" or by the dialog's Save button.
+// Edits on the Checks tab (add, remove, change) are saved with the rest of Settings by the dialog's Save button.
 let checksDirty = false;
 $('#checks-list').addEventListener('input', () => { checksDirty = true; });
 $('#checks-list').addEventListener('change', () => { checksDirty = true; });
@@ -1347,6 +1347,4 @@ async function saveChecks() {
   await api.checks(workspace, list);
   state.settings.checks = { ...(state.settings.checks || {}), [workspace]: list };
   checksDirty = false;
-  $('#checks-status').textContent = 'Checks saved.';
 }
-$('#checks-save').onclick = async () => { try { await saveChecks(); } catch (error) { notify(error); } };
