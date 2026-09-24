@@ -10,6 +10,18 @@ Desktop client (Windows and Linux) for local coding agents. One chat can use Cod
 
 No provider is required up front. Settings → Providers shows an **Install** button next to any provider that is not detected; it confirms, runs the vendor's official installer (npm for Codex 0.156.1, pinned as `CODEX_VERSION` in `src/providers/install.cjs`, claude.ai/install for Claude, cursor.com/install for Cursor), then re-detects it. Sign in with the plug button afterwards. Configured task checks run in the Codex sandbox when Codex is connected; otherwise they run as local processes after an approval prompt that says so (Full access skips the prompt), with the same timeout, Stop and crash-recovery handling on Windows and Linux. The execution block is saved before a local check starts. When the check exits, everything it started is stopped and verified gone (Linux: an inherited `PHASMA_HARNESS_CHECK` environment tag; Windows: the process tree recorded while it runs, plus `ParentProcessId` links); a detached leftover is reported on the result, and an unverifiable one keeps the block. Descendants that clear their environment (Linux) or whose short-lived parent exited unseen (Windows) are not tracked. The context meter and manual compaction work for Codex and Claude sessions; Cursor reports no usage and has no compact command. OpenAI-compatible API providers, the connected-MCP gateway and ChatGPT models still need Codex, which is their runtime. Jev is optional and uses a key you save in Settings.
 
+### Access by provider
+
+The access setting applies to every provider; Codex enforces it with its OS sandbox, Claude and Cursor with Harness approval prompts.
+
+| | Codex | Claude Code | Cursor |
+|---|---|---|---|
+| Ask | read-only sandbox, no network; more asks | reads inside the workspace and read-only commands run; outside reads, other commands, edits and web ask. Small tool set, no subagents | permission requests ask |
+| Workspace access | workspace-write sandbox, no network; more asks | reads, edits and filesystem commands inside the workspace run; other commands, outside edits and web ask | permission requests ask |
+| Full access | no sandbox, no prompts | `bypassPermissions` | auto-approved |
+
+Routing classifiers get no tools on any provider. An approval still open when a turn ends, is stopped, or is withdrawn by the CLI is declined. Claude's own `~/.claude` allow and deny rules still apply. Claude effort is set per model in Settings → Providers (default: the CLI's own setting).
+
 ## Run
 
 ```
