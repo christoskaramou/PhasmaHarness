@@ -83,6 +83,25 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderProviders(); true');
   const models = await window.webContents.executeJavaScript("document.querySelector('#provider-model-list').textContent");
   assert.match(models, /claude-opus-5-5 · low\/high\/max/, 'one Claude row per model listing its efforts, like Codex');
+  // Manual selection: one entry per model, and an effort select with every effort that model supports.
+  const picker = await window.webContents.executeJavaScript(`(() => {
+    showMode('claude-cli:claude-opus-5-5:high');
+    const effort = document.querySelector('#effort');
+    const result = { model: document.querySelector('#preset').selectedOptions[0].textContent, efforts: [...effort.options].map(o => o.textContent), effort: effort.value, hidden: effort.hidden, mode: currentMode(),
+      models: [...document.querySelector('#preset').options].map(o => o.textContent) };
+    effort.value = 'max'; result.after = currentMode();
+    showMode('auto'); result.autoHidden = effort.hidden; result.autoMode = currentMode();
+    return result;
+  })()`);
+  assert.equal(picker.model, 'claude-opus-5-5');
+  assert.deepEqual(picker.efforts, ['low', 'high', 'max']);
+  assert.equal(picker.effort, 'high');
+  assert.equal(picker.hidden, false);
+  assert.equal(picker.mode, 'claude-cli:claude-opus-5-5:high');
+  assert.equal(picker.after, 'claude-cli:claude-opus-5-5:max');
+  assert.equal(picker.models.filter(m => m === 'claude-opus-5-5').length, 1, 'one entry per model, not per effort');
+  assert.equal(picker.autoHidden, true);
+  assert.equal(picker.autoMode, 'auto');
   assert.equal(await window.webContents.executeJavaScript("providerCaps('cursor-cli').usage"), false);
   assert.equal(await window.webContents.executeJavaScript("providerCaps('claude-cli').steer"), false);
   assert.equal(await window.webContents.executeJavaScript("providerCaps(undefined).steer"), true);

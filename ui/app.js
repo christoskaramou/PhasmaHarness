@@ -25,6 +25,44 @@ const claudeInUse = () => !!state?.claude?.loggedIn && state.claude.enabled !== 
 const cursorInUse = () => !!state?.cursor?.loggedIn && state.cursor.enabled !== false;
 const KEPT_SIGNED_IN = 'disconnected';
 
+// Manual selection: pick a model, then one of the efforts it supports. A worker ID is claude-cli:<model>:<effort>,
+// codex:<model>:<effort>, …; variants of one model share provider + model.
+const EFFORT_ORDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+function presetGroups() {
+  const groups = new Map();
+  for (const p of (state?.presets || []).filter(p => p.available)) {
+    const key = `${p.provider || 'codex'}|${p.model}`;
+    const group = groups.get(key) || { key, variants: [] };
+    group.variants.push(p);
+    groups.set(key, group);
+  }
+  for (const group of groups.values()) {
+    group.variants.sort((a, b) => EFFORT_ORDER.indexOf(a.effort) - EFFORT_ORDER.indexOf(b.effort));
+    const only = group.variants[0];
+    group.label = group.variants.length === 1 && !only.effort ? only.label : only.model;
+  }
+  return [...groups.values()];
+}
+function currentMode() {
+  const group = presetGroups().find(g => g.key === $('#preset').value);
+  if (!group) return 'auto';
+  return (group.variants.find(p => (p.effort || '') === $('#effort').value) || group.variants[0]).id;
+}
+// Show a worker ID in the two selects; unknown or auto shows Auto.
+function showMode(id) {
+  const groups = presetGroups();
+  const group = groups.find(g => g.variants.some(p => p.id === id));
+  $('#preset').value = group ? group.key : 'auto';
+  const effort = $('#effort');
+  const variants = group?.variants || [];
+  const values = variants.map(p => p.effort || '');
+  if ([...effort.options].map(o => o.value).join('|') !== values.join('|')) {
+    effort.replaceChildren(...variants.map(p => new Option(p.effort || 'default', p.effort || '')));
+  }
+  effort.value = variants.find(p => p.id === id)?.effort || values[0] || '';
+  effort.hidden = variants.length < 2;
+}
+
 function connectedProviders() {
   if (!state) return [];
   const rows = [];
@@ -335,15 +373,13 @@ function render() {
   $('#banner').textContent = sticky || flash;
   $('#banner').hidden = !$('#banner').textContent;
   const preset = $('#preset');
-  const availablePresets = state.presets.filter(p => p.available);
-  if ([...preset.options].slice(1).map(o => o.value).join('|') !== availablePresets.map(p => p.id).join('|')) {
+  const groups = presetGroups();
+  if ([...preset.options].slice(1).map(o => o.value).join('|') !== groups.map(g => g.key).join('|')) {
     preset.replaceChildren(new Option('Auto · choose for me', 'auto'));
-    for (const p of availablePresets) { const option = new Option(p.label, p.id); preset.add(option); }
+    for (const g of groups) preset.add(new Option(g.label, g.key));
   }
-  for (const option of [...preset.options].slice(1)) {
-    option.textContent = availablePresets.find(p => p.id === option.value).label;
-  }
-  preset.value = availablePresets.some(p => p.id === state.settings.mode) ? state.settings.mode : 'auto';
+  for (const option of [...preset.options].slice(1)) option.textContent = groups.find(g => g.key === option.value).label;
+  showMode(state.settings.mode);
   const query = $('#search').value.toLowerCase();
   const sessions = state.sessions.filter(s => !s.archived && (s.title + s.workspace).toLowerCase().includes(query));
   $('#session-count').textContent = sessions.length;
@@ -395,7 +431,7 @@ function render() {
           if (action === 'edit') {
             drafts.set(session.id, edited.text); imageDrafts.set(session.id, edited.images);
             if (selectedId === session.id) {
-              $('#prompt').value = edited.text; $('#preset').value = edited.mode;
+              $('#prompt').value = edited.text; showMode(edited.mode);
               renderImages(); updatePreview(); $('#prompt').focus();
             }
           }
@@ -580,12 +616,12 @@ async function updatePreview() {
   const prompt = $('#prompt').value;
   $('#send').disabled = state?.connection !== 'ready' || changingPermissions || submitting || readingImages || (!prompt.trim() && !attachedImages().length);
   if (!prompt.trim()) {
-    const selected = state?.presets.find(p => p.id === $('#preset').value);
+    const selected = state?.presets.find(p => p.id === currentMode());
     $('#route-preview').replaceChildren(element('span', 'route-dot'), element('strong', '', selected?.label || 'Auto'), element('span', '', selected ? 'Your manual selection.' : 'Task context is checked when you send.'));
     return;
   }
   try {
-    const selected = await api.preview(selectedId, prompt, $('#preset').value);
+    const selected = await api.preview(selectedId, prompt, currentMode());
     if (version !== routeVersion) return;
     $('#route-preview').replaceChildren(element('span', 'route-dot'), element('strong', '', selected.provisional ? 'Smart Auto' : selected.label), element('span', '', selected.reason));
   } catch (error) { notify(error); }
@@ -661,7 +697,7 @@ $('#composer').addEventListener('submit', async event => {
     sentHistory = null; sentHistoryIndex = -1;
     drafts.set(selectedId, ''); $('#prompt').value = ''; updatePreview();
     imageDrafts.delete(selectedId); renderImages();
-    await api.send({ id: selectedId, text, images, mode: $('#preset').value, task: 'on' });
+    await api.send({ id: selectedId, text, images, mode: currentMode(), task: 'on' });
   } catch (error) {
     if (!$('#prompt').value) { $('#prompt').value = text; drafts.set(selectedId, text); }
     if (images.length) imageDrafts.set(selectedId || 'new', images);
@@ -689,7 +725,15 @@ $('#prompt').addEventListener('keydown', event => {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); $('#composer').requestSubmit(); }
 });
 $('#new-session').onclick = () => { selectSession(null); $('#prompt').focus(); };
-$('#preset').onchange = async () => { try { applyState(await api.settings({ mode: $('#preset').value })); updatePreview(); } catch (error) { notify(error); } };
+const saveMode = async mode => { try { applyState(await api.settings({ mode })); updatePreview(); } catch (error) { notify(error); showMode(state.settings.mode); } };
+// A new model keeps the current effort when it supports it, else medium, else its lowest effort.
+$('#preset').onchange = () => {
+  const group = presetGroups().find(g => g.key === $('#preset').value);
+  if (!group) return saveMode('auto');
+  const keep = group.variants.find(p => (p.effort || '') === $('#effort').value) || group.variants.find(p => p.effort === 'medium') || group.variants[0];
+  showMode(keep.id); saveMode(keep.id);
+};
+$('#effort').onchange = () => saveMode(currentMode());
 $('#permissions').onchange = async () => {
   const access = $('#permissions').value;
   if (!selectedId) { draftAccess = access; render(); return; }
