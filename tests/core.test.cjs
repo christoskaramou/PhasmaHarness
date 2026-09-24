@@ -967,3 +967,19 @@ test('Claude tool approvals use the Harness prompt and are withdrawn when the tu
   assert.equal(await second, false, 'an unanswered approval is declined when the turn ends');
   assert.equal([...controller.requests.keys()].some(id => id.startsWith('cli-')), false);
 });
+
+test('Claude router fallback uses a discovered Haiku ID and keeps a working router', async t => {
+  const { controller } = await setup(t);
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  controller.claude.models = ['claude-opus-5-5', 'claude-haiku-4-5', 'claude-sonnet-5'].map(model => ({ id: 'claude-cli:' + model, model, label: model, provider: 'claude-cli', effort: null, efforts: [], rank: 35, worker: true, router: true, images: true }));
+  controller.data.settings.routerPreset = 'claude-cli:haiku';
+  controller.claudeRouterFallback();
+  assert.equal(controller.data.settings.routerPreset, 'claude-cli:claude-haiku-4-5');
+  controller.data.settings.routerPreset = 'claude-cli:claude-sonnet-5';
+  controller.claudeRouterFallback();
+  assert.equal(controller.data.settings.routerPreset, 'claude-cli:claude-sonnet-5');
+  controller.data.settings.disabledModels = ['claude-cli:claude-haiku-4-5', 'claude-cli:claude-sonnet-5'];
+  controller.claudeRouterFallback();
+  assert.equal(controller.data.settings.routerPreset, 'claude-cli:claude-opus-5-5');
+});

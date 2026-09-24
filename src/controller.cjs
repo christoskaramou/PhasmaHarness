@@ -284,6 +284,15 @@ class Controller extends EventEmitter {
     if (choice) this.smartRouter.warm(choice);
   }
 
+  // Claude IDs come from discovery (claude-cli:<resolved model>), so there is no fixed alias to fall back to.
+  // Keep a working router if one is set; otherwise prefer the cheapest Claude tier, Haiku.
+  claudeRouterFallback() {
+    if (this.routerChoices().some(p => p.id === this.data.settings.routerPreset && this.available(p))) return;
+    const claude = this.routerChoices().filter(p => p.provider === 'claude-cli' && this.available(p));
+    const router = claude.find(p => /haiku/i.test(p.model)) || claude[0];
+    if (router) this.data.settings.routerPreset = router.id;
+  }
+
   routerChoices() {
     return this.catalog().filter(p => p.router && p.enabled !== false &&
       (['codex', 'claude-cli', 'cursor-cli'].includes(p.provider) || this.data.settings.providers?.some(v => v.id === p.provider && v.enabled)));

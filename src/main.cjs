@@ -112,14 +112,14 @@ async function start() {
     if (controller.busy) throw new Error('Wait for the current turn to finish before signing in.');
     const status = await controller.claude.login(url => shell.openExternal(url));
     if (status.loggedIn) controller.data.settings.claudeEnabled = true;
-    if (status.loggedIn && !controller.routerChoices().some(p => p.id === controller.data.settings.routerPreset && controller.available(p))) controller.data.settings.routerPreset = 'claude-cli:haiku';
+    if (status.loggedIn) controller.claudeRouterFallback();
     await controller.refreshAccount(); controller.save(); return controller.snapshot();
   });
   handle('claudeRefresh', async () => {
     if (controller.busy) throw new Error('Wait for the current turn to finish.');
     await controller.claude.refresh();
     if (controller.claude.status.loggedIn) controller.data.settings.claudeEnabled = true;
-    if (controller.claude.status.loggedIn && !controller.routerChoices().some(p => p.id === controller.data.settings.routerPreset && controller.available(p))) controller.data.settings.routerPreset = 'claude-cli:haiku';
+    if (controller.claude.status.loggedIn) controller.claudeRouterFallback();
     await controller.refreshAccount(); controller.save(); return controller.snapshot();
   });
   handle('claudeLogout', async () => {
