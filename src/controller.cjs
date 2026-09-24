@@ -311,6 +311,12 @@ class Controller extends EventEmitter {
   // or back to the default Codex router, so routing does not fail on an ID that no longer exists.
   migrateLegacyRouter() {
     if (!LEGACY_CLAUDE_ROUTERS.includes(this.data.settings.routerPreset)) return;
+    // Keep the family the user chose: the model the CLI alias resolves to, else a discovered model of that family.
+    const family = this.data.settings.routerPreset.slice('claude-cli:'.length);
+    const claude = this.routerChoices().filter(p => p.provider === 'claude-cli' && this.available(p));
+    const named = claude.filter(p => p.model.toLowerCase().includes(family));
+    const same = claude.find(p => p.aliases?.includes(family)) || named.find(p => !p.model.endsWith('[1m]')) || named[0];
+    if (same) { this.data.settings.routerPreset = same.id; return; }
     this.claudeRouterFallback();
     const preset = this.data.settings.routerPreset;
     if (LEGACY_CLAUDE_ROUTERS.includes(preset) && !this.routerChoices().some(p => p.id === preset)) this.data.settings.routerPreset = DEFAULT_ROUTER;

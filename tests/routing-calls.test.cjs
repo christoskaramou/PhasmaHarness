@@ -72,3 +72,14 @@ test('Stop during workspace scanning prevents the second paid call', async () =>
   await assert.rejects(router.choose('review changes', session, []), { name: 'AbortError' });
   assert.equal(calls, 1);
 });
+
+test('a Claude router runs at its selected effort; unset leaves the CLI default and Cursor gets none', async () => {
+  const router = new SmartRouter(__dirname);
+  const seen = [];
+  router.claude = { run: async options => { seen.push(['claude', options.effort]); return { structured_output: decision(false) }; } };
+  router.cursor = { run: async options => { seen.push(['cursor', options.effort]); return { structured_output: decision(false) }; } };
+  await router.classifyCodex('x', session, [worker], 'claude-haiku-4-5', 'low', evidence, { provider: 'claude-cli' }, new AbortController());
+  await router.classifyCodex('x', session, [worker], 'claude-haiku-4-5', null, evidence, { provider: 'claude-cli' }, new AbortController());
+  await router.classifyCodex('x', session, [worker], 'auto', 'low', evidence, { provider: 'cursor-cli' }, new AbortController());
+  assert.deepEqual(seen, [['claude', 'low'], ['claude', undefined], ['cursor', undefined]]);
+});

@@ -25,6 +25,7 @@ test('Claude discovers versioned models without inference, deduplicates aliases 
   });
   const models = await cli.discover();
   assert.deepEqual(models.map(m => m.model), ['claude-opus-5[1m]', 'claude-fable-5-1[1m]', 'claude-haiku-4-5']);
+  assert.deepEqual(models.map(m => m.aliases), [['default', 'opus[1m]'], [], ['haiku']], 'CLI aliases are kept for migrating saved alias IDs');
   assert.equal(requests.length, 1);
   assert.equal(requests[0].request.subtype, 'initialize');
   assert.ok(args.includes('--no-session-persistence'));

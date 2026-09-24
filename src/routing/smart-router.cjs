@@ -135,7 +135,9 @@ class SmartRouter {
       const schema = { type: 'object', properties: { preset: { type: 'string', enum: available.map(p => p.id) }, reason: { type: 'string', maxLength: 240 },
         taskKind: { type: 'string', enum: TASK_KINDS }, workspaceRelevant: { type: 'boolean' }, needsChecks: { type: 'boolean' }, risk: { type: 'string', enum: RISKS }, uncertainty: { type: 'string', enum: UNCERTAINTIES } },
         required: ['preset', 'reason', 'taskKind', 'workspaceRelevant', 'needsChecks', 'risk', 'uncertainty'], additionalProperties: false };
+      // Claude takes the router's selected effort (unset = CLI default); Cursor's effort is part of its model ID.
       const result = await this[choice.provider === 'cursor-cli' ? 'cursor' : 'claude'].run({ cwd: this.directory, model, schema,
+        ...(choice.provider === 'claude-cli' && effort ? { effort } : {}),
         signal: AbortSignal.any([abort.signal, AbortSignal.timeout(this.timeoutMs)]),
         prompt: INSTRUCTIONS + '\nWorker catalog: ' +
           JSON.stringify(routerCatalog(available)) + '\nTask context: ' + JSON.stringify(contextFor(text, session, workspace)) });

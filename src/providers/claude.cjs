@@ -72,7 +72,9 @@ class ClaudeCLI {
               if (typeof model !== 'string' || !model.trim()) throw new Error('Claude returned an invalid model.');
               if (entry.value?.endsWith('[1m]') && !model.endsWith('[1m]')) model += '[1m]';
               const efforts = entry.supportsEffort && Array.isArray(entry.supportedEffortLevels) ? EFFORTS.filter(e => entry.supportedEffortLevels.includes(e)) : [];
-              models.set(model, { id: `claude-cli:${model}`, model, label: model, provider: 'claude-cli', effort: null, efforts,
+              // Remember which CLI aliases (opus, sonnet[1m], …) resolve to this model, so saved alias IDs can be migrated.
+              const aliases = [...(models.get(model)?.aliases || []), ...(typeof entry.value === 'string' && !entry.value.startsWith('claude-') ? [entry.value] : [])];
+              models.set(model, { id: `claude-cli:${model}`, model, label: model, provider: 'claude-cli', effort: null, efforts, aliases,
                 rank: 35, worker: true, router: true, images: true });
             }
             finish(null, [...models.values()]);

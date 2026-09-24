@@ -1030,3 +1030,21 @@ test('a withdrawn Claude approval disappears from the Harness, and late requests
   assert.equal(await late({ title: 'late' }), false);
   assert.equal([...controller.requests.keys()].some(id => id.startsWith('cli-')), false, 'no prompt for a finished turn');
 });
+
+test('a saved Claude router alias keeps its family when that family is discovered', async t => {
+  const { controller } = await setup(t);
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  const model = (id, aliases = []) => ({ id: 'claude-cli:' + id, model: id, label: id, provider: 'claude-cli', effort: null, efforts: [], aliases, rank: 35, worker: true, router: true, images: true });
+  controller.claude.models = [model('claude-haiku-4-5', ['haiku']), model('claude-opus-5-5[1m]', ['opus[1m]']), model('claude-opus-5-5', ['opus']), model('claude-sonnet-5')];
+  for (const [saved, expected] of [['claude-cli:opus', 'claude-cli:claude-opus-5-5'], ['claude-cli:sonnet', 'claude-cli:claude-sonnet-5'], ['claude-cli:haiku', 'claude-cli:claude-haiku-4-5']]) {
+    controller.data.settings.routerPreset = saved;
+    controller.migrateLegacyRouter();
+    assert.equal(controller.data.settings.routerPreset, expected, saved);
+  }
+  // Without that family, the cheapest available Claude router is used.
+  controller.claude.models = [model('claude-haiku-4-5'), model('claude-sonnet-5')];
+  controller.data.settings.routerPreset = 'claude-cli:opus';
+  controller.migrateLegacyRouter();
+  assert.equal(controller.data.settings.routerPreset, 'claude-cli:claude-haiku-4-5');
+});
