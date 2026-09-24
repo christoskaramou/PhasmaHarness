@@ -80,6 +80,7 @@ app.whenReady().then(async () => {
   controller.claude.status = { installed: true, loggedIn: true };
   controller.claude.models = [{ id: 'claude-cli:claude-opus-5-5', model: 'claude-opus-5-5', label: 'claude-opus-5-5', provider: 'claude-cli', effort: null,
     efforts: ['low', 'high', 'max'], rank: 35, worker: true, router: true, images: true }];
+  controller.data.settings.disabledCodexModels = []; // gpt-6-sol enabled too, to check provider sections
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderProviders(); true');
   const models = await window.webContents.executeJavaScript("document.querySelector('#provider-model-list').textContent");
   assert.match(models, /claude-opus-5-5 · low\/high\/max/, 'one Claude row per model listing its efforts, like Codex');
@@ -100,6 +101,10 @@ app.whenReady().then(async () => {
   assert.equal(picker.mode, 'claude-cli:claude-opus-5-5:high');
   assert.equal(picker.after, 'claude-cli:claude-opus-5-5:max');
   assert.equal(picker.models.filter(m => m === 'claude-opus-5-5').length, 1, 'one entry per model, not per effort');
+  const sections = await window.webContents.executeJavaScript(`[...document.querySelectorAll('#preset optgroup')].map(g => [g.label, [...g.children].map(o => o.textContent)])`);
+  assert.deepEqual(sections.map(([label]) => label), ['Codex / ChatGPT', 'Claude'], 'models are listed under their provider, Codex first');
+  assert.deepEqual(sections[0][1], ['gpt-6-sol']);
+  assert.deepEqual(sections[1][1], ['claude-opus-5-5']);
   assert.equal(picker.autoHidden, true);
   assert.equal(picker.autoMode, 'auto');
   assert.equal(await window.webContents.executeJavaScript("providerCaps('cursor-cli').usage"), false);

@@ -28,20 +28,27 @@ const KEPT_SIGNED_IN = 'disconnected';
 // Manual selection: pick a model, then one of the efforts it supports. A worker ID is claude-cli:<model>:<effort>,
 // codex:<model>:<effort>, …; variants of one model share provider + model.
 const EFFORT_ORDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+const PROVIDER_ORDER = ['codex', 'claude-cli', 'cursor-cli'];
+const PROVIDER_TITLES = { codex: 'Codex / ChatGPT', 'claude-cli': 'Claude', 'cursor-cli': 'Cursor' };
+const providerTitle = id => PROVIDER_TITLES[id] || state?.settings?.providers?.find(p => p.id === id)?.name || id;
 function presetGroups() {
   const groups = new Map();
   for (const p of (state?.presets || []).filter(p => p.available)) {
-    const key = `${p.provider || 'codex'}|${p.model}`;
-    const group = groups.get(key) || { key, variants: [] };
+    const provider = p.provider || 'codex';
+    const key = `${provider}|${p.model}`;
+    const group = groups.get(key) || { key, provider, variants: [] };
     group.variants.push(p);
     groups.set(key, group);
   }
   for (const group of groups.values()) {
     group.variants.sort((a, b) => EFFORT_ORDER.indexOf(a.effort) - EFFORT_ORDER.indexOf(b.effort));
     const only = group.variants[0];
-    group.label = group.variants.length === 1 && !only.effort ? only.label : only.model;
+    group.label = group.variants.length === 1 && !only.effort ? only.label : only.modelLabel || only.model;
   }
-  return [...groups.values()];
+  // Grouped by provider (Codex, Claude, Cursor, then API providers by name), models by name within each.
+  const rank = g => { const i = PROVIDER_ORDER.indexOf(g.provider); return i < 0 ? PROVIDER_ORDER.length : i; };
+  return [...groups.values()].sort((a, b) => rank(a) - rank(b) || providerTitle(a.provider).localeCompare(providerTitle(b.provider))
+    || a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: 'base' }));
 }
 function currentMode() {
   const group = presetGroups().find(g => g.key === $('#preset').value);
@@ -374,11 +381,20 @@ function render() {
   $('#banner').hidden = !$('#banner').textContent;
   const preset = $('#preset');
   const groups = presetGroups();
-  if ([...preset.options].slice(1).map(o => o.value).join('|') !== groups.map(g => g.key).join('|')) {
+  const signature = groups.map(g => `${g.provider}|${providerTitle(g.provider)}|${g.key}|${g.label}`).join('\n');
+  if (preset.dataset.signature !== signature) {
     preset.replaceChildren(new Option('Auto · choose for me', 'auto'));
-    for (const g of groups) preset.add(new Option(g.label, g.key));
+    let section = null;
+    for (const g of groups) {
+      if (section?.dataset.provider !== g.provider) {
+        section = document.createElement('optgroup');
+        section.label = providerTitle(g.provider); section.dataset.provider = g.provider;
+        preset.append(section);
+      }
+      section.append(new Option(g.label, g.key));
+    }
+    preset.dataset.signature = signature;
   }
-  for (const option of [...preset.options].slice(1)) option.textContent = groups.find(g => g.key === option.value).label;
   showMode(state.settings.mode);
   const query = $('#search').value.toLowerCase();
   const sessions = state.sessions.filter(s => !s.archived && (s.title + s.workspace).toLowerCase().includes(query));
