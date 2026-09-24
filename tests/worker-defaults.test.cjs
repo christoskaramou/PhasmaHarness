@@ -19,8 +19,11 @@ test('a relocated checkout loads full bundled skills without global skill folder
     const body = fs.readFileSync(path.join(directory, 'SKILL.md'), 'utf8')
       .replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '')
       .replaceAll('{{SKILL_DIR}}', directory.replace(/\\/g, '/'));
-    assert.ok(loaded.WORKER_INSTRUCTIONS.includes(body));
+    assert.equal(loaded.readSkill(name), body, `${name} is readable on demand from the relocated checkout`);
+    assert.ok(loaded.WORKER_INSTRUCTIONS.includes(path.join(directory, 'SKILL.md').replace(/\\/g, '/')), `${name} is indexed with its relocated path`);
   }
+  assert.ok(loaded.WORKER_INSTRUCTIONS.length < 4000, 'workers get the short defaults and index, not full skill bodies');
+  assert.match(loaded.WORKER_INSTRUCTIONS, /caveman: OPT-IN/);
   assert.ok(!/[\\/]\.(agents|codex)[\\/]skills/.test(loaded.WORKER_INSTRUCTIONS));
   assert.ok(fs.existsSync(path.join(root, 'skills/large-responses/scripts/output.cjs')));
 });
@@ -51,7 +54,7 @@ test('Claude and Cursor workers receive defaults; classifiers remain isolated', 
     const system = args[args.indexOf('--append-system-prompt') + 1];
     assert.equal(system.includes('Ponytail full'), !schema);
     await cursor.run({ model: 'test', prompt: 'hello', access: 'read-only', schema });
-    assert.equal(prompt.includes('Bundled skill: caveman'), !schema);
+    assert.equal(prompt.includes('Harness skills'), !schema);
     if (!schema) assert.ok(prompt.includes(WORKER_INSTRUCTIONS));
   }
 });

@@ -122,4 +122,33 @@ function compactCatalog(workers) {
   return { encoding: 'Each benchmark row inherits version, harness and date metadata from evaluations[row.evaluation]. Source and metric names are explicit in every row. Empty benchmarks means unknown.', evaluations, workers: entries };
 }
 
-module.exports = { BenchmarkStore, validateSnapshot, SOURCES, POLICY: POLICY + METRIC_GUIDE, workerCatalog, compactCatalog, MAX_BYTES };
+// Router view: one flat row per worker with only routing-relevant numbers (~1/4 of compactCatalog).
+// Per benchmark, only the most common plain (non-fallback) version+harness is kept, so a key is comparable across workers.
+const ROUTER_FIELDS = [
+  ['aa-index', 'score', 'index'], ['aa-index', 'inputUsdPerMillion', 'inUsdPerM'], ['aa-index', 'outputUsdPerMillion', 'outUsdPerM'], ['aa-index', 'tokensPerSecond', 'tokPerSec'],
+  ['deepswe', 'passPercent', 'repoEngineering'], ['aa-agent', 'score', 'codingAgent'], ['aa-terminal', 'passPercent', 'terminal'], ['terminal-bench', 'passPercent', 'terminalBench'],
+  ['aa-tool-use', 'passPercent', 'toolUse'], ['bfcl', 'score', 'toolCalling'], ['livecodebench', 'passPercent', 'algorithmic'], ['aa-lcr', 'score', 'longContext'],
+  ['aa-ifbench', 'passPercent', 'instructionFollowing'],
+];
+const ROUTER_GUIDE = ' Worker catalog keys (higher is better except prices; a missing key means unknown, not zero; each key comes from one benchmark version and harness, so it is comparable across workers): index = general intelligence; repoEngineering = DeepSWE repository tasks; codingAgent = coding-agent composite; terminal, terminalBench = terminal workflows; toolUse, toolCalling = tool use; algorithmic = LiveCodeBench; longContext = long-context reasoning; instructionFollowing = IFBench; inUsdPerM, outUsdPerM = API price per million tokens (not subscription quota); tokPerSec = output speed; stale = some values are older than 90 days.';
+
+function routerCatalog(workers) {
+  const catalog = workerCatalog(workers), chosen = new Map();
+  for (const [source] of ROUTER_FIELDS) {
+    if (chosen.has(source)) continue;
+    const counts = new Map();
+    for (const worker of catalog) for (const row of worker.benchmarks)
+      if (row.source === source && !/fallback/i.test(row.harness)) counts.set(`${row.version}|${row.harness}`, (counts.get(`${row.version}|${row.harness}`) || 0) + 1);
+    chosen.set(source, [...counts].sort((a, b) => b[1] - a[1])[0]?.[0]);
+  }
+  return catalog.map(({ id, label, benchmarks }) => {
+    const row = { id, label };
+    for (const [source, metric, key] of ROUTER_FIELDS) {
+      const found = benchmarks.find(b => b.source === source && `${b.version}|${b.harness}` === chosen.get(source) && Number.isFinite(b[metric]));
+      if (found) { row[key] = found[metric]; if (found.stale) row.stale = true; }
+    }
+    return row;
+  });
+}
+
+module.exports = { BenchmarkStore, validateSnapshot, SOURCES, POLICY: POLICY + METRIC_GUIDE, ROUTER_POLICY: POLICY + ROUTER_GUIDE, workerCatalog, compactCatalog, routerCatalog, MAX_BYTES };

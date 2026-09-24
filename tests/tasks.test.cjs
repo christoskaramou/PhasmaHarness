@@ -28,18 +28,9 @@ test('citation signals resolve current files with bounded reads and workspace/pr
 });
 const { shouldTrack, createTask, gateOutcome, summaryLine, correctionText, validateChecks, confirmTermination, identityFromProbe, MEASURED_REAP } = require('../src/tasks.cjs');
 
-test('task tracking follows the toggle and assessment', () => {
-  assert.equal(shouldTrack(undefined, 'auto'), false);
-  assert.equal(shouldTrack('conversation', 'auto'), false);
-  assert.equal(shouldTrack('implementation', 'auto'), true);
-  assert.equal(shouldTrack({ taskKind: 'implementation', workspaceRelevant: true, risk: 'medium', uncertainty: 'low' }, 'auto'), true);
-  assert.equal(shouldTrack({ taskKind: 'general', workspaceRelevant: false, risk: 'low', uncertainty: 'low' }, 'auto'), false);
-  assert.equal(shouldTrack({}, 'auto'), false);
-  assert.equal(shouldTrack('debugging', 'auto'), true);
-  assert.equal(shouldTrack('review', 'auto'), true);
-  assert.equal(shouldTrack('architecture', 'auto'), true);
-  assert.equal(shouldTrack(undefined, 'on'), true);
-  assert.equal(shouldTrack('implementation', 'off'), false);
+test('task tracking defaults on and only explicit off skips it', () => {
+  for (const mode of [undefined, 'on', 'auto']) assert.equal(shouldTrack(mode), true);
+  assert.equal(shouldTrack('off'), false);
 });
 
 test('no checks is not a pass, and blocked or unknown prevents correction', () => {

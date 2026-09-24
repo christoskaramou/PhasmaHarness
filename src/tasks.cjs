@@ -2,12 +2,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 
-const TRACKED = new Set(['implementation', 'debugging', 'review', 'architecture']);
 const FINAL = new Set(['checks-passed', 'not-checked', 'blocked', 'needs-you', 'cancelled']);
 // Measured 2026-09-23, codex-cli 0.153.4, Windows, dangerFullAccess only.
 const MEASURED_REAP = Object.freeze({ codexVersion: '0.153.4', platform: 'win32', sandbox: 'dangerFullAccess' });
 const OUTPUT_CAP = 64 * 1024;
-const CHECKLIST_INSTRUCTION = '\n\n[Harness instruction] Begin your final reply with "Done when:" followed by 3–6 short checkable bullets describing completion criteria for the request. Then give your normal result. These are proposed criteria, not verified check results.';
 
 function hasProjectWiki(workspace) {
   try {
@@ -82,15 +80,8 @@ function resolveCitations(workspace, text) {
   return { references, note: references.length ? null : 'No supported file:line references assessed.' };
 }
 
-function taskKind(assessment) {
-  if (typeof assessment === 'string') return assessment;
-  return typeof assessment?.taskKind === 'string' ? assessment.taskKind : '';
-}
-
-function shouldTrack(assessment, toggle) {
-  if (toggle === 'on') return true;
-  if (toggle === 'off') return false;
-  return TRACKED.has(taskKind(assessment));
+function shouldTrack(toggle) {
+  return toggle !== 'off';
 }
 
 function parentExitReaps(runtime) {
@@ -134,13 +125,13 @@ function summaryLine(task) {
   if (task.state === 'checking') return 'Running configured checks';
   if (task.state === 'correcting') return 'Sending one correction';
   if (workerFailed && task.state === 'needs-you') {
-    const checks = !results.length ? 'no checks configured'
+    const checks = !results.length ? (task.checksSkippedByRouter ? 'checks skipped by router' : 'no checks configured')
       : results.every(result => result.status === 'passed') ? 'configured checks passed'
         : 'checks did not all pass';
     return `Worker turn failed · ${checks}`;
   }
   if (task.state === 'checks-passed') return 'Configured checks passed · coverage not assessed';
-  if (task.state === 'not-checked') return 'No checks configured · coverage not assessed';
+  if (task.state === 'not-checked') return `${task.checksSkippedByRouter ? 'Checks skipped by router' : 'No checks configured'} · coverage not assessed`;
   if (task.state === 'blocked') {
     const blocked = results.find(result => result.status === 'blocked' || result.status === 'unknown');
     return `Blocked: ${blocked?.detail || task.reason || 'check did not run'}`;
@@ -225,7 +216,7 @@ function restartReason(task, block) {
 
 module.exports = {
   hasProjectWiki, canProposeWiki,
-  CHECKLIST_INSTRUCTION, parseChecklist, resolveCitations,
+  parseChecklist, resolveCitations,
   FINAL, MEASURED_REAP, OUTPUT_CAP, shouldTrack, createTask, gateOutcome, summaryLine, correctionText,
   validateChecks, confirmTermination, restartReason, capStream, identityFromProbe, lookupState, parentExitReaps, childBlocksClear,
 };

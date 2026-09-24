@@ -29,19 +29,18 @@ Sessions and settings are stored in `%APPDATA%\Phasma Harness`. The app uses you
 
 ## Tasks and checks
 
-The composer task control is Auto, Task on, or Task off. Auto tracks implementation, debugging, review, and architecture work. A direct answer is never a task.
+Worker messages are tracked automatically in the background. Direct Jev answers and wiki proposals remain untracked. Checks only run when configured; passing them does not establish complete task correctness. There are no task cards, acknowledgment buttons or per-message check controls.
 
-After a tracked turn, the app runs the checks configured for that workspace under Settings → Checks. The task keeps the checks and access it started with. One failed run gets a single correction on the same model. A blocked or unknown check stops that correction. Stop during checks cancels the task.
+Jev and Smart routing decide whether the configured workspace checks are useful for the current request, using their names and commands in the existing classification call. No extra model call is added. Relevant executable verification runs; unrelated checks can be skipped, with the decision retained in the internal task record. Manually selected models, which bypass routing, keep configured checks enabled . After a tracked turn, the app runs any retained checks configured under Settings → Checks. The task keeps the checks and access it started with. One failed run gets a single correction on the same model. A blocked or unknown check stops that correction. Stop during checks cancels the task.
 
-Tracked workers are asked for 3–6 proposed completion criteria at the start of their final reply. The task card displays these as unverified proposals; missing or malformed proposals are reported without inventing items. No additional model call is used.
+Workers give normal replies without a mandatory completion checklist. Check results and task evidence remain saved internally.
 
 The card also checks up to 20 explicit `file:line` or `file:start-end` citations from the latest final reply against current workspace files, reading at most 64 KiB per file. Paths outside the workspace (including symlink escapes), private paths, binary files, and files over the limit are not assessed. Resolved references only establish that the path and line range exist, not that the claim is correct. These signals never change check outcomes or trigger corrections. Other citation formats and historical file versions are not assessed.
 
 ### Wiki follow-up
 
-When a completed task has passing configured checks (or none configured), its card offers **Propose wiki update**. Clicking sends a normal follow-up, queued if that session is busy, to the same provider/model/effort with task tracking off. Availability is rechecked when the follow-up starts; the app does not substitute another worker.
 
-The worker is asked to inspect project instructions and relevant wiki/source files, identify durable knowledge, and return a proposed patch for your approval without editing files. It may conclude that no update is needed. The request includes the originating task ID, bounded goal/result excerpts, amendments, and check outcomes. There is no automatic wiki write, separate memory store, or automatic wiki-proposal chain. Applying an approved proposal is a separate user request, subject to the project's validation rules.
+After a worker completes and configured checks pass, Harness runs one internal wiki-maintenance turn on the same available model. It first assesses every original requirement and accepted amendment against current source and check evidence. Incomplete or ambiguous evidence means no edit. Only durable new knowledge belongs in the active wiki, with source references and verification dates; project instructions and source code are not changed. This is a model assessment, not a correctness guarantee. Failed, blocked, cancelled, unchecked and read-only tasks do not trigger maintenance. Existing access permissions and project validation rules still apply, including approval for an external wiki folder. Maintenance is hidden from chat, recorded on the task, and never replayed after interruption. It adds one worker turn per eligible task; no recursive tracking or automatic entry-file rewrites.
 
 ### Local wiki storage
 
@@ -74,9 +73,15 @@ Workspace-access follow-up on the same date/runtime: all three runs passed, at 2
 
 ### Bundled default skills
 
-Full SKILL.md files ship in skills/: caveman, ponytail, i-have-adhd, large-responses, workflow and rtk. The large-response Node helper and Ponytail license are included. No user-global skill directory is needed. src/worker-instructions.cjs loads their full bodies at startup for Codex/API, Claude and Cursor workers, including resumed sessions. Restart after editing skills. The installer checks these payload files.
+Full SKILL.md files ship in skills/: caveman, ponytail, i-have-adhd, large-responses, workflow and rtk. The large-response Node helper and Ponytail license are included. No user-global skill directory is needed. Workers get a short defaults block (action-first replies, Ponytail full, workflow, output budget, bundled rtk/rg, wiki) plus an index of the skills with their paths, about 750 tokens instead of the ~5,750 the full bodies cost. A worker reads a full skill only when its topic applies, through `router_read_output` with `{"skill": "<name>"}` (works in every access mode and provider) or the file. Caveman is opt-in: listed, never active by default. Restart after editing skills. The installer checks these payload files.
 
-Codex receives developer instructions; Claude an appended system prompt; Cursor a prompt prefix. Classifiers and Jev yes/no shortcuts stay unchanged. User style overrides remain supported through conversation instructions. Full skill bodies consume more context than summaries. These instructions are not enforced guarantees.
+### Routing cost
+
+On Auto, every message is routed from the full catalog, so a session that starts with a simple question can still move to a stronger model for review or debugging. Task tracking is enabled independently unless skipped for that message. The router is told which worker already holds the conversation (`currentWorker`) and keeps it when adequate, because switching makes the next worker re-read the conversation without the prompt cache once; it switches for a different capability need or a clearly cheaper adequate choice, not back and forth. The router sees a compact catalog: one flat row per worker with only routing-relevant numbers (general index, repository engineering, coding agent, terminal, tool use, algorithmic, long context, instruction following, API price, speed), each from one comparable benchmark version and harness, with assisted fallback runs excluded. Its fixed prompt is about 750 tokens instead of about 3,100. Jev ranking keeps the full benchmark view.
+
+Smart first classifies the request without scanning the workspace. Only when that decision needs workspace evidence does it scan and make a second call. Successful two-call routes sum both usages; general requests have no discarded background classifier. This saves calls on general requests, but makes workspace-dependent routing sequential and potentially slower. See [measured routing results](benchmarks/results/routing-demand.md).
+
+Codex receives developer instructions; Claude an appended system prompt; Cursor a prompt prefix. Classifiers and Jev yes/no shortcuts stay unchanged. User style overrides remain supported through conversation instructions. These instructions are not enforced guarantees.
 
 The installer provisions Node and Git when absent or unusable, and fetches RTK and ripgrep into `tools/bin`. Provider CLIs are installed on demand from Settings → Providers. Python is not required. Working installations are preserved. Bundled skill files are checked before installation. Downloads for Cursor, npm and Electron are kept in installers/; WinGet manages other package downloads. WinGet must already be available. This is not a complete offline installer. See skills/README.md.
 
@@ -86,6 +91,8 @@ Every worker receives the current <workspace>/INSTRUCTIONS.md through the same p
 
 Content is reread before worker turns. Codex/API threads resume with updated developer instructions when entry content or the selected wiki path changes; unchanged threads do not need extra resumes. Claude/Cursor receive current contents with each worker request. Provider-native instruction files remain untouched; workers are instructed to surface conflicts. This is model guidance, not an automatic conflict validator.
 
-The entry points to the active wiki supplied by Harness rather than embedding a machine-specific path that becomes stale when the wiki moves. PE keeps its existing root entry. A task card's Propose wiki update action can also propose a focused entry-file improvement based on verified workflow changes or recurring corrections, with evidence and a verification date. Apply only after user authorization. No automatic rewrites or separate memory database.
+The entry points to the active wiki supplied by Harness rather than embedding a machine-specific path that becomes stale when the wiki moves. PE keeps its existing root entry. The wiki proposal backend can also propose a focused entry-file improvement based on verified workflow changes or recurring corrections, with evidence and a verification date. Apply only after user authorization. No automatic rewrites or separate memory database.
 
 Memory consists of persistent per-workspace wiki pages, retrieved on demand via project_context, plus saved session history. Workers see the entry and wiki location, not the full wiki on every turn. Persistence does not guarantee the model retrieved every relevant fact; there is no automatic learning from every conversation.
+
+Claude model discovery uses the signed-in CLI initialization response, without an inference request. Providers and routing use its versioned model IDs, deduplicating aliases while retaining context variants. Renew refreshes this list; discovery errors never fall back to hard-coded Haiku/Sonnet/Opus presets.

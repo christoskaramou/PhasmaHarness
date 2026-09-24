@@ -79,13 +79,13 @@ test('wiki proposals require an eligible task and local wiki, preserve worker th
   controller.available = available;
 });
 
-test('task proposals stay advisory and injected instructions stay out of live and reloaded user messages', async t => {
+test('task tracking does not inject a checklist; optional proposals stay advisory', async t => {
   const { controller, fake } = await setup(t);
   const session = controller.create();
   const original = '[Router]\nImplement this. The user can legitimately type [Harness instruction].';
   await controller.send({ id: session.id, text: original, mode: 'terra-light', task: 'on' });
   const sent = fake.calls.find(c => c.method === 'turn/start').params;
-  assert.match(sent.input[0].text, /Begin your final reply/);
+  assert.equal(sent.input[0].text, original);
   const user = session.items.find(i => i.clientId === sent.clientUserMessageId);
   assert.notEqual(user.routeLabel, 'Router');
   controller.notification({ method: 'item/completed', params: { threadId: session.threadId, turnId: fake.turnIds[0],
@@ -112,6 +112,7 @@ async function setup(t) {
   const fake = new Fake();
   const smartRouter = { calls: [], cancel() { }, close() { }, jev: null, async choose() { throw new Error('unexpected route'); } };
   const controller = new Controller(path.join(directory, 'state.json'), directory, fake, smartRouter);
+  controller.claude.models = ['haiku', 'sonnet', 'opus'].map(model => ({ id: 'claude-cli:' + model, model, label: model, provider: 'claude-cli', effort: null, rank: 35, worker: true, router: true, images: true }));
   controller.claude.refresh = async () => controller.claude.status;
   controller.cursor.refresh = async () => controller.cursor.status;
   await controller.initialize();
@@ -151,7 +152,7 @@ test('shared worker defaults reach Codex and CLI with the selected workspace wik
   controller.wikiStore = { location: () => ({ root: path.join(session.workspace, 'private-wiki') }) };
   await controller.send({ id: session.id, text: 'hello', mode: 'terra-light', task: 'off' });
   const instructions = fake.calls.find(c => c.method === 'thread/start').params.developerInstructions;
-  assert.ok(instructions.includes('Bundled skill: caveman') && instructions.includes('Ponytail full'));
+  assert.ok(instructions.includes('Harness skills') && instructions.includes('Ponytail full'));
   assert.ok(instructions.includes('private-wiki'));
   complete(controller, session, session.turnId);
   await flush();
@@ -359,6 +360,7 @@ test('Jev direct answers drain through settle', async t => {
   assert.equal(fake.turnIds.length, 2);
   assert.equal(session.queue.length, 0);
   assert.match(fake.calls.filter(call => call.method === 'turn/start').at(-1).params.input[0].text, /Current user request:\nthird$/);
+  assert.equal(session.tasks.length, 2, 'only the worker turns are tracked');
 });
 
 test('settle waits until queue delivery finishes', async t => {
@@ -376,7 +378,8 @@ test('settle waits until queue delivery finishes', async t => {
   assert.equal(fake.turnIds.length, 3);
   assert.equal(session.queue.length, 0);
   assert.equal(controller.busy, null);
-  assert.deepEqual(fake.calls.filter(call => call.method === 'turn/start').map(call => call.params.input[0].text), ['first', 'second', 'third']);
+  assert.deepEqual(fake.calls.filter(call => call.method === 'turn/start').map(call => call.params.input[0].text.split('\n\n[Harness instruction]')[0]), ['first', 'second', 'third']);
+  assert.equal(session.tasks.length, 3, 'queued messages retain default tracking');
 });
 
 function arm(controller, fake) {
@@ -408,7 +411,7 @@ test('task mode is stored through queue edit and send', async t => {
   const session = controller.create();
   arm(controller, fake);
   await controller.send({ id: session.id, text: 'first', mode: 'terra-light', task: 'off' });
-  const queued = await controller.send({ id: session.id, text: 'second', mode: 'terra-light', task: 'on' });
+  const queued = await controller.send({ id: session.id, text: 'second', mode: 'terra-light' });
   assert.equal(queued.queued, true);
   const edited = await controller.queuedMessage(session.id, session.queue[0].id, 'edit');
   assert.equal(edited.task, 'on');
@@ -422,21 +425,89 @@ test('task mode is stored through queue edit and send', async t => {
   assert.equal(session.tasks[0].state, 'not-checked');
 });
 
-test('auto tracks an implementation assessment and direct answers are not tasks', async t => {
+test('default tracking ignores classification, legacy Auto tracks, and direct answers are not tasks', async t => {
   const { controller, fake, smartRouter } = await setup(t);
   const session = controller.create();
   arm(controller, fake);
   smartRouter.choose = async () => ({ provider: 'codex', model: 'gpt-5.6-terra', effort: 'low', label: 'Terra', id: 'terra', images: true, assessment: { taskKind: 'implementation', workspaceRelevant: true, risk: 'medium', uncertainty: 'low' } });
-  await controller.send({ id: session.id, text: 'fix the leak', mode: 'auto', task: 'auto' });
+  await controller.send({ id: session.id, text: 'fix the leak', mode: 'auto' });
   assert.equal(session.tasks.length, 1);
   complete(controller, session, fake.turnIds[0]);
   await controller.gateDone;
   smartRouter.choose = async () => ({ provider: 'codex', model: 'gpt-5.6-terra', effort: 'low', label: 'Terra', id: 'terra', images: true, assessment: { taskKind: 'general', workspaceRelevant: false, risk: 'low', uncertainty: 'low' } });
   await controller.send({ id: session.id, text: 'explain a mutex', mode: 'auto', task: 'auto' });
-  assert.equal(session.tasks.length, 1);
+  assert.equal(session.tasks.length, 2);
+  complete(controller, session, fake.turnIds[1]);
+  await controller.gateDone;
   smartRouter.choose = async () => ({ directAnswer: 'Just a definition.', provider: 'codex', model: 'gpt-5.6-terra', effort: 'low' });
   await controller.send({ id: session.id, text: 'what is a mutex', mode: 'auto', task: 'auto' });
+  assert.equal(session.tasks.length, 2);
+});
+
+test('router controls checks independently of task kind; manual and skip overrides remain safe', async t => {
+  const { controller, fake, smartRouter } = await setup(t);
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  arm(controller, fake);
+  addCheck(controller, session, ['unit-tests']);
+  let needsChecks = false;
+  smartRouter.choose = async (_text, context) => {
+    assert.equal(context.configuredChecks[0].argv[0], 'unit-tests');
+    return { ...controller.resolveWorker('terra-light'), assessment: { taskKind: 'review', needsChecks } };
+  };
+  const send = async (text, mode = 'auto', task = 'on') => {
+    await controller.send({ id: session.id, text, mode, task });
+    complete(controller, session, fake.turnIds.at(-1));
+    await controller.gateDone;
+  };
+  await send('review without running tests');
+  assert.equal(fake.calls.filter(c => c.method === 'command/exec').length, 0);
+  assert.match(session.tasks.at(-1).summary, /Checks skipped by router/);
+  needsChecks = true;
+  await send('review and reproduce the failure');
+  assert.equal(fake.calls.filter(c => c.method === 'command/exec').length, 1);
+  assert.equal(session.tasks.at(-1).state, 'checks-passed');
+  const tasks = session.tasks.length;
+  await send('skip checks explicitly', 'auto', 'off');
+  assert.equal(session.tasks.length, tasks);
+  assert.equal(fake.calls.filter(c => c.method === 'command/exec').length, 1);
+  await send('manual model with no routing assessment', 'terra-light');
+  assert.equal(fake.calls.filter(c => c.method === 'command/exec').length, 2);
+});
+
+test('successful checks schedule one internal wiki assessment; failures and unverified tasks never do', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  arm(controller, fake);
+  addCheck(controller, session, ['unit-tests']);
+  fs.mkdirSync(path.join(session.workspace, 'docs', 'wiki'), { recursive: true });
+  fs.writeFileSync(path.join(session.workspace, 'docs', 'wiki', 'index.md'), '# Wiki');
+  await controller.send({ id: session.id, text: 'Implement retry handling', mode: 'terra-light' });
+  complete(controller, session, fake.turnIds[0]);
+  await controller.gateDone;
+  const task = session.tasks[0];
+  assert.equal(task.state, 'checks-passed');
+  assert.equal(task.wikiMaintenance.state, 'running');
+  assert.equal(fake.turnIds.length, 2);
   assert.equal(session.tasks.length, 1);
+  assert.equal(controller.busy, session.id);
+  const maintenance = fake.calls.filter(c => c.method === 'turn/start').at(-1).params;
+  assert.match(maintenance.input[0].text, /EVERY requirement/);
+  assert.match(maintenance.input[0].text, /incomplete evidence means no wiki edits/);
+  assert.match(maintenance.input[0].text, /Do not change project instructions/);
+  assert.equal(await controller.maintainWiki(session, task), false, 'never dispatch twice');
+  complete(controller, session, fake.turnIds[1]);
+  assert.equal(task.wikiMaintenance.state, 'finished');
+  assert.equal(controller.busy, null);
+  for (const state of ['not-checked', 'blocked', 'needs-you', 'cancelled']) {
+    assert.equal(await controller.maintainWiki(session, { ...task, state, wikiMaintenance: null }), false);
+  }
+  task.wikiMaintenance.state = 'running';
+  controller.save();
+  const restored = reopen(controller);
+  t.after(() => restored.close());
+  assert.equal(restored.data.sessions[0].tasks[0].wikiMaintenance.state, 'interrupted');
 });
 
 test('configured checks stay frozen and hold the slot', async t => {

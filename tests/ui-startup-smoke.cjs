@@ -13,6 +13,14 @@ app.whenReady().then(async () => {
   ipcMain.handle('bootstrap', () => controller.snapshot());
   ipcMain.handle('browseWorkspace', () => ({ available: false, entries: [] }));
   ipcMain.handle('preview', () => ({ label: 'Auto', reason: 'Smoke test' }));
+  const sent = [];
+  let failSend = false;
+  ipcMain.handle('create', (_event, workspace, access) => controller.create(workspace, access));
+  ipcMain.handle('send', (_event, message) => {
+    if (failSend) throw new Error('Test send failed');
+    sent.push(message);
+    return { queued: true };
+  });
   let modelRequests = 0, failModels = false, finishFetch;
   ipcMain.handle('providerModels', async () => {
     modelRequests++;
@@ -36,6 +44,23 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript(`document.querySelector('#prompt').value = 'hello'; document.querySelector('#prompt').dispatchEvent(new Event('input'));`);
   assert.match(await window.webContents.executeJavaScript("document.querySelector('#connection-label').textContent"), /Connected Providers: 1/);
   console.log('Connected-state UI smoke passed');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#task-card')"), null);
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#skip-checks')"), null);
+  await window.webContents.executeJavaScript(`(async () => {
+    document.querySelector('#prompt').value = 'test message';
+    document.querySelector('#composer').dispatchEvent(new Event('submit', { cancelable: true }));
+    while (submitting) await new Promise(resolve => setTimeout(resolve, 10));
+  })()`);
+  assert.equal(sent.at(-1).task, 'on', 'checks run automatically behind the scenes');
+  console.log('Background checks UI smoke passed');
+  await window.webContents.executeJavaScript(`renderMessages({ items: [
+    { id: 'visible', type: 'agentMessage', text: 'Visible result' },
+    { id: 'maintenance', type: 'userMessage', content: [{ type: 'text', text: 'Hidden maintenance' }] },
+    { id: 'maintenance-answer', turnId: 'wiki-turn', type: 'agentMessage', text: 'Hidden wiki assessment' }
+  ], routes: [{ messageId: 'maintenance', turnId: 'wiki-turn', wikiMaintenanceTaskId: 'task' }] });`);
+  const chat = await window.webContents.executeJavaScript("document.querySelector('#messages').textContent");
+  assert.match(chat, /Visible result/);
+  assert.doesNotMatch(chat, /Hidden/);
   await window.webContents.executeJavaScript(`window.fetchTest = Promise.all([loadDiscoveredModels('cursor-cli'), loadDiscoveredModels('cursor-cli')]).catch(() => null); true;`);
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#models-loading').hidden"), false);
   while (!finishFetch) await new Promise(setImmediate);

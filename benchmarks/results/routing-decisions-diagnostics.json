@@ -1,0 +1,381 @@
+{
+  "at": "2026-09-24T10:26:15.902Z",
+  "benchmarkSnapshot": "f75a3d2e5f02",
+  "note": "One sample per case/router, low effort for GPT classifiers; routing only, no workers. Full enabled/available app catalog. Direct Jev answers disabled for comparison. Workspace evidence is cached per case and shared. Pass checks cover task kind and workspace relevance, not objective worker-model quality. Provider caches uncontrolled.",
+  "workers": [
+    {
+      "id": "codex:gpt-6-astra:low",
+      "model": "gpt-6-astra",
+      "effort": "low",
+      "provider": "codex"
+    },
+    {
+      "id": "codex:gpt-6-astra:medium",
+      "model": "gpt-6-astra",
+      "effort": "medium",
+      "provider": "codex"
+    },
+    {
+      "id": "codex:gpt-6-astra:high",
+      "model": "gpt-6-astra",
+      "effort": "high",
+      "provider": "codex"
+    },
+    {
+      "id": "codex:gpt-6-astra:xhigh",
+      "model": "gpt-6-astra",
+      "effort": "xhigh",
+      "provider": "codex"
+    },
+    {
+      "id": "codex:gpt-6-astra:max",
+      "model": "gpt-6-astra",
+      "effort": "max",
+      "provider": "codex"
+    },
+    {
+      "id": "codex:gpt-6-astra:ultra",
+      "model": "gpt-6-astra",
+      "effort": "ultra",
+      "provider": "codex"
+    },
+    {
+      "id": "codex:gpt-6-sol:low",
+      "model": "gpt-6-sol",
+      "effort": "low",
+      "provider": "codex"
+    },
+    {
+      "id": "codex:gpt-6-sol:medium",
+      "model": "gpt-6-sol",
+      "effort": "medium",
+      "provider": "codex"
+    },
+    {
+      "id": "codex:gpt-6-sol:high",
+      "model": "gpt-6-sol",
+      "effort": "high",
+      "provider": "codex"
+    },
+    {
+      "id": "codex:gpt-6-sol:xhigh",
+      "model": "gpt-6-sol",
+      "effort": "xhigh",
+      "provider": "codex"
+    },
+    {
+      "id": "codex:gpt-6-sol:max",
+      "model": "gpt-6-sol",
+      "effort": "max",
+      "provider": "codex"
+    },
+    {
+      "id": "codex:gpt-6-sol:ultra",
+      "model": "gpt-6-sol",
+      "effort": "ultra",
+      "provider": "codex"
+    },
+    {
+      "id": "codex:gpt-6-luna:low",
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "provider": "codex"
+    },
+    {
+      "id": "codex:gpt-6-luna:medium",
+      "model": "gpt-6-luna",
+      "effort": "medium",
+      "provider": "codex"
+    },
+    {
+      "id": "codex:gpt-6-luna:high",
+      "model": "gpt-6-luna",
+      "effort": "high",
+      "provider": "codex"
+    },
+    {
+      "id": "codex:gpt-6-luna:xhigh",
+      "model": "gpt-6-luna",
+      "effort": "xhigh",
+      "provider": "codex"
+    },
+    {
+      "id": "codex:gpt-6-luna:max",
+      "model": "gpt-6-luna",
+      "effort": "max",
+      "provider": "codex"
+    },
+    {
+      "id": "cursor-cli:grok-4.7[context=256k,reasoning_effort=high,fast=true]:default",
+      "model": "grok-4.7[context=256k,reasoning_effort=high,fast=true]",
+      "effort": null,
+      "provider": "cursor-cli"
+    },
+    {
+      "id": "cursor-cli:composer-2.5[fast=true]:default",
+      "model": "composer-2.5[fast=true]",
+      "effort": null,
+      "provider": "cursor-cli"
+    },
+    {
+      "id": "cursor-cli:grok-4.6[effort=high,fast=true]:default",
+      "model": "grok-4.6[effort=high,fast=true]",
+      "effort": null,
+      "provider": "cursor-cli"
+    },
+    {
+      "id": "cursor-cli:grok-4.5[effort=high,fast=true]:default",
+      "model": "grok-4.5[effort=high,fast=true]",
+      "effort": null,
+      "provider": "cursor-cli"
+    }
+  ],
+  "cases": [
+    {
+      "id": "greeting",
+      "text": "Hello!",
+      "workspace": false,
+      "kinds": [
+        "general"
+      ]
+    },
+    {
+      "id": "translation",
+      "text": "Translate \"the deadlock corrupted the database\" into Greek. Only translate the sentence.",
+      "workspace": false,
+      "kinds": [
+        "general"
+      ]
+    },
+    {
+      "id": "lookup",
+      "text": "Where in Phasma Harness is the decision to run configured checks made? Locate the function; do not change code.",
+      "workspace": true,
+      "kinds": [
+        "lookup"
+      ]
+    },
+    {
+      "id": "mechanical",
+      "text": "Change only the checkbox label \"Skip checks for this message\" to \"Skip checks once\" in ui/index.html.",
+      "workspace": true,
+      "kinds": [
+        "mechanical",
+        "implementation"
+      ]
+    },
+    {
+      "id": "review",
+      "text": "Review src/process-tree.cjs and its controller callers for unsafe PID reuse and incorrect crash recovery. Report concrete correctness findings; do not edit files.",
+      "workspace": true,
+      "kinds": [
+        "review"
+      ]
+    },
+    {
+      "id": "debugging",
+      "text": "A configured check exits but a detached child remains alive, and Harness reports it passed. Investigate the root cause in the local check runner and fix it without killing unrelated processes.",
+      "workspace": true,
+      "kinds": [
+        "debugging"
+      ]
+    },
+    {
+      "id": "architecture",
+      "text": "Design provider-independent parent/child task scheduling for Phasma Harness, avoiding deadlocks, preserving cancellation and inherited permissions. Explain the design; do not implement yet.",
+      "workspace": true,
+      "kinds": [
+        "architecture"
+      ]
+    },
+    {
+      "id": "followup",
+      "text": "Yes, focus on the PID reuse case first.",
+      "workspace": true,
+      "kinds": [
+        "review",
+        "debugging"
+      ],
+      "history": [
+        {
+          "type": "userMessage",
+          "content": [
+            {
+              "type": "text",
+              "text": "Review the local check runner for PID reuse and crash recovery bugs. Do not edit files."
+            }
+          ]
+        },
+        {
+          "type": "agentMessage",
+          "phase": "final_answer",
+          "text": "I can inspect PID identity matching and orphan cleanup. Which should I examine first?"
+        }
+      ]
+    }
+  ],
+  "samples": [
+    {
+      "case": "lookup",
+      "router": "luna",
+      "classifier": "gpt-6-luna",
+      "elapsedMs": 8936,
+      "selected": "codex:gpt-6-astra:medium",
+      "label": "gpt-6-astra · medium",
+      "assessment": {
+        "taskKind": "lookup",
+        "workspaceRelevant": true,
+        "risk": "low",
+        "uncertainty": "low"
+      },
+      "reason": "Locate a function in a repository; medium effort suits targeted code navigation. The Phasma Harness workspace is relevant, and no code changes are requested.",
+      "usage": {
+        "totalTokens": 15971,
+        "inputTokens": 15833,
+        "cachedInputTokens": 8704,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 138,
+        "reasoningOutputTokens": 0
+      },
+      "evidence": {
+        "at": 1790245576419,
+        "nativeProject": false,
+        "coverage": "partial",
+        "changedFiles": 24,
+        "sampledFiles": [
+          "README.md",
+          "skills/README.md",
+          "src/controller.cjs",
+          "src/routing/benchmarks.cjs",
+          "src/routing/smart-router.cjs",
+          "src/tasks.cjs",
+          "src/tools/tool-helpers.cjs",
+          "src/worker-instructions.cjs"
+        ],
+        "signals": [
+          "security"
+        ],
+        "limitations": [
+          "Only 8 of 24 text files sampled.",
+          "Excerpt truncated: README.md",
+          "Excerpt truncated: src/routing/benchmarks.cjs",
+          "Excerpt truncated: src/routing/smart-router.cjs",
+          "Excerpt truncated: src/tools/tool-helpers.cjs",
+          "Excerpt truncated: src/worker-instructions.cjs"
+        ]
+      },
+      "kindOK": true,
+      "workspaceOK": true,
+      "observedDecisions": [
+        {
+          "preset": "codex:gpt-6-astra:medium",
+          "reason": "Repository symbol-location lookup without workspace access; medium effort balances codebase reasoning with economy.",
+          "taskKind": "lookup",
+          "workspaceRelevant": true,
+          "risk": "low",
+          "uncertainty": "low",
+          "reasonLength": 115
+        },
+        {
+          "preset": "codex:gpt-6-astra:medium",
+          "reason": "Locate a function in a repository; medium effort suits targeted code navigation. The Phasma Harness workspace is relevant, and no code changes are requested.",
+          "taskKind": "lookup",
+          "workspaceRelevant": true,
+          "risk": "low",
+          "uncertainty": "low",
+          "reasonLength": 157
+        }
+      ]
+    },
+    {
+      "case": "debugging",
+      "router": "terra",
+      "classifier": "gpt-5.6-terra",
+      "elapsedMs": 14366,
+      "selected": "codex:gpt-6-astra:xhigh",
+      "label": "gpt-6-astra · xhigh",
+      "assessment": {
+        "taskKind": "debugging",
+        "workspaceRelevant": true,
+        "risk": "high",
+        "uncertainty": "medium"
+      },
+      "reason": "Debugging a local runner’s child-process lifecycle needs repository investigation and terminal/process tooling. Astra xhigh has the strongest matching measured repo-engineering and terminal scores among measured workers.",
+      "usage": {
+        "totalTokens": 14982,
+        "inputTokens": 14695,
+        "cachedInputTokens": 7680,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 287,
+        "reasoningOutputTokens": 116
+      },
+      "evidence": {
+        "at": 1790245585376,
+        "nativeProject": false,
+        "coverage": "partial",
+        "changedFiles": 24,
+        "sampledFiles": [
+          "README.md",
+          "skills/README.md",
+          "src/controller.cjs",
+          "src/routing/benchmarks.cjs",
+          "src/routing/smart-router.cjs",
+          "src/tasks.cjs",
+          "src/tools/tool-helpers.cjs",
+          "src/worker-instructions.cjs"
+        ],
+        "signals": [
+          "security"
+        ],
+        "limitations": [
+          "Only 8 of 24 text files sampled.",
+          "Excerpt truncated: README.md",
+          "Excerpt truncated: src/routing/benchmarks.cjs",
+          "Excerpt truncated: src/routing/smart-router.cjs",
+          "Excerpt truncated: src/tools/tool-helpers.cjs",
+          "Excerpt truncated: src/worker-instructions.cjs"
+        ]
+      },
+      "kindOK": true,
+      "workspaceOK": true,
+      "observedDecisions": [
+        {
+          "preset": "codex:gpt-6-astra:xhigh",
+          "reason": "Process-lifecycle debugging and a safe runner fix need strong repository engineering plus terminal/tool performance. Astra xhigh leads the measured Astra efforts on those relevant dimensions; the change has high safety risk.",
+          "taskKind": "debugging",
+          "workspaceRelevant": true,
+          "risk": "high",
+          "uncertainty": "medium",
+          "reasonLength": 224
+        },
+        {
+          "preset": "codex:gpt-6-astra:xhigh",
+          "reason": "Debugging a local runner’s child-process lifecycle needs repository investigation and terminal/process tooling. Astra xhigh has the strongest matching measured repo-engineering and terminal scores among measured workers.",
+          "taskKind": "debugging",
+          "workspaceRelevant": true,
+          "risk": "high",
+          "uncertainty": "medium",
+          "reasonLength": 220
+        }
+      ]
+    },
+    {
+      "case": "architecture",
+      "router": "terra",
+      "classifier": "gpt-5.6-terra",
+      "elapsedMs": 6229,
+      "error": "Smart routing stopped: Router returned an invalid decision. No worker was started. Retry or choose a manual preset.",
+      "observedDecisions": [
+        {
+          "preset": "codex:gpt-6-astra:xhigh",
+          "reason": "Architecture design for project-specific scheduling needs strong repository/terminal reasoning; Astra xhigh has the best relevant measured repo and terminal results among measured options. No implementation is requested, but correctness risk is meaningful.",
+          "taskKind": "architecture",
+          "workspaceRelevant": true,
+          "risk": "medium",
+          "uncertainty": "medium",
+          "reasonLength": 256
+        }
+      ]
+    }
+  ]
+}

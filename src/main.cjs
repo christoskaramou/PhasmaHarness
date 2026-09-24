@@ -183,6 +183,10 @@ async function start() {
     const notes = [];
     try { await controller.refreshAccount(); }
     catch (error) { notes.push(error.message); }
+    if (controller.claude.status.loggedIn) {
+      try { await controller.claude.discover(); }
+      catch (error) { notes.push(error.message); }
+    }
     if (controller.cursor.status.loggedIn) {
       controller.cursor.models = [];
       try { await controller.cursor.discover(); }

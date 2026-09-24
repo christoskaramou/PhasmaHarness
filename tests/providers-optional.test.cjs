@@ -19,6 +19,7 @@ async function start(t, { claude }) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-no-codex-'));
   const controller = new Controller(path.join(directory, 'state.json'), directory, new NoCodex(), { cancel() {}, close() {}, jev: null });
   controller.data.settings.claudeEnabled = claude;
+  controller.claude.models = ['haiku', 'sonnet', 'opus'].map(model => ({ id: 'claude-cli:' + model, model, label: model, provider: 'claude-cli', effort: null, rank: 35, worker: true, router: true, images: true }));
   controller.claude.refresh = async () => (controller.claude.status = { installed: claude, loggedIn: claude });
   controller.cursor.refresh = async () => (controller.cursor.status = { installed: false, loggedIn: false });
   await controller.initialize();
@@ -55,6 +56,7 @@ async function withClaude(t, client) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-codex-live-'));
   const controller = new Controller(path.join(directory, 'state.json'), directory, client, { cancel() {}, close() {}, jev: null });
   controller.data.settings.claudeEnabled = true;
+  controller.claude.models = ['haiku', 'sonnet', 'opus'].map(model => ({ id: 'claude-cli:' + model, model, label: model, provider: 'claude-cli', effort: null, rank: 35, worker: true, router: true, images: true }));
   controller.claude.refresh = async () => (controller.claude.status = { installed: true, loggedIn: true });
   controller.cursor.refresh = async () => controller.cursor.status;
   await controller.initialize();
@@ -308,6 +310,56 @@ test('Claude turns feed the context meter and support manual compaction', async 
   assert.match(session.notice, /compacted/);
   controller.data.sessions.find(s => s.id === session.id).activeProvider = 'cursor-cli';
   await assert.rejects(controller.compact(session.id), /Cursor manages its context automatically/);
+});
+
+test('every Auto message is routed from the full catalog with the current worker as a hint, so it can upgrade', async t => {
+  const controller = await start(t, { claude: true });
+  const calls = [];
+  const { contextFor } = require('../src/routing/smart-router.cjs');
+  controller.smartRouter.choose = async (text, session) => {
+    calls.push({ offered: session.routingCatalog.map(p => p.id), current: contextFor(text, session, {}).currentWorker?.id });
+    const hard = /debug|review/.test(text);
+    const worker = session.routingCatalog.find(p => p.id === (hard ? 'claude-cli:opus' : 'claude-cli:haiku'));
+    return { ...worker, source: 'model', reason: 'routed', assessment: { taskKind: hard ? 'debugging' : /implement/.test(text) ? 'implementation' : 'general', risk: 'low', uncertainty: 'low' } };
+  };
+  controller.claude.run = async () => ({ type: 'result', result: 'ok' });
+  const session = controller.create(fs.realpathSync(path.dirname(controller.filename)), 'read-only');
+  for (const text of ['what is a mutex?', 'debug this deadlock', 'thanks!']) {
+    await controller.send({ id: session.id, text, mode: 'auto' });
+    await controller.gateDone;
+  }
+  await controller.gateDone;
+
+  assert.equal(calls.length, 3, 'every message is routed');
+  assert.ok(calls.every(call => call.offered.length > 1), 'always from the whole catalog');
+  assert.deepEqual(calls.map(call => call.current), [undefined, 'claude-cli:haiku', 'claude-cli:opus'], 'the router sees the worker already holding the conversation');
+  assert.deepEqual(session.routes.map(r => r.id), ['claude-cli:haiku', 'claude-cli:opus', 'claude-cli:haiku'], 'a light first model does not lock out a stronger one');
+  assert.deepEqual((session.tasks || []).map(task => task.goal), ['what is a mutex?', 'debug this deadlock', 'thanks!'], 'all worker messages are tracked by default');
+});
+
+test('the router gets a compact, comparable catalog instead of raw benchmark rows', () => {
+  const { BenchmarkStore, routerCatalog, compactCatalog, ROUTER_POLICY, POLICY } = require('../src/routing/benchmarks.cjs');
+  const { PRESETS } = require('../src/routing/router.cjs');
+  const catalog = new BenchmarkStore().catalog(PRESETS);
+  const rows = routerCatalog(catalog);
+  assert.equal(rows.length, catalog.length);
+  assert.ok(rows.every(row => row.id && row.label && Object.values(row).every(v => typeof v !== 'object')), 'one flat row per worker');
+  assert.ok(JSON.stringify(rows).length + ROUTER_POLICY.length < (JSON.stringify(compactCatalog(catalog)).length + POLICY.length) / 3);
+  const fake = routerCatalog([
+    { id: 'a', label: 'A', benchmarks: [{ source: 'aa-index', version: '1', harness: 'api', score: 50 }, { source: 'deepswe', version: '1', harness: 'x-fallback', passPercent: 99 }] },
+    { id: 'b', label: 'B', benchmarks: [{ source: 'aa-index', version: '1', harness: 'api', score: 40 }] },
+  ]);
+  assert.deepEqual(fake, [{ id: 'a', label: 'A', index: 50 }, { id: 'b', label: 'B', index: 40 }], 'assisted fallback runs are excluded and unknown values are omitted, not zero');
+});
+
+test('workers can read a full bundled skill on demand through router_read_output', () => {
+  const { ToolHelpers } = require('../src/tools/tool-helpers.cjs');
+  const helpers = new ToolHelpers(os.tmpdir());
+  const result = helpers.read({ id: 's', workspace: process.cwd() }, { skill: 'large-responses' });
+  assert.match(result.text, /scripts\/output\.cjs/);
+  assert.doesNotMatch(result.text, /\{\{SKILL_DIR\}\}/);
+  assert.throws(() => helpers.read({ id: 's' }, { skill: '../../secrets' }), /Unknown Harness skill/);
+  assert.throws(() => helpers.read({ id: 's' }, { skill: 'ponytail', path: 'a' }), /exactly one/);
 });
 
 test('a failed installer download fails the install instead of piping nothing into a shell', async () => {

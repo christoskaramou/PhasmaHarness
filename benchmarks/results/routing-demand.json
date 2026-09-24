@@ -1,0 +1,172 @@
+{
+  "at": "2026-09-24T10:14:41.561Z",
+  "classifier": {
+    "provider": "codex",
+    "model": "gpt-5.6-terra",
+    "effort": "low"
+  },
+  "workerCount": 17,
+  "baselineSha256": "5a23ca40ded64501e76fa0dd12921f1d1eaf60fc359873c1c38e2b6ad099f40f",
+  "currentSha256": "82bd70f88ecc03c06585576b39482d050ce58c40e27e9ed9f3aa74569c5ef0fe",
+  "note": "Two requests, one sample per version. Warm app-servers; provider caches uncontrolled. Actual successful classifier usage includes discarded baseline calls. No worker is executed.",
+  "samples": [
+    {
+      "version": "before",
+      "prompt": "Hello!",
+      "routeMs": 4515,
+      "allCallsMs": 6402,
+      "calls": [
+        {
+          "usage": {
+            "totalTokens": 4822,
+            "inputTokens": 4726,
+            "cachedInputTokens": 0,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 96,
+            "reasoningOutputTokens": 30
+          },
+          "workspaceRelevant": false
+        },
+        {
+          "usage": {
+            "totalTokens": 9456,
+            "inputTokens": 9368,
+            "cachedInputTokens": 0,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 88,
+            "reasoningOutputTokens": 22
+          },
+          "workspaceRelevant": false
+        }
+      ],
+      "totals": {
+        "inputTokens": 14094,
+        "cachedInputTokens": 0,
+        "outputTokens": 184,
+        "totalTokens": 14278
+      },
+      "reported": {
+        "totalTokens": 4822,
+        "inputTokens": 4726,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 96,
+        "reasoningOutputTokens": 30
+      },
+      "selected": "codex:gpt-6-luna:low"
+    },
+    {
+      "version": "after",
+      "prompt": "Hello!",
+      "routeMs": 5517,
+      "allCallsMs": 5517,
+      "calls": [
+        {
+          "usage": {
+            "totalTokens": 4816,
+            "inputTokens": 4726,
+            "cachedInputTokens": 3840,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 90,
+            "reasoningOutputTokens": 26
+          },
+          "workspaceRelevant": false
+        }
+      ],
+      "totals": {
+        "inputTokens": 4726,
+        "cachedInputTokens": 3840,
+        "outputTokens": 90,
+        "totalTokens": 4816
+      },
+      "reported": {
+        "totalTokens": 4816,
+        "inputTokens": 4726,
+        "cachedInputTokens": 3840,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 90,
+        "reasoningOutputTokens": 26
+      },
+      "selected": "codex:gpt-6-luna:low"
+    },
+    {
+      "version": "after",
+      "prompt": "Translate \"good morning\" into Greek.",
+      "routeMs": 4423,
+      "allCallsMs": 4423,
+      "calls": [
+        {
+          "usage": {
+            "totalTokens": 4828,
+            "inputTokens": 4731,
+            "cachedInputTokens": 0,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 97,
+            "reasoningOutputTokens": 31
+          },
+          "workspaceRelevant": false
+        }
+      ],
+      "totals": {
+        "inputTokens": 4731,
+        "cachedInputTokens": 0,
+        "outputTokens": 97,
+        "totalTokens": 4828
+      },
+      "reported": {
+        "totalTokens": 4828,
+        "inputTokens": 4731,
+        "cachedInputTokens": 0,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 97,
+        "reasoningOutputTokens": 31
+      },
+      "selected": "codex:gpt-6-luna:low"
+    },
+    {
+      "version": "before",
+      "prompt": "Translate \"good morning\" into Greek.",
+      "routeMs": 4674,
+      "allCallsMs": 6608,
+      "calls": [
+        {
+          "usage": {
+            "totalTokens": 4793,
+            "inputTokens": 4731,
+            "cachedInputTokens": 3840,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 62,
+            "reasoningOutputTokens": 0
+          },
+          "workspaceRelevant": false
+        },
+        {
+          "usage": {
+            "totalTokens": 9500,
+            "inputTokens": 9387,
+            "cachedInputTokens": 0,
+            "cacheWriteInputTokens": 0,
+            "outputTokens": 113,
+            "reasoningOutputTokens": 47
+          },
+          "workspaceRelevant": false
+        }
+      ],
+      "totals": {
+        "inputTokens": 14118,
+        "cachedInputTokens": 3840,
+        "outputTokens": 175,
+        "totalTokens": 14293
+      },
+      "reported": {
+        "totalTokens": 4793,
+        "inputTokens": 4731,
+        "cachedInputTokens": 3840,
+        "cacheWriteInputTokens": 0,
+        "outputTokens": 62,
+        "reasoningOutputTokens": 0
+      },
+      "selected": "codex:gpt-6-luna:low"
+    }
+  ]
+}

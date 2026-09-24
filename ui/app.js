@@ -9,6 +9,11 @@ function chatgptDetail(account) {
   return plan || 'connected';
 }
 
+function claudeDetail(account) {
+  const plan = (account?.subscriptionType || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  return plan && account?.email ? `${plan} as ${account.email}` : account?.email || plan || account?.authMethod || 'connected';
+}
+
 function connectedProviders() {
   if (!state) return [];
   const rows = [];
@@ -319,16 +324,15 @@ function render() {
   $('#banner').textContent = sticky || flash;
   $('#banner').hidden = !$('#banner').textContent;
   const preset = $('#preset');
-  if ([...preset.options].slice(1).map(o => o.value).join('|') !== state.presets.map(p => p.id).join('|')) {
+  const availablePresets = state.presets.filter(p => p.available);
+  if ([...preset.options].slice(1).map(o => o.value).join('|') !== availablePresets.map(p => p.id).join('|')) {
     preset.replaceChildren(new Option('Auto · choose for me', 'auto'));
-    for (const p of state.presets) { const option = new Option(p.label, p.id); preset.add(option); }
+    for (const p of availablePresets) { const option = new Option(p.label, p.id); preset.add(option); }
   }
   for (const option of [...preset.options].slice(1)) {
-    const p = state.presets.find(p => p.id === option.value);
-    option.disabled = ready && !p.available;
-    option.textContent = p.label + (ready && !p.available ? ' · unavailable' : '');
+    option.textContent = availablePresets.find(p => p.id === option.value).label;
   }
-  preset.value = state.settings.mode;
+  preset.value = availablePresets.some(p => p.id === state.settings.mode) ? state.settings.mode : 'auto';
   const query = $('#search').value.toLowerCase();
   const sessions = state.sessions.filter(s => !s.archived && (s.title + s.workspace).toLowerCase().includes(query));
   $('#session-count').textContent = sessions.length;
@@ -420,7 +424,6 @@ function render() {
     ? `\n\nSession totals: ${total.inputTokens.toLocaleString()} input (${total.cachedInputTokens.toLocaleString()} cached, ${Math.max(0, total.inputTokens - total.cachedInputTokens).toLocaleString()} uncached), ${total.outputTokens.toLocaleString()} output. Reasoning is included in output. Latest request input: ${usage.last?.inputTokens?.toLocaleString() ?? 'unknown'}. These are token counts, not dollars or allowance usage.`
     : '\n\nHover lists providers. Token totals appear after the provider reports usage.');
   renderMessages(session);
-  renderTask(session);
   renderRequest();
 }
 
@@ -428,88 +431,10 @@ function providerConnectionSummary() {
   if (!state) return '';
   const lines = [
     `ChatGPT · ${state.account ? 'connected' : state.codex?.installed === false ? 'Codex CLI not installed' : 'not connected'}${state.account?.email ? ' · ' + state.account.email : ''}`,
-    `Claude · ${state.claude?.loggedIn ? 'connected' : state.claude?.installed === false ? 'not installed' : 'not connected'}`,
+    `Claude · ${state.claude?.loggedIn ? claudeDetail(state.claude) : state.claude?.installed === false ? 'not installed' : 'not connected'}`,
     `Cursor · ${state.cursor?.loggedIn ? (state.cursor.email || state.cursor.identity || 'connected') : state.cursor?.installed === false ? 'not installed' : 'not connected'}`,
   ];
   return lines.join('\n');
-}
-
-function renderTask(session) {
-  const card = $('#task-card');
-  const task = (session?.tasks || []).at(-1);
-  if (!task) { card.hidden = true; card.replaceChildren(); return; }
-  card.hidden = false;
-  const heading = document.createElement('h3');
-  heading.textContent = task.summary || task.state;
-  const goal = document.createElement('p');
-  goal.textContent = task.goal;
-  card.replaceChildren(heading, goal);
-  const criteria = document.createElement('details');
-  const criteriaTitle = document.createElement('summary');
-  criteriaTitle.textContent = task.proposedChecklist?.length ? 'Proposed completion criteria · not verified'
-    : task.checklistStatus === 'pending' ? 'Awaiting proposed completion criteria'
-      : task.checklistStatus === 'unparseable' ? 'No checklist proposed in the expected format' : 'No checklist proposed';
-  criteria.append(criteriaTitle);
-  if (task.proposedChecklist?.length) {
-    const list = document.createElement('ul');
-    for (const text of task.proposedChecklist) { const item = document.createElement('li'); item.textContent = text; list.append(item); }
-    criteria.append(list);
-  }
-  card.append(criteria);
-  if (task.wikiAvailable && ['checks-passed', 'not-checked'].includes(task.state)) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.textContent = 'Propose wiki update';
-    button.title = 'Ask the same worker for a proposed wiki patch. Files are not edited automatically.';
-    button.onclick = async () => {
-      button.disabled = true;
-      try { await api.proposeWiki(session.id, task.id); }
-      catch (error) { button.disabled = false; notify(error); }
-    };
-    card.append(button);
-  }
-  const citations = task.attempts?.at(-1)?.citations;
-  if (citations) {
-    const details = document.createElement('details');
-    const summary = document.createElement('summary');
-    summary.textContent = 'File references · advisory only';
-    details.append(summary);
-    for (const reference of citations.references) {
-      const line = document.createElement('p');
-      line.textContent = `${reference.citation}: ${reference.status} · ${reference.detail}`;
-      details.append(line);
-    }
-    if (citations.note) { const note = document.createElement('p'); note.textContent = citations.note; details.append(note); }
-    card.append(details);
-  }
-  if (task.amendments?.length) {
-    const list = document.createElement('ul');
-    for (const amendment of task.amendments) {
-      const item = document.createElement('li');
-      item.textContent = amendment.text;
-      list.append(item);
-    }
-    card.append(list);
-  }
-  for (const attempt of task.attempts || []) {
-    for (const result of attempt.results || []) {
-      const details = document.createElement('details');
-      const summary = document.createElement('summary');
-      const seconds = result.durationMs ? ` · ${(result.durationMs / 1000).toFixed(1)}s` : '';
-      summary.textContent = `${result.name}: ${result.status}${result.detail ? ` · ${result.detail}` : ''}${seconds}`;
-      const output = document.createElement('pre');
-      output.textContent = [result.stdout, result.stderr].filter(Boolean).join('\n') || result.detail || '';
-      details.append(summary, output);
-      card.append(details);
-    }
-  }
-  if (['needs-you', 'blocked', 'checks-passed', 'not-checked', 'cancelled'].includes(task.state) && !task.acknowledged) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.textContent = 'Acknowledge';
-    button.onclick = () => api.acknowledgeTask(session.id, task.id).catch(notify);
-    card.append(button);
-  }
 }
 
 function renderMessages(session) {
@@ -517,7 +442,9 @@ function renderMessages(session) {
   const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
   if (renderedSession !== selectedId) { $('#messages').replaceChildren(); messageNodes.clear(); renderedSession = selectedId; }
   const ids = new Set();
+  const maintenance = (session?.routes || []).filter(route => route.wikiMaintenanceTaskId);
   for (const item of [...(session?.items || []), ...(session?.pendingMessage ? [session.pendingMessage] : [])]) {
+    if (item.internal || maintenance.some(route => route.messageId === (item.clientId || item.id) || (route.turnId && route.turnId === item.turnId))) continue;
     ids.add(item.id);
     let entry = messageNodes.get(item.id);
     const selected = item.type === 'userMessage' ? session.routes.find(r => r.messageId === (item.clientId || item.id)) : null;
@@ -593,7 +520,7 @@ function renderMessages(session) {
           details.append(element('p', '', `TypeSafe estimate: $${meter.estimatedCostUsd.toFixed(6)} · ${meter.usage.inputTokens.toLocaleString()} input tokens`));
           details.append(element('p', '', `Jev distribution confidence: ${(meter.confidence * 100).toFixed(0)}%. This is not a measured probability of choosing the right worker.`));
         }
-        if (selected.assessment) details.append(element('p', '', `Task: ${selected.assessment.taskKind} · Risk: ${selected.assessment.risk} · Uncertainty: ${selected.assessment.uncertainty}`));
+        if (selected.assessment) details.append(element('p', '', `Task: ${selected.assessment.taskKind}${typeof selected.assessment.needsChecks === 'boolean' ? ' · Checks: ' + (selected.assessment.needsChecks ? 'run if configured' : 'not needed') : ''} · Risk: ${selected.assessment.risk} · Uncertainty: ${selected.assessment.uncertainty}`));
         if (meter?.evidence) {
           details.append(element('p', '', `Workspace: ${meter.evidence.changedFiles} changed files; ${meter.evidence.sampledFiles.length} sampled. ${meter.evidence.coverage} evidence.`));
           details.append(element('p', '', [...meter.evidence.signals, ...meter.evidence.limitations].join(' · ')));
@@ -723,7 +650,7 @@ $('#composer').addEventListener('submit', async event => {
     sentHistory = null; sentHistoryIndex = -1;
     drafts.set(selectedId, ''); $('#prompt').value = ''; updatePreview();
     imageDrafts.delete(selectedId); renderImages();
-    await api.send({ id: selectedId, text, images, mode: $('#preset').value, task: $('#task-mode').value });
+    await api.send({ id: selectedId, text, images, mode: $('#preset').value, task: 'on' });
   } catch (error) {
     if (!$('#prompt').value) { $('#prompt').value = text; drafts.set(selectedId, text); }
     if (images.length) imageDrafts.set(selectedId || 'new', images);
@@ -1060,7 +987,7 @@ function renderProviders() {
     label: 'Claude',
     connected: !!state.claude?.loggedIn,
     installed: state.claude?.installed,
-    detail: state.claude?.loggedIn ? (state.claude.authMethod || 'CLI login') : (state.claude?.installed === false ? 'not installed' : 'not connected'),
+    detail: state.claude?.loggedIn ? claudeDetail(state.claude) : (state.claude?.installed === false ? 'not installed' : 'not connected'),
     connect: () => api.claudeLogin(),
     disconnect: () => api.claudeLogout(),
   });
@@ -1088,6 +1015,9 @@ function renderProviders() {
     if (group.gated) {
       list.append(element('p', 'muted', 'Connect this provider to enable its models.'));
       continue;
+    }
+    if (group.id === 'claude-cli' && !group.models.length) {
+      list.append(element('p', 'muted', state.claude?.modelsError || 'No Claude models returned. Click Renew to retry.'));
     }
     if (group.discover) {
       const discovered = discoveredModels.get(group.id) || [];

@@ -4,19 +4,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 
-const MODELS = [
-  { model: 'haiku', label: 'Claude Haiku', rank: 15, description: 'Fast, small tasks and focused lookups.' },
-  { model: 'sonnet', label: 'Claude Sonnet', rank: 35, description: 'General coding, debugging and reviews.' },
-  { model: 'opus', label: 'Claude Opus', rank: 55, description: 'Complex reasoning, architecture and difficult reviews.' },
-].map(p => ({ ...p, id: `claude-cli:${p.model}`, provider: 'claude-cli', effort: null, worker: true, router: true, images: true }));
-
 function executable() {
   const native = path.join(os.homedir(), '.local', 'bin', process.platform === 'win32' ? 'claude.exe' : 'claude');
   return fs.existsSync(native) ? native : 'claude';
 }
 
 class ClaudeCLI {
-  constructor(launch = spawn) { this.launch = launch; this.children = new Set(); this.status = { installed: false, loggedIn: false }; }
+  constructor(launch = spawn) { this.launch = launch; this.children = new Set(); this.models = []; this.status = { installed: false, loggedIn: false }; }
   start(args, cwd) {
     // Authentication stays inside the published CLI, including user-configured auth methods.
     const child = this.launch(executable(), args, { cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -28,9 +22,57 @@ class ClaudeCLI {
     try {
       const result = await this.command(['auth', 'status']);
       const status = JSON.parse(result);
-      this.status = { installed: true, loggedIn: status.loggedIn === true, authMethod: status.authMethod || null };
+      this.status = { installed: true, loggedIn: status.loggedIn === true, authMethod: status.authMethod || null,
+        email: status.loggedIn === true && typeof status.email === 'string' ? status.email : null,
+        subscriptionType: status.loggedIn === true && typeof status.subscriptionType === 'string' ? status.subscriptionType : null };
     } catch (error) { this.status = { installed: error.code !== 'ENOENT', loggedIn: false, error: error.code === 'ENOENT' ? 'Claude Code is not installed. Install it from Settings → Providers.' : 'Could not read Claude Code login status.' }; }
+    if (this.status.loggedIn) {
+      this.models = [];
+      try { await this.discover(); delete this.status.modelsError; }
+      catch (error) { this.status.modelsError = error.message; }
+    } else this.models = [];
     return this.status;
+  }
+  discover() {
+    return new Promise((resolve, reject) => {
+      const child = this.start(['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--no-session-persistence',
+        '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--tools', '', '--settings', '{"disableAllHooks":true}'], os.tmpdir());
+      let buffer = '', settled = false;
+      const finish = (error, models) => {
+        if (settled) return;
+        settled = true; clearTimeout(timer); child.kill();
+        if (error) reject(error); else { this.models = models; resolve(models); }
+      };
+      const timer = setTimeout(() => finish(new Error('Claude model discovery timed out.')), 15000);
+      child.on('error', error => finish(error));
+      child.on('close', () => finish(new Error('Claude model discovery ended without a model list.')));
+      child.stdin.on('error', error => finish(error));
+      child.stderr.on('data', () => {});
+      child.stdout.on('data', data => {
+        buffer += data;
+        if (buffer.length > 1024 * 1024) return finish(new Error('Claude model response exceeded the size limit.'));
+        let end;
+        while ((end = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
+          try {
+            const event = JSON.parse(line);
+            if (event.type !== 'control_response' || event.response?.request_id !== 'models') continue;
+            const entries = event.response.response?.models;
+            if (!Array.isArray(entries) || !entries.length) throw new Error('Claude returned no available models.');
+            const models = new Map();
+            for (const entry of entries) {
+              let model = entry.resolvedModel || entry.value;
+              if (typeof model !== 'string' || !model.trim()) throw new Error('Claude returned an invalid model.');
+              if (entry.value?.endsWith('[1m]') && !model.endsWith('[1m]')) model += '[1m]';
+              models.set(model, { id: `claude-cli:${model}`, model, label: model, provider: 'claude-cli', effort: null,
+                rank: 35, worker: true, router: true, images: true });
+            }
+            finish(null, [...models.values()]);
+          } catch (error) { finish(error); }
+        }
+      });
+      child.stdin.write(JSON.stringify({ type: 'control_request', request_id: 'models', request: { subtype: 'initialize', hooks: {} } }) + '\n');
+    });
   }
   command(args, onOutput, timeout = 15000) {
     return new Promise((resolve, reject) => {
@@ -126,4 +168,4 @@ function handoff(items) {
   if (text.length > 1000000) throw new Error('Conversation is too large to transfer. Start a new chat or compact it before switching backends.');
   return messages.length ? `Earlier conversation, supplied as history:\n${text}\n\nCurrent request:\n` : '';
 }
-module.exports = { ClaudeCLI, MODELS, handoff };
+module.exports = { ClaudeCLI, handoff };
