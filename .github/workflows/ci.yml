@@ -1,0 +1,78 @@
+name: CI
+
+# Tests run on pushes to master and on pull requests. The Windows installer is built only
+# for version tags (v1.2.3) or on demand, to keep Actions minutes low.
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      # Also downloads the pinned ripgrep and RTK builds (tools/fetch.cjs) and checks their SHA256.
+      - run: npm ci
+      - run: npm test
+      - name: Installer script test
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tests/installer.test.ps1
+      - name: UI smoke (Windows)
+        if: runner.os == 'Windows'
+        run: npx electron tests/ui-startup-smoke.cjs
+      - name: UI smoke (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npx electron --no-sandbox tests/ui-startup-smoke.cjs
+
+  package:
+    name: Windows installer
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
+      - run: npm run dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Phasma-Harness-Setup
+          path: dist/*.exe
+          if-no-files-found: error
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.exe --title "Phasma Harness $GITHUB_REF_NAME" --generate-notes

@@ -8,3 +8,4 @@ artifacts/
 installers/*
 !installers/README.md
 tools/bin/
+dist/

@@ -6,7 +6,7 @@ for (const method of ['benchmarkData', 'benchmarkRefresh', 'benchmarkImport', 'b
 api.copyText = text => ipcRenderer.invoke('copyText', text);
 api.queuedMessage = (...args) => ipcRenderer.invoke('queuedMessage', ...args);
 api.browseWorkspace = (...args) => ipcRenderer.invoke('browseWorkspace', ...args);
-for (const method of ['cursorLogin', 'cursorRefresh', 'cursorLogout', 'claudeLogin', 'claudeRefresh', 'claudeLogout', 'connectChatGPT', 'logoutChatGPT', 'installProvider', 'providerSettings', 'providerKey', 'providerModels', 'renewModels', 'bootstrap', 'settings', 'jevSaveKey', 'jevRemoveKey', 'jevTest', 'create', 'permissions', 'load', 'rename', 'archive', 'deleteSession', 'findContext', 'cancelContext', 'preview', 'send', 'compact', 'stop', 'answer', 'checks', 'acknowledgeTask', 'proposeWiki', 'workspaceWiki', 'chooseWorkspaceWiki', 'openWorkspaceWiki', 'chooseWorkspace', 'openLink']) {
+for (const method of ['cursorLogin', 'cursorRefresh', 'cursorLogout', 'claudeLogin', 'claudeRefresh', 'claudeLogout', 'connectChatGPT', 'logoutChatGPT', 'installProvider', 'providerSettings', 'providerKey', 'providerModels', 'renewModels', 'bootstrap', 'settings', 'jevSaveKey', 'jevRemoveKey', 'jevTest', 'create', 'permissions', 'load', 'rename', 'archive', 'deleteSession', 'findContext', 'cancelContext', 'preview', 'send', 'compact', 'stop', 'answer', 'checks', 'acknowledgeTask', 'proposeWiki', 'workspaceWiki', 'chooseWorkspaceWiki', 'openWorkspaceWiki', 'chooseWorkspace', 'openLink', 'diagnostics', 'openLogs', 'appInfo', 'checkUpdates']) {
   api[method] = (...args) => ipcRenderer.invoke(method, ...args);
 }
 api.onState = callback => {

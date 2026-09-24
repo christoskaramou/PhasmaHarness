@@ -8,12 +8,18 @@ const { JevKey } = require('./providers/jev-key.cjs');
 const { JevClient } = require('./providers/jev.cjs');
 const { ContextSearch } = require('./workspace/context-search.cjs');
 const { BenchmarkStore, validateSnapshot, MAX_BYTES } = require('./routing/benchmarks.cjs');
+const { Log } = require('./log.cjs');
+const { buildDiagnostics } = require('./diagnostics.cjs');
+const { checkForUpdate } = require('./updates.cjs');
 
 // Workers and helpers inherit this, so bundled rtk/rg win over any system copies.
 process.env.PATH = path.join(__dirname, '..', 'tools', 'bin') + path.delimiter + process.env.PATH;
 app.setPath('userData', path.join(app.getPath('appData'), 'Phasma Harness'));
 app.setName('Phasma Harness');
 let window, controller, quitting = false;
+const log = new Log(path.join(app.getPath('userData'), 'logs'));
+process.on('uncaughtExceptionMonitor', error => log.error('Uncaught exception', { message: error?.message, stack: String(error?.stack || '').slice(0, 1500) }));
+process.on('unhandledRejection', reason => log.error('Unhandled rejection', { message: reason?.message || String(reason) }));
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', () => { window?.show(); window?.focus(); });
@@ -26,8 +32,13 @@ else {
 async function start() {
   const home = os.homedir();
   const { WikiStore } = require('./workspace/wiki-store.cjs');
-  const wikiStore = new WikiStore(path.join(app.getAppPath(), 'workspace-data'));
+  // A source checkout keeps wikis beside the app, as before. An installed app keeps them with the
+  // other user data, because updates replace the install folder.
+  const dataRoot = app.isPackaged ? app.getPath('userData') : app.getAppPath();
+  const wikiStore = new WikiStore(path.join(dataRoot, 'workspace-data'));
   controller = new Controller(path.join(app.getPath('userData'), 'sessions.json'), home, undefined, undefined, { wikiStore });
+  controller.log = log;
+  log.info('Started', { version: app.getVersion(), electron: process.versions.electron, platform: `${process.platform} ${process.arch} ${os.release()}`, packaged: app.isPackaged });
   controller.smartRouter.benchmarks = new BenchmarkStore(path.join(app.getPath('userData'), 'benchmarks.json'));
   const { Providers } = require('./providers/providers.cjs');
   controller.providers = new Providers(path.join(app.getPath('userData'), 'provider-keys'), safeStorage, () => controller.data.settings.providers || [], (...args) => net.fetch(...args));
@@ -51,7 +62,8 @@ async function start() {
   controller.on('state', state => { if (!window.isDestroyed()) window.webContents.send('state', state); });
   const handle = (name, fn) => ipcMain.handle(name, async (event, ...args) => {
     if (event.sender !== window.webContents || event.senderFrame?.url !== rendererURL) throw new Error('Untrusted caller.');
-    return fn(...args);
+    try { return await fn(...args); }
+    catch (error) { log.warn(`Action ${name} failed`, { error: String(error?.message || error).slice(0, 300) }); throw error; }
   });
   handle('bootstrap', () => controller.snapshot());
   handle('workspaceWiki', id => wikiStore.ensure(id ? controller.session(id).workspace : controller.data.settings.workspace));
@@ -61,7 +73,7 @@ async function start() {
       const answer = await dialog.showMessageBox(window, {
         type: 'question', buttons: ['Reset', 'Cancel'], defaultId: 1, cancelId: 1,
         message: 'Reset this workspace wiki to the default folder?',
-        detail: `The wiki will point to the app folder again. Pages in the current folder are not moved or deleted.\n\nCurrent: ${wikiStore.ensure(workspace).root}`,
+        detail: `The wiki will point to the default folder again. Pages in the current folder are not moved or deleted.\n\nCurrent: ${wikiStore.ensure(workspace).root}`,
       });
       return answer.response === 0 ? wikiStore.setLocation(workspace, null) : wikiStore.ensure(workspace);
     }
@@ -180,7 +192,8 @@ async function start() {
   handle('providerSettings', value => controller.providerSettings(value));
   handle('providerKey', (id, key) => {
     if (controller.busy) throw new Error('Stop the current turn before changing keys.');
-    controller.providers.provider(id);
+    // Keys can be changed while a provider is disabled.
+    if (!(controller.data.settings.providers || []).some(p => p.id === id)) throw new Error('Unknown provider.');
     const store = controller.providers.key(id);
     if (key === null) store.remove(); else store.save(key);
     controller.loaded.clear(); controller.changed(); return controller.snapshot();
@@ -247,6 +260,25 @@ async function start() {
     }) });
   });
   handle('stop', () => controller.stop());
+  handle('diagnostics', async () => {
+    const version = async run => { try { return (await run()).trim().split(/\s+/).find(part => /\d+\.\d+/.test(part)) || '?'; } catch { return 'not available'; } };
+    const [claude, cursor] = await Promise.all([
+      version(() => controller.claude.command(['--version'], undefined, 5000)),
+      version(() => controller.cursor.command(['--version'], 5000)),
+    ]);
+    return buildDiagnostics({
+      controller, logLines: log.tail(150), cli: { codex: controller.client.version || '?', claude, cursor },
+      app: { version: app.getVersion(), electron: process.versions.electron, node: process.versions.node, platform: process.platform, arch: process.arch,
+        osRelease: os.release(), packaged: app.isPackaged, dataLocation: app.getPath('userData') },
+    });
+  });
+  handle('openLogs', () => shell.openPath(log.directory));
+  handle('appInfo', () => ({ version: app.getVersion(), packaged: app.isPackaged }));
+  handle('checkUpdates', async () => {
+    const result = await checkForUpdate({ current: app.getVersion(), fetch: (...args) => net.fetch(...args) });
+    log.info('Update check', { current: result.current, latest: result.latest, newer: result.newer });
+    return result;
+  });
   handle('copyText', text => {
     if (typeof text !== 'string' || text.length > 2000000) throw new Error('Message is too large to copy.');
     clipboard.writeText(text);

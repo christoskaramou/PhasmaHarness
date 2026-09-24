@@ -1,4 +1,5 @@
 const { WORKER_INSTRUCTIONS } = require('../worker-instructions.cjs');
+const { CLAUDE_MODEL_WINDOWS } = require('./limits.cjs');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -158,7 +159,7 @@ class ClaudeCLI {
       }
       args.push('--permission-mode', access === 'danger-full-access' && !schema ? 'bypassPermissions'
         : ask ? (access === 'workspace-write' ? 'acceptEdits' : 'default') : 'dontAsk');
-      let settled = false;
+      let settled = false, rateLimited = false, limitInfo = null;
       const done = (fn, value) => { if (!settled) { settled = true; fn(value); } };
       const child = this.start(args, cwd); let buffer = '', result, stderr = '';
       const abort = () => child.kill(); signal?.addEventListener('abort', abort, { once: true });
@@ -180,7 +181,10 @@ class ClaudeCLI {
         try {
           allowed = !signal?.aborted && await approve({
             title: request.title || `Allow Claude to use ${request.display_name || request.tool_name}?` + (request.blocked_path ? ` (${request.blocked_path})` : ''),
-            rawInput: { tool: request.tool_name, ...input },
+            // Shown to the user; an input field named "tool" must not hide the real tool name.
+            rawInput: Object.hasOwn(input, 'tool') ? { tool: request.tool_name, input } : { tool: request.tool_name, ...input },
+            // What "Allow for this session" keys on (see sessionAllowKey).
+            toolName: String(request.tool_name || ''), input, blockedPath: request.blocked_path,
           }, { signal: cancel.signal }) === true;
         } catch { allowed = false; }
         if (cancel.signal.aborted) return pending.delete(event.request_id);
@@ -203,6 +207,9 @@ class ClaudeCLI {
           if (ask && event.type === 'control_request') { permission(event).catch(() => {}); continue; }
           if (ask && event.type === 'control_cancel_request') { pending.get(event.request_id)?.abort(); continue; }
           if (event.type === 'result') { result = event; if (ask) child.stdin.end(); }
+          // Plan usage limits: the rate-limit event carries the window and its reset; a blocked reply is marked "rate_limit".
+          if (event.type === 'rate_limit_event' && event.rate_limit_info) limitInfo = event.rate_limit_info;
+          if (event.type === 'assistant' && event.error === 'rate_limit') rateLimited = true;
           onEvent(event);
         }
       });
@@ -212,7 +219,17 @@ class ClaudeCLI {
         signal?.removeEventListener('abort', abort);
         for (const cancel of pending.values()) cancel.abort();
         if (signal?.aborted) done(reject, new Error('Claude stopped.'));
-        else if (code || !result || result.is_error) done(reject, new Error(result?.errors?.join('\n') || (stderr ? 'Claude Code failed. Check its login and model access.' : 'Claude Code did not complete the response.')));
+        else if (code || !result || result.is_error) {
+          const message = result?.errors?.join('\n') || (result?.is_error && typeof result.result === 'string' && result.result.trim())
+            || (stderr ? 'Claude Code failed. Check its login and model access.' : 'Claude Code did not complete the response.');
+          const error = new Error(message);
+          // A blocked reply is a limit; so is a rejected window, unless paid extra usage covers the overflow.
+          const overage = limitInfo?.isUsingOverage === true || ['allowed', 'allowed_warning'].includes(limitInfo?.overageStatus);
+          if (rateLimited || (limitInfo?.status === 'rejected' && !overage))
+            error.limit = { until: Number.isFinite(limitInfo?.resetsAt) ? limitInfo.resetsAt * 1000 : null, reason: message, type: limitInfo?.rateLimitType || null,
+              family: CLAUDE_MODEL_WINDOWS[limitInfo?.rateLimitType] || null };
+          done(reject, error);
+        }
         else done(resolve, result);
       });
       const message = JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: prompt }, ...images.map(url => ({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: url.split(',')[1] } }))] } }) + '\n';

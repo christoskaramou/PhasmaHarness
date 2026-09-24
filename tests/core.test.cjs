@@ -1253,3 +1253,281 @@ test('older Cursor variant entries fold into one entry per base model; no duplic
   assert.equal(controller.resolveWorker('cursor-cli:grok-4.6[effort=high,fast=true]:default').id, 'cursor-cli:grok-4.6:high');
   assert.equal(controller.migrateCursorEntries(), false, 'idempotent');
 });
+
+test('"Allow for this session" remembers the exact Claude/Cursor action per session; Codex gets its native decision', async t => {
+  const { controller, fake } = await setup(t);
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  const session = controller.create();
+  session.helperTools = false;
+  const pending = () => [...controller.requests.values()].filter(r => r.id.startsWith('cli-'));
+  let results = [];
+  controller.claude.run = async ({ approve }) => {
+    const bash = command => ({ title: 'Allow Claude to use Bash?', rawInput: { tool: 'Bash', command }, toolName: 'Bash', input: { command, description: 'varies' } });
+    const first = approve(bash('ninja -C build'));
+    const [request] = pending();
+    assert.equal(controller.snapshot().requests.find(r => r.id === request.id).canAllowSession, true);
+    controller.answer(request.id, { decision: 'acceptForSession' });
+    results.push(await first);
+    results.push(await approve({ ...bash('ninja -C build'), input: { command: 'ninja -C build', description: 'another wording' } }));
+    const other = approve(bash('rm -rf build'));
+    assert.equal(pending().length, 1, 'a different command still asks');
+    controller.answer(pending()[0].id, { decision: 'decline' });
+    results.push(await other);
+    const plan = approve({ title: 'Approve Cursor plan', rawInput: {}, kind: 'plan' });
+    assert.equal(controller.snapshot().requests.find(r => r.id === pending()[0].id).canAllowSession, false, 'plans are never remembered');
+    assert.throws(() => controller.answer(pending()[0].id, { decision: 'acceptForSession' }), /Invalid approval/);
+    controller.answer(pending()[0].id, { decision: 'accept' });
+    results.push(await plan);
+    return { result: 'ok' };
+  };
+  await controller.send({ id: session.id, text: 'build', mode: 'claude-cli:sonnet', task: 'off' });
+  assert.deepEqual(results, [true, true, false, true]);
+  assert.equal(pending().length, 0, 'the remembered action did not prompt');
+  // Another session does not inherit it, and an access change clears it.
+  assert.equal(controller.sessionAllows.get(session.id).size, 1);
+  await controller.permissions(session.id, 'read-only');
+  assert.equal(controller.sessionAllows.has(session.id), false);
+
+  // Codex approvals pass acceptForSession through; permission grants become session-scoped.
+  const responses = [];
+  fake.respond = (id, result) => responses.push([id, result]);
+  controller.requests.set('c1', { id: 'c1', method: 'item/commandExecution/requestApproval', params: { threadId: 't' } });
+  controller.requests.set('p1', { id: 'p1', method: 'item/permissions/requestApproval', params: { threadId: 't', permissions: { network: true } } });
+  assert.equal(controller.snapshot().requests.find(r => r.id === 'c1').canAllowSession, true);
+  controller.answer('c1', { decision: 'acceptForSession' });
+  controller.answer('p1', { decision: 'acceptForSession' });
+  assert.deepEqual(responses, [['c1', { decision: 'acceptForSession' }], ['p1', { permissions: { network: true }, scope: 'session' }]]);
+});
+
+test('"Allow for this session" keys never cover more than the approved action', () => {
+  const { sessionAllowKey } = require('../src/controller/shared.cjs');
+  const claude = (toolName, input, extra = {}) => sessionAllowKey({ title: `Allow Claude to use ${toolName}?`, rawInput: { tool: toolName, ...input }, toolName, input, ...extra });
+  // MCP and other tools repeat their whole input; the generic title is never the target.
+  const merge = number => claude('mcp__github__merge_pull_request', { owner: 'o', repo: 'r', pull_number: number });
+  assert.ok(merge(12));
+  assert.notEqual(merge(12), merge(99));
+  assert.equal(merge(12), claude('mcp__github__merge_pull_request', { pull_number: 12, repo: 'r', owner: 'o' }), 'key order does not matter');
+  assert.notEqual(claude('mcp__shell__run', { command: 'git', args: ['status'] }), claude('mcp__shell__run', { command: 'git', args: ['push', '--force'] }));
+  // An input field named "tool" cannot pose as another tool.
+  assert.notEqual(claude('mcp__x__run', { tool: 'Bash', command: 'ls' }), claude('Bash', { command: 'ls' }));
+  // Known tools key on their target; a missing target, plans and questions are not remembered.
+  assert.equal(claude('Bash', { command: 'ls', description: 'a' }), claude('Bash', { command: 'ls', description: 'b' }));
+  assert.notEqual(claude('Bash', { command: 'npm test' }), claude('Bash', { command: 'npm test', dangerouslyDisableSandbox: true }), 'leaving the sandbox is a different action');
+  assert.equal(claude('Bash', { description: 'no command' }), null);
+  assert.notEqual(claude('Read', { file_path: '/a' }), claude('Read', { file_path: '/a' }, { blockedPath: '/a' }));
+  assert.notEqual(claude('Grep', { pattern: 'x', path: '/a' }), claude('Grep', { pattern: 'x', path: '/b' }));
+  assert.equal(claude('ExitPlanMode', { plan: 'p' }), null);
+  assert.equal(claude('AskUserQuestion', { questions: [] }), null);
+  // Cursor: the title names the command or file; MCP arguments come from the content.
+  const cursor = (kind, title, content) => sessionAllowKey({ toolCallId: String(Math.random()), title, kind, status: 'pending', content });
+  assert.equal(cursor('execute', '`ls -la`'), cursor('execute', '`ls -la`'), 'the call id is not part of the key');
+  assert.notEqual(cursor('execute', '`ls -la`'), cursor('execute', '`rm -rf /`'));
+  const args = pull => [{ type: 'content', content: { type: 'text', text: JSON.stringify({ pull }) } }];
+  assert.notEqual(cursor('other', 'github: merge_pull_request', args(12)), cursor('other', 'github: merge_pull_request', args(99)));
+  assert.equal(cursor('execute', ''), null);
+  assert.equal(sessionAllowKey({ toolCallId: 'x', kind: 'execute' }), null);
+  assert.equal(cursor('other', 'Unknown operation'), null);
+  assert.equal(sessionAllowKey({ title: 'Approve Cursor plan', rawInput: {}, kind: 'plan' }), null);
+});
+
+test('usage limits: an Auto message fails over once to another provider; manual selections only report it', async t => {
+  const { controller, fake, smartRouter } = await setup(t);
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  const routed = [];
+  // Prefer Claude while it is offered; the controller leaves limited providers out of the catalog.
+  smartRouter.choose = async (_text, session) => {
+    routed.push(session.routingCatalog.map(p => p.provider || 'codex'));
+    const pick = session.routingCatalog.find(p => p.provider === 'claude-cli') || session.routingCatalog.find(p => (p.provider || 'codex') === 'codex');
+    return { ...pick, source: 'model', reason: 'test' };
+  };
+  const reset = Date.now() + 3600 * 1000;
+  let claudeRuns = 0;
+  controller.claude.run = async () => {
+    claudeRuns++;
+    throw Object.assign(new Error("You've hit your session limit"), { limit: { until: reset, reason: 'limit', type: 'five_hour' } });
+  };
+  const session = controller.create();
+  session.helperTools = false;
+  await controller.send({ id: session.id, text: 'build it', mode: 'auto', task: 'off' });
+  await flush();
+  assert.equal(claudeRuns, 1);
+  assert.equal(controller.limits.limited('claude-cli').until, reset);
+  assert.ok(routed[1] && !routed[1].includes('claude-cli'), 'the retry was routed without Claude');
+  assert.equal(fake.turnIds.length, 1, 'the retry went to Codex');
+  assert.match(session.notice, /Claude reached its usage limit until .*another provider/);
+  assert.equal(controller.snapshot().providerLimits['claude-cli'].until, reset);
+  // The retried message hits Codex's limit too: reported, never retried again.
+  controller.notification({ method: 'turn/completed', params: { threadId: session.threadId, turn: { id: fake.turnIds[0], status: 'failed', error: { message: 'You have hit your usage limit.', codexErrorInfo: 'usageLimitExceeded' } } } });
+  await flush();
+  assert.equal(fake.turnIds.length, 1);
+  assert.ok(controller.limits.limited('codex'));
+  assert.match(session.error, /ChatGPT \(Codex\) reached its usage limit/);
+  assert.equal((session.queue || []).length, 0);
+
+  // Manual selection: no failover.
+  controller.limits.clear('claude-cli'); controller.limits.clear('codex');
+  await controller.send({ id: session.id, text: 'manual', mode: 'claude-cli:sonnet', task: 'off' });
+  await flush();
+  assert.equal(claudeRuns, 2);
+  assert.equal((session.queue || []).length, 0);
+  assert.match(session.error, /Claude reached its usage limit until/);
+
+  // A later success on a provider clears its limit.
+  controller.claude.run = async () => ({ result: 'ok' });
+  await controller.send({ id: session.id, text: 'again', mode: 'claude-cli:sonnet', task: 'off' });
+  assert.equal(controller.limits.limited('claude-cli'), null);
+});
+
+test('a router at its usage limit is replaced by another provider\'s router for that message', async t => {
+  const { controller, smartRouter } = await setup(t);
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  controller.data.settings.routerPreset = 'claude-cli:haiku';
+  const routers = [];
+  smartRouter.choose = async (_text, session) => {
+    routers.push(session.routerChoice.id);
+    if (session.routerChoice.provider === 'claude-cli') throw Object.assign(new Error('Smart routing stopped: limit'), { limit: { until: null, reason: 'limit' }, limitProvider: 'claude-cli' });
+    return { ...session.routingCatalog.find(p => (p.provider || 'codex') === 'codex'), source: 'model', reason: 'test' };
+  };
+  const session = controller.create();
+  await controller.send({ id: session.id, text: 'hi', mode: 'auto', task: 'off' });
+  assert.equal(routers[0], 'claude-cli:haiku');
+  assert.ok(routers[1] && !routers[1].startsWith('claude-cli:'));
+  assert.ok(controller.limits.limited('claude-cli'));
+  assert.equal(controller.effectiveRouter().provider, 'codex', 'later messages skip the limited router directly');
+  assert.equal(controller.data.settings.routerPreset, 'claude-cli:haiku', 'the saved router choice is kept');
+});
+
+test('usage limits: Stop is never overridden by the failover, and the refused attempt runs no checks', async t => {
+  const { controller, fake, smartRouter } = await setup(t);
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  smartRouter.choose = async (_text, session) => ({ ...session.routingCatalog.find(p => (p.provider || 'codex') === 'codex'), source: 'model', reason: 'test' });
+  const session = controller.create();
+  session.helperTools = false;
+  controller.data.settings.checks[session.workspace] = [{ id: 'c1', name: 'Build', argv: ['node', '--version'], cwd: session.workspace, timeoutMs: 10000, readOnlySafe: true }];
+  let checks = 0;
+  controller.runCheck = async () => { checks++; return { id: 'c1', name: 'Build', status: 'passed' }; };
+  const limited = turn => controller.notification({ method: 'turn/completed', params: { threadId: session.threadId,
+    turn: { id: turn, status: 'failed', error: { message: 'You have hit your usage limit.', codexErrorInfo: 'usageLimitExceeded' } } } });
+  // Stopped while Codex was refusing the turn: reported, not resent.
+  await controller.send({ id: session.id, text: 'build it', mode: 'auto', task: 'on' });
+  await controller.stop();
+  limited(fake.turnIds[0]);
+  await flush(); await controller.gateDone; await flush();
+  assert.equal(fake.turnIds.length, 1);
+  assert.equal((session.queue || []).length, 0, 'nothing was queued after Stop');
+  assert.match(session.error, /usage limit/);
+  // Not stopped: the refused attempt ends without running checks, and the message goes to Claude.
+  controller.limits.clear('codex');
+  let claudeRuns = 0;
+  controller.claude.run = async () => { claudeRuns++; return { result: 'done' }; };
+  smartRouter.choose = async (_text, session) => ({ ...(session.routingCatalog.find(p => (p.provider || 'codex') === 'codex') || session.routingCatalog.find(p => p.provider === 'claude-cli')), source: 'model', reason: 'test' });
+  await controller.send({ id: session.id, text: 'build again', mode: 'auto', task: 'on' });
+  limited(fake.turnIds[1]);
+  await flush(); await controller.gateDone; await flush(); await controller.gateDone; await flush();
+  const refused = session.tasks.find(task => task.goal === 'build again' && task.reason === 'usage limit');
+  assert.equal(refused?.state, 'needs-you');
+  assert.equal(claudeRuns, 1, 'the message was resent to Claude');
+  assert.equal(checks, 1, 'only the resent turn ran the configured check');
+});
+
+test('a Claude Opus weekly limit leaves the other Claude models usable, and only an Opus success lifts it', async t => {
+  const { controller, smartRouter } = await setup(t);
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  const routed = [];
+  smartRouter.choose = async (_text, session) => {
+    routed.push(session.routingCatalog.filter(p => p.provider === 'claude-cli').map(p => p.model));
+    return { ...(session.routingCatalog.find(p => p.model === 'opus') || session.routingCatalog.find(p => p.model === 'sonnet')), source: 'model', reason: 'test' };
+  };
+  const models = [];
+  controller.claude.run = async ({ model }) => {
+    models.push(model);
+    if (model === 'opus') throw Object.assign(new Error('Opus limit'), { limit: { until: Date.now() + 3600000, reason: 'limit', type: 'seven_day_opus', family: 'opus' } });
+    return { result: 'ok' };
+  };
+  const session = controller.create();
+  session.helperTools = false;
+  await controller.send({ id: session.id, text: 'review', mode: 'auto', task: 'off' });
+  await flush();
+  assert.deepEqual(models, ['opus', 'sonnet'], 'the retry stayed on Claude with another model');
+  assert.ok(!routed[1].includes('opus') && routed[1].includes('sonnet'));
+  assert.match(session.notice, /Claude Opus reached its usage limit/);
+  assert.ok(controller.limits.limited('claude-cli', 'opus'), 'a Sonnet success does not lift the Opus limit');
+  assert.equal(controller.limits.limited('claude-cli', 'sonnet'), null);
+});
+
+test('Codex usage windows are shown and a full window marks the limit until its reset', async t => {
+  const { controller } = await setup(t);
+  const resetsAt = Math.floor(Date.now() / 1000) + 600;
+  controller.notification({ method: 'account/rateLimits/updated', params: { rateLimits: { primary: { usedPercent: 42, windowDurationMins: 300, resetsAt }, secondary: null } } });
+  assert.equal(controller.snapshot().providerUsage.codex.primary.usedPercent, 42);
+  assert.equal(controller.limits.limited('codex'), null);
+  controller.notification({ method: 'account/rateLimits/updated', params: { rateLimits: { primary: { usedPercent: 100, windowDurationMins: 300, resetsAt } } } });
+  assert.equal(controller.limits.limited('codex').until, resetsAt * 1000);
+  assert.equal(controller.snapshot().providerUsage.codex.primary.usedPercent, 100);
+});
+
+test('Codex usage: stale windows, other limit buckets and credits never mark a limit', async t => {
+  const { controller } = await setup(t);
+  const past = Math.floor(Date.now() / 1000) - 60, future = Math.floor(Date.now() / 1000) + 600;
+  controller.codexUsage({ limitId: 'codex', primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: past }, secondary: null });
+  assert.equal(controller.limits.current('codex'), null, 'a full window whose reset has passed is stale');
+  controller.notification({ method: 'account/rateLimits/updated', params: { rateLimits: { limitId: 'codex', primary: null, secondary: { usedPercent: 10, windowDurationMins: 10080, resetsAt: future } } } });
+  assert.equal(controller.limits.current('codex'), null, 'merging a sparse update does not revive the stale window as a limit');
+  controller.notification({ method: 'account/rateLimits/updated', params: { rateLimits: { limitId: 'gpt-6-astra', primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: future } } } });
+  assert.equal(controller.limits.current('codex'), null, 'another bucket is not the Codex plan window');
+  assert.equal(controller.snapshot().providerUsage.codex.secondary.usedPercent, 10);
+  controller.codexUsage({ limitId: 'codex', primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: future }, credits: { hasCredits: true, unlimited: false, balance: '5' } });
+  assert.equal(controller.limits.current('codex'), null, 'credits cover a full window');
+});
+
+test('API providers: add, enable a discovered model, and remove the provider with its models and key', async t => {
+  const { controller } = await setup(t);
+  const removedKeys = [];
+  controller.providers = { configured: () => false, key: id => ({ remove: () => removedKeys.push(id) }) };
+  controller.providerSettings({ action: 'provider', provider: { id: 'lm-studio', name: 'LM Studio', baseUrl: 'http://localhost:1234/v1', enabled: true } });
+  controller.providerSettings({ action: 'enableDiscovered', provider: 'lm-studio', model: 'qwen3-coder-30b-a3b', label: 'qwen3-coder-30b-a3b' });
+  const worker = controller.catalog().find(p => p.provider === 'lm-studio');
+  assert.equal(worker.id, 'lm-studio:qwen3-coder-30b-a3b:default');
+  assert.equal(controller.available(worker), true, 'runs through the connected Codex app-server');
+  assert.throws(() => controller.providerSettings({ action: 'provider', provider: { id: 'codex', name: 'x', baseUrl: 'https://x.test' } }), /provider ID/);
+  assert.throws(() => controller.providerSettings({ action: 'provider', provider: { id: 'remote', name: 'x', baseUrl: 'http://example.com' } }), /HTTPS/);
+  controller.data.settings.mode = worker.id;
+  controller.data.settings.routerPreset = worker.id;
+  controller.providerSettings({ action: 'removeProvider', id: 'lm-studio' });
+  assert.equal(controller.data.settings.mode, 'auto', 'a manual choice of a removed model goes back to Auto');
+  assert.ok(controller.routerChoices().some(p => p.id === controller.data.settings.routerPreset && controller.available(p)), 'routing gets an available router');
+  // Other providers' saved choices stay, even while their models are not listed (for example Claude signed out).
+  controller.providerSettings({ action: 'provider', provider: { id: 'lm-studio', name: 'LM Studio', baseUrl: 'http://localhost:1234/v1', enabled: true } });
+  controller.data.settings.mode = 'claude-cli:claude-opus-5-5:high';
+  controller.data.settings.routerPreset = 'claude-cli:claude-haiku-5';
+  controller.providerSettings({ action: 'removeProvider', id: 'lm-studio' });
+  assert.equal(controller.data.settings.mode, 'claude-cli:claude-opus-5-5:high');
+  assert.equal(controller.data.settings.routerPreset, 'claude-cli:claude-haiku-5');
+  assert.deepEqual(controller.data.settings.providers, []);
+  assert.equal(controller.catalog().some(p => p.provider === 'lm-studio'), false);
+  assert.deepEqual(removedKeys, ['lm-studio', 'lm-studio']);
+  assert.throws(() => controller.providerSettings({ action: 'removeProvider', id: 'lm-studio' }), /Unknown provider/);
+});
+
+test('diagnostics list versions, provider state and limits without emails, keys or chat content', async t => {
+  const { buildDiagnostics } = require('../src/diagnostics.cjs');
+  const { controller } = await setup(t);
+  controller.claude.status = { installed: true, loggedIn: true, email: 'someone@example.com' };
+  controller.data.settings.providers = [{ id: 'lm', name: 'LM', baseUrl: 'http://localhost:1234/v1', enabled: true }];
+  const session = controller.create();
+  session.title = 'Secret project plan';
+  controller.limits.mark('cursor-cli', { until: null });
+  const text = buildDiagnostics({ controller, app: { version: '0.1.0', electron: '44.4.3', packaged: false }, cli: { codex: '0.156.1', claude: '2.1.281' },
+    logLines: ['2026 INFO Started', 'token=sk-abcdefghijklmnopqrstu'] });
+  assert.match(text, /Phasma Harness 0\.1\.0 · Electron 44\.4\.3/);
+  assert.match(text, /Codex CLI 0\.156\.1 · running: yes/);
+  assert.match(text, /Claude Code 2\.1\.281 · signed in: yes/);
+  assert.match(text, /API provider lm · localhost:1234/);
+  assert.match(text, /Usage limits: cursor-cli until .*\(estimated\)/);
+  assert.doesNotMatch(text, /someone@example\.com|Secret project|sk-abcdefghijklmnopqrstu/);
+});

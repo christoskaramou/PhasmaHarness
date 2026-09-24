@@ -70,6 +70,81 @@ function showMode(id) {
   effort.hidden = variants.length < 2;
 }
 
+// Usage and limits as each provider reports them (Settings → Providers).
+const clock = ms => new Date(ms).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+const windowName = minutes => minutes === 300 ? '5h' : minutes === 10080 ? 'week' : minutes ? `${Math.round(minutes / 60)}h` : 'window';
+const CLAUDE_WINDOWS = { five_hour: '5h', seven_day: 'week', seven_day_opus: 'week (Opus)', seven_day_sonnet: 'week (Sonnet)', overage: 'extra usage' };
+// API providers: add (name, base URL, optional key), enable/disable, replace or clear the key, remove.
+function renderApiProviders() {
+  const list = $('#api-provider-list');
+  list.replaceChildren(...(state.providers || []).map(p => {
+    const row = element('div', 'api-provider-row');
+    const toggle = document.createElement('input'); toggle.type = 'checkbox'; toggle.checked = p.enabled !== false; toggle.disabled = !!state.busy;
+    toggle.setAttribute('aria-label', `Use ${p.name}`);
+    toggle.onchange = () => apiProviderAction(() => api.providerSettings({ action: 'provider', provider: { id: p.id, name: p.name, baseUrl: p.baseUrl, enabled: toggle.checked } }));
+    // Electron has no prompt(): a key is typed into an inline password field.
+    const keyInput = document.createElement('input'); keyInput.type = 'password'; keyInput.placeholder = 'API key'; keyInput.autocomplete = 'off';
+    keyInput.hidden = !!p.configured; keyInput.setAttribute('aria-label', `API key for ${p.name}`);
+    const key = element('button', '', p.configured ? 'Clear key' : 'Save key');
+    key.onclick = () => {
+      if (p.configured) return apiProviderAction(() => api.providerKey(p.id, null));
+      if (keyInput.value) apiProviderAction(() => api.providerKey(p.id, keyInput.value));
+    };
+    const remove = element('button', '', 'Remove');
+    remove.onclick = () => { if (confirm(`Remove ${p.name} and its models?`)) apiProviderAction(() => api.providerSettings({ action: 'removeProvider', id: p.id })); };
+    row.append(toggle, element('span', '', `${p.name} · ${p.baseUrl}${p.configured ? ' · key saved' : ''}${state.codex?.connected ? '' : ' · needs Codex'}`), keyInput, key, remove);
+    return row;
+  }));
+}
+async function apiProviderAction(run) {
+  try {
+    applyState(await run());
+    for (const id of [...discoveredModels.keys()]) if (!['codex', 'claude-cli', 'cursor-cli'].includes(id)) discoveredModels.delete(id);
+    renderProviders(); $('#provider-status').textContent = '';
+  }
+  catch (error) { $('#provider-status').textContent = error.message; }
+}
+$('#api-add').onclick = () => {
+  const name = $('#api-name').value.trim(), baseUrl = $('#api-url').value.trim(), key = $('#api-key').value;
+  // IDs: lowercase letters, digits and hyphens, starting with a letter (validated again by the main process).
+  let id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^[^a-z]+|-+$/g, '').slice(0, 40) || 'provider';
+  for (let n = 2; (state.providers || []).some(p => p.id === id) || ['codex', 'claude-cli', 'cursor-cli'].includes(id); n++) id = `${id.replace(/-\d+$/, '')}-${n}`;
+  apiProviderAction(async () => {
+    let next = await api.providerSettings({ action: 'provider', provider: { id, name, baseUrl, enabled: true } });
+    if (key) next = await api.providerKey(id, key);
+    $('#api-name').value = ''; $('#api-url').value = ''; $('#api-key').value = '';
+    return next;
+  });
+};
+
+function usageLine(provider) {
+  // The provider-wide limit, or else its model-family limits (for example Claude's weekly Opus window).
+  const limits = Object.entries(state?.providerLimits || {})
+    .filter(([key, limit]) => (key === provider || key.startsWith(provider + ':')) && limit.until > Date.now());
+  const wide = limits.find(([key]) => key === provider);
+  const shown = (wide ? [wide] : limits).map(([, limit]) => {
+    const what = limit.family ? `${limit.family[0].toUpperCase()}${limit.family.slice(1)} usage limit reached` : 'Usage limit reached';
+    return limit.known ? `${what} · resets ${clock(limit.until)}` : `${what} · retried after ${clock(limit.until)}`;
+  });
+  if (shown.length) return { limited: true, text: shown.join(' · ') };
+  const usage = state?.providerUsage?.[provider];
+  if (!usage) return null;
+  if (provider === 'codex') {
+    const parts = [usage.primary, usage.secondary].filter(w => w && Number.isFinite(w.usedPercent))
+      .map(w => `${Math.round(w.usedPercent)}% of ${windowName(w.windowDurationMins)}${w.resetsAt ? ` (resets ${clock(w.resetsAt * 1000)})` : ''}`);
+    return parts.length ? { text: `Used: ${parts.join(' · ')}` } : null;
+  }
+  if (provider === 'claude-cli') {
+    const name = CLAUDE_WINDOWS[usage.rateLimitType] || 'plan';
+    // Claude Code reports utilization as a fraction (its warning thresholds are 0.25–0.9).
+    const used = Number.isFinite(usage.utilization) ? `${Math.round(usage.utilization * 100)}% of ${name}` : null;
+    const reset = Number.isFinite(usage.resetsAt) ? ` (resets ${clock(usage.resetsAt * 1000)})` : '';
+    if (usage.status === 'allowed_warning') return { text: `Near the ${name} limit${used ? ` · ${used}` : ''}${reset}` };
+    return used ? { text: `Used: ${used}${reset}` } : null;
+  }
+  return null;
+}
+
 function connectedProviders() {
   if (!state) return [];
   const rows = [];
@@ -686,6 +761,13 @@ function renderRequest() {
     }
     const actions = element('div', 'dialog-footer');
     const decline = element('button', '', 'Decline'); decline.onclick = () => finish({ decision: 'decline' }); actions.append(decline);
+    if (request.canAllowSession) {
+      const session = element('button', '', 'Allow for this session');
+      session.title = request.method === 'router/tool/requestApproval'
+        ? 'Allow this exact action again without asking until the session ends or its access changes.'
+        : 'Codex allows this action again without asking for the rest of this conversation.';
+      session.onclick = () => finish({ decision: 'acceptForSession' }); actions.append(session);
+    }
     if (!unsupported) { const allow = element('button', 'primary', 'Allow once'); allow.onclick = () => finish({ decision: 'accept' }); actions.append(allow); }
     content.append(actions);
   }
@@ -803,8 +885,39 @@ $('#settings').onclick = async () => {
   $('#jev-result').textContent = '';
   renderProviders();
   renderChecks(); // saved checks, not leftovers from an earlier unsaved edit
+  showVersion();
   $('#settings-dialog').showModal();
 };
+// Versions, provider state and recent log lines (no prompts, replies or keys), for bug reports.
+$('#copy-diagnostics').onclick = async () => {
+  $('#diagnostics-status').textContent = 'Collecting…';
+  try { await api.copyText(await api.diagnostics()); $('#diagnostics-status').textContent = 'Diagnostics copied to the clipboard.'; }
+  catch (error) { $('#diagnostics-status').textContent = error.message; }
+};
+$('#open-logs').onclick = () => api.openLogs().catch(notify);
+let appInfo = null, releaseURL = null;
+async function showVersion() {
+  appInfo ??= await api.appInfo().catch(() => null);
+  if (appInfo) $('#app-version').textContent = `Version ${appInfo.version}${appInfo.packaged ? '' : ' (source folder)'}`;
+}
+// Manual only: asks GitHub for the latest release and links to it. Nothing is downloaded.
+$('#check-updates').onclick = async () => {
+  const button = $('#check-updates');
+  button.disabled = true; $('#open-release').hidden = true;
+  $('#update-status').textContent = 'Checking…';
+  try {
+    const result = await api.checkUpdates();
+    releaseURL = result.url;
+    if (result.note) $('#update-status').textContent = result.note;
+    else if (!result.newer) $('#update-status').textContent = `You have the latest version (${result.latest}).`;
+    else $('#update-status').textContent = appInfo?.packaged === false
+      ? `Version ${result.latest} is available. Update the source folder, then run Install Phasma Harness.cmd again.`
+      : `Version ${result.latest} is available${result.installer ? ` (${result.installer})` : ''}. Download it from the release page and run it; your settings and sessions are kept.`;
+    $('#open-release').hidden = !(result.newer || result.note);
+  } catch (error) { $('#update-status').textContent = error.message; }
+  finally { button.disabled = false; }
+};
+$('#open-release').onclick = () => { if (releaseURL) api.openLink(releaseURL).catch(notify); };
 $('#settings-access').onchange = () => {
   $('#settings-access-detail').textContent = state.accessModes.find(mode => mode.id === $('#settings-access').value).description;
 };
@@ -1027,6 +1140,8 @@ function renderProviders() {
     };
     const text = element('div', 'provider-account-text');
     text.append(element('strong', '', label), document.createTextNode(detail ? ` · ${detail}` : ''));
+    const usage = usageLine(id);
+    if (usage) text.append(element('small', usage.limited ? 'provider-usage limited' : 'provider-usage', usage.text));
     row.append(plug, text);
     if (installed === false) {
       const install = element('button', 'provider-install', 'Install');
@@ -1082,11 +1197,14 @@ function renderProviders() {
     disconnect: () => api.cursorLogout(),
   });
 
+  renderApiProviders();
   const catalog = state.providerCatalog || [];
   const groups = [
     { id: 'codex', title: 'Codex / ChatGPT', models: catalog.filter(m => !m.provider || m.provider === 'codex'), gated: !state.account },
     { id: 'claude-cli', title: 'Claude', models: catalog.filter(m => m.provider === 'claude-cli'), gated: !claudeInUse() },
     { id: 'cursor-cli', title: 'Cursor', models: catalog.filter(m => m.provider === 'cursor-cli'), gated: !cursorInUse(), discover: true },
+    // API providers run through the Codex app-server; their models come from the endpoint's /models list.
+    ...(state.providers || []).map(p => ({ id: p.id, title: p.name, models: catalog.filter(m => m.provider === p.id), gated: !p.enabled || !state.codex?.connected, discover: true, api: true })),
   ];
 
   for (const group of groups) {
@@ -1108,7 +1226,7 @@ function renderProviders() {
       // Always load Cursor's full model list, not only when nothing is enabled yet; enabled models show meanwhile.
       if (!discoveredModels.has(group.id) && !modelFetches.has(group.id))
         loadDiscoveredModels(group.id).then(() => renderProviders()).catch(e => { $('#provider-status').textContent = e.message; });
-      if (!discoveredModels.has(group.id)) list.append(element('p', 'muted', 'Fetching Cursor models…'));
+      if (!discoveredModels.has(group.id)) list.append(element('p', 'muted', `Fetching ${group.title} models…`));
       else if (!ids.size) list.append(element('p', 'muted', 'No models returned.'));
       for (const modelId of [...ids].sort()) {
         const existing = enabledByModel.get(modelId);

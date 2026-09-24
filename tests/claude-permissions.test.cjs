@@ -53,7 +53,8 @@ for (const [access, mode] of [['workspace-write', 'acceptEdits'], ['read-only', 
     let answered = nextInput();
     send({ type: 'control_request', request_id: 'r1', request: { subtype: 'can_use_tool', tool_name: 'Bash', tool_use_id: 't1', input: { command: 'ninja -C build' } } });
     await answered;
-    assert.deepEqual(asked[0], { title: 'Allow Claude to use Bash?', rawInput: { tool: 'Bash', command: 'ninja -C build' } });
+    assert.deepEqual(asked[0], { title: 'Allow Claude to use Bash?', rawInput: { tool: 'Bash', command: 'ninja -C build' },
+      toolName: 'Bash', input: { command: 'ninja -C build' }, blockedPath: undefined });
     assert.deepEqual(state.input[1], { type: 'control_response', response: { request_id: 'r1', subtype: 'success',
       response: { behavior: 'allow', updatedInput: { command: 'ninja -C build' }, toolUseID: 't1' } } });
 
@@ -150,4 +151,25 @@ test('a Claude cancel withdraws its approval, and events after the run settles a
   state.child.stdout.write(JSON.stringify({ type: 'control_request', request_id: 'r2', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: {} } }) + '\n');
   await new Promise(setImmediate);
   assert.equal(asks, 1, 'no approval is requested after the run has settled');
+});
+
+test('Claude usage limits: a blocked reply or a rejected window is a limit, unless extra usage covers it', async () => {
+  const outcome = async events => {
+    const { cli, state, send } = fake();
+    const run = cli.run({ model: 'claude-opus-5-5', prompt: 'x', access: 'workspace-write', approve: async () => false });
+    await new Promise(setImmediate);
+    for (const event of events) send(event);
+    await new Promise(setImmediate);
+    state.child.emit('close', 1);
+    return run.then(() => null, error => error);
+  };
+  const failed = { type: 'result', is_error: true, result: "You've hit your limit · resets 5pm" };
+  const weekly = await outcome([{ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: 2000000000, rateLimitType: 'seven_day_opus' } }, failed]);
+  assert.match(weekly.message, /hit your limit/);
+  assert.deepEqual(weekly.limit, { until: 2000000000000, reason: weekly.message, type: 'seven_day_opus', family: 'opus' });
+  const session = await outcome([{ type: 'assistant', error: 'rate_limit', message: { content: [] } }, failed]);
+  assert.equal(session.limit.family, null, 'a session window limits all of Claude');
+  const overage = await outcome([{ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', rateLimitType: 'five_hour', isUsingOverage: true, overageStatus: 'allowed' } },
+    { type: 'result', is_error: true, subtype: 'error_max_turns', errors: ['Reached the maximum number of turns'] }]);
+  assert.equal(overage.limit, undefined, 'another failure while extra usage covers the window is not a usage limit');
 });

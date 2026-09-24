@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const { CodexClient } = require('../providers/codex.cjs');
 const { isCLI } = require('../providers/capabilities.cjs');
+const { codexTurnLimited } = require('../providers/limits.cjs');
 const { PRESETS, ROUTER_PRESETS } = require('./router.cjs');
 const { collectWorkspace } = require('../workspace/workspace-context.cjs');
 const { MODEL: JEV_MODEL, CHECKS_POLICY } = require('../providers/jev.cjs');
@@ -164,7 +165,8 @@ class SmartRouter {
       if (method === 'thread/tokenUsage/updated') usage = p.tokenUsage.last;
       if (method === 'item/completed' && p.item.type === 'agentMessage') output = p.item.text;
       if (method === 'item/started' && ['commandExecution', 'fileChange', 'mcpToolCall', 'webSearch'].includes(p.item.type)) fail(new Error('Router attempted tool use.'));
-      if (method === 'turn/completed') p.turn.status === 'completed' ? finish(output) : fail(new Error(p.turn.error?.message || 'Routing did not complete.'));
+      if (method === 'turn/completed') p.turn.status === 'completed' ? finish(output) : fail(Object.assign(new Error(p.turn.error?.message || 'Routing did not complete.'),
+        codexTurnLimited(p.turn.error) ? { limit: { until: null, reason: p.turn.error.message || 'Codex usage limit reached.' } } : {}));
     };
     client.on('request', onRequest);
     client.on('disconnected', onDisconnect);
@@ -295,7 +297,9 @@ class SmartRouter {
     } catch (error) {
       if (!useJev) this.close();
       if (error.name === 'AbortError') throw error;
-      throw new Error(`${useJev ? 'Jev' : 'Smart'} routing stopped: ${clip(error.message, 240)} No worker was started. Retry or choose a manual preset.`);
+      // A usage limit on the router's own provider is kept so the caller can route with another provider.
+      throw Object.assign(new Error(`${useJev ? 'Jev' : 'Smart'} routing stopped: ${clip(error.message, 240)} No worker was started. Retry or choose a manual preset.`),
+        error.limit && !useJev ? { limit: error.limit, limitProvider: choice?.provider || 'codex' } : {});
     } finally {
       scanAbort.abort();
       if (this.abort === abort) this.abort = null;

@@ -19,6 +19,11 @@ app.whenReady().then(async () => {
   const savedChecks = [];
   ipcMain.handle('checks', (_event, workspace, list) => { savedChecks.push(list); return controller.checks(workspace, list); });
   ipcMain.handle('settings', (_event, values) => controller.settings(values));
+  ipcMain.handle('providerSettings', (_event, value) => controller.providerSettings(value));
+  ipcMain.handle('providerKey', () => controller.snapshot());
+  ipcMain.handle('appInfo', () => ({ version: '0.1.0', packaged: true }));
+  let updateResult = { current: '0.1.0', latest: '0.2.0', newer: true, url: 'https://github.com/x/y/releases/tag/v0.2.0', installer: 'Phasma-Harness-Setup-0.2.0.exe' };
+  ipcMain.handle('checkUpdates', () => { if (updateResult instanceof Error) throw updateResult; return updateResult; });
   ipcMain.handle('send', (_event, message) => {
     if (failSend) throw new Error('Test send failed');
     sent.push(message);
@@ -125,6 +130,38 @@ app.whenReady().then(async () => {
   assert.doesNotMatch(await window.webContents.executeJavaScript("document.querySelector('#provider-model-list').textContent"), /claude-opus-5-5/, 'Claude models are hidden');
   assert.doesNotMatch(await window.webContents.executeJavaScript("document.querySelector('#provider-model-list').textContent"), /gpt-6-sol/);
   console.log('Disconnected providers hide models and keep CLI logins passed');
+  // Usage and limits per provider.
+  controller.account = { type: 'chatgpt', plan: 'pro' }; controller.data.settings.claudeEnabled = true;
+  controller.limits.setUsage('codex', { primary: { usedPercent: 42, windowDurationMins: 300, resetsAt: Math.floor(Date.now() / 1000) + 3600 } });
+  controller.limits.mark('claude-cli', { until: Date.now() + 3600 * 1000, reason: 'limit' });
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderProviders(); true');
+  const usageText = await window.webContents.executeJavaScript("[...document.querySelectorAll('.provider-usage')].map(e => e.textContent + '|' + e.className)");
+  assert.ok(usageText.some(t => /^Used: 42% of 5h \(resets /.test(t)), JSON.stringify(usageText));
+  assert.ok(usageText.some(t => /^Usage limit reached · resets .*\|provider-usage limited$/.test(t)), JSON.stringify(usageText));
+  // A model-family limit alone names its family.
+  controller.limits.clear('claude-cli');
+  controller.limits.mark('claude-cli', { until: Date.now() + 3600 * 1000, reason: 'limit', family: 'opus' });
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderProviders(); true');
+  const familyText = await window.webContents.executeJavaScript("[...document.querySelectorAll('.provider-usage')].map(e => e.textContent)");
+  assert.ok(familyText.some(t => /^Opus usage limit reached · resets /.test(t)), JSON.stringify(familyText));
+  controller.limits.clear('claude-cli', 'opus'); controller.account = null; controller.data.settings.claudeEnabled = false;
+  console.log('Provider usage and limits are shown passed');
+  // Adding an API provider from Settings.
+  controller.providers = { configured: () => false, key: () => ({ remove() {} }) };
+  controller.codex = { installed: true, connected: true };
+  await window.webContents.executeJavaScript(`(async () => {
+    document.querySelector('#api-name').value = 'LM Studio';
+    document.querySelector('#api-url').value = 'http://localhost:1234/v1';
+    document.querySelector('#api-add').click();
+    await new Promise(r => setTimeout(r, 300));
+  })()`);
+  assert.deepEqual(controller.data.settings.providers.map(p => [p.id, p.name, p.baseUrl]), [['lm-studio', 'LM Studio', 'http://localhost:1234/v1']]);
+  const apiRows = await window.webContents.executeJavaScript("[...document.querySelectorAll('.api-provider-row span')].map(e => e.textContent)");
+  assert.deepEqual(apiRows, ['LM Studio · http://localhost:1234/v1']);
+  const groups = await window.webContents.executeJavaScript("[...document.querySelectorAll('#provider-model-list .provider-model-group')].map(e => e.textContent)");
+  assert.ok(groups.includes('LM Studio'), JSON.stringify(groups));
+  controller.data.settings.providers = [];
+  console.log('API providers can be added from Settings passed');
   // Settings loads Cursor's full model list even when some models are already enabled; rows show model names only.
   failModels = false; finishFetch = null;
   nextModels = [{ id: 'grok-4.7', label: 'Grok 4.7' }, { id: 'kimi-k3', label: 'Kimi K3' }, { id: 'gpt-5.5', label: 'GPT-5.5' }];
@@ -151,6 +188,24 @@ app.whenReady().then(async () => {
   assert.deepEqual(savedChecks.at(-1), [], 'the removal was saved');
   assert.deepEqual(controller.data.settings.checks[controller.data.settings.workspace], []);
   console.log('Removed checks are saved by the dialog Save passed');
+  // Settings shows the app version; the manual update check reports and links, and never downloads.
+  await window.webContents.executeJavaScript("document.querySelector('#settings').click(); new Promise(r => setTimeout(r, 200))");
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#app-version').textContent"), 'Version 0.1.0');
+  const checkUpdates = () => window.webContents.executeJavaScript(`(async () => {
+    document.querySelector('#check-updates').click();
+    await new Promise(r => setTimeout(r, 200));
+    return [document.querySelector('#update-status').textContent, document.querySelector('#open-release').hidden];
+  })()`);
+  const [newer, newerHidden] = await checkUpdates();
+  assert.match(newer, /Version 0\.2\.0 is available \(Phasma-Harness-Setup-0\.2\.0\.exe\)/);
+  assert.equal(newerHidden, false);
+  updateResult = { current: '0.2.0', latest: '0.2.0', newer: false, url: 'https://github.com/x/y/releases' };
+  assert.deepEqual(await checkUpdates(), ['You have the latest version (0.2.0).', true]);
+  updateResult = new Error('Could not reach GitHub to check for updates (timed out).');
+  const [failed] = await checkUpdates();
+  assert.match(failed, /Could not reach GitHub/);
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#check-updates').disabled"), false);
+  console.log('Version and manual update check passed');
   controller.close();
   window.destroy();
   clearTimeout(deadline);

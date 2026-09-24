@@ -1,5 +1,6 @@
 const { WORKER_INSTRUCTIONS } = require('../worker-instructions.cjs');
 const { spawn } = require('node:child_process');
+const { cursorLimitText } = require('./limits.cjs');
 const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
@@ -158,7 +159,7 @@ class CursorCLI {
           const option = p.options?.find(o => o.kind === (allowed ? 'allow_once' : 'reject_once'));
           return { outcome: option ? { outcome: 'selected', optionId: option.optionId } : { outcome: 'cancelled' } };
         }
-        if (method === 'cursor/create_plan') return { outcome: { outcome: !schema && await approve({ title: p.name || 'Approve Cursor plan', rawInput: p.plan }) ? 'accepted' : 'rejected' } };
+        if (method === 'cursor/create_plan') return { outcome: { outcome: !schema && await approve({ title: p.name || 'Approve Cursor plan', rawInput: p.plan, kind: 'plan' }) ? 'accepted' : 'rejected' } };
         if (method === 'cursor/ask_question') return { outcome: { outcome: 'skipped', reason: 'Ask the user in the chat response.' } };
         return { outcome: 'cancelled' };
       } });
@@ -189,6 +190,9 @@ class CursorCLI {
       const helperNote = (!schema && helpers?.instructions) ? '\n\nApp helper note (not Cursor system policy):' + helpers.instructions : '';
       const result = await rpc.call('session/prompt', { sessionId, prompt: [{ type: 'text', text: (schema ? '' : 'Harness worker defaults (subject to user overrides):\n' + instructions + '\n\nCurrent request:\n') + prompt + helperNote + (schema ? '\nReturn only JSON matching this schema: ' + JSON.stringify(schema) : '') }, ...images.map(url => ({ type: 'image', mimeType: 'image/png', data: url.split(',')[1] }))] }, 0);
       if (result.stopReason !== 'end_turn') throw new Error(`Cursor stopped: ${result.stopReason || 'unknown reason'}`);
+      // Cursor reports usage and rate limits as a closing line of the reply, not as an error.
+      const limit = cursorLimitText(output);
+      if (limit) throw Object.assign(new Error(`Cursor: ${limit}.`), { limit: { until: null, reason: `Cursor: ${limit}.` } });
       return { result: output, session_id: sessionId };
     } finally { rpc.close(); }
   }

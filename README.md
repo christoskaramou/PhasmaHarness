@@ -22,6 +22,14 @@ The access setting applies to every provider; Codex enforces it with its OS sand
 
 Routing classifiers get no tools on any provider. An approval still open when a turn ends, is stopped, or is withdrawn by the CLI is declined. Claude's own `~/.claude` allow and deny rules still apply. Like Codex, each Claude model is offered at every effort it supports (`claude-cli:<model>:<effort>`), enabled per model in Settings → Providers, and the router picks the effort per task; a model without effort levels uses the CLI default. Cursor models get the same treatment from the reasoning levels (`thought_level`) Cursor lists in `cursor/list_available_models`; the chosen level is set with `session/set_config_option` (parameterized model picker), and Cursor saves the last model and level as its own default, as it already did for the model.
 
+### Approvals, usage limits and diagnostics
+
+- **Allow for this session.** An approval prompt can be answered once or for the rest of the session. Codex remembers it itself for that conversation (`acceptForSession`, or session scope for permission requests); Harness does not reset what Codex remembers when the access setting changes. For Claude and Cursor, Harness remembers the tool together with its exact target, never the tool as a whole: Claude's Bash, file, search and web tools by their command, file, pattern or URL, and any other tool (MCP tools, Task, …) only when its whole input repeats exactly; Cursor by the command, file or URL its request names, and MCP calls with their arguments. Requests without a specific target, plans and questions are never remembered, and changing the session's access setting or deleting the session forgets these answers.
+- **Usage-limit failover.** When a provider reports that its plan limit is reached (Codex `usageLimitExceeded`/`rateLimitExceeded`, Claude's rate-limit result, Cursor's "Upgrade your plan"/"Add a payment method" reply), Harness marks that provider limited until its reported reset time (15 minutes when the provider gives none). Claude's weekly Opus or Sonnet window limits only that model family, and a rejected Claude window that paid extra usage still covers is not a limit. On Auto the same message is sent once more through another provider (or, for a model-family limit, another model of the same provider) that has an available model, with a notice in the chat; a manually chosen model only reports the limit, and so does a stopped turn or a paused queue. The refused attempt runs no task checks. While a provider is limited, Auto routing leaves out its models, and a limited routing model is replaced by another enabled one. A later successful turn with a model the limit covers clears the mark.
+- **Usage in Settings → Providers.** Each signed-in provider row shows what its CLI reports: Codex's plan windows (for example "Used: 42% of 5h", with the reset time), Claude's current utilization, and "Usage limit reached · resets …" (or "Opus usage limit reached …") while limited. A full Codex window marks the limit ahead of time only without credits, since credits let usage continue. Cursor reports no usage.
+- **API providers.** Settings → Providers → API providers adds an OpenAI-compatible endpoint (name, base URL, optional key). Keys are stored encrypted with the OS key store and are never shown again; each provider can be enabled, have its key replaced or cleared, or be removed. Their models appear in the Models list and run through Codex.
+- **Logs and diagnostics.** The app writes `logs/harness.log` in its data folder (rotated at 1 MB, two older files kept), with failed actions, provider disconnects, usage limits and crashes; keys and tokens are redacted. Settings → General → **Copy diagnostics** copies versions, provider states (no account emails), settings that affect routing, usage limits and the recent log, for bug reports. **Open logs folder** opens the folder. Prompts and replies are not logged.
+
 ## Run
 
 ```
@@ -32,6 +40,16 @@ npm start
 `Launch Phasma Harness.vbs` opens the app without a command window after dependencies are installed.
 
 `Install Phasma Harness.cmd` installs missing Node.js LTS and Git through winget, runs `npm ci`, fetches the bundled tools, and creates a desktop shortcut. Providers are installed from the app. Keep the folder where the shortcut points.
+
+### Installer build and updates
+
+`npm run dist` builds a Windows installer (`dist/Phasma-Harness-Setup-<version>.exe`) with electron-builder, pinned in the script and fetched by `npx`, so it is not a dependency of the source install. Build it on Windows after `npm ci`, because the bundled rg/rtk come from `tools/bin` for the build machine. The installer asks whether to install for you only (the default, no administrator rights) or for everyone on the computer, lets you choose the folder, and ships the app unpacked (no asar) because the provider CLIs run bundled files such as the helper MCP script, skills and `tools/bin` by path. It has no custom icon yet and is not code-signed, so SmartScreen may warn on first run.
+
+An installed app keeps everything in `%APPDATA%\Phasma Harness`, including the workspace wikis (`workspace-data`), so installing a newer version over it keeps settings, sessions and wikis. A source folder keeps `workspace-data` beside the app as before.
+
+Settings → General shows the version and has **Check for updates**, which asks GitHub for the latest release of this repository and, when a newer one exists, offers to open its page. Nothing is downloaded or installed automatically. A private repository, or one with no releases, answers as "no published release"; there is no background check.
+
+To release: bump `version` in `package.json`, commit, and push a tag `v<version>`. CI then runs the tests, builds the installer and publishes it as a GitHub release (the tag must match the version).
 
 ### Bundled tools
 
@@ -56,17 +74,19 @@ After a worker completes and configured checks pass, Harness runs one internal w
 
 ### Local wiki storage
 
-Settings → Wiki shows the active workspace's wiki. All projects default to the app folder, including projects with a repository wiki. This installation explicitly preserves PE's repository wiki through a saved override. Change folder selects a different wiki; Reset to default (after a confirmation) points it back to the app folder; Show in folder opens it. These changes apply immediately per workspace and never copy, move or delete existing pages. Overrides live in workspace-data/locations.json. Default workspaces get `workspace-data/<name>-<path-hash>/wiki/index.md` beside the app, plus `workspace.json` recording the associated workspace. Create focused Markdown topic pages and link them from the index. Opening the Wiki tab or requesting a proposal initializes this local store without replacing existing pages.
+Settings → Wiki shows the active workspace's wiki. All projects default to the app folder (the data folder, `%APPDATA%\Phasma Harness`, for an installed app), including projects with a repository wiki. This installation explicitly preserves PE's repository wiki through a saved override. Change folder selects a different wiki; Reset to default (after a confirmation) points it back to the app folder; Show in folder opens it. These changes apply immediately per workspace and never copy, move or delete existing pages. Overrides live in workspace-data/locations.json. Default workspaces get `workspace-data/<name>-<path-hash>/wiki/index.md` beside the app, plus `workspace.json` recording the associated workspace. Create focused Markdown topic pages and link them from the index. Opening the Wiki tab or requesting a proposal initializes this local store without replacing existing pages.
 
 `project_context` searches the active local wiki alongside source, with at most 200 local wiki Markdown files and existing excerpt/size limits. Symlinked wiki pages are excluded. Other workspaces' stores are excluded from source scans. Files stay local with no automatic publishing or synchronization; context excerpts still go to the chosen model/ranker as part of normal requests. `workspace-data/` is Git-ignored and must be preserved when replacing the app folder; do not include it when sharing the app. The portable app folder must be writable. Moving a project to a different absolute path gives it a new identity; automatic migration is not implemented.
 
 If a check's process cannot be confirmed stopped, every session refuses new work until that process identity is gone. Acknowledging the task does not lift that block. Restarting the app does not rerun an unfinished task.
 
-Recovery requires confirmed process-tree termination or the measured parent-exit cleanup contract (Codex CLI 0.153.4 on Windows with full access). An unknown lookup or an unmeasured runtime does not establish that descendants stopped. The install pin is now 0.156.1, which has not been measured, so on it recovery relies on confirmed process-tree termination until `MEASURED_REAP` in `src/tasks.cjs` is updated from a new measurement.
+Recovery requires confirmed process-tree termination or the measured parent-exit cleanup contract (Codex CLI 0.153.4 on Windows with full access). An unknown lookup or an unmeasured runtime does not establish that descendants stopped. The install pin is now 0.156.1, which has not been measured, so on it recovery relies on confirmed process-tree termination until `MEASURED_REAP` in `src/tasks.cjs` is updated from a new measurement. `node tests/codex-reap-live.cjs [workspace]` measures it on Windows: it runs a check that starts a foreground and a detached process through Codex with full access, then ends Codex twice (closing its input, as the app does, and terminating it, as a crash does) and reports whether every check process stopped. It prints the exact `MEASURED_REAP` line to use only when both cases leave nothing running; it needs the Codex CLI but no login and makes no model calls.
 
 ### Validation
 
-Run `node --test tests/tasks.test.cjs tests/core.test.cjs` for the task and controller regressions, and `node --test tests/bundled-tools.test.cjs` for the tool manifest and large-response helper.
+`npm test` runs every unit test (`tests/*.test.cjs`); `node --test tests/tasks.test.cjs tests/core.test.cjs` runs just the task and controller regressions, and `node --test tests/bundled-tools.test.cjs` the tool manifest and large-response helper. `npm run smoke` opens the real window with a test controller (no logins or model calls) and exercises Settings and the chat UI; on Linux without a display use `xvfb-run -a npx electron --no-sandbox tests/ui-startup-smoke.cjs`. `tests/installer.test.ps1` checks the installer script on Windows without changing the machine.
+
+CI (`.github/workflows/ci.yml`) runs the unit tests and the UI smoke on Windows and Linux for pushes to master and pull requests, plus the installer script test on Windows. The installer is built only for version tags or a manual run, to keep Actions minutes low.
 Run `node tests/task-checks-live.cjs <workspace>` for an opt-in completion-gate smoke with a real Codex connection, temporary app state, and a read-only Git command. It makes no model calls and prints the retained evidence directory.
 Append `workspace-write` to test Workspace access. The smoke approves only its fixed Git check; normal app checks still use the session's approval rules.
 
@@ -76,11 +96,13 @@ Workspace-access follow-up on the same date/runtime: all three runs passed, at 2
 
 ## Layout
 
+- `src/controller.cjs` — sessions, sending and the worker turn; the rest of the Controller is split by area in `src/controller/` (`providers` catalog, routing models and usage limits; `turns` Codex turn events; `helpers` worker helper tools; `task-gate` tasks, checks and recovery; `shared` constants)
 - `src/providers` — Codex, Claude, Cursor, and Jev
 - `src/routing` — model choice and benchmark evidence
 - `src/workspace` — project search
 - `src/tools` — helper tools shared with those CLIs
 - `ui` — the window
+- `src/log.cjs`, `src/diagnostics.cjs`, `src/updates.cjs` — log file, diagnostics text, update check
 - `benchmarks` — bundled measurements
 
 ### Bundled default skills
