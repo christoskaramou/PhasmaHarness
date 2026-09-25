@@ -2,6 +2,7 @@ const { WORKER_INSTRUCTIONS } = require('../worker-instructions.cjs');
 const { CLAUDE_MODEL_WINDOWS } = require('./limits.cjs');
 const { stripTaskStatus } = require('../routing/task-state.cjs');
 const { spawn } = require('node:child_process');
+const { spawnOwned, stopTree } = require('../process-tree.cjs');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
@@ -22,7 +23,7 @@ class ClaudeCLI {
   constructor(launch = spawn) { this.launch = launch; this.children = new Set(); this.models = []; this.status = { installed: false, loggedIn: false }; }
   start(args, cwd) {
     // Authentication stays inside the published CLI, including user-configured auth methods.
-    const child = this.launch(executable(), args, { cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawnOwned(this.launch, executable(), args, { cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
     this.children.add(child); child.once('close', () => this.children.delete(child));
     return child;
@@ -163,7 +164,8 @@ class ClaudeCLI {
       let settled = false, rateLimited = false, limitInfo = null;
       const done = (fn, value) => { if (!settled) { settled = true; fn(value); } };
       const child = this.start(args, cwd); let buffer = '', result, stderr = '';
-      const abort = () => child.kill(); signal?.addEventListener('abort', abort, { once: true });
+      // The whole tree: Claude's tool commands and MCP servers would otherwise outlive it.
+      const abort = () => stopTree(child); signal?.addEventListener('abort', abort, { once: true });
       child.stdin.on('error', () => {});
       let closed = false;
       const pending = new Map();
@@ -197,14 +199,14 @@ class ClaudeCLI {
       child.stdout.on('data', d => {
         buffer += d;
         if (settled) return;
-        if (buffer.length > 16 * 1024 * 1024) { done(reject, new Error('Claude event exceeded the size limit.')); child.kill(); return; }
+        if (buffer.length > 16 * 1024 * 1024) { done(reject, new Error('Claude event exceeded the size limit.')); stopTree(child); return; }
         let end;
         while ((end = buffer.indexOf('\n')) >= 0) {
           const line = buffer.slice(0, end).trim(); buffer = buffer.slice(end + 1);
           if (!line) continue;
           let event;
           try { event = JSON.parse(line); }
-          catch { done(reject, new Error('Invalid Claude Code stream event.')); child.kill(); return; }
+          catch { done(reject, new Error('Invalid Claude Code stream event.')); stopTree(child); return; }
           if (ask && event.type === 'control_request') { permission(event).catch(() => {}); continue; }
           if (ask && event.type === 'control_cancel_request') { pending.get(event.request_id)?.abort(); continue; }
           if (event.type === 'result') { result = event; if (ask) child.stdin.end(); }
@@ -238,7 +240,7 @@ class ClaudeCLI {
       if (ask) child.stdin.write(message); else child.stdin.end(message);
     });
   }
-  close() { for (const child of this.children) child.kill(); }
+  close() { for (const child of this.children) stopTree(child); }
 }
 
 function handoff(items) {

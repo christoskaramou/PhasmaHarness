@@ -20,6 +20,7 @@ const { WORKER_INSTRUCTIONS } = require('./worker-instructions.cjs');
 const { projectInstructions } = require('./workspace/project-instructions.cjs');
 const { stripTaskStatus } = require('./routing/task-state.cjs');
 const { EFFORT_CAPS, DEFAULT_EFFORT_CAP, capCatalog } = require('./routing/effort-cap.cjs');
+const { snapshotOwned, settleOwned, stopOwned } = require('./process-tree.cjs');
 const { CONTEXT_INSTRUCTIONS, ACCESS_MODES, sameEffort, DEFAULT_ROUTER, sessionAllowKey, accessMode, isMcpConfirmation } = require('./controller/shared.cjs');
 
 class Controller extends EventEmitter {
@@ -951,6 +952,23 @@ class Controller extends EventEmitter {
     const policy = tracked ? 'tracked' : 'default';
     if (session.featurePolicy && session.featurePolicy !== policy) this.loaded.delete(session.id);
     session.featurePolicy = policy;
+  }
+
+  // Quitting: stop the running task and wait (bounded) for it to wind down, stop background work, give workers a moment
+  // to exit (Codex closes on end of input), then kill and verify every process tree the app started. The trees are
+  // recorded first, so a child whose parent exits in the meantime is still found. Returns { stopped, remaining }.
+  async shutdown({ stopMs = 5000, graceMs = 2000, killMs = 5000 } = {}) {
+    if (this.busy) {
+      const end = Date.now() + stopMs;
+      let timer;
+      await Promise.race([this.stop().catch(() => {}), new Promise(resolve => { timer = setTimeout(resolve, stopMs); })]);
+      clearTimeout(timer);
+      while (this.busy && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    const known = snapshotOwned();
+    try { this.close(); } catch (error) { this.log.error('Close failed during shutdown', { message: error.message }); }
+    await settleOwned(graceMs);
+    return stopOwned({ known, deadline: Date.now() + killMs });
   }
 
   close() {

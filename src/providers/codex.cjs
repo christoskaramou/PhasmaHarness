@@ -1,4 +1,5 @@
 const { spawn, execFile } = require('node:child_process');
+const { spawnOwned, stopTree } = require('../process-tree.cjs');
 const execFileAsync = require('node:util').promisify(execFile);
 const { EventEmitter } = require('node:events');
 const { createInterface } = require('node:readline');
@@ -148,7 +149,7 @@ class CodexClient extends EventEmitter {
     const executable = await findCodex();
     if (this.closed) throw new Error('Codex connection closed during discovery.');
     this.version = formatCodexVersion(executable.version);
-    this.process = spawn(executable.command, [...executable.args, 'app-server', '--stdio'], {
+    this.process = spawnOwned(spawn, executable.command, [...executable.args, 'app-server', '--stdio'], {
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: this.cwd,
@@ -210,10 +211,7 @@ class CodexClient extends EventEmitter {
     if (this.process && !this.process.killed) this.process.stdin.end();
     if (force) {
       this.fail(new Error('Routing connection closed.'));
-      if (this.process?.pid && this.process.exitCode === null) {
-        if (process.platform === 'win32') spawn('taskkill.exe', ['/PID', String(this.process.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).on('error', () => {});
-        else this.process.kill('SIGTERM');
-      }
+      if (this.process?.pid && this.process.exitCode === null) stopTree(this.process);
     }
   }
 }

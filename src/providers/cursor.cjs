@@ -1,16 +1,12 @@
 const { WORKER_INSTRUCTIONS } = require('../worker-instructions.cjs');
 const { spawn } = require('node:child_process');
+const { spawnOwned, stopTree } = require('../process-tree.cjs');
 const { cursorLimitText } = require('./limits.cjs');
 const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 
-function stop(child) {
-  if (process.platform === 'win32' && child.pid) {
-    const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
-    killer.on('error', () => child.kill());
-  } else child.kill();
-}
+const stop = stopTree;
 
 function launchCursor(args, cwd) {
   if (process.platform === 'win32') {
@@ -20,10 +16,10 @@ function launchCursor(args, cwd) {
     const version = fs.readdirSync(path.join(root, 'versions')).filter(v => /^\d{4}\.\d{2}\.\d{2}(?:-\d{2}-\d{2}-\d{2})?-[a-f0-9]+$/.test(v)).sort().at(-1);
     if (!version) throw new Error('Cursor CLI installation is incomplete. Run its installer again.');
     const directory = path.join(root, 'versions', version);
-    return spawn(path.join(directory, 'node.exe'), [path.join(directory, 'index.js'), ...args], { cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    return spawnOwned(spawn, path.join(directory, 'node.exe'), [path.join(directory, 'index.js'), ...args], { cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   }
   const local = path.join(require('node:os').homedir(), '.local', 'bin', 'cursor-agent');
-  return spawn(fs.existsSync(local) ? local : 'cursor-agent', args, { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+  return spawnOwned(spawn, fs.existsSync(local) ? local : 'cursor-agent', args, { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
 }
 
 function parseStatus(output) {

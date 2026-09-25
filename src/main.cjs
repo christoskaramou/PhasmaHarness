@@ -21,13 +21,13 @@ app.setName('Phasma Harness');
 // The installed app's shortcuts carry the appId (electron-builder), and Windows shows a shortcut's icon on the taskbar for
 // windows with the same ID. Only the installed app uses it; a source-folder run keeps its own window icon.
 if (process.platform === 'win32' && app.isPackaged) app.setAppUserModelId('com.phasma.harness');
-let window, controller, quitting = false;
+let window, controller, quitting = false, closing = null, closed = false;
 const log = new Log(path.join(app.getPath('userData'), 'logs'));
 process.on('uncaughtExceptionMonitor', error => log.error('Uncaught exception', { message: error?.message, stack: String(error?.stack || '').slice(0, 1500) }));
 process.on('unhandledRejection', reason => log.error('Unhandled rejection', { message: reason?.message || String(reason) }));
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
-  app.on('second-instance', () => { window?.show(); window?.focus(); });
+  app.on('second-instance', () => { if (closing) return; window?.show(); window?.focus(); });
   app.whenReady().then(start).catch(error => {
     dialog.showErrorBox('Phasma Harness could not start', error.message);
     app.exit(1);
@@ -340,7 +340,21 @@ async function start() {
 }
 
 app.on('window-all-closed', () => app.quit());
+// Quitting waits for the workers: the window goes away at once, then Controller.shutdown stops the task and every
+// process the app started (bounded, about 12 s at most) before the app exits.
 app.on('before-quit', event => {
   if (controller?.busy && !quitting) { event.preventDefault(); window?.close(); return; }
-  try { controller?.providers?.close(); controller?.close(); } catch (error) { console.error(error.message); }
+  if (closed || !controller) return;
+  event.preventDefault();
+  if (closing) return;
+  quitting = true;
+  if (window && !window.isDestroyed()) window.hide();
+  closing = controller.shutdown()
+    .then(result => { if (result.stopped || result.remaining.length) log.info('Stopped leftover processes', result); },
+      error => log.error('Shutdown cleanup failed', { message: error.message }))
+    .finally(() => {
+      try { controller.providers?.close(); } catch (error) { console.error(error.message); }
+      closed = true;
+      app.quit();
+    });
 });

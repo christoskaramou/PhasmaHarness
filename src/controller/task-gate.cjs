@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
-const { TAG: PROCESS_TAG, Watch, stopLeftovers } = require('../process-tree.cjs');
+const { TAG: PROCESS_TAG, Watch, stopLeftovers, spawnOwned } = require('../process-tree.cjs');
 const { FINAL, OUTPUT_CAP, canProposeWiki, capStream, childBlocksClear, confirmTermination, correctionText, createTask, gateOutcome, hasProjectWiki, identityFromProbe, lookupState, parentExitReaps, parseChecklist, resolveCitations, shouldTrack, summaryLine, validateChecks } = require('../tasks.cjs');
 const { accessMode, sameEffort, treeEntries } = require('./shared.cjs');
 const { stripTaskStatus } = require('../routing/task-state.cjs');
@@ -395,7 +395,7 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
     try { this.save(); } catch { this.data.executionBlock = previous; return blocked('could not persist the execution block'); }
     let child;
     try {
-      child = spawn(check.argv[0], check.argv.slice(1), {
+      child = spawnOwned(spawn, check.argv[0], check.argv.slice(1), {
         cwd: check.cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32', env: { ...process.env, [PROCESS_TAG]: processId },
       });
     } catch (error) {
