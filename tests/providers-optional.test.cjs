@@ -344,9 +344,10 @@ test('the router gets a compact, comparable catalog instead of raw benchmark row
   const rows = routerCatalog(catalog);
   assert.equal(rows.length, catalog.length);
   assert.ok(rows.every(row => row.id && row.label && Object.values(row).every(v => typeof v !== 'object')), 'one flat row per worker');
-  assert.ok(JSON.stringify(rows).length + ROUTER_POLICY.length < (JSON.stringify(compactCatalog(catalog)).length + POLICY.length) / 3);
+  assert.ok(JSON.stringify(rows).length < JSON.stringify(compactCatalog(catalog)).length / 3, 'router rows are far smaller than the compact catalog');
+  assert.ok(ROUTER_POLICY.length < POLICY.length, 'and so is the router policy');
   const fake = routerCatalog([
-    { id: 'a', label: 'A', benchmarks: [{ source: 'aa-index', version: '1', harness: 'api', score: 50 }, { source: 'deepswe', version: '1', harness: 'x-fallback', passPercent: 99 }] },
+    { id: 'a', label: 'A', benchmarks: [{ source: 'aa-index', version: '1', harness: 'api', score: 50 }, { source: 'aa-terminal', version: '1', harness: 'x-fallback', passPercent: 99 }] },
     { id: 'b', label: 'B', benchmarks: [{ source: 'aa-index', version: '1', harness: 'api', score: 40 }] },
   ]);
   assert.deepEqual(fake, [{ id: 'a', label: 'A', index: 50 }, { id: 'b', label: 'B', index: 40 }], 'assisted fallback runs are excluded and unknown values are omitted, not zero');

@@ -16,89 +16,12 @@
       "cacheWriteUsdPerMillion": "API USD per million cache-write tokens"
     }
   },
-  "deepswe": {
-    "name": "DeepSWE / Datacurve",
-    "url": "https://deepswe.datacurve.ai/",
-    "methodology": "https://arxiv.org/abs/2607.07946",
-    "metrics": {
-      "passPercent": "Engineering tasks passed, percent",
-      "marginPercent": "Published plus/minus uncertainty, percentage points",
-      "costUsd": "Mean API USD per DeepSWE task",
-      "ciLowPercent": "Lower 95% confidence bound, percent",
-      "ciHighPercent": "Upper 95% confidence bound, percent",
-      "tasksAttempted": "Tasks attempted out of 113; fewer means partial task coverage",
-      "scoredAttempts": "Number of scored attempts",
-      "runs": "Whole-benchmark runs",
-      "seconds": "Mean scored attempt duration, seconds"
-    }
-  },
-  "aa-agent": {
-    "name": "Artificial Analysis Coding Agent Index",
-    "url": "https://artificialanalysis.ai/agents/coding-agents",
-    "methodology": "https://artificialanalysis.ai/methodology/coding-agents-benchmarking",
-    "metrics": {
-      "score": "Coding Agent Index",
-      "engineeringPercent": "DeepSWE pass percent (overlaps standalone DeepSWE)",
-      "terminalPercent": "Terminal-Bench pass percent (overlaps standalone Terminal-Bench)",
-      "repoQaPercent": "SWE-Atlas-QnA task resolve percent; LLM-judged",
-      "costUsd": "Mean API USD per agent task",
-      "seconds": "Mean active agent runtime seconds",
-      "fallbackAttempts": "Attempts using fallback; nonzero is not standalone model performance"
-    }
-  },
-  "terminal-bench": {
-    "name": "Terminal-Bench",
-    "url": "https://www.tbench.ai/",
-    "methodology": "https://www.tbench.ai/benchmarks",
-    "metrics": {
-      "passPercent": "Terminal tasks passed, percent",
-      "costUsd": "Mean API USD per terminal task",
-      "seconds": "Mean execution seconds"
-    }
-  },
-  "bfcl": {
-    "name": "Berkeley Function Calling Leaderboard",
-    "url": "https://gorilla.cs.berkeley.edu/leaderboard.html",
-    "methodology": "https://gorilla.cs.berkeley.edu/blogs/15_bfcl_v4_web_search.html",
-    "metrics": {
-      "score": "Function calling score, percent"
-    }
-  },
-  "livecodebench": {
-    "name": "LiveCodeBench",
-    "url": "https://livecodebench.github.io/leaderboard.html",
-    "methodology": "https://livecodebench.github.io/",
-    "metrics": {
-      "passPercent": "Algorithmic coding pass@1 percent"
-    }
-  },
-  "arc": {
-    "name": "ARC Prize Verified",
-    "url": "https://arcprize.org/leaderboard",
-    "methodology": "https://arcprize.org/policy",
-    "metrics": {
-      "score": "Verified ARC score, percent; compare only same version and harness",
-      "costPerTaskUsd": "API USD per task for ARC-AGI-1/2",
-      "totalCostUsd": "Total evaluation API cost for ARC-AGI-3",
-      "costUsd": "Legacy cost field; consult the source run budget"
-    }
-  },
-  "aa-lcr": {
-    "name": "AA Long Context Reasoning",
-    "url": "https://artificialanalysis.ai/methodology/intelligence-benchmarking",
+  "aa-hle": {
+    "name": "Humanity's Last Exam (AA)",
+    "url": "https://artificialanalysis.ai/leaderboards/models",
     "methodology": "https://artificialanalysis.ai/methodology/intelligence-benchmarking",
     "metrics": {
-      "score": "AA-LCR v1.1 long-context pass@1, percent; LLM-judged"
-    }
-  },
-  "aa-omniscience": {
-    "name": "AA Omniscience",
-    "url": "https://artificialanalysis.ai/methodology/intelligence-benchmarking",
-    "methodology": "https://artificialanalysis.ai/methodology/intelligence-benchmarking",
-    "metrics": {
-      "score": "Factual knowledge with abstention; may be negative",
-      "accuracyPercent": "Correct answers, percent",
-      "nonHallucinationPercent": "100 minus hallucination rate, percent"
+      "passPercent": "Text-only reasoning/knowledge pass@1 percent; LLM-judged"
     }
   },
   "scicode": {
@@ -117,14 +40,6 @@
       "passPercent": "Terminal tasks pass@1 percent; mini-swe-agent, not native CLI"
     }
   },
-  "aa-hle": {
-    "name": "Humanity's Last Exam (AA)",
-    "url": "https://artificialanalysis.ai/leaderboards/models",
-    "methodology": "https://artificialanalysis.ai/methodology/intelligence-benchmarking",
-    "metrics": {
-      "passPercent": "Text-only reasoning/knowledge pass@1 percent; LLM-judged"
-    }
-  },
   "aa-critpt": {
     "name": "CritPt (AA)",
     "url": "https://artificialanalysis.ai/leaderboards/models",
@@ -133,44 +48,22 @@
       "passPercent": "Physics reasoning pass@1 percent"
     }
   },
-  "aa-gpqa": {
-    "name": "GPQA Diamond (AA)",
-    "url": "https://artificialanalysis.ai/leaderboards/models",
+  "aa-lcr": {
+    "name": "AA Long Context Reasoning",
+    "url": "https://artificialanalysis.ai/methodology/intelligence-benchmarking",
     "methodology": "https://artificialanalysis.ai/methodology/intelligence-benchmarking",
     "metrics": {
-      "passPercent": "Graduate-level science pass@1 percent; legacy evaluation"
+      "score": "AA-LCR v1.1 long-context pass@1, percent; LLM-judged"
     }
   },
-  "aa-ifbench": {
-    "name": "IFBench (AA)",
-    "url": "https://artificialanalysis.ai/leaderboards/models",
+  "aa-omniscience": {
+    "name": "AA Omniscience",
+    "url": "https://artificialanalysis.ai/methodology/intelligence-benchmarking",
     "methodology": "https://artificialanalysis.ai/methodology/intelligence-benchmarking",
     "metrics": {
-      "passPercent": "Instruction-following pass@1 percent"
-    }
-  },
-  "aa-vision": {
-    "name": "MMMU-Pro (AA)",
-    "url": "https://artificialanalysis.ai/leaderboards/models",
-    "methodology": "https://artificialanalysis.ai/methodology/intelligence-benchmarking",
-    "metrics": {
-      "passPercent": "Visual reasoning accuracy percent"
-    }
-  },
-  "aa-tool-use": {
-    "name": "Tau3-Banking (AA)",
-    "url": "https://artificialanalysis.ai/leaderboards/models",
-    "methodology": "https://artificialanalysis.ai/methodology/intelligence-benchmarking",
-    "metrics": {
-      "passPercent": "Banking tool-use pass@1 percent; legacy evaluation"
-    }
-  },
-  "aa-data-analysis": {
-    "name": "AA-AnalystAgent",
-    "url": "https://artificialanalysis.ai/leaderboards/models",
-    "methodology": "https://artificialanalysis.ai/methodology/intelligence-benchmarking",
-    "metrics": {
-      "passPercent": "Quantitative analysis pass^5 percent; five attempts must all pass, not pass@1"
+      "score": "Factual knowledge with abstention; may be negative",
+      "accuracyPercent": "Correct answers, percent",
+      "nonHallucinationPercent": "100 minus hallucination rate, percent"
     }
   }
 }

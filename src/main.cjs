@@ -7,7 +7,7 @@ const { Controller } = require('./controller.cjs');
 const { JevKey } = require('./providers/jev-key.cjs');
 const { JevClient } = require('./providers/jev.cjs');
 const { ContextSearch } = require('./workspace/context-search.cjs');
-const { BenchmarkStore, validateSnapshot, MAX_BYTES } = require('./routing/benchmarks.cjs');
+const { BenchmarkStore, validateSnapshot, pruneSources, MAX_BYTES } = require('./routing/benchmarks.cjs');
 const { Log } = require('./log.cjs');
 const { buildDiagnostics } = require('./diagnostics.cjs');
 const { Updater } = require('./updater.cjs');
@@ -115,7 +115,7 @@ async function start() {
     if (selection.canceled) return null;
     const filename = selection.filePaths[0];
     if (fs.statSync(filename).size > MAX_BYTES) throw new Error('Benchmark file exceeds 1 MB.');
-    return validateSnapshot(JSON.parse(fs.readFileSync(filename, 'utf8')));
+    return validateSnapshot(pruneSources(JSON.parse(fs.readFileSync(filename, 'utf8'))));
   });
   handle('benchmarkApply', data => {
     if (controller.busy) throw new Error('Finish the current turn before replacing benchmark evidence.');

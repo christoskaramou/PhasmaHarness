@@ -109,7 +109,7 @@ Workspace-access follow-up on the same date/runtime: all three runs passed, at 2
 - `src/tools` — helper tools shared with those CLIs
 - `ui` — the window
 - `src/log.cjs`, `src/diagnostics.cjs`, `src/updates.cjs`, `src/updater.cjs` — log file, diagnostics text, update check and automatic update
-- `benchmarks` — bundled measurements
+- `benchmarks` — bundled measurements: only Artificial Analysis evaluations that cover every current model (Intelligence Index with price, speed and cost to run, Terminal-Bench, SciCode, HLE, CritPt, AA-LCR, AA-Omniscience). Rows from dropped sources in an older saved or imported table are ignored.
 
 ### Bundled default skills
 
