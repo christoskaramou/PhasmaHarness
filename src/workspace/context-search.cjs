@@ -65,19 +65,25 @@ class ContextSearch {
       else throw error;
     }
     const names = stdout.split(/\r?\n/).map(n => n.replace(/\\/g, '/').replace(/^\.\//, '')).filter(allowed).sort();
-    const wiki = this.wikiStore?.location(root);
+    // WikiStore names workspaces and wikis by fs.realpathSync paths (links resolved, Windows short names such as
+    // RUNNER~1 kept), so it gets the workspace as selected. Files are read through native real paths, which also
+    // expand short names; wikiScope is the wiki folder in that form and hits report the store's form.
+    const wiki = this.wikiStore?.location(this.root);
     if (wiki) {
       for (let i = names.length - 1; i >= 0; i--)
         if (names[i].startsWith('docs/wiki/')) names.splice(i, 1);
     }
     const localWiki = new Map();
-    if (wiki && fsSync.existsSync(wiki.root) && await fs.realpath(wiki.root) === wiki.root) {
+    let wikiScope = null;
+    // The same no-redirect rule as WikiStore.ensure().
+    if (wiki && fsSync.existsSync(wiki.root) && fsSync.realpathSync(wiki.root) === path.resolve(wiki.root)) {
+      wikiScope = await fs.realpath(wiki.root);
       const pending = [''];
       let visited = 0;
       while (pending.length && visited++ < 100 && localWiki.size < 200) {
         signal?.throwIfAborted();
         const dir = pending.shift();
-        for (const entry of await fs.readdir(path.join(wiki.root, dir), { withFileTypes: true })) {
+        for (const entry of await fs.readdir(path.join(wikiScope, dir), { withFileTypes: true })) {
           const relative = path.posix.join(dir, entry.name);
           if (!allowed('docs/wiki/' + relative + (entry.isDirectory() ? '/index.md' : ''))) continue;
           if (entry.isDirectory() && pending.length < 100) pending.push(relative);
@@ -92,7 +98,7 @@ class ContextSearch {
       if (seen.size >= 5000 || bytes > 32 * 1024 * 1024) { omitted++; continue; }
       try {
         const wikiRelative = localWiki.get(name);
-        const scope = wikiRelative ? wiki.root : root;
+        const scope = wikiRelative ? wikiScope : root;
         const filename = await fs.realpath(path.join(scope, wikiRelative || name));
         if (!inside(scope, filename) || !allowed(path.relative(scope, filename).replace(/\\/g, '/'))) { omitted++; continue; }
         const stat = await fs.stat(filename);
@@ -104,7 +110,7 @@ class ContextSearch {
           const data = await fs.readFile(filename);
           if (data.includes(0)) { this.cache.delete(name); continue; }
           entry = { signature, hash: createHash('sha256').update(data).digest('hex'), chunks: chunks(name, data.toString('utf8')) };
-          if (wikiRelative) entry.chunks = entry.chunks.map(chunk => ({ ...chunk, source: 'wiki', path: filename }));
+          if (wikiRelative) entry.chunks = entry.chunks.map(chunk => ({ ...chunk, source: 'wiki', path: path.join(wiki.root, path.relative(wikiScope, filename)) }));
           this.cache.set(name, entry);
         }
         manifest.push(`${name}:${entry.hash}`); corpus.push(...entry.chunks);

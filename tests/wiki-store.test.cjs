@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { execSync } = require('node:child_process');
 const { WikiStore } = require('../src/workspace/wiki-store.cjs');
 const { ContextSearch } = require('../src/workspace/context-search.cjs');
 
@@ -36,4 +37,22 @@ test('local wikis isolate same-name workspaces, retain edits, use explicit locat
   assert.equal(fs.readFileSync(path.join(a, 'docs/wiki/index.md'), 'utf8'), '# Existing project wiki');
   assert.equal(new WikiStore(store.directory).ensure(a).root, first.root);
   assert.throws(() => store.setLocation(a, 'relative'));
+});
+
+// GitHub's Windows runners have a short (8.3) temp path, C:\Users\RUNNER~1\...; this reproduces that anywhere 8.3 names exist.
+test('a workspace and wiki store reached through Windows short (8.3) names are still searched', { skip: process.platform !== 'win32' }, async t => {
+  const long = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-wiki-short-'));
+  t.after(() => fs.rmSync(long, { recursive: true, force: true }));
+  let short = '';
+  try { short = execSync(`for %I in ("${long}") do @echo %~sI`, { encoding: 'utf8', windowsHide: true }).trim(); } catch {}
+  if (!short || short.toLowerCase() === long.toLowerCase()) { t.skip('No 8.3 names on this volume.'); return; }
+  const workspace = path.join(short, 'project');
+  fs.mkdirSync(workspace);
+  const store = new WikiStore(path.join(short, 'workspace-data'));
+  const wiki = store.ensure(workspace);
+  fs.writeFileSync(path.join(wiki.root, 'runtime.md'), '# Amberquartz runtime\nAmberquartz queues preserve completion order.');
+  const search = new ContextSearch(workspace, null);
+  search.wikiStore = store;
+  const result = await search.search(workspace, 'Amberquartz runtime', 'local');
+  assert.ok(result.hits.some(h => h.source === 'wiki' && h.path === path.join(wiki.root, 'runtime.md')));
 });
