@@ -82,6 +82,17 @@ app.whenReady().then(async () => {
   assert.match(tagged[0], /Which cascade flickers\?/);
   assert.deepEqual(tagged[1], ['Needs your input']);
   console.log('Task status line shown as a tag passed');
+  // Each reply is labelled with the provider that wrote it, not always "Codex".
+  await window.webContents.executeJavaScript(`renderMessages({ items: [
+    { id: 'by-codex', turnId: 't-codex', type: 'agentMessage', phase: 'final_answer', text: 'one', routeLabel: 'gpt-6-astra · high' },
+    { id: 'by-claude', turnId: 't-claude', type: 'agentMessage', phase: 'final_answer', text: 'two', routeLabel: 'claude-sonnet-5 · high' },
+    { id: 'by-cursor', turnId: 't-cursor', type: 'agentMessage', phase: 'final_answer', text: 'three', routeLabel: 'Grok 4.7' },
+    { id: 'by-jev', type: 'agentMessage', phase: 'final_answer', text: 'four', routeLabel: 'Jev · quick answer' },
+    { id: 'old', type: 'agentMessage', phase: 'final_answer', text: 'five' }
+  ], routes: [{ turnId: 't-codex', provider: 'codex' }, { turnId: 't-claude', provider: 'claude-cli' }, { turnId: 't-cursor', provider: 'cursor-cli' }] });`);
+  const writers = await window.webContents.executeJavaScript("[...document.querySelectorAll('.message-label')].map(e => e.firstChild.textContent)");
+  assert.deepEqual(writers, ['Codex', 'Claude', 'Cursor', 'Jev', 'Codex']);
+  console.log('Reply labels name their provider passed');
   await window.webContents.executeJavaScript(`window.fetchTest = Promise.all([loadDiscoveredModels('cursor-cli'), loadDiscoveredModels('cursor-cli')]).catch(() => null); true;`);
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#models-loading').hidden"), false);
   while (!finishFetch) await new Promise(setImmediate);

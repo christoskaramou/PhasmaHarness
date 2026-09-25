@@ -629,6 +629,16 @@ function providerConnectionSummary() {
   return lines.join('\n');
 }
 
+// Who wrote a reply: the provider of its turn's route (so older replies are labelled too). API providers run on the
+// Codex runtime; a reply without a turn (older data) was Codex's.
+const WRITERS = { codex: 'Codex', 'claude-cli': 'Claude', 'cursor-cli': 'Cursor' };
+function writer(item, session) {
+  if (item.type === 'plan') return 'Plan';
+  if (item.routeLabel === 'Jev · quick answer') return 'Jev';
+  const route = item.turnId ? (session.routes || []).find(r => r.turnId === item.turnId) : null;
+  return WRITERS[route?.provider || 'codex'] || 'Codex';
+}
+
 function renderMessages(session) {
   const container = $('#conversation');
   const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
@@ -640,7 +650,8 @@ function renderMessages(session) {
     ids.add(item.id);
     let entry = messageNodes.get(item.id);
     const selected = item.type === 'userMessage' ? session.routes.find(r => r.messageId === (item.clientId || item.id)) : null;
-    const signature = JSON.stringify([item, selected]);
+    const who = item.type === 'userMessage' ? 'You' : writer(item, session);
+    const signature = JSON.stringify([item, selected, who]);
     if (entry?.signature === signature) continue;
     if (!entry) {
       const node = document.createElement('div');
@@ -651,7 +662,7 @@ function renderMessages(session) {
     if (item.type === 'userMessage' || item.type === 'agentMessage' || item.type === 'plan') {
       const user = item.type === 'userMessage';
       node.className = `message ${user ? 'user' : item.phase === 'commentary' ? 'commentary' : 'assistant'}`;
-      const label = element('div', 'message-label', user ? 'You' : item.type === 'plan' ? 'Plan' : 'Codex');
+      const label = element('div', 'message-label', who);
       const routeLabel = selected?.label || item.routeLabel;
       if (routeLabel && !user) label.append(element('span', 'model-label', routeLabel));
       const body = element('div', 'message-body');
