@@ -210,6 +210,26 @@ test('the router sees the current task, and task status lines never reach it', (
   assert.equal(contextFor('hi', {}, { available: false }).currentTask, undefined);
 });
 
+test('Jev unsure about high-risk work between Sonnet and the 1M-context Opus: the strongest (Opus) runs, as measured', async () => {
+  // 25 Sep: Jev picked claude-sonnet-5 · high at 23% confidence for a high-risk review. Opus had no numbers (its
+  // 1M-context ID matched no benchmark rows, and its only runs are fallback-labelled), so nothing looked stronger.
+  const { BenchmarkStore } = require('../src/routing/benchmarks.cjs');
+  const sonnet = { id: 'claude-cli:claude-sonnet-5:high', provider: 'claude-cli', model: 'claude-sonnet-5', effort: 'high', label: 'claude-sonnet-5 · high' };
+  const opus = { id: 'claude-cli:claude-opus-5-5[1m]:high', provider: 'claude-cli', model: 'claude-opus-5-5[1m]', effort: 'high', label: 'claude-opus-5-5[1m] · high' };
+  const jev = new JevClient({ configured: true, read: () => 'key' });
+  jev.evaluate = async () => {
+    const answer = (choice, confidence = 0.9) => ({ choice, confidence, probabilities: {} });
+    return { model: 'jev-1.13.0', answers: { preset: answer(sonnet.id, 0.23), needsChecks: answer('no'), taskKind: answer('review'), workspaceRelevant: answer('no'),
+      risk: answer('high'), uncertainty: answer('high') }, usage: { inputTokens: 1, outputTokens: 0, totalTokens: 1 }, estimatedCostUsd: 0, durationMs: 1 };
+  };
+  const router = new SmartRouter(__dirname);
+  router.benchmarks = new BenchmarkStore();
+  router.jev = jev;
+  const chosen = await router.choose('review the C++ scripting work and finish it', { routingCatalog: [sonnet, opus], jevQuickAnswers: false }, [], 'jev');
+  assert.equal(chosen.id, opus.id);
+  assert.equal(chosen.escalatedFrom, sonnet.id);
+});
+
 test('Jev asks whether the prompt continues the task only when there is one, and keeps the task worker', async () => {
   const jev = new JevClient({ configured: true, read: () => 'key' });
   const asked = [];

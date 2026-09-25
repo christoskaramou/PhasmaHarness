@@ -350,7 +350,8 @@ test('the router gets a compact, comparable catalog instead of raw benchmark row
     { id: 'a', label: 'A', benchmarks: [{ source: 'aa-index', version: '1', harness: 'api', score: 50 }, { source: 'aa-terminal', version: '1', harness: 'x-fallback', passPercent: 99 }] },
     { id: 'b', label: 'B', benchmarks: [{ source: 'aa-index', version: '1', harness: 'api', score: 40 }] },
   ]);
-  assert.deepEqual(fake, [{ id: 'a', label: 'A', index: 50 }, { id: 'b', label: 'B', index: 40 }], 'assisted fallback runs are excluded and unknown values are omitted, not zero');
+  assert.deepEqual(fake, [{ id: 'a', label: 'A', index: 50, terminal: 99, fallback: true }, { id: 'b', label: 'B', index: 40 }],
+    'a run labelled with a provider fallback is used only where no plain run exists, and flagged; unknown values are omitted, not zero');
 });
 
 test('workers can read a full bundled skill on demand through router_read_output', () => {

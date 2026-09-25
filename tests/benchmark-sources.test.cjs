@@ -37,3 +37,24 @@ test('the AA cost figure reaches the routers as the average cost per task, not t
   assert.match(POLICY, /average API USD per index task/);
   assert.doesNotMatch(POLICY + ROUTER_POLICY, /whole index|indexCostUsd/);
 });
+
+test('a context-size variant (claude-opus-5-5[1m]) gets its model\'s measurements', () => {
+  const store = new BenchmarkStore();
+  const [variant, plain] = store.catalog([{ id: 'v', model: 'claude-opus-5-5[1m]', effort: 'high' }, { id: 'p', model: 'claude-opus-5-5', effort: 'high' }]);
+  assert.ok(plain.benchmarks.length > 0);
+  assert.deepEqual(variant.benchmarks, plain.benchmarks);
+});
+
+test('the router sees a model measured only with a provider fallback (Opus 5.5 at AA), flagged, next to plain runs', () => {
+  const rows = routerCatalog(new BenchmarkStore().catalog([
+    { id: 'opus', label: 'opus', model: 'claude-opus-5-5[1m]', effort: 'high' },
+    { id: 'sonnet', label: 'sonnet', model: 'claude-sonnet-5', effort: 'high' },
+  ]));
+  const [opus, sonnet] = rows;
+  assert.equal(opus.index, 53.6);
+  assert.equal(opus.fallback, true);
+  assert.ok(Number.isFinite(opus.terminal) && Number.isFinite(opus.sciCode), 'every key, from the same test versions');
+  assert.equal(sonnet.index, 31.7);
+  assert.equal(sonnet.fallback, undefined);
+  assert.match(ROUTER_POLICY, /fallback = some values come from the evaluator runs labelled as allowing a provider fallback/);
+});

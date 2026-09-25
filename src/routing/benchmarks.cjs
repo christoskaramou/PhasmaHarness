@@ -87,7 +87,7 @@ class BenchmarkStore {
   }
   catalog(workers) {
     return workers.map(worker => ({ ...worker, benchmarks: this.data.records
-      .filter(row => row.model === worker.model && row.effort === (worker.effort || 'default'))
+      .filter(row => row.model === measuredModel(worker.model) && row.effort === (worker.effort || 'default'))
       .map(row => ({ source: row.source, version: row.version, harness: row.harness,
         ...(row.evaluatedAt ? { evaluated: row.evaluatedAt } : {}),
         ...(Date.now() - Date.parse(row.observedAt) > 90 * 86400000 ? { observed: row.observedAt, stale: true } : {}),
@@ -127,29 +127,41 @@ function compactCatalog(workers) {
   return { encoding: 'Each benchmark row inherits version, harness and date metadata from evaluations[row.evaluation]. Source and metric names are explicit in every row. Empty benchmarks means unknown.', evaluations, workers: entries };
 }
 
+// A model's context-size variant (Claude Code's "claude-opus-5-5[1m]") is the same model and shares its measurements.
+const measuredModel = model => String(model || '').replace(/\[[^\]]*\]$/, '');
+const fallbackRun = harness => /fallback/i.test(harness || '');
+
 // Router view: one flat row per worker with only routing-relevant numbers (~1/4 of compactCatalog).
-// Per benchmark, only the most common plain (non-fallback) version+harness is kept, so a key is comparable across workers.
+// Per benchmark, the most common plain (non-fallback) version+harness is kept, so a key is comparable across workers.
+// A model the evaluator measured only with a provider fallback (Artificial Analysis's current Claude runs) gets that
+// same-version run instead, flagged `fallback`, rather than no numbers at all.
 const ROUTER_FIELDS = [
   ['aa-index', 'score', 'index'], ['aa-index', 'inputUsdPerMillion', 'inUsdPerM'], ['aa-index', 'outputUsdPerMillion', 'outUsdPerM'], ['aa-index', 'tokensPerSecond', 'tokPerSec'],
   ['aa-index', 'costUsd', 'taskCostUsd'], ['aa-terminal', 'passPercent', 'terminal'], ['scicode', 'passPercent', 'sciCode'], ['aa-lcr', 'score', 'longContext'],
   ['aa-omniscience', 'nonHallucinationPercent', 'nonHallucination'],
 ];
-const ROUTER_GUIDE = ' Worker catalog keys (higher is better except prices and cost; a missing key means unknown, not zero; each key comes from one benchmark version and harness, so it is comparable across workers): index = general intelligence; terminal = agentic terminal workflows; sciCode = scientific coding; longContext = long-context reasoning; nonHallucination = how rarely it makes things up; taskCostUsd = average API USD per Intelligence Index task at this effort (reflects token use as well as price); inUsdPerM, outUsdPerM = API price per million tokens (not subscription quota); tokPerSec = output speed; stale = some values are older than 90 days.';
+const ROUTER_GUIDE = ' Worker catalog keys (higher is better except prices and cost; a missing key means unknown, not zero; each key comes from one benchmark version and harness, so it is comparable across workers): index = general intelligence; terminal = agentic terminal workflows; sciCode = scientific coding; longContext = long-context reasoning; nonHallucination = how rarely it makes things up; taskCostUsd = average API USD per Intelligence Index task at this effort (reflects token use as well as price); inUsdPerM, outUsdPerM = API price per million tokens (not subscription quota); tokPerSec = output speed; stale = some values are older than 90 days; fallback = some values come from the evaluator runs labelled as allowing a provider fallback, the only measurements of that model (the same test otherwise).';
 
 function routerCatalog(workers) {
   const catalog = workerCatalog(workers), chosen = new Map();
+  const top = counts => [...counts].sort((a, b) => b[1] - a[1])[0]?.[0];
   for (const [source] of ROUTER_FIELDS) {
     if (chosen.has(source)) continue;
-    const counts = new Map();
-    for (const worker of catalog) for (const row of worker.benchmarks)
-      if (row.source === source && !/fallback/i.test(row.harness)) counts.set(`${row.version}|${row.harness}`, (counts.get(`${row.version}|${row.harness}`) || 0) + 1);
-    chosen.set(source, [...counts].sort((a, b) => b[1] - a[1])[0]?.[0]);
+    const plain = new Map(), assisted = new Map();
+    for (const worker of catalog) for (const row of worker.benchmarks) if (row.source === source) {
+      const counts = fallbackRun(row.harness) ? assisted : plain, key = `${row.version}|${row.harness}`;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    chosen.set(source, top(plain) || top(assisted));
   }
   return catalog.map(({ id, label, benchmarks }) => {
     const row = { id, label };
     for (const [source, metric, key] of ROUTER_FIELDS) {
-      const found = benchmarks.find(b => b.source === source && `${b.version}|${b.harness}` === chosen.get(source) && Number.isFinite(b[metric]));
-      if (found) { row[key] = found[metric]; if (found.stale) row.stale = true; }
+      if (!chosen.get(source)) continue;
+      const [version, harness] = chosen.get(source).split('|');
+      const found = benchmarks.find(b => b.source === source && b.version === version && b.harness === harness && Number.isFinite(b[metric]))
+        || benchmarks.find(b => b.source === source && b.version === version && fallbackRun(b.harness) && b.harness.startsWith(harness + '-') && Number.isFinite(b[metric]));
+      if (found) { row[key] = found[metric]; if (found.stale) row.stale = true; if (fallbackRun(found.harness)) row.fallback = true; }
     }
     return row;
   });

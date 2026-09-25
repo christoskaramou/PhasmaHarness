@@ -111,7 +111,7 @@ Workspace-access follow-up on the same date/runtime: all three runs passed, at 2
 - `src/tools` — helper tools shared with those CLIs
 - `ui` — the window
 - `src/log.cjs`, `src/diagnostics.cjs`, `src/updates.cjs`, `src/updater.cjs` — log file, diagnostics text, update check and automatic update
-- `benchmarks` — bundled measurements: only Artificial Analysis evaluations that cover every current model (Intelligence Index with price, speed and API cost per task, Terminal-Bench, SciCode, HLE, CritPt, AA-LCR, AA-Omniscience). Rows from dropped sources in an older saved or imported table are ignored.
+- `benchmarks` — bundled measurements: only Artificial Analysis evaluations that cover every current model (Intelligence Index with price, speed and API cost per task, Terminal-Bench, SciCode, HLE, CritPt, AA-LCR, AA-Omniscience). Rows from dropped sources in an older saved or imported table are ignored. A context-size variant (Claude Code's `claude-opus-5-5[1m]`) shares its model's measurements, and a model the evaluator measured only with a provider fallback (Artificial Analysis's current Claude runs) reaches both routers and the unsure-to-strongest rule with those runs, flagged, instead of with no numbers.
 
 ### Bundled default skills
 
