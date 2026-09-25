@@ -862,13 +862,25 @@ $('#composer').addEventListener('submit', async event => {
     sentHistory = null; sentHistoryIndex = -1;
     drafts.set(selectedId, ''); $('#prompt').value = ''; updatePreview();
     imageDrafts.delete(selectedId); renderImages();
-    await api.send({ id: selectedId, text, images, mode: currentMode(), task: 'on' });
-  } catch (error) {
-    if (!$('#prompt').value) { $('#prompt').value = text; drafts.set(selectedId, text); }
-    if (images.length) imageDrafts.set(selectedId || 'new', images);
-    updatePreview(); notify(error);
-  } finally { submitting = false; render(); }
+    // Not awaited: a Claude or Cursor send resolves only when its turn ends, which kept the composer locked. The main
+    // process marks the session busy before it yields, so the next message sent meanwhile is queued, not doubled.
+    const id = selectedId;
+    api.send({ id, text, images, mode: currentMode(), task: 'on' }).catch(error => restoreDraft(id, text, images, error));
+  } catch (error) { restoreDraft(selectedId, text, images, error); }
+  finally { submitting = false; render(); }
 });
+
+// A message that could not be sent goes back to its chat's composer, unless something new was typed there meanwhile.
+function restoreDraft(id, text, images, error) {
+  const key = id || 'new';
+  if (!(drafts.get(key) || '').trim()) {
+    drafts.set(key, text);
+    if (key === (selectedId || 'new') && !$('#prompt').value) $('#prompt').value = text;
+  }
+  if (images.length && !imageDrafts.get(key)?.length) imageDrafts.set(key, images);
+  if (key === (selectedId || 'new')) { renderImages(); updatePreview(); }
+  notify(error);
+}
 $('#prompt').addEventListener('input', () => { sentHistory = null; sentHistoryIndex = -1; updatePreview(); });
 $('#prompt').addEventListener('keydown', event => {
   if (!event.isComposing && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && ['ArrowUp', 'ArrowDown'].includes(event.key)) {

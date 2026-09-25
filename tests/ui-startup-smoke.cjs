@@ -27,9 +27,12 @@ app.whenReady().then(async () => {
   let installs = 0;
   ipcMain.handle('updateStatus', () => ({ status: 'idle' }));
   ipcMain.handle('installUpdate', () => { installs++; });
+  let holdSend = false;
   ipcMain.handle('send', (_event, message) => {
     if (failSend) throw new Error('Test send failed');
     sent.push(message);
+    // A Claude or Cursor send resolves only when its turn ends.
+    if (holdSend) return new Promise(() => {});
     return { queued: true };
   });
   let modelRequests = 0, failModels = false, finishFetch, nextModels = [];
@@ -57,13 +60,37 @@ app.whenReady().then(async () => {
   console.log('Connected-state UI smoke passed');
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#task-card')"), null);
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#skip-checks')"), null);
-  await window.webContents.executeJavaScript(`(async () => {
-    document.querySelector('#prompt').value = 'test message';
+  const submit = text => window.webContents.executeJavaScript(`(async () => {
+    document.querySelector('#prompt').value = ${JSON.stringify(text)};
+    document.querySelector('#prompt').dispatchEvent(new Event('input'));
     document.querySelector('#composer').dispatchEvent(new Event('submit', { cancelable: true }));
-    while (submitting) await new Promise(resolve => setTimeout(resolve, 10));
+    for (let i = 0; i < 100 && submitting; i++) await new Promise(resolve => setTimeout(resolve, 20));
   })()`);
+  const until = async (condition, what) => { for (let i = 0; i < 100 && !condition(); i++) await new Promise(r => setTimeout(r, 20)); assert.ok(condition(), what); };
+  let before = sent.length;
+  await submit('test message');
+  await until(() => sent.length > before, 'the message reached the app');
   assert.equal(sent.at(-1).task, 'on', 'checks run automatically behind the scenes');
   console.log('Background checks UI smoke passed');
+  // While a Claude or Cursor turn runs its send has not returned; the next message can still be sent (and is queued).
+  holdSend = true; before = sent.length;
+  await submit('first, a long Claude turn');
+  await until(() => sent.length === before + 1, 'the first message reached the app');
+  await window.webContents.executeJavaScript(`document.querySelector('#prompt').value = 'a follow-up'; document.querySelector('#prompt').dispatchEvent(new Event('input')); true`);
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#send').disabled"), false, 'the composer is not locked by the running send');
+  await submit('a follow-up');
+  await until(() => sent.length === before + 2, 'the follow-up was sent too');
+  assert.equal(sent.at(-1).text, 'a follow-up');
+  holdSend = false;
+  // A send that fails puts the message back into the composer.
+  failSend = true;
+  await submit('this one fails');
+  let restored = '';
+  for (let i = 0; i < 100 && restored !== 'this one fails'; i++) { await new Promise(r => setTimeout(r, 20)); restored = await window.webContents.executeJavaScript("document.querySelector('#prompt').value"); }
+  assert.equal(restored, 'this one fails', 'the failed message is back in the composer');
+  failSend = false;
+  await window.webContents.executeJavaScript(`document.querySelector('#prompt').value = ''; document.querySelector('#prompt').dispatchEvent(new Event('input')); true`);
+  console.log('Sending while a turn runs passed');
   await window.webContents.executeJavaScript(`renderMessages({ items: [
     { id: 'visible', type: 'agentMessage', text: 'Visible result' },
     { id: 'maintenance', type: 'userMessage', content: [{ type: 'text', text: 'Hidden maintenance' }] },
