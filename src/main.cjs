@@ -322,7 +322,8 @@ async function start() {
         type: 'question', title: 'A task is still running', message: 'Stop the running task and close Phasma Harness?',
         buttons: ['Keep working', 'Stop and close'], defaultId: 0, cancelId: 0,
       });
-      if (choice === 1) controller.stop().then(() => { quitting = true; app.quit(); }).catch(error => dialog.showErrorBox('Could not stop task', error.message));
+      // Quitting stops the task itself (Controller.shutdown), within a time limit, so a failed or hung Stop cannot keep the app open.
+      if (choice === 1) { quitting = true; app.quit(); }
     }
   });
   await window.loadURL(rendererURL);
@@ -340,6 +341,8 @@ async function start() {
 }
 
 app.on('window-all-closed', () => app.quit());
+// For tests/quit-live.cjs, which runs this file in Electron.
+module.exports = { controller: () => controller };
 // Quitting waits for the workers: the window goes away at once, then Controller.shutdown stops the task and every
 // process the app started (bounded, about 12 s at most) before the app exits.
 app.on('before-quit', event => {

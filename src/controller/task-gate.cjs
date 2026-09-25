@@ -65,7 +65,7 @@ module.exports = {
 
   async maintainWiki(session, task) {
     if (task.wikiMaintenance || task.state !== 'checks-passed' || !canProposeWiki(task) ||
-        this.data.executionBlock || this.stopping.has(session.id) || session.queuePaused ||
+        this.blockedReason() || this.stopping.has(session.id) || session.queuePaused ||
         (session.access === 'read-only' || task.access === 'read-only') || (!this.wikiStore && !hasProjectWiki(session.workspace))) return false;
     const worker = this.resolveWorker(task.route.id);
     if (!worker || !this.available(worker) || worker.model !== task.route.model || worker.provider !== task.route.provider || !sameEffort(worker, task.route)) return false;
@@ -153,6 +153,14 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
     return identityFromProbe(result, pid);
   },
 
+  // Stops a local check's tree by its root pid. Windows: not once the root has exited, when the pid may already be
+  // someone else's (the root's pipes can outlive it); stopLeftovers then stops what it left, verified by creation time.
+  // POSIX: the check leads its own process group, whose id cannot be reused while the group lives.
+  killCheckRoot(child) {
+    if (process.platform === 'win32' && (child.exitCode !== null || child.signalCode !== null)) return false;
+    return this.killProcessTree(child.pid);
+  },
+
   killProcessTree(pid) {
     if (this.killMatched) return this.killMatched(pid) !== false;
     if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -237,8 +245,16 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
       task.state = 'needs-you'; task.reason = 'usage limit'; task.summary = summaryLine(task);
       this.releaseSlot(session); return;
     }
-    if (this.data.executionBlock) {
-      task.state = 'blocked'; task.reason = 'check execution unconfirmed'; task.summary = summaryLine(task);
+    // A worker's cleanup still running (Cursor's ends every turn) delays the checks; only an unconfirmed one blocks them,
+    // and a Stop pressed meanwhile cancels them.
+    let refusal = this.readyToStart(session);
+    if (refusal?.then) refusal = await refusal; // awaited only when it waited, so timing is unchanged otherwise
+    if (refusal?.stopped) {
+      task.state = 'cancelled'; task.reason = 'cancelled'; task.summary = summaryLine(task);
+      this.releaseSlot(session); return;
+    }
+    if (refusal) {
+      task.state = 'blocked'; task.reason = this.data.executionBlock ? 'check execution unconfirmed' : 'stopped task cleanup unconfirmed'; task.summary = summaryLine(task);
       this.releaseSlot(session); return;
     }
     const gate = { sessionId: session.id, taskId: task.id, token: randomUUID(), abort: new AbortController(), processId: null, approvals: new Set() };
@@ -426,7 +442,7 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
       };
       const kill = () => {
         if (done) return;
-        this.killProcessTree(child.pid);
+        this.killCheckRoot(child);
         setTimeout(() => finish({ stuck: true }), 5000).unref?.();
       };
       const timer = setTimeout(() => { timedOut = true; kill(); }, check.timeoutMs);

@@ -6,6 +6,14 @@ const { ClaudeCLI } = require('../src/providers/claude.cjs');
 const { CursorCLI } = require('../src/providers/cursor.cjs');
 const { WORKER_INSTRUCTIONS } = require('../src/worker-instructions.cjs');
 
+test('workers are told rtk starts programs only: shell built-ins and PowerShell cmdlets run without it', () => {
+  const skill = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'skills', 'rtk', 'SKILL.md'), 'utf8');
+  assert.match(WORKER_INSTRUCTIONS, /Prefix programs with rtk/);
+  assert.match(WORKER_INSTRUCTIONS, /shell built-ins and PowerShell cmdlets \(Get-Content, Select-String, cd\) run without it/);
+  assert.match(skill, /rtk proxy Get-Content fails/);
+  assert.doesNotMatch(WORKER_INSTRUCTIONS + skill, /Prefix shell commands with rtk/);
+});
+
 test('a relocated checkout loads full bundled skills without global skill folders', t => {
   const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'harness skills '));

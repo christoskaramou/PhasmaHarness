@@ -406,6 +406,216 @@ function reopen(controller, options) {
   return new Controller(filename, workspace, new Fake(), { cancel() {}, close() {}, jev: null, async choose() { throw new Error('unexpected route'); } }, options);
 }
 
+test('a worker cleanup still running when a turn ends (Cursor ends every turn with one) delays its checks and the next worker call instead of blocking them', async t => {
+  const processTree = require('../src/process-tree.cjs');
+  const { controller, fake } = await setup(t);
+  arm(controller, fake);
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access'); // checks run without an approval prompt
+  controller.checks(session.workspace, [{ name: 'unit', argv: ['unit'], cwd: session.workspace, timeoutMs: 5000, readOnlySafe: true }]);
+  await controller.send({ id: session.id, text: 'implement', mode: 'terra-light', task: 'on' });
+  const cleanupFor = id => { processTree.cleanup.emit('pending', id); setTimeout(() => processTree.cleanup.emit('done', { id, remaining: [], record: null }), 150); };
+  cleanupFor('cursor-1');
+  complete(controller, session, fake.turnIds.at(-1));
+  await controller.gateDone;
+  assert.equal(session.tasks.at(-1).state, 'checks-passed', 'the checks ran once the cleanup was confirmed');
+  assert.equal(fake.calls.filter(call => call.method === 'command/exec').length, 1);
+
+  // Worker calls made without send (corrections, wiki maintenance) and compaction wait the same way.
+  cleanupFor('cursor-2');
+  await assert.doesNotReject(controller.submitWorker(session, controller.resolveWorker('terra-light'), 'follow-up', [], 'client-2', null));
+  complete(controller, session, fake.turnIds.at(-1));
+  await new Promise(resolve => setImmediate(resolve));
+  cleanupFor('cursor-3');
+  await assert.doesNotReject(controller.compact(session.id));
+});
+
+test('Stop pressed while a sent message or a compaction waits for a worker cleanup means neither starts', async t => {
+  const processTree = require('../src/process-tree.cjs');
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  const starts = () => fake.calls.filter(call => call.method === 'turn/start').length;
+  const settled = (promise, ms = 3000) => Promise.race([promise.then(() => 'done', error => error.message), new Promise(resolve => setTimeout(() => resolve('still running'), ms))]);
+
+  processTree.cleanup.emit('pending', 'cursor-s');
+  const sent = controller.send({ id: session.id, text: 'right after the previous Stop', mode: 'terra-light', task: 'off' });
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(controller.busy, session.id, 'the message is under way (so Stop applies to it) while it waits');
+  await controller.stop();
+  processTree.cleanup.emit('done', { id: 'cursor-s', remaining: [], record: null });
+  assert.match(await settled(sent), /stopped before sending/);
+  assert.equal(starts(), 0, 'no turn started');
+  assert.equal(session.status, 'interrupted');
+  assert.equal(controller.busy, null);
+
+  // A turn to compact, then a compaction waiting the same way.
+  session.queuePaused = false;
+  await controller.send({ id: session.id, text: 'something to compact', mode: 'terra-light', task: 'off' });
+  complete(controller, session, fake.turnIds.at(-1));
+  await new Promise(resolve => setImmediate(resolve));
+  processTree.cleanup.emit('pending', 'cursor-c');
+  const compacting = controller.compact(session.id);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  await controller.stop();
+  processTree.cleanup.emit('done', { id: 'cursor-c', remaining: [], record: null });
+  assert.match(await settled(compacting), /stopped before starting/);
+  assert.equal(fake.calls.filter(call => call.method === 'thread/compact/start').length, 0, 'no compaction started');
+  assert.equal(controller.busy, null);
+});
+
+test('work waits for a slow cleanup until it has finished, however long, and Stop ends the wait at once', async t => {
+  const processTree = require('../src/process-tree.cjs');
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  processTree.cleanup.emit('pending', 'slow');
+  const sent = controller.send({ id: session.id, text: 'after a slow cleanup', mode: 'terra-light', task: 'off' });
+  await new Promise(resolve => setTimeout(resolve, 8000)); // longer than any fixed limit would allow
+  assert.equal(fake.calls.filter(call => call.method === 'turn/start').length, 0, 'nothing starts while the cleanup runs');
+  const stopped = Date.now();
+  await controller.stop();
+  await assert.rejects(sent, /stopped before sending/);
+  assert.ok(Date.now() - stopped < 1000, 'Stop does not wait for the cleanup');
+  processTree.cleanup.emit('done', { id: 'slow', remaining: [], record: null });
+});
+
+test('a cleanup that ends unconfirmed while work waits for it refuses that work: a turn, its checks, and both compactions', async t => {
+  const processTree = require('../src/process-tree.cjs');
+  const unconfirmed = id => ({ id, remaining: [-1], record: { id, tags: [], roots: [], children: [] } });
+  const settled = promise => Promise.race([promise.then(() => 'done', error => error.message), new Promise(resolve => setTimeout(() => resolve('still running'), 3000))]);
+  const count = (fake, method) => fake.calls.filter(call => call.method === method).length;
+  const blockedMessage = /could not be confirmed stopped/;
+
+  { // A sent message (every worker call goes through submitWorker).
+    const { controller, fake } = await setup(t);
+    const session = controller.create();
+    processTree.cleanup.emit('pending', 'u-send');
+    const sent = controller.send({ id: session.id, text: 'hello', mode: 'terra-light', task: 'off' });
+    await new Promise(resolve => setTimeout(resolve, 60));
+    processTree.cleanup.emit('done', unconfirmed('u-send'));
+    assert.match(await settled(sent), blockedMessage);
+    assert.equal(count(fake, 'turn/start'), 0);
+    assert.equal(controller.busy, null);
+  }
+  { // The checks after a turn.
+    const { controller, fake } = await setup(t);
+    arm(controller, fake);
+    const session = controller.create();
+    controller.permissions(session.id, 'danger-full-access');
+    controller.checks(session.workspace, [{ name: 'unit', argv: ['unit'], cwd: session.workspace, timeoutMs: 5000, readOnlySafe: true }]);
+    await controller.send({ id: session.id, text: 'implement', mode: 'terra-light', task: 'on' });
+    processTree.cleanup.emit('pending', 'u-checks');
+    complete(controller, session, fake.turnIds.at(-1));
+    await new Promise(resolve => setTimeout(resolve, 60));
+    processTree.cleanup.emit('done', unconfirmed('u-checks'));
+    await controller.gateDone;
+    assert.equal(count(fake, 'command/exec'), 0);
+    assert.deepEqual([session.tasks.at(-1).state, session.tasks.at(-1).reason], ['blocked', 'stopped task cleanup unconfirmed']);
+    assert.equal(controller.busy, null);
+  }
+  { // A Codex compaction.
+    const { controller, fake } = await setup(t);
+    const session = controller.create();
+    await controller.send({ id: session.id, text: 'something to compact', mode: 'terra-light', task: 'off' });
+    complete(controller, session, fake.turnIds.at(-1));
+    await new Promise(resolve => setImmediate(resolve));
+    processTree.cleanup.emit('pending', 'u-compact');
+    const compacting = controller.compact(session.id);
+    await new Promise(resolve => setTimeout(resolve, 60));
+    processTree.cleanup.emit('done', unconfirmed('u-compact'));
+    assert.match(await settled(compacting), blockedMessage);
+    assert.equal(count(fake, 'thread/compact/start'), 0);
+    assert.equal(controller.busy, null);
+  }
+  { // A Claude compaction.
+    const { controller } = await setup(t);
+    const session = controller.create();
+    Object.assign(session, { activeProvider: 'claude-cli', claudeSessionId: 'claude-session', routes: [{ provider: 'claude-cli', model: 'opus' }] });
+    controller.claude.status = { installed: true, loggedIn: true };
+    let runs = 0;
+    controller.claude.run = async () => { runs++; };
+    processTree.cleanup.emit('pending', 'u-claude');
+    const compacting = controller.compact(session.id);
+    await new Promise(resolve => setTimeout(resolve, 60));
+    processTree.cleanup.emit('done', unconfirmed('u-claude'));
+    assert.match(await settled(compacting), blockedMessage);
+    assert.equal(runs, 0);
+    assert.equal(controller.busy, null);
+  }
+});
+
+test('Stop pressed while checks wait for a worker cleanup cancels them', async t => {
+  const processTree = require('../src/process-tree.cjs');
+  const { controller, fake } = await setup(t);
+  arm(controller, fake);
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  controller.checks(session.workspace, [{ name: 'unit', argv: ['unit'], cwd: session.workspace, timeoutMs: 5000, readOnlySafe: true }]);
+  await controller.send({ id: session.id, text: 'implement', mode: 'terra-light', task: 'on' });
+  processTree.cleanup.emit('pending', 'cursor-a');
+  complete(controller, session, fake.turnIds.at(-1));
+  await new Promise(resolve => setTimeout(resolve, 60)); // the checks are waiting for the cleanup
+  const interrupts = fake.calls.filter(call => call.method === 'turn/interrupt').length;
+  await controller.stop();
+  processTree.cleanup.emit('done', { id: 'cursor-a', remaining: [], record: null });
+  await controller.gateDone;
+  assert.equal(fake.calls.filter(call => call.method === 'command/exec').length, 0, 'no check ran');
+  assert.deepEqual([session.tasks.at(-1).state, session.tasks.at(-1).reason], ['cancelled', 'cancelled']);
+  assert.equal(fake.calls.filter(call => call.method === 'turn/interrupt').length, interrupts, 'nothing was running to interrupt');
+  assert.equal(controller.busy, null);
+});
+
+test('Stop pressed while a CLI worker call waits for a worker cleanup means it is never launched', async t => {
+  const processTree = require('../src/process-tree.cjs');
+  const { controller } = await setup(t);
+  const session = controller.create();
+  let launched = 0;
+  controller.claude.run = () => { launched++; return new Promise(() => {}); };
+  controller.busy = session.id;
+  processTree.cleanup.emit('pending', 'cursor-b');
+  const call = controller.submitWorker(session, controller.claude.models[0], 'next', [], 'client-b', null);
+  await new Promise(resolve => setTimeout(resolve, 60));
+  await controller.stop();
+  processTree.cleanup.emit('done', { id: 'cursor-b', remaining: [], record: null });
+  const outcome = await Promise.race([call.then(() => 'sent', error => error.message), new Promise(resolve => setTimeout(() => resolve('still running'), 3000))]);
+  assert.match(outcome, /stopped before sending/);
+  assert.equal(launched, 0);
+  assert.equal(session.status, 'interrupted');
+  assert.equal(controller.busy, null);
+});
+
+test('after Stop, new work waits for worker cleanup and stays blocked, also across a restart, until it is confirmed', async t => {
+  const processTree = require('../src/process-tree.cjs');
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  // A cleanup in flight: a message sent now waits for it instead of failing.
+  processTree.cleanup.emit('pending', 'worker-1');
+  assert.equal(controller.blockedReason(), null, 'a cleanup still running is not a block; the start of the work waits for it');
+  const waiting = controller.send({ id: session.id, text: 'right after Stop', mode: 'terra-light', task: 'off' });
+  setTimeout(() => processTree.cleanup.emit('done', { id: 'worker-1', remaining: [], record: null }), 100);
+  await assert.doesNotReject(waiting);
+  complete(controller, session, fake.turnIds.at(-1));
+  await new Promise(resolve => setImmediate(resolve));
+
+  // A cleanup that could not be confirmed: nothing new starts, it is kept on disk and retried.
+  const record = { id: 'worker-2', tags: ['PHASMA_HARNESS_OWNER=gone-run/2\0'], roots: [{ pid: 999999, startedMs: Date.now() - 5000, endedMs: Date.now() - 4000 }], children: [] };
+  processTree.cleanup.emit('done', { id: 'worker-2', remaining: [-1], record });
+  await assert.rejects(controller.send({ id: session.id, text: 'blocked', mode: 'terra-light', task: 'off' }), /could not be confirmed stopped/);
+  await assert.rejects(controller.compact(session.id), /could not be confirmed stopped/);
+  assert.ok(controller.cleanupRetry, 'retried in the background');
+  assert.deepEqual(JSON.parse(fs.readFileSync(controller.filename, 'utf8')).workerCleanup.map(item => item.id), ['worker-2'], 'kept for a restart');
+  const sweep = processTree.sweepRecord;
+  processTree.sweepRecord = async record => ({ remaining: [-1], record });
+  try { await controller.retryCleanupNow(); } finally { processTree.sweepRecord = sweep; }
+  assert.match(controller.blockedReason(), /could not be confirmed stopped/, 'a failed retry keeps the block');
+
+  // A restart finishes the cleanup first (its processes are gone), and work can start again.
+  const restarted = reopen(controller);
+  t.after(() => restarted.close());
+  await restarted.initialize();
+  assert.equal(restarted.data.workerCleanup, undefined);
+  assert.equal(restarted.blockedReason(), null);
+});
+
 test('task mode is stored through queue edit and send', async t => {
   const { controller, fake } = await setup(t);
   const session = controller.create();

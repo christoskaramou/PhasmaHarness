@@ -44,6 +44,9 @@ jobs:
       - name: UI smoke (Linux)
         if: runner.os == 'Linux'
         run: xvfb-run -a npx electron --no-sandbox tests/ui-startup-smoke.cjs
+      - name: Quit test (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npx electron --no-sandbox tests/quit-live.cjs
 
   package:
     name: Windows installer

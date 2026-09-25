@@ -20,7 +20,7 @@ const { WORKER_INSTRUCTIONS } = require('./worker-instructions.cjs');
 const { projectInstructions } = require('./workspace/project-instructions.cjs');
 const { stripTaskStatus } = require('./routing/task-state.cjs');
 const { EFFORT_CAPS, DEFAULT_EFFORT_CAP, capCatalog } = require('./routing/effort-cap.cjs');
-const { snapshotOwned, settleOwned, stopOwned } = require('./process-tree.cjs');
+const processTree = require('./process-tree.cjs');
 const { CONTEXT_INSTRUCTIONS, ACCESS_MODES, sameEffort, DEFAULT_ROUTER, sessionAllowKey, accessMode, isMcpConfirmation } = require('./controller/shared.cjs');
 
 class Controller extends EventEmitter {
@@ -57,6 +57,16 @@ class Controller extends EventEmitter {
     this.trace = NO_TRACE; this.startedAt = Date.now();
     this.wikiSnapshots = new Map(); this.wikiChecks = new AbortController();
     this.log = NO_LOG; // replaced by the app's rotating log file
+    // Worker cleanups after Stop (src/process-tree.cjs): new work waits while one runs, and stays blocked while one
+    // could not be confirmed (data.workerCleanup, retried until confirmed, also after a restart).
+    this.cleanupPending = new Set(); this.cleanupRetry = null; this.cleanupWait = null;
+    this.onCleanupPending = id => { this.cleanupPending.add(id); };
+    this.onCleanupDone = ({ id, remaining, record }) => {
+      this.cleanupPending.delete(id);
+      if (remaining.length) this.holdCleanup(record);
+      this.cleanupChanged();
+    };
+    processTree.cleanup.on('pending', this.onCleanupPending).on('done', this.onCleanupDone);
     this.helperRequests = new Set();
     // Large tool output is always captured as excerpts; the setting is no longer shown, so an old "off" is not kept.
     this.data.settings.largeResponses = true;
@@ -105,7 +115,8 @@ class Controller extends EventEmitter {
       if (latestTask) latestTask.wikiAvailable = canProposeWiki(latestTask) && (!!this.wikiStore || hasProjectWiki(session.workspace));
     }
     const cleared = this.recoverExecutionBlock();
-    if (restarted || cleared) { try { this.save(); } catch { /* the in-memory block and task state still apply */ } }
+    const cleaned = this.recoverWorkerCleanup();
+    if (restarted || cleared || cleaned) { try { this.save(); } catch { /* the in-memory block and task state still apply */ } }
     client.on('notification', message => this.notification(message));
     client.on('request', message => this.serverRequest(message));
     client.on('disconnected', error => {
@@ -439,7 +450,7 @@ class Controller extends EventEmitter {
   async send({ id, text, mode, images = [], task = 'on', wikiTaskId = null, failover = false }) {
     if (!['auto', 'on', 'off'].includes(task)) throw new Error('Invalid task mode.');
     if (task === 'auto') task = 'on'; // Existing queued messages use the new default.
-    if (this.data.executionBlock) throw new Error('A check may still be running.');
+    if (this.blockedReason()) throw new Error(this.blockedReason());
     if (this.connection !== 'ready') throw new Error(this.error || 'Codex is still connecting.');
     if (!Array.isArray(images) || images.length > 4 || images.some(url => typeof url !== 'string' || !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(url)) || images.reduce((n, url) => n + url.length, 0) > 12 * 1024 * 1024) throw new Error('Invalid images: attach up to four PNG images under 8 MB total.');
     if (typeof text !== 'string' || (!text.trim() && !images.length) || text.length > 200000) throw new Error('Enter a message under 200,000 characters or attach an image.');
@@ -557,7 +568,11 @@ class Controller extends EventEmitter {
     const permissions = accessMode(task?.access || session.access);
     let submission = null;
     try {
-      if (this.data.executionBlock) throw new Error('A check may still be running.');
+      // A worker's cleanup still running (Cursor's ends every turn) delays the next call; only an unconfirmed one refuses
+      // it, and a Stop pressed meanwhile means nothing starts.
+      let refusal = this.readyToStart(session);
+      if (refusal?.then) refusal = await refusal; // awaited only when it waited, so timing is unchanged otherwise
+      if (refusal) throw new Error(refusal.blocked || 'Turn was stopped before sending.');
       projectInstructions(session.workspace, permissions.id !== 'read-only');
       if (isCLI(selected.provider)) return await this.sendCLI(session, selected, text, images, clientId, task);
       await this.resume(session, selected);
@@ -766,9 +781,9 @@ class Controller extends EventEmitter {
   }
 
   settle(session) {
-    if (!session || this.busy || this.data.executionBlock || session.queueSending || this.connection !== 'ready' || session.queuePaused) return;
+    if (!session || this.busy || this.blockedReason() || session.queueSending || this.connection !== 'ready' || session.queuePaused) return;
     setImmediate(() => {
-      if (this.busy || this.data.executionBlock || session.queueSending || this.connection !== 'ready' || session.queuePaused || !this.data.sessions.includes(session)) return;
+      if (this.busy || this.blockedReason() || session.queueSending || this.connection !== 'ready' || session.queuePaused || !this.data.sessions.includes(session)) return;
       const next = session.queue?.[0];
       if (!next || next.error) return;
       this.queuedMessage(session.id, next.id, 'send').catch(() => { });
@@ -825,6 +840,9 @@ class Controller extends EventEmitter {
     this.busy = session.id; this.cliAbort = abort; session.compacting = true; session.error = null;
     this.changed();
     try {
+      let refusal = this.readyToStart(session);
+      if (refusal?.then) refusal = await refusal; // awaited only when it waited, so timing is unchanged otherwise
+      if (refusal) throw new Error(refusal.blocked || 'Compaction was stopped before starting.');
       await this.claude.run({
         cwd: this.workspace(session.workspace), model, prompt: '/compact', resume: session.claudeSessionId, access: 'read-only',
         signal: abort.signal, instructions: this.workerInstructions(session),
@@ -843,7 +861,7 @@ class Controller extends EventEmitter {
   }
 
   async compact(id) {
-    if (this.data.executionBlock) throw new Error('A check may still be running.');
+    if (this.blockedReason()) throw new Error(this.blockedReason());
     if (this.connection !== 'ready') throw new Error('No provider is connected.');
     if (this.busy) throw new Error('Wait for the current task to finish before compacting.');
     const session = this.session(id);
@@ -855,6 +873,9 @@ class Controller extends EventEmitter {
     let submission = null;
     this.changed();
     try {
+      let refusal = this.readyToStart(session);
+      if (refusal?.then) refusal = await refusal; // awaited only when it waited, so timing is unchanged otherwise
+      if (refusal) throw new Error(refusal.blocked || 'Compaction was stopped before starting.');
       await this.resume(session);
       if (this.stopping.has(id)) throw new Error('Compaction was stopped before starting.');
       submission = this.beginSubmission(session, { kind: 'compaction', backend: 'codex', threadId: session.threadId });
@@ -883,6 +904,8 @@ class Controller extends EventEmitter {
     if (!this.busy) return;
     const session = this.session(this.busy);
     session.queuePaused = true;
+    // Waiting for a worker cleanup before a turn or its checks: nothing has started, so the waiter only has to see it.
+    if (this.cleanupWait === session.id) { this.stopping.add(session.id); this.changed(); return; }
     if (this.gate?.sessionId === session.id) {
       this.stopping.add(session.id);
       this.gate.abort.abort();
@@ -956,19 +979,107 @@ class Controller extends EventEmitter {
 
   // Quitting: stop the running task and wait (bounded) for it to wind down, stop background work, give workers a moment
   // to exit (Codex closes on end of input), then kill and verify every process tree the app started. The trees are
-  // recorded first, so a child whose parent exits in the meantime is still found. Returns { stopped, remaining }.
+  // recorded before anything is stopped (and again before closing), so a child whose parent exits in the meantime is
+  // still found. A Stop that fails or hangs only costs its time limit. Returns { stopped, remaining }.
   async shutdown({ stopMs = 5000, graceMs = 2000, killMs = 5000 } = {}) {
+    const known = processTree.snapshotOwned();
     if (this.busy) {
       const end = Date.now() + stopMs;
       let timer;
-      await Promise.race([this.stop().catch(() => {}), new Promise(resolve => { timer = setTimeout(resolve, stopMs); })]);
+      const stopped = this.stop().catch(error => this.log?.error('Stop failed during shutdown', { message: error.message }));
+      await Promise.race([stopped, new Promise(resolve => { timer = setTimeout(resolve, stopMs); })]);
       clearTimeout(timer);
       while (this.busy && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 50));
+      processTree.snapshotOwned(known);
     }
-    const known = snapshotOwned();
-    try { this.close(); } catch (error) { this.log.error('Close failed during shutdown', { message: error.message }); }
-    await settleOwned(graceMs);
-    return stopOwned({ known, deadline: Date.now() + killMs });
+    try { this.close(); } catch (error) { this.log?.error('Close failed during shutdown', { message: error.message }); }
+    await processTree.settleOwned(graceMs);
+    const result = processTree.stopOwned({ known, deadline: Date.now() + killMs });
+    // Whatever could not be confirmed stopped keeps new work blocked at the next start until it is.
+    if (result.record) { this.holdCleanup(result.record, false); try { this.save(); } catch { /* logged by the caller */ } }
+    return { stopped: result.stopped, remaining: result.remaining };
+  }
+
+  // Why new work may not start: a check, or a stopped worker's processes, could not be confirmed stopped. A cleanup
+  // still running is not a block: the one place work starts (submitWorker, the checks in runGate, compaction) waits
+  // for it with the session busy, so Stop during the wait cancels what was waiting (waitForCleanup, stop()).
+  blockedReason() {
+    if (this.data.executionBlock) return 'A check may still be running.';
+    if (this.data.workerCleanup?.length) return 'Processes from a stopped task could not be confirmed stopped. Phasma Harness keeps trying; restart it if this persists.';
+    return null;
+  }
+
+  // The one check before work starts (submitWorker, the checks in runGate, both compactions), always with the session
+  // busy. It waits for cleanups in flight, then returns why the work must not start, looked at after the wait: Stop
+  // ({ stopped: true }) or a block ({ blocked }: a cleanup that just ended unconfirmed, a check that may still run).
+  // Null means start. With no cleanup running it answers at once (not a promise), so callers await it only if it is one.
+  readyToStart(session) {
+    const refusal = () => {
+      if (this.stopping.has(session.id)) return { stopped: true };
+      const blocked = this.blockedReason();
+      return blocked ? { blocked } : null;
+    };
+    return this.cleanupPending?.size ? this.waitForCleanup(session).then(refusal) : refusal();
+  }
+
+  // Lasts until every cleanup in flight has finished (each is bounded by its own scans and deadline), or until Stop,
+  // which is recorded for the waiter (see stop()). Use readyToStart, which also checks what the wait may have changed.
+  async waitForCleanup(session) {
+    if (!this.cleanupPending?.size) return;
+    const id = session?.id ?? null;
+    this.cleanupWait = id;
+    try {
+      while (this.cleanupPending.size && !this.stopping.has(id)) await new Promise(resolve => setTimeout(resolve, 50));
+    } finally { if (this.cleanupWait === id) this.cleanupWait = null; }
+  }
+
+  holdCleanup(record, retry = true) {
+    if (!record) return;
+    this.data.workerCleanup = [...(this.data.workerCleanup || []).filter(item => item.id !== record.id), record];
+    this.log?.error('Stopped task processes could not be confirmed stopped', { id: record.id, roots: record.roots.length, children: record.children.length });
+    try { this.save(); } catch { /* the in-memory block still applies */ }
+    if (retry) this.retryCleanup();
+  }
+
+  // Retries unconfirmed cleanups every 15 s (without blocking) until each is confirmed.
+  retryCleanup(delayMs = 15000) {
+    if (this.cleanupRetry || !this.data.workerCleanup?.length) return;
+    this.cleanupRetry = setTimeout(() => this.retryCleanupNow().catch(() => {}), delayMs);
+    this.cleanupRetry.unref?.();
+  }
+
+  // Each retry keeps what it learned: descendants it found are saved with the record, so one whose parent exits
+  // before the next retry is still linked then.
+  async retryCleanupNow() {
+    clearTimeout(this.cleanupRetry); this.cleanupRetry = null;
+    const results = new Map();
+    for (const record of this.data.workerCleanup || []) results.set(record.id, await processTree.sweepRecord(record));
+    this.applyCleanupResults(results);
+    this.retryCleanup();
+  }
+
+  // At start: finishes cleanups recorded by an earlier run (the caller saves). Returns whether there were any.
+  recoverWorkerCleanup(ms = 5000) {
+    const records = this.data.workerCleanup || [];
+    if (!records.length) return false;
+    this.applyCleanupResults(new Map(records.map(record => [record.id, processTree.stopRecord(record, ms)])), false);
+    this.retryCleanup();
+    return true;
+  }
+
+  // Drops confirmed records and replaces the others with their grown versions (records added meanwhile are kept).
+  applyCleanupResults(results, notify = true) {
+    const left = (this.data.workerCleanup || []).filter(record => !results.get(record.id) || results.get(record.id).remaining.length)
+      .map(record => results.get(record.id)?.record || record);
+    if (left.length) this.data.workerCleanup = left; else delete this.data.workerCleanup;
+    if (!notify) return;
+    try { this.save(); } catch { /* retried with the next change */ }
+    this.cleanupChanged();
+  }
+
+  cleanupChanged() {
+    this.changed();
+    if (!this.blockedReason()) for (const session of this.data.sessions) this.settle(session);
   }
 
   close() {
@@ -985,6 +1096,8 @@ class Controller extends EventEmitter {
     this.client.removeAllListeners('request');
     this.client.removeAllListeners('disconnected');
     this.client.close();
+    processTree.cleanup.off('pending', this.onCleanupPending).off('done', this.onCleanupDone);
+    clearTimeout(this.cleanupRetry); this.cleanupRetry = null;
   }
 }
 
