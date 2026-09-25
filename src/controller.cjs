@@ -211,7 +211,7 @@ class Controller extends EventEmitter {
   }
 
   save() {
-    clearTimeout(this.timer); this.timer = null;
+    // Persisting must not cancel a pending UI state update.
     fs.mkdirSync(path.dirname(this.filename), { recursive: true });
     fs.writeFileSync(this.filename + '.tmp', JSON.stringify(this.data));
     fs.renameSync(this.filename + '.tmp', this.filename);
@@ -220,6 +220,7 @@ class Controller extends EventEmitter {
   changed() {
     clearTimeout(this.timer);
     this.timer = setTimeout(() => {
+      this.timer = null;
       try { this.save(); } catch (error) { this.error = `Could not save sessions: ${error.message}`; }
       this.emit('state', this.snapshot());
     }, 100);
@@ -1096,6 +1097,7 @@ class Controller extends EventEmitter {
     this.client.close();
     processTree.cleanup.off('pending', this.onCleanupPending).off('done', this.onCleanupDone);
     clearTimeout(this.cleanupRetry); this.cleanupRetry = null;
+    clearTimeout(this.timer); this.timer = null;
   }
 }
 

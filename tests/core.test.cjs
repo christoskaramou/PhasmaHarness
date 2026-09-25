@@ -128,6 +128,35 @@ async function flush() {
   for (let i = 0; i < 8; i++) await new Promise(setImmediate);
 }
 
+for (const stopped of [false, true]) test(`Claude ${stopped ? 'Stop' : 'completion'} publishes the idle state after saving`, async t => {
+  const { controller } = await setup(t);
+  const session = controller.create();
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  session.helperTools = false;
+  let finish;
+  controller.claude.run = ({ signal, onEvent }) => new Promise((resolve, reject) => {
+    finish = () => resolve({ result: 'Finished.' });
+    signal.addEventListener('abort', () => reject(new Error('Claude stopped.')), { once: true });
+    onEvent({ type: 'assistant', message: { id: 'answer', content: [{ type: 'text', text: 'Finished.' }] } });
+  });
+  const nextState = () => new Promise((resolve, reject) => {
+    const listener = state => { clearTimeout(timer); resolve({ busy: state.busy, status: state.sessions[0].status }); };
+    const timer = setTimeout(() => { controller.off('state', listener); reject(new Error('No state update reached the UI')); }, 1000);
+    controller.once('state', listener);
+  });
+  const running = nextState();
+  const sent = controller.send({ id: session.id, text: 'review', mode: 'claude-cli:sonnet', task: stopped ? 'off' : 'on' });
+  assert.equal((await running).busy, session.id);
+  const idle = nextState();
+  if (stopped) await controller.stop(); else finish();
+  await sent;
+  await controller.gateDone;
+  const status = stopped ? 'interrupted' : 'completed';
+  assert.equal(JSON.parse(fs.readFileSync(controller.filename, 'utf8')).sessions[0].status, status);
+  assert.deepEqual(await idle, { busy: null, status });
+});
+
 test('changed project instructions refresh an existing worker; unchanged entry does not reload', async t => {
   const { controller, fake } = await setup(t);
   const session = controller.create();
