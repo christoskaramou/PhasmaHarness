@@ -18,6 +18,8 @@ const { DecisionLog } = require('./trace.cjs');
 process.env.PATH = path.join(__dirname, '..', 'tools', 'bin') + path.delimiter + process.env.PATH;
 app.setPath('userData', path.join(app.getPath('appData'), 'Phasma Harness'));
 app.setName('Phasma Harness');
+// Groups the window with the installed shortcuts (electron-builder gives them the appId) so the taskbar shows the app icon.
+if (process.platform === 'win32') app.setAppUserModelId('com.phasma.harness');
 let window, controller, quitting = false;
 const log = new Log(path.join(app.getPath('userData'), 'logs'));
 process.on('uncaughtExceptionMonitor', error => log.error('Uncaught exception', { message: error?.message, stack: String(error?.stack || '').slice(0, 1500) }));
@@ -57,6 +59,7 @@ async function start() {
     width: 1320, height: 900, minWidth: 840, minHeight: 640,
     resizable: true, maximizable: true,
     title: 'Phasma Harness', backgroundColor: '#151719', show: false,
+    ...(process.platform === 'win32' ? { icon: path.join(__dirname, '..', 'ui', 'icon.ico') } : {}),
     autoHideMenuBar: true,
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true },
   });

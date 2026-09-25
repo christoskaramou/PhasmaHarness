@@ -76,7 +76,7 @@ try {
     $shortcut.TargetPath = Join-Path $env:WINDIR 'System32\wscript.exe'
     $shortcut.Arguments = '"' + (Join-Path $folder 'Launch Phasma Harness.vbs') + '"'
     $shortcut.WorkingDirectory = $folder
-    $shortcut.IconLocation = "$electron,0"
+    $shortcut.IconLocation = (Join-Path $folder 'ui\icon.ico') + ',0'
     $shortcut.Save()
     Write-Host 'Setup complete. Install and sign in to Codex, Claude or Cursor from Settings > Providers; any one is enough. Jev is optional. Keep this app folder in place.'
     Start-Process -FilePath (Join-Path $env:WINDIR 'System32\wscript.exe') -ArgumentList ('"' + (Join-Path $folder 'Launch Phasma Harness.vbs') + '"') -WindowStyle Hidden

@@ -42,6 +42,7 @@
       "tools/bin/**/*"
     ],
     "win": {
+      "icon": "ui/icon.ico",
       "target": [
         {
           "target": "nsis",
