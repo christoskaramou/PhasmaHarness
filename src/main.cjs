@@ -18,8 +18,9 @@ const { DecisionLog } = require('./trace.cjs');
 process.env.PATH = path.join(__dirname, '..', 'tools', 'bin') + path.delimiter + process.env.PATH;
 app.setPath('userData', path.join(app.getPath('appData'), 'Phasma Harness'));
 app.setName('Phasma Harness');
-// Groups the window with the installed shortcuts (electron-builder gives them the appId) so the taskbar shows the app icon.
-if (process.platform === 'win32') app.setAppUserModelId('com.phasma.harness');
+// The installed app's shortcuts carry the appId (electron-builder), and Windows shows a shortcut's icon on the taskbar for
+// windows with the same ID. Only the installed app uses it; a source-folder run keeps its own window icon.
+if (process.platform === 'win32' && app.isPackaged) app.setAppUserModelId('com.phasma.harness');
 let window, controller, quitting = false;
 const log = new Log(path.join(app.getPath('userData'), 'logs'));
 process.on('uncaughtExceptionMonitor', error => log.error('Uncaught exception', { message: error?.message, stack: String(error?.stack || '').slice(0, 1500) }));
