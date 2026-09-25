@@ -1,8 +1,20 @@
-// Manual update check against the project's GitHub releases. Nothing is downloaded or installed:
-// the result only says whether a newer release exists and links to its page.
+// Update check against the project's GitHub releases, and the pieces of an automatic update: the release's installer is
+// downloaded only from this repository's release downloads, kept only if its size and SHA-256 match what GitHub
+// reports for the asset, and run silently (see src/updater.cjs, which decides when).
+const fs = require('node:fs');
+const path = require('node:path');
+const { createHash } = require('node:crypto');
+const { spawn } = require('node:child_process');
+const { pipeline } = require('node:stream/promises');
+const { Readable, Transform } = require('node:stream');
 const REPOSITORY = 'christoskaramou/PhasmaHarness';
 const RELEASES_PAGE = `https://github.com/${REPOSITORY}/releases`;
 const LATEST_URL = `https://api.github.com/repos/${REPOSITORY}/releases/latest`;
+const DOWNLOADS = `https://github.com/${REPOSITORY}/releases/download/`;
+const MAX_INSTALLER_BYTES = 1024 ** 3;
+// electron-builder's NSIS installer: --updated keeps app data while replacing the old version, /S installs silently into
+// the existing location, --force-run starts the new version when it is done.
+const INSTALL_ARGS = ['--updated', '/S', '--force-run'];
 
 function parseVersion(value) {
   const match = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(String(value || '').trim());
@@ -41,7 +53,62 @@ async function checkForUpdate({ current, fetch, timeoutMs = 10000 }) {
     current, latest, newer: compareVersions(latest, current) > 0,
     url: /^https:\/\/github\.com\//.test(release.html_url || '') ? release.html_url : RELEASES_PAGE,
     installer: installer?.name || null,
+    asset: installerAsset(release, latest),
   };
 }
 
-module.exports = { checkForUpdate, compareVersions, parseVersion, RELEASES_PAGE, LATEST_URL };
+// The installer an automatic update may download: this version's setup file, served from this repository's release
+// downloads, with a SHA-256 digest and a plausible size. Anything else is only linked, never downloaded.
+function installerAsset(release, version) {
+  const asset = (release.assets || []).find(item => item?.name === `Phasma-Harness-Setup-${version}.exe`);
+  const sha256 = /^sha256:([0-9a-f]{64})$/.exec(asset?.digest || '')?.[1];
+  const url = String(asset?.browser_download_url || '');
+  if (!sha256 || url !== DOWNLOADS + `v${version}/${asset.name}` || !Number.isSafeInteger(asset.size) || asset.size <= 0 || asset.size > MAX_INSTALLER_BYTES) return null;
+  return { name: asset.name, url, sha256, size: asset.size };
+}
+
+function sha256File(file) {
+  return new Promise((resolve, reject) => {
+    const hash = createHash('sha256');
+    fs.createReadStream(file).on('error', reject).on('data', chunk => hash.update(chunk)).on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
+// Streams the installer into directory while hashing it. Only a file with the asset's exact size and SHA-256 is kept;
+// anything else is deleted. A verified copy from an earlier attempt is reused.
+async function downloadInstaller({ asset, directory, fetch, onProgress = () => {}, signal }) {
+  fs.mkdirSync(directory, { recursive: true });
+  const file = path.join(directory, asset.name), partial = file + '.partial';
+  if (await sha256File(file).catch(() => null) === asset.sha256) return file;
+  fs.rmSync(file, { force: true });
+  let response;
+  try { response = await fetch(asset.url, { headers: { 'User-Agent': 'Phasma-Harness' }, signal }); }
+  catch (error) { throw new Error(`Could not download the update (${error?.name === 'AbortError' ? 'stopped' : error?.message || 'network error'}).`); }
+  if (!response.ok || !response.body) throw new Error(`Could not download the update (HTTP ${response.status}).`);
+  const hash = createHash('sha256');
+  let received = 0;
+  const meter = new Transform({ transform(chunk, _encoding, done) {
+    received += chunk.length;
+    if (received > asset.size) { done(new Error('The download is larger than the release says.')); return; }
+    hash.update(chunk); onProgress(received / asset.size); done(null, chunk);
+  } });
+  try { await pipeline(Readable.fromWeb(response.body), meter, fs.createWriteStream(partial), ...(signal ? [{ signal }] : [])); }
+  catch (error) { fs.rmSync(partial, { force: true }); throw new Error(`Could not download the update (${error.message}).`); }
+  if (received !== asset.size || hash.digest('hex') !== asset.sha256) {
+    fs.rmSync(partial, { force: true });
+    throw new Error('The downloaded installer does not match the release checksum, so it was deleted.');
+  }
+  fs.renameSync(partial, file);
+  return file;
+}
+
+// Starts the installer detached, so it outlives this app, and resolves once Windows has started it.
+function startInstaller(file, spawnFn = spawn) {
+  return new Promise((resolve, reject) => {
+    const child = spawnFn(file, INSTALL_ARGS, { detached: true, stdio: 'ignore' });
+    child.once('error', error => reject(new Error(`Could not start the installer (${error.message}).`)));
+    child.once('spawn', () => { child.unref(); resolve(); });
+  });
+}
+
+module.exports = { checkForUpdate, installerAsset, downloadInstaller, startInstaller, compareVersions, parseVersion, RELEASES_PAGE, LATEST_URL, INSTALL_ARGS };

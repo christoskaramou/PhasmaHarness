@@ -24,6 +24,9 @@ app.whenReady().then(async () => {
   ipcMain.handle('appInfo', () => ({ version: '0.1.0', packaged: true }));
   let updateResult = { current: '0.1.0', latest: '0.2.0', newer: true, url: 'https://github.com/x/y/releases/tag/v0.2.0', installer: 'Phasma-Harness-Setup-0.2.0.exe' };
   ipcMain.handle('checkUpdates', () => { if (updateResult instanceof Error) throw updateResult; return updateResult; });
+  let installs = 0;
+  ipcMain.handle('updateStatus', () => ({ status: 'idle' }));
+  ipcMain.handle('installUpdate', () => { installs++; });
   ipcMain.handle('send', (_event, message) => {
     if (failSend) throw new Error('Test send failed');
     sent.push(message);
@@ -215,7 +218,31 @@ app.whenReady().then(async () => {
   const [failed] = await checkUpdates();
   assert.match(failed, /Could not reach GitHub/);
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#check-updates').disabled"), false);
+  updateResult = { current: '0.1.0', latest: '0.2.0', newer: true, installable: true, url: 'https://github.com/x/y/releases/tag/v0.2.0', installer: 'Phasma-Harness-Setup-0.2.0.exe' };
+  const [installable] = await checkUpdates();
+  assert.match(installable, /Version 0\.2\.0 is available\. Update and restart downloads and installs it/);
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#install-update').hidden"), false);
   console.log('Version and manual update check passed');
+  // The automatic update banner: offered when the installed app finds a release, disabled while a turn runs.
+  await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').close(); true");
+  const banner = () => window.webContents.executeJavaScript("[document.querySelector('#update-banner').hidden, document.querySelector('#update-text').textContent, document.querySelector('#update-install').hidden, document.querySelector('#update-install').disabled]");
+  const push = async state => { window.webContents.send('update', state); await new Promise(r => setTimeout(r, 100)); };
+  await push({ status: 'available', latest: '0.2.0', installable: false, url: 'https://github.com/x/y/releases/tag/v0.2.0' });
+  assert.equal((await banner())[0], true, 'a source folder gets no banner');
+  await push({ status: 'available', latest: '0.2.0', installable: true, url: 'https://github.com/x/y/releases/tag/v0.2.0' });
+  assert.deepEqual(await banner(), [false, 'Phasma Harness 0.2.0 is available.', false, false]);
+  await window.webContents.executeJavaScript("document.querySelector('#update-install').click(); new Promise(r => setTimeout(r, 100))");
+  assert.equal(installs, 1);
+  await push({ status: 'downloading', latest: '0.2.0', installable: true, progress: 42 });
+  assert.deepEqual(await banner(), [false, 'Downloading Phasma Harness 0.2.0… 42%', true, true]);
+  await push({ status: 'error', latest: '0.2.0', installable: true, error: 'The downloaded installer does not match the release checksum, so it was deleted.' });
+  assert.match((await banner())[1], /^Update failed: The downloaded installer does not match/);
+  await push({ status: 'available', latest: '0.2.0', installable: true });
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify({ ...controller.snapshot(), busy: 'someone' }) + '); true');
+  assert.equal((await banner())[3], true, 'disabled while a turn runs');
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + "); document.querySelector('#update-dismiss').click(); true");
+  assert.equal((await banner())[0], true, 'hidden after dismissing');
+  console.log('Update banner passed');
   // Compare with Jev: shown only with a Jev key while Smart routes, with the agreement so far.
   await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').close(); true");
   const compareRow = () => window.webContents.executeJavaScript("[document.querySelector('#jev-compare-row').hidden, document.querySelector('#jev-compare-detail').textContent]");

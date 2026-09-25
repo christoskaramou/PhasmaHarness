@@ -268,7 +268,7 @@ function element(tag, className, text) {
   return node;
 }
 
-function applyState(next) { state = next; render(); }
+function applyState(next) { state = next; render(); renderUpdate(); }
 // Jev failing: say since when and which saved settings are on their fallbacks, so it is never silent.
 function jevHealth() {
   const health = state.jev?.health, s = state.settings;
@@ -945,24 +945,55 @@ async function showVersion() {
   appInfo ??= await api.appInfo().catch(() => null);
   if (appInfo) $('#app-version').textContent = `Version ${appInfo.version}${appInfo.packaged ? '' : ' (source folder)'}`;
 }
-// Manual only: asks GitHub for the latest release and links to it. Nothing is downloaded.
+// Asks GitHub for the latest release. The installed app can then update itself (Update and restart); a source folder
+// only gets the link.
 $('#check-updates').onclick = async () => {
   const button = $('#check-updates');
-  button.disabled = true; $('#open-release').hidden = true;
+  button.disabled = true; $('#open-release').hidden = true; $('#install-update').hidden = true;
   $('#update-status').textContent = 'Checking…';
   try {
     const result = await api.checkUpdates();
     releaseURL = result.url;
     if (result.note) $('#update-status').textContent = result.note;
     else if (!result.newer) $('#update-status').textContent = `Up to date: ${result.latest} is the latest release.`;
+    else if (result.installable) $('#update-status').textContent = `Version ${result.latest} is available. Update and restart downloads and installs it; your settings and sessions are kept.`;
     else $('#update-status').textContent = appInfo?.packaged === false
       ? `Version ${result.latest} is available. Update the source folder, then run Install Phasma Harness.cmd again.`
       : `Version ${result.latest} is available${result.installer ? ` (${result.installer})` : ''}. Download it from the release page and run it; your settings and sessions are kept.`;
+    $('#install-update').hidden = !(result.newer && result.installable);
     $('#open-release').hidden = !(result.newer || result.note);
   } catch (error) { $('#update-status').textContent = error.message; }
   finally { button.disabled = false; }
 };
 $('#open-release').onclick = () => { if (releaseURL) api.openLink(releaseURL).catch(notify); };
+// Automatic update (installed app): the main process checks, the banner offers it, and nothing installs until clicked.
+var update = { status: 'idle' }, updateHidden = null; // var: applyState may render before this line has run
+function renderUpdate() {
+  const u = update || { status: 'idle' }, busy = !!state?.busy;
+  const shown = u.installable && (u.status === 'downloading' || u.status === 'installing' || u.status === 'error' || (u.status === 'available' && updateHidden !== u.latest));
+  $('#update-banner').hidden = !shown;
+  if (!shown) return;
+  $('#update-text').textContent = u.status === 'downloading' ? `Downloading Phasma Harness ${u.latest}… ${u.progress ?? 0}%`
+    : u.status === 'installing' ? `Installing Phasma Harness ${u.latest}. It restarts when the installer finishes.`
+    : u.status === 'error' ? `Update failed: ${u.error}`
+    : `Phasma Harness ${u.latest} is available.`;
+  const idle = u.status === 'available' || u.status === 'error';
+  for (const id of ['#update-install', '#install-update']) {
+    $(id).disabled = busy || !idle;
+    $(id).title = busy ? 'Finish or stop the current turn first; updating restarts the app.' : '';
+  }
+  $('#update-install').hidden = !idle;
+  $('#update-install').textContent = u.status === 'error' ? 'Try again' : 'Update and restart';
+  $('#update-notes').hidden = !idle;
+  $('#update-dismiss').hidden = u.status !== 'available' && u.status !== 'error';
+}
+const installUpdate = () => api.installUpdate().catch(error => { if (update.status !== 'error') notify(error); });
+$('#update-install').onclick = installUpdate;
+$('#install-update').onclick = () => { $('#settings-dialog').close(); installUpdate(); };
+$('#update-notes').onclick = () => { if (update.url) api.openLink(update.url).catch(notify); };
+$('#update-dismiss').onclick = () => { updateHidden = update.latest; if (update.status === 'error') update = { ...update, status: 'available' }; renderUpdate(); };
+api.onUpdate?.(next => { update = next; renderUpdate(); });
+api.updateStatus?.().then(next => { update = next; renderUpdate(); }).catch(() => {});
 $('#settings-access').onchange = () => {
   $('#settings-access-detail').textContent = state.accessModes.find(mode => mode.id === $('#settings-access').value).description;
 };

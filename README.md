@@ -49,7 +49,7 @@ npm start
 
 An installed app keeps everything in `%APPDATA%\Phasma Harness`, including the workspace wikis (`workspace-data`), so installing a newer version over it keeps settings, sessions and wikis. A source folder keeps `workspace-data` beside the app as before.
 
-Settings → General shows the version and has **Check for updates**, which asks GitHub for the latest release of this repository and, when a newer one exists, offers to open its page. Nothing is downloaded or installed automatically. The repository is public, so no sign-in is involved; there is no background check.
+Updates: the installed app checks GitHub for a newer release about 10 seconds after it starts and then every 12 hours (a failed check is only logged), and Settings → General → **Check for updates** checks on demand. When one exists, a bar at the top of the window offers **Update and restart**. Nothing downloads or installs until you click it, and it is disabled while a turn or its checks run. It downloads that version's `Phasma-Harness-Setup-<version>.exe`, only from this repository's release downloads, keeps it only if its size and SHA-256 match what GitHub reports for the asset, then runs it silently (`--updated /S --force-run`) and quits; the installer replaces the app in place and starts the new version, keeping settings, sessions, logs and wikis. Downloads go to `%APPDATA%\Phasma Harness\updates` and are removed once they are no longer newer than the running version. A source folder only reports the new version and links to it.
 
 To release: bump `version` in `package.json`, commit, and push a tag `v<version>`. CI then runs the tests, builds the installer and publishes it as a GitHub release (the tag must match the version).
 
@@ -106,7 +106,7 @@ Workspace-access follow-up on the same date/runtime: all three runs passed, at 2
 - `src/workspace` — project search
 - `src/tools` — helper tools shared with those CLIs
 - `ui` — the window
-- `src/log.cjs`, `src/diagnostics.cjs`, `src/updates.cjs` — log file, diagnostics text, update check
+- `src/log.cjs`, `src/diagnostics.cjs`, `src/updates.cjs`, `src/updater.cjs` — log file, diagnostics text, update check and automatic update
 - `benchmarks` — bundled measurements
 
 ### Bundled default skills
