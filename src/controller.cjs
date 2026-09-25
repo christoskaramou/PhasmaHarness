@@ -56,7 +56,8 @@ class Controller extends EventEmitter {
     this.wikiSnapshots = new Map(); this.wikiChecks = new AbortController();
     this.log = NO_LOG; // replaced by the app's rotating log file
     this.helperRequests = new Set();
-    this.data.settings.largeResponses ??= true;
+    // Large tool output is always captured as excerpts; the setting is no longer shown, so an old "off" is not kept.
+    this.data.settings.largeResponses = true;
     this.contextSearch = null;
     this.wikiStore = options.wikiStore || null;
     this.contextRequests = new Set();
@@ -165,7 +166,7 @@ class Controller extends EventEmitter {
       codex: this.codex,
       ...this.data, settings: { ...this.data.settings, mode: this.planPreset() ? 'auto' : this.data.settings.mode }, planRouting: this.planPreset(), connection: this.connection, error: this.error, account: this.account, busy: this.busy,
       routing: this.routing, routerModel: this.data.settings.routing === 'jev' ? JEV_MODEL : this.routerChoices().find(p => p.id === this.data.settings.routerPreset)?.model || null,
-      jev: { configured: !!this.smartRouter.jev?.configured, model: JEV_MODEL, compare: this.jevCompare?.summary() || null },
+      jev: { configured: !!this.smartRouter.jev?.configured, model: JEV_MODEL, compare: this.jevCompare?.summary() || null, health: this.smartRouter.jev?.health || null },
       decisions: this.trace.summary(),
       contextRoot: this.contextSearch?.root || null,
       helperCapabilities: {

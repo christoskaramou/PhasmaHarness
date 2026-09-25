@@ -69,10 +69,6 @@
     <label>Default workspace<div class="path-field"><input id="settings-workspace" readonly><button id="settings-browse" type="button">Browse</button></div></label>
     <label>New session permissions<select id="settings-access" aria-describedby="settings-access-detail"></select></label>
     <p id="settings-access-detail" class="hint"></p>
-    <div class="workspace-actions"><button type="button" id="copy-diagnostics">Copy diagnostics</button><button type="button" id="open-logs">Open logs folder</button></div>
-    <p id="diagnostics-status" class="hint" role="status"></p>
-    <div class="workspace-actions"><span id="app-version" class="hint"></span><button type="button" id="check-updates">Check for updates</button><button type="button" id="open-release" hidden>Open release page</button></div>
-    <p id="update-status" class="hint" role="status"></p>
     <h3 class="settings-section">Routing</h3>
     <label>Router<select id="settings-routing" aria-describedby="router-detail"><option value="smart">Smart</option><option value="jev">Jev</option></select></label>
     <p id="router-detail" class="hint"></p>
@@ -84,9 +80,13 @@
     <h3 class="settings-section">Tools</h3>
     <label>Project search<select id="settings-context"><option value="local">Local</option><option value="jev">Local + Jev ranking</option></select></label>
     <label>Tool recommendations<select id="settings-tools"><option value="off">Off</option><option value="jev">Jev</option></select></label>
-    <label>Large output<select id="settings-output"><option value="on">Capture excerpts</option><option value="off">Return directly</option></select></label>
     <h3 class="settings-section">Jev <span id="jev-status" class="hint">No key saved</span></h3>
+    <p id="jev-health" class="hint" role="status"></p>
     <div class="jev-note"><label>API key<input id="jev-key" type="password" autocomplete="off" spellcheck="false" maxlength="4096" placeholder="Paste a key to save or replace" aria-label="Jev API key"></label><div class="jev-actions"><button id="jev-save" type="button">Save</button><button id="jev-test" type="button">Test</button><button id="jev-remove" type="button">Remove</button></div><p id="jev-result" class="hint" role="status"></p></div>
+    <h3 class="settings-section">App <span id="app-version" class="hint"></span></h3>
+    <div class="app-actions"><button type="button" id="copy-diagnostics">Copy diagnostics</button><button type="button" id="open-logs">Open logs folder</button><button type="button" id="check-updates">Check for updates</button><button type="button" id="open-release" hidden>Open release page</button></div>
+    <p id="diagnostics-status" class="hint" role="status"></p>
+    <p id="update-status" class="hint" role="status"></p>
     </div>
     <div id="panel-providers" class="settings-panel" role="tabpanel" aria-labelledby="tab-providers" hidden>
       <p class="muted">Plug icon: gray = connect, green = connected. Click a connected plug to stop using it here; the CLI stays signed in. Tick a model to enable it for Auto.</p>

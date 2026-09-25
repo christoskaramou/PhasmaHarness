@@ -100,9 +100,22 @@ function choices(response, questions) {
 }
 
 class JevClient {
-  constructor(keyStore, fetchFn = fetch) { this.keyStore = keyStore; this.fetch = fetchFn; }
+  constructor(keyStore, fetchFn = fetch) { this.keyStore = keyStore; this.fetch = fetchFn; this.resetHealth(); }
   get configured() { return this.keyStore.configured; }
+  // Every Jev feature shares this client, so one failing call means its features are on their fallbacks (Smart router,
+  // local ranking, local tool candidates). since: when the current run of failures began; cleared by the next answer.
+  resetHealth() { this.health = { since: null, error: null, at: null }; }
   async evaluate(state, questions, signal, timeoutMs = 15000) {
+    try {
+      const result = await this.request(state, questions, signal, timeoutMs);
+      this.resetHealth();
+      return result;
+    } catch (error) {
+      if (error.name !== 'AbortError') { const now = Date.now(); this.health = { since: this.health.since || now, error: error.message, at: now }; }
+      throw error;
+    }
+  }
+  async request(state, questions, signal, timeoutMs) {
     const key = this.keyStore.read();
     const started = Date.now();
     const deadline = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(timeoutMs)]);

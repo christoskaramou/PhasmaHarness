@@ -30,8 +30,7 @@ async function checkForUpdate({ current, fetch, timeoutMs = 10000 }) {
   } catch (error) {
     throw new Error(`Could not reach GitHub to check for updates (${error?.name === 'TimeoutError' ? 'timed out' : error?.message || 'network error'}).`);
   }
-  // A private repository answers 404 to anonymous requests, the same as one with no releases.
-  if (response.status === 404) return { current, latest: null, newer: false, url: RELEASES_PAGE, note: 'No published release was found. The repository may be private or has no releases yet.' };
+  if (response.status === 404) return { current, latest: null, newer: false, url: RELEASES_PAGE, note: 'No published release was found.' };
   if (response.status === 403 || response.status === 429) throw new Error('GitHub refused the update check (rate limited). Try again later.');
   if (!response.ok) throw new Error(`Update check failed (HTTP ${response.status}).`);
   const release = await response.json();

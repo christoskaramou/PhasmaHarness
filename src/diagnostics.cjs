@@ -19,7 +19,7 @@ function buildDiagnostics({ controller, app = {}, cli = {}, logLines = [] }) {
     ...(s.providers || []).map(p => `API provider ${p.id} · ${hostOf(p.baseUrl)} · enabled: ${yesNo(p.enabled !== false)} · models enabled: ${enabled(p.id)}`),
     '',
     `Routing: ${s.routing} · router: ${s.routerPreset} · effective router: ${controller.effectiveRouter?.()?.id || 'none'} · manual selection: ${s.mode}`,
-    `Default access: ${s.access} · Jev key: ${yesNo(controller.smartRouter?.jev?.configured)} · execution block: ${yesNo(controller.data.executionBlock)}`,
+    `Default access: ${s.access} · Jev key: ${yesNo(controller.smartRouter?.jev?.configured)}${controller.smartRouter?.jev?.health?.since ? ` (unavailable since ${new Date(controller.smartRouter.jev.health.since).toISOString()}: ${controller.smartRouter.jev.health.error})` : ''} · execution block: ${yesNo(controller.data.executionBlock)}`,
     `Sessions: ${controller.data.sessions.length} · busy: ${yesNo(controller.busy)} · connection: ${controller.connection}${controller.error ? ` (${controller.error})` : ''}`,
     `Decision log: ${(() => { const d = controller.trace?.summary?.(); return d ? `${d.turns} turns; wiki additions ${d.wiki.additions} (${d.wiki.assessed} judged, ${d.wiki.unassessable} not assessable)` : 'none'; })()}; wiki check ${controller.data.settings.wikiAssessment ? 'on' : 'off'}, Jev comparison ${controller.data.settings.jevCompare ? 'on' : 'off'}`,
     `Usage limits: ${Object.entries(limits).map(([p, l]) => `${p} until ${new Date(l.until).toISOString()}${l.known ? '' : ' (estimated)'}`).join(', ') || 'none'}`,

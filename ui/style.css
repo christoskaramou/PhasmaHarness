@@ -97,6 +97,8 @@ header>div:first-child{min-width:0}.header-actions{flex-shrink:0}#delete-session
 .settings-section .hint{margin:0;font-weight:400;letter-spacing:0;text-transform:none}
 .hint{margin:-6px 0 0;color:#8a959b;font-size:calc(11px * var(--font-scale,1));line-height:1.5}
 .hint:empty{display:none}
+#jev-health{margin:10px 0 0;color:#dfc49a}
+.app-actions{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 20px}.app-actions>button{padding:5px 10px;font-size:calc(11px * var(--font-scale,1))}.app-actions~.hint{margin:-12px 0 20px}
 .setting-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:14px 0}
 .setting-row .hint{margin:0}
 #panel-general .jev-note{display:block;margin:12px 0 0;padding:12px}

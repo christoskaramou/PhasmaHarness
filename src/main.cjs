@@ -232,16 +232,16 @@ async function start() {
 
   handle('jevSaveKey', value => {
     if (controller.busy) throw new Error('Stop the current turn before changing the Jev key.');
-    jevKey.save(value); controller.changed(); return controller.snapshot();
+    jevKey.save(value); controller.smartRouter.jev.resetHealth(); controller.changed(); return controller.snapshot();
   });
   handle('jevRemoveKey', () => {
     if (controller.busy) throw new Error('Stop the current turn before removing the Jev key.');
-    jevKey.remove();
+    jevKey.remove(); controller.smartRouter.jev.resetHealth();
     return controller.settings({ routing: controller.data.settings.routing === 'jev' ? 'smart' : controller.data.settings.routing, contextRanking: 'local', toolSelection: 'off', jevCompare: false, wikiAssessment: false });
   });
   handle('jevTest', async () => {
     if (controller.busy) throw new Error('Wait for the current turn to finish before testing Jev.');
-    return controller.smartRouter.jev.test();
+    try { return await controller.smartRouter.jev.test(); } finally { controller.changed(); }
   });
   handle('create', (workspace, access) => controller.create(workspace, access));
   handle('permissions', (id, access) => controller.permissions(id, access));

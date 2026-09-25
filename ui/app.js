@@ -269,6 +269,19 @@ function element(tag, className, text) {
 }
 
 function applyState(next) { state = next; render(); }
+// Jev failing: say since when and which saved settings are on their fallbacks, so it is never silent.
+function jevHealth() {
+  const health = state.jev?.health, s = state.settings;
+  if (!state.jev?.configured || !health?.since) return '';
+  const uses = [];
+  if (s.routing === 'jev') uses.push('the Smart router routes');
+  if (s.contextRanking === 'jev') uses.push('project search uses local ranking');
+  if (s.toolSelection === 'jev') uses.push('tool recommendations use local candidates');
+  if (s.wikiAssessment === true) uses.push('wiki additions are not judged');
+  const since = new Date(health.since), today = since.toDateString() === new Date().toDateString();
+  const time = since.toLocaleString([], today ? { hour: '2-digit', minute: '2-digit' } : { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  return `Unavailable since ${time}: ${health.error}${uses.length ? ` Meanwhile ${uses.join(', ')}.` : ''}`;
+}
 let browserWorkspace = '', browserSession = null, browserMode = 'list', browserFile = null, browserVersion = 0;
 let browserPreviewVersion = 0;
 let probedWorkspace = '';
@@ -464,6 +477,7 @@ function render() {
   $('#quick-routing').title = state.planRouting ? state.planRouting.reason : state.jev.configured ? 'Choose Smart or Jev routing' : 'Choose routing. Add a Jev key in Settings to enable Jev.';
   $('#quick-routing option[value="jev"]').disabled = !state.jev.configured;
   $('#jev-status').textContent = state.jev.configured ? 'Key saved' : 'No key saved';
+  $('#jev-health').textContent = jevHealth();
   $('#settings-routing').onchange();
   $('#jev-test').disabled = !state.jev.configured || !!state.busy || testingJev;
   $('#jev-remove').disabled = !state.jev.configured || !!state.busy || testingJev;
@@ -907,7 +921,6 @@ $('#settings').onclick = async () => {
   renderRoutingModels(state.settings.routerPreset);
   $('#settings-context').value = state.settings.contextRanking || 'local';
   $('#settings-tools').value = state.settings.toolSelection || 'off';
-  $('#settings-output').value = state.settings.largeResponses === false ? 'off' : 'on';
   $('#settings-quick').value = state.settings.jevQuickAnswers === false ? 'off' : 'on';
   $('#settings-jev-compare').value = state.settings.jevCompare === true ? 'on' : 'off';
   $('#settings-wiki-check').value = state.settings.wikiAssessment === true ? 'on' : 'off';
@@ -941,7 +954,7 @@ $('#check-updates').onclick = async () => {
     const result = await api.checkUpdates();
     releaseURL = result.url;
     if (result.note) $('#update-status').textContent = result.note;
-    else if (!result.newer) $('#update-status').textContent = `You have the latest version (${result.latest}).`;
+    else if (!result.newer) $('#update-status').textContent = `Up to date: ${result.latest} is the latest release.`;
     else $('#update-status').textContent = appInfo?.packaged === false
       ? `Version ${result.latest} is available. Update the source folder, then run Install Phasma Harness.cmd again.`
       : `Version ${result.latest} is available${result.installer ? ` (${result.installer})` : ''}. Download it from the release page and run it; your settings and sessions are kept.`;
@@ -1079,7 +1092,7 @@ $('#settings-form').onsubmit = async event => {
   event.preventDefault();
   // Unsaved check edits (e.g. a removed check) are saved too; a failure keeps the dialog open.
   if (checksDirty) { try { await saveChecks(); } catch (error) { $('#tab-checks')?.click(); notify(error); return; } }
-  try { applyState(await api.settings({ jevQuickAnswers: $('#settings-quick').value === 'on', routerPreset: $('#settings-router-preset').value || undefined, workspace: $('#settings-workspace').value, fontScale: Number($('#settings-font').value), access: $('#settings-access').value, routing: $('#settings-routing').value, contextRanking: $('#settings-context').value, toolSelection: $('#settings-tools').value, jevCompare: $('#settings-jev-compare').value === 'on', wikiAssessment: $('#settings-wiki-check').value === 'on', largeResponses: $('#settings-output').value === 'on' })); updatePreview(); $('#settings-dialog').close(); } catch (error) { notify(error); }
+  try { applyState(await api.settings({ jevQuickAnswers: $('#settings-quick').value === 'on', routerPreset: $('#settings-router-preset').value || undefined, workspace: $('#settings-workspace').value, fontScale: Number($('#settings-font').value), access: $('#settings-access').value, routing: $('#settings-routing').value, contextRanking: $('#settings-context').value, toolSelection: $('#settings-tools').value, jevCompare: $('#settings-jev-compare').value === 'on', wikiAssessment: $('#settings-wiki-check').value === 'on' })); updatePreview(); $('#settings-dialog').close(); } catch (error) { notify(error); }
 };
 $('#context-meter').onclick = async () => {
   try { await api.compact(selectedId); } catch (error) { notify(error); }

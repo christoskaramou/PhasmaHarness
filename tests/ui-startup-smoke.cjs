@@ -210,7 +210,7 @@ app.whenReady().then(async () => {
   assert.match(newer, /Version 0\.2\.0 is available \(Phasma-Harness-Setup-0\.2\.0\.exe\)/);
   assert.equal(newerHidden, false);
   updateResult = { current: '0.2.0', latest: '0.2.0', newer: false, url: 'https://github.com/x/y/releases' };
-  assert.deepEqual(await checkUpdates(), ['You have the latest version (0.2.0).', true]);
+  assert.deepEqual(await checkUpdates(), ['Up to date: 0.2.0 is the latest release.', true]);
   updateResult = new Error('Could not reach GitHub to check for updates (timed out).');
   const [failed] = await checkUpdates();
   assert.match(failed, /Could not reach GitHub/);
@@ -238,6 +238,18 @@ app.whenReady().then(async () => {
   assert.equal(wikiCheck[0], false);
   assert.match(wikiCheck[1], /^Log only\. When on, .*nothing in the wiki changes\..* 5 additions: 3 judged \(2 supported, 1 partial; 2 addition, 1 covered\), 2 not assessable · Jev cost \$0\.0002\.$/);
   await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').close(); true");
+  // Jev failing: the Jev section says since when and which saved settings are on their fallbacks.
+  const savedRanking = controller.data.settings.contextRanking;
+  controller.data.settings.contextRanking = 'jev';
+  controller.smartRouter.jev = { configured: true, health: { since: Date.now(), error: 'Jev timed out after 15 seconds.', at: Date.now() } };
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); true');
+  assert.match(await window.webContents.executeJavaScript("document.querySelector('#jev-health').textContent"), /^Unavailable since .+: Jev timed out after 15 seconds\. Meanwhile .*project search uses local ranking/);
+  controller.smartRouter.jev = { configured: true, health: { since: null, error: null, at: null } };
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); true');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#jev-health').textContent"), '');
+  controller.data.settings.contextRanking = savedRanking;
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-output')"), null, 'large output is always captured, not a setting');
+  console.log('Jev fallback status passed');
   controller.smartRouter.jev = undefined; controller.jevCompare = null;
   controller.trace = require('../src/trace.cjs').NO_TRACE;
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + "); document.querySelector('#settings').click(); new Promise(r => setTimeout(r, 200))");

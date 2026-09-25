@@ -31,7 +31,7 @@ test('update check: same version, missing releases, odd links and failures', asy
   assert.equal(same.url, RELEASES_PAGE, 'only GitHub links are offered');
   const none = await checkForUpdate({ current: '0.1.0', fetch: reply(404, {}) });
   assert.equal(none.newer, false);
-  assert.match(none.note, /private or has no releases/);
+  assert.equal(none.note, 'No published release was found.');
   await assert.rejects(checkForUpdate({ current: '0.1.0', fetch: reply(403, {}) }), /rate limited/);
   await assert.rejects(checkForUpdate({ current: '0.1.0', fetch: reply(500, {}) }), /HTTP 500/);
   await assert.rejects(checkForUpdate({ current: '0.1.0', fetch: reply(200, { tag_name: 'nightly' }) }), /unexpected tag/);
