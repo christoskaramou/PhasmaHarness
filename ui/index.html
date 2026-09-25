@@ -60,6 +60,8 @@
       <button type="button" id="wiki-open">Show in folder</button>
       <button type="button" id="wiki-choose">Change folder</button>
       <button type="button" id="wiki-reset">Reset to default</button>
+      <label id="wiki-check-row">Check wiki updates with Jev<select id="settings-wiki-check" aria-describedby="wiki-check-detail"><option value="off">Off</option><option value="on">Log only</option></select></label>
+      <p id="wiki-check-detail" class="hint"></p>
     </div>
     <div id="panel-general" class="settings-panel" role="tabpanel" aria-labelledby="tab-general">
     <h3 class="settings-section">General</h3>
@@ -76,6 +78,8 @@
     <p id="router-detail" class="hint"></p>
     <label>Routing model<select id="settings-router-preset"></select></label>
     <label>Jev quick answers<select id="settings-quick"><option value="on">On</option><option value="off">Off</option></select></label>
+    <label id="jev-compare-row">Compare with Jev<select id="settings-jev-compare" aria-describedby="jev-compare-detail"><option value="off">Off</option><option value="on">Log only</option></select></label>
+    <p id="jev-compare-detail" class="hint"></p>
     <div class="setting-row"><span id="benchmark-summary" class="hint"></span><button type="button" id="benchmark-open">Benchmarks</button></div>
     <h3 class="settings-section">Tools</h3>
     <label>Project search<select id="settings-context"><option value="local">Local</option><option value="jev">Local + Jev ranking</option></select></label>

@@ -34,13 +34,16 @@ function parseChecklist(text) {
   return { proposedChecklist: items.length >= 3 ? items : null, checklistStatus: items.length >= 3 ? 'proposed' : 'unparseable' };
 }
 
+// Paths never read as evidence: VCS internals, environment files, credentials, secrets and keys.
+const PRIVATE_PATH = /(^|[\\/])(\.git|\.env(?:\..*)?|auth\.json|credentials[^\\/]*|secrets?[^\\/]*|id_rsa|id_ed25519)([\\/]|$)|\.(pem|key|pfx|p12)$/i;
+
 function resolveCitations(workspace, text) {
   // ponytail: inspect up to 20 explicit file:line references and 64 KiB per file; other formats remain unassessed.
   const references = [], seen = new Set();
   const pattern = /\[[^\]\n]+\]\(<?([^\n)]+?)>?\)|`([^`\n]+)`|((?:[A-Za-z]:[\\/])?[\w./\\-]+:\d+(?:-\d+)?)/g;
   let root;
   try { root = fs.realpathSync(workspace); } catch { return { references, note: 'Workspace unavailable; references unassessed.' }; }
-  const privatePath = /(^|[\\/])(\.git|\.env(?:\..*)?|auth\.json|credentials[^\\/]*|secrets?[^\\/]*|id_rsa|id_ed25519)([\\/]|$)|\.(pem|key|pfx|p12)$/i;
+  const privatePath = PRIVATE_PATH;
   const allowed = filename => {
     const relative = path.relative(root, filename);
     return relative && relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative) && !privatePath.test(relative);
@@ -144,10 +147,38 @@ function summaryLine(task) {
   return 'Running';
 }
 
+// Lines that name a real failure: compiler/linker errors ("error:", "error C2065:", "error LNK2019:"), fatal
+// errors, CMake errors, Vulkan validation messages, exceptions ("TypeError:", "AssertionError:"), failed
+// assertions, panics, and test/build summary lines (Ninja/pytest "FAILED", Go "--- FAIL:"). Plain
+// "failed"/"not found" (such as CMake feature probes) is not enough.
+const ERROR_LINE = /\berror\b(?:\s+[A-Z]+\d+)?\s*:|\b\w*(?:Error|Exception):|\bfatal error\b|CMake Error|VUID-|Validation Error|\bAssertion\b.*\bfailed\b|\bpanicked\b|undefined reference|^\s*FAILED\b|^\s*--- FAIL:/i;
+
+// What a correction sees from a failed check. It is exactly what it was before (the last 2,000 characters of stdout,
+// or of stderr when stdout is empty) whenever that already shows an error line or the output has none. Only when the
+// error lines are elsewhere (earlier in a long log, or in stderr) are up to six of them, at most 600 characters, put
+// first, and the whole excerpt still stays within 2,000 characters.
+function failureExcerpt(result, budget = 2000, extra = 600) {
+  const tail = capStream(result.stdout || result.stderr || '').text.slice(-budget);
+  if (tail.split(/\r?\n/).some(line => ERROR_LINE.test(line))) return tail;
+  const errors = [];
+  let size = 0;
+  scan: for (const stream of [result.stdout, result.stderr]) {
+    for (const line of capStream(stream || '').text.split(/\r?\n/)) {
+      const clipped = line.trim().slice(0, 240);
+      if (!clipped || !ERROR_LINE.test(clipped) || errors.includes(clipped) || size + clipped.length + 1 > extra) continue;
+      errors.push(clipped); size += clipped.length + 1;
+      if (errors.length >= 6) break scan;
+    }
+  }
+  if (!errors.length) return tail;
+  const head = `Error lines from the full output:\n${errors.join('\n')}\nOutput tail:\n`;
+  return head + tail.slice(-(budget - head.length));
+}
+
 function correctionText(task) {
   const failed = (task.attempts.at(-1)?.results || []).filter(result => result.status === 'failed');
   const lines = failed.map(result => {
-    const output = capStream(result.stdout || result.stderr || '').text.slice(-2000);
+    const output = failureExcerpt(result);
     return `- ${result.name}: exit ${result.exitCode ?? '?'}${result.truncated ? ' (truncated)' : ''}${output ? `\n${output}` : ''}`;
   });
   const amendments = (task.amendments || []).map(item => item.text).filter(Boolean);
@@ -217,6 +248,6 @@ function restartReason(task, block) {
 module.exports = {
   hasProjectWiki, canProposeWiki,
   parseChecklist, resolveCitations,
-  FINAL, MEASURED_REAP, OUTPUT_CAP, shouldTrack, createTask, gateOutcome, summaryLine, correctionText,
+  FINAL, MEASURED_REAP, OUTPUT_CAP, PRIVATE_PATH, shouldTrack, createTask, gateOutcome, summaryLine, correctionText, failureExcerpt,
   validateChecks, confirmTermination, restartReason, capStream, identityFromProbe, lookupState, parentExitReaps, childBlocksClear,
 };

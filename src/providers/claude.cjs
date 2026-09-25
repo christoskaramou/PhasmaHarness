@@ -1,5 +1,6 @@
 const { WORKER_INSTRUCTIONS } = require('../worker-instructions.cjs');
 const { CLAUDE_MODEL_WINDOWS } = require('./limits.cjs');
+const { stripTaskStatus } = require('../routing/task-state.cjs');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -243,7 +244,7 @@ class ClaudeCLI {
 function handoff(items) {
   const messages = items.filter(i => i.type === 'userMessage' || i.type === 'agentMessage').map(i => ({
     role: i.type === 'userMessage' ? 'user' : 'assistant',
-    text: i.type === 'userMessage' ? (i.content || []).map(c => c.type === 'text' ? c.text : '[Earlier image attachment]').join('\n') : i.text,
+    text: i.type === 'userMessage' ? (i.content || []).map(c => c.type === 'text' ? c.text : '[Earlier image attachment]').join('\n') : stripTaskStatus(i.text),
   }));
   const text = JSON.stringify(messages);
   if (text.length > 1000000) throw new Error('Conversation is too large to transfer. Start a new chat or compact it before switching backends.');

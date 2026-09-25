@@ -286,6 +286,27 @@ module.exports = {
   },
 
   // Codex (ChatGPT) usage windows; a window at 100% marks Codex limited until it resets.
+  // Opt-in (Settings → Routing → Compare with Jev): after a message is routed, ask Jev in the background which
+  // worker it would pick and log it next to the one that runs. Log only: routing and the worker are unaffected,
+  // and a comparison still running when the next message is sent makes that message skip it.
+  compareWithJev(session, text, images, selected, previousState) {
+    const settings = this.data.settings;
+    if (settings.jevCompare !== true || settings.routing === 'jev' || !this.jevCompare || !this.smartRouter.jev?.configured || !this.smartRouter.shadowJev) return;
+    if (!selected?.id || selected.directAnswer || selected.wikiTaskId || this.jevComparing) return;
+    const usable = this.catalog().filter(p => p.worker && this.available(p) && (!images.length || p.images));
+    const unlimited = usable.filter(p => !this.limits.limited(p.provider || 'codex', p.model));
+    // A copy of the conversation as it was before this message, like the router saw it.
+    const context = { ...session, ...previousState, items: [...(session.items || [])], routes: [...(session.routes || [])], directContext: [...(session.directContext || [])],
+      configuredChecks: settings.checks?.[session.workspace] || [], routingCatalog: unlimited.length ? unlimited : usable, attachedImageCount: images.length };
+    const used = { id: selected.id, provider: selected.provider || 'codex', model: selected.model, effort: selected.effort || null, source: selected.source === 'manual' ? 'manual' : 'router' };
+    const abort = new AbortController();
+    this.jevComparing = abort;
+    this.smartRouter.shadowJev(text, context, AbortSignal.any([abort.signal, AbortSignal.timeout(30000)]))
+      .then(jev => this.jevCompare.record({ at: Date.now(), used, jev }),
+        error => { if (!abort.signal.aborted) this.jevCompare.record({ at: Date.now(), used, error: String(error?.message || error).slice(0, 160) }); })
+      .finally(() => { if (this.jevComparing === abort) this.jevComparing = null; if (!abort.signal.aborted) this.changed(); });
+  },
+
   // A rolling update is merged into the last read only for the same limit bucket (other buckets are per-model quotas).
   // With credits, usage can continue past a full window, so only a failed turn marks the limit then.
   codexUsage(snapshot, merge = false) {

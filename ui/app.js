@@ -117,6 +117,34 @@ $('#api-add').onclick = () => {
   });
 };
 
+// Workers end final replies with [task: done|pending|needs-input]; the Harness reads it (one model per task) and
+// hides it, also while it streams in (same rules as src/routing/task-state.cjs). Unfinished tasks get a small tag.
+const TASK_LINE = /^[\s>*_`+-]*\[task:[ \t]*(done|pending|needs-input)[ \t]*\][\s*_`.]*$/i;
+const TASK_FENCE = /^\s*(```|~~~)\s*\w*\s*$/;
+const TASK_PARTIAL = /(?:^|\n)[\s>*_`+-]*\[task(?::[^\]\n]*)?$/i;
+const TASK_STATUS_LABELS = { pending: 'Task pending', 'needs-input': 'Needs your input' };
+function taskLine(text) {
+  const value = String(text || '');
+  const lines = value.trimEnd().split('\n');
+  // Look at the last three non-empty lines only, so a status quoted earlier in a reply is left alone.
+  for (let i = lines.length - 1, seen = 0; i >= 0 && seen < 3; i--) {
+    if (!lines[i].trim()) continue;
+    seen++;
+    const match = TASK_LINE.exec(lines[i]);
+    if (!match) continue;
+    // A code fence that holds only the status line goes with it.
+    let from = i, to = i;
+    const before = lines.slice(0, i).findLastIndex(line => line.trim());
+    const after = lines.findIndex((line, k) => k > i && line.trim());
+    if (before >= 0 && after > i && TASK_FENCE.test(lines[before]) && TASK_FENCE.test(lines[after])) { from = before; to = after; }
+    const rest = [...lines.slice(0, from), ...lines.slice(to + 1)];
+    // Do not leave a double blank line where the status line was.
+    if (from > 0 && from < rest.length && !rest[from - 1].trim() && !rest[from].trim()) rest.splice(from, 1);
+    return { status: match[1].toLowerCase(), text: rest.join('\n').trimEnd() };
+  }
+  return { status: null, text: value.replace(TASK_PARTIAL, '') };
+}
+
 function usageLine(provider) {
   // The provider-wide limit, or else its model-family limits (for example Claude's weekly Opus window).
   const limits = Object.entries(state?.providerLimits || {})
@@ -601,7 +629,9 @@ function renderMessages(session) {
       const routeLabel = selected?.label || item.routeLabel;
       if (routeLabel && !user) label.append(element('span', 'model-label', routeLabel));
       const body = element('div', 'message-body');
-      const text = user ? item.content.filter(c => c.type === 'text').map(c => c.text).join('\n') : item.text || '';
+      const reply = user ? null : taskLine(item.text || '');
+      const text = user ? item.content.filter(c => c.type === 'text').map(c => c.text).join('\n') : reply.text;
+      if (TASK_STATUS_LABELS[reply?.status] && item.phase !== 'commentary') label.append(element('span', 'task-status', TASK_STATUS_LABELS[reply.status]));
       const actions = element('div', 'message-actions');
       const timestamp = item.createdAt || selected?.at;
       if (timestamp) {
@@ -879,6 +909,8 @@ $('#settings').onclick = async () => {
   $('#settings-tools').value = state.settings.toolSelection || 'off';
   $('#settings-output').value = state.settings.largeResponses === false ? 'off' : 'on';
   $('#settings-quick').value = state.settings.jevQuickAnswers === false ? 'off' : 'on';
+  $('#settings-jev-compare').value = state.settings.jevCompare === true ? 'on' : 'off';
+  $('#settings-wiki-check').value = state.settings.wikiAssessment === true ? 'on' : 'off';
   $('#settings-font').value = String(state.settings.fontScale || 100);
   $('#settings-routing').onchange();
   $('#jev-key').value = '';
@@ -994,7 +1026,30 @@ $('#benchmark-refresh').onclick = async () => {
   } catch (error) { notify(error); }
   finally { button.disabled = !!state.busy || !$('#benchmark-worker').value; }
 };
+// Shown with a saved Jev key while Smart routes; the result is only a log next to the model that ran.
+function renderJevCompare() {
+  const shown = !!state.jev?.configured && $('#settings-routing').value === 'smart';
+  $('#jev-compare-row').hidden = $('#jev-compare-detail').hidden = !shown;
+  if (!shown) return;
+  const s = state.jev.compare;
+  const pct = (n, of) => `${Math.round(n / of * 100)}%`;
+  const stats = !s?.compared ? '' : ` ${s.compared} compared: same model ${pct(s.sameModel, s.compared)} (and effort ${pct(s.sameWorker, s.compared)}), same provider ${pct(s.sameProvider, s.compared)}` +
+    `${s.manual ? `; your manual picks ${pct(s.manualSameModel, s.manual)} same model` : ''} · Jev cost $${s.costUsd.toFixed(4)}${s.errors ? ` · ${s.errors} failed` : ''}.`;
+  $('#jev-compare-detail').textContent = 'Log only. When on, Jev is also asked which model it would pick, so each message is sent to Jev and billed by Jev; routing and the model that runs do not change.' + stats;
+}
+// Shown with a saved Jev key. Log only: automatic wiki updates are judged afterwards and nothing in the wiki changes.
+function renderWikiCheck() {
+  const shown = !!state.jev?.configured;
+  $('#wiki-check-row').hidden = $('#wiki-check-detail').hidden = !shown;
+  if (!shown) return;
+  const w = state.decisions?.wiki;
+  const parts = counts => Object.entries(counts || {}).map(([name, n]) => `${n} ${name}`).join(', ');
+  const stats = !w?.additions ? '' : ` ${w.additions} additions: ${w.assessed} judged${w.assessed ? ` (${parts(w.support)}; ${parts(w.novelty)})` : ''}, ${w.unassessable} not assessable · Jev cost $${w.jevCostUsd.toFixed(4)}.`;
+  $('#wiki-check-detail').textContent = 'Log only. When on, after an automatic wiki update Jev judges each small addition that cites a file:line source: does the source support it, and did the wiki already have it? The addition, the cited source lines and related wiki passages are sent to Jev and billed by Jev; nothing in the wiki changes. Results are in decisions.jsonl in the logs folder.' + stats;
+}
 $('#settings-routing').onchange = () => {
+  renderJevCompare();
+  renderWikiCheck();
   const provider = $('#settings-routing').value;
   $('#settings-router-preset').disabled = provider !== 'smart' || !!state.planRouting;
   $('#router-detail').textContent = state.planRouting ? state.planRouting.reason + ' This overrides the saved routing preference.' : provider === 'jev' && !state.jev.configured ? 'Save your Jev API key below to enable this routing option, then save settings.'
@@ -1004,7 +1059,7 @@ $('#settings-routing').onchange = () => {
 };
 $('#jev-save').onclick = async () => {
   const key = $('#jev-key').value; $('#jev-key').value = '';
-  try { applyState(await api.jevSaveKey(key)); $('#jev-result').textContent = 'Key saved. Test the connection, then select Jev above and save settings.'; }
+  try { applyState(await api.jevSaveKey(key)); renderJevCompare(); renderWikiCheck(); $('#jev-result').textContent = 'Key saved. Test the connection, then select Jev above and save settings.'; }
   catch (error) { notify(error); }
 };
 $('#jev-test').onclick = async () => {
@@ -1017,14 +1072,14 @@ $('#jev-test').onclick = async () => {
   finally { testingJev = false; render(); }
 };
 $('#jev-remove').onclick = async () => {
-  try { applyState(await api.jevRemoveKey()); $('#settings-routing').value = state.settings.routing; $('#settings-context').value = state.settings.contextRanking || 'local'; $('#settings-tools').value = state.settings.toolSelection || 'off'; $('#settings-routing').onchange(); $('#jev-result').textContent = 'Saved key removed.'; }
+  try { applyState(await api.jevRemoveKey()); $('#settings-routing').value = state.settings.routing; $('#settings-context').value = state.settings.contextRanking || 'local'; $('#settings-tools').value = state.settings.toolSelection || 'off'; $('#settings-jev-compare').value = 'off'; $('#settings-wiki-check').value = 'off'; $('#settings-routing').onchange(); $('#jev-result').textContent = 'Saved key removed.'; }
   catch (error) { notify(error); }
 };
 $('#settings-form').onsubmit = async event => {
   event.preventDefault();
   // Unsaved check edits (e.g. a removed check) are saved too; a failure keeps the dialog open.
   if (checksDirty) { try { await saveChecks(); } catch (error) { $('#tab-checks')?.click(); notify(error); return; } }
-  try { applyState(await api.settings({ jevQuickAnswers: $('#settings-quick').value === 'on', routerPreset: $('#settings-router-preset').value || undefined, workspace: $('#settings-workspace').value, fontScale: Number($('#settings-font').value), access: $('#settings-access').value, routing: $('#settings-routing').value, contextRanking: $('#settings-context').value, toolSelection: $('#settings-tools').value, largeResponses: $('#settings-output').value === 'on' })); updatePreview(); $('#settings-dialog').close(); } catch (error) { notify(error); }
+  try { applyState(await api.settings({ jevQuickAnswers: $('#settings-quick').value === 'on', routerPreset: $('#settings-router-preset').value || undefined, workspace: $('#settings-workspace').value, fontScale: Number($('#settings-font').value), access: $('#settings-access').value, routing: $('#settings-routing').value, contextRanking: $('#settings-context').value, toolSelection: $('#settings-tools').value, jevCompare: $('#settings-jev-compare').value === 'on', wikiAssessment: $('#settings-wiki-check').value === 'on', largeResponses: $('#settings-output').value === 'on' })); updatePreview(); $('#settings-dialog').close(); } catch (error) { notify(error); }
 };
 $('#context-meter').onclick = async () => {
   try { await api.compact(selectedId); } catch (error) { notify(error); }

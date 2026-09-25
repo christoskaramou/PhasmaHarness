@@ -58,7 +58,9 @@ function sessionAllowKey(tool) {
   }
   const title = typeof tool.title === 'string' ? tool.title.trim() : '';
   if (!title || title === 'Unknown operation' || typeof tool.kind !== 'string' || !tool.kind) return null;
-  return canonical(['cursor', tool.kind, title, tool.kind === 'other' ? tool.content ?? null : null]);
+  // "other" requests (MCP calls) are told apart only by their arguments; without them nothing is remembered.
+  if (tool.kind === 'other' && !(Array.isArray(tool.content) && tool.content.length)) return null;
+  return canonical(['cursor', tool.kind, title, tool.kind === 'other' ? tool.content : null]);
 }
 
 function accessMode(value) {

@@ -6,6 +6,7 @@ const { codexTurnLimited } = require('../providers/limits.cjs');
 const { TOOL: CONTEXT_TOOL } = require('../workspace/context-search.cjs');
 const { FINAL } = require('../tasks.cjs');
 const { SUBMISSION_EVENT_LIMIT } = require('./shared.cjs');
+const { readTaskStatus, stripTaskStatus } = require('../routing/task-state.cjs');
 
 module.exports = {
   visible(item) {
@@ -115,9 +116,18 @@ module.exports = {
       const origin = session.tasks?.find(task => task.id === maintenanceRoute.wikiMaintenanceTaskId);
       if (origin?.wikiMaintenance) {
         origin.wikiMaintenance.state = outcome.status === 'completed' ? 'finished' : 'interrupted';
-        origin.wikiMaintenance.result = session.items.filter(item => item.turnId === submission.turnId && item.type === 'agentMessage' && item.phase !== 'commentary').at(-1)?.text || outcome.error || '';
+        origin.wikiMaintenance.result = stripTaskStatus(session.items.filter(item => item.turnId === submission.turnId && item.type === 'agentMessage' && item.phase !== 'commentary').at(-1)?.text) || outcome.error || '';
         this.writeTaskFile(session, origin);
+        // Opt-in, log only: judge what this update added (see src/workspace/wiki-assess.cjs).
+        const before = this.wikiSnapshots.get(origin.id);
+        this.wikiSnapshots.delete(origin.id);
+        // Deferred, so the turn finishes and the session is free before the wiki is read again and compared.
+        if (before && outcome.status === 'completed') this.wikiCheckDone = new Promise(resolve => setImmediate(() => resolve(this.assessWiki(session, origin, before))));
       }
+    }
+    if (submission.kind === 'turn' && !maintenanceRoute) this.updateJob(session, submission, outcome);
+    if (submission.kind === 'turn') {
+      try { this.traceTurn(session, submission, outcome, !!maintenanceRoute); } catch { /* tracing never affects a turn */ }
     }
     if (submission.kind === 'compaction' && outcome.status === 'completed') {
       session.notice = 'Context compacted. The visible chat history is retained.';
@@ -136,6 +146,53 @@ module.exports = {
     if (this.busy === session.id) this.busy = null;
     this.changed();
     this.settle(session);
+  },
+
+  // One model per task: after each worker turn, record the task (its first request), the worker now running it and
+  // the status the worker reported in its last line ([task: done|pending|needs-input]; "unknown" without one, and
+  // "pending" for a failed or stopped turn). Corrections and other internal turns continue the current task.
+  updateJob(session, submission, outcome) {
+    const route = session.routes.find(r => r.messageId === submission.messageId);
+    if (!route || route.directAnswer || route.wikiTaskId) return;
+    const decision = session.jobDecision?.messageId === submission.messageId ? session.jobDecision : null;
+    if (decision) session.jobDecision = null;
+    const final = session.items.filter(item => item.turnId === submission.turnId && item.type === 'agentMessage' && item.phase !== 'commentary').at(-1);
+    const status = outcome.status === 'completed' ? readTaskStatus(final?.text).status || 'unknown' : 'pending';
+    const worker = { id: route.id, provider: route.provider || 'codex', model: route.model, effort: route.effort || null, label: route.label || route.id };
+    const now = Date.now();
+    if (!session.job || (decision && !decision.continues)) {
+      const message = session.items.find(item => item.type === 'userMessage' && item.clientId === submission.messageId);
+      const goal = decision?.goal ?? (message?.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+      session.job = { goal: String(goal || '').slice(0, 2000), startedAt: now, worker, status, turns: 1, updatedAt: now };
+    } else session.job = { ...session.job, worker, status, turns: (session.job.turns || 0) + 1, updatedAt: now };
+  },
+
+  // Decision trace: one entry per worker turn, with no prompt or reply text (see src/trace.cjs). The status the worker
+  // reported is kept apart from the configured checks, which are traced when they are final (traceChecks).
+  traceTurn(session, submission, outcome, maintenance) {
+    const index = session.routes.findIndex(route => route.messageId === submission.messageId);
+    const route = session.routes[index];
+    if (!route || route.directAnswer) return;
+    const previous = session.routes.slice(0, index).reverse().find(r => !r.directAnswer && !r.wikiMaintenanceTaskId);
+    const task = submission.taskId ? (session.tasks || []).find(item => item.id === submission.taskId) : null;
+    const final = session.items.filter(item => item.turnId === submission.turnId && item.type === 'agentMessage' && item.phase !== 'commentary').at(-1);
+    const reported = outcome.status === 'completed' ? readTaskStatus(final?.text).status || 'unknown' : null;
+    const usage = route.turnUsage || null; // the whole turn (Codex and Claude; Cursor reports none)
+    const router = route.router || null;
+    const source = { manual: 'manual', model: 'smart', jev: 'jev' }[route.source] || route.source || null;
+    this.trace.record({
+      event: 'turn', session: session.id, message: submission.messageId,
+      kind: maintenance ? 'wiki-maintenance' : route.wikiTaskId ? 'wiki-proposal' : task && task.messageId !== submission.messageId ? 'correction' : 'message',
+      route: { source, provider: route.provider || 'codex', model: route.model, effort: route.effort || null,
+        sameTask: typeof route.sameTask === 'boolean' ? route.sameTask : null, routerPick: route.routerPick || null, escalatedFrom: route.escalatedFrom || null,
+        failover: !!route.failover, switched: !!previous && ((previous.provider || 'codex') !== (route.provider || 'codex') || previous.model !== route.model) },
+      assessment: route.assessment ? { taskKind: route.assessment.taskKind, risk: route.assessment.risk, uncertainty: route.assessment.uncertainty, needsChecks: route.assessment.needsChecks } : null,
+      routing: router ? { classifier: router.model || null, calls: router.timings?.classifications?.length || null, durationMs: router.durationMs ?? null,
+        tokens: router.usage?.totalTokens ?? null, costUsd: router.estimatedCostUsd ?? null, confidence: router.confidence ?? null } : null,
+      worker: { durationMs: route.at ? Date.now() - route.at : null,
+        tokens: usage ? { input: usage.inputTokens ?? null, cached: usage.cachedInputTokens ?? null, output: usage.outputTokens ?? null } : null },
+      outcome: { status: outcome.status, limit: !!outcome.limit, reportedTask: reported },
+    });
   },
 
   notification({ method, params: p }) {
@@ -157,7 +214,17 @@ module.exports = {
     if (method === 'thread/tokenUsage/updated') {
       session.usage = p.tokenUsage;
       const turn = session.routes.find(r => r.turnId === p.turnId);
-      if (turn) turn.usageReport = p.tokenUsage;
+      if (turn) {
+        turn.usageReport = p.tokenUsage;
+        // The whole turn for the decision trace: the thread total now, minus the total before the turn's first model
+        // call (that report's total less its own call). Repeated reports of the same total change nothing.
+        const { total, last } = p.tokenUsage || {};
+        if (total && last) {
+          const keys = ['inputTokens', 'cachedInputTokens', 'outputTokens'];
+          turn.usageBase ??= Object.fromEntries(keys.map(key => [key, (total[key] || 0) - (last[key] || 0)]));
+          turn.turnUsage = Object.fromEntries(keys.map(key => [key, Math.max(0, (total[key] || 0) - turn.usageBase[key])]));
+        }
+      }
     }
     if (method === 'model/rerouted') {
       session.notice = `Codex rerouted ${p.fromModel} to ${p.toModel}: ${p.reason}`;

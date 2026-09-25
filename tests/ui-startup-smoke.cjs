@@ -69,6 +69,16 @@ app.whenReady().then(async () => {
   const chat = await window.webContents.executeJavaScript("document.querySelector('#messages').textContent");
   assert.match(chat, /Visible result/);
   assert.doesNotMatch(chat, /Hidden/);
+  // The worker's task status line is shown as a small tag, never as reply text (also while it streams in).
+  await window.webContents.executeJavaScript(`renderMessages({ items: [
+    { id: 'asked', type: 'agentMessage', phase: 'final_answer', text: 'Which cascade flickers?\\n\\n[task: needs-input]' },
+    { id: 'streaming', type: 'agentMessage', phase: 'final_answer', text: 'Fixed the bias.\\n[task: do' }
+  ], routes: [] });`);
+  const tagged = await window.webContents.executeJavaScript("[document.querySelector('#messages').textContent, [...document.querySelectorAll('.task-status')].map(e => e.textContent)]");
+  assert.doesNotMatch(tagged[0], /\[task/);
+  assert.match(tagged[0], /Which cascade flickers\?/);
+  assert.deepEqual(tagged[1], ['Needs your input']);
+  console.log('Task status line shown as a tag passed');
   await window.webContents.executeJavaScript(`window.fetchTest = Promise.all([loadDiscoveredModels('cursor-cli'), loadDiscoveredModels('cursor-cli')]).catch(() => null); true;`);
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#models-loading').hidden"), false);
   while (!finishFetch) await new Promise(setImmediate);
@@ -206,6 +216,34 @@ app.whenReady().then(async () => {
   assert.match(failed, /Could not reach GitHub/);
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#check-updates').disabled"), false);
   console.log('Version and manual update check passed');
+  // Compare with Jev: shown only with a Jev key while Smart routes, with the agreement so far.
+  await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').close(); true");
+  const compareRow = () => window.webContents.executeJavaScript("[document.querySelector('#jev-compare-row').hidden, document.querySelector('#jev-compare-detail').textContent]");
+  await window.webContents.executeJavaScript("document.querySelector('#settings').click(); new Promise(r => setTimeout(r, 200))");
+  assert.equal((await compareRow())[0], true, 'hidden without a Jev key');
+  controller.smartRouter.jev = { configured: true };
+  controller.jevCompare = { summary: () => ({ compared: 4, errors: 1, sameWorker: 1, sameModel: 2, sameProvider: 3, manual: 2, manualSameModel: 1, costUsd: 0.0004 }) };
+  await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').close(); true");
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + "); document.querySelector('#settings').click(); new Promise(r => setTimeout(r, 200))");
+  const [hidden, detail] = await compareRow();
+  assert.equal(hidden, false);
+  assert.match(detail, /^Log only\. When on, .*do not change\. 4 compared: same model 50% \(and effort 25%\), same provider 75%; your manual picks 50% same model · Jev cost \$0\.0004 · 1 failed\.$/);
+  await window.webContents.executeJavaScript("document.querySelector('#settings-routing').value = 'jev'; document.querySelector('#settings-routing').onchange(); true");
+  assert.equal((await compareRow())[0], true, 'hidden while Jev is the router');
+  await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').close(); true");
+  // The log-only wiki check: shown with a Jev key, whatever the router, with the verdicts so far.
+  controller.trace = { record() {}, summary: () => ({ turns: 3, wiki: { additions: 5, assessed: 3, unassessable: 2, support: { supported: 2, partial: 1 }, novelty: { addition: 2, covered: 1 }, jevCalls: 1, jevCostUsd: 0.0002 } }) };
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + "); document.querySelector('#settings').click(); new Promise(r => setTimeout(r, 200))");
+  const wikiCheck = await window.webContents.executeJavaScript("[document.querySelector('#wiki-check-row').hidden, document.querySelector('#wiki-check-detail').textContent]");
+  assert.equal(wikiCheck[0], false);
+  assert.match(wikiCheck[1], /^Log only\. When on, .*nothing in the wiki changes\..* 5 additions: 3 judged \(2 supported, 1 partial; 2 addition, 1 covered\), 2 not assessable · Jev cost \$0\.0002\.$/);
+  await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').close(); true");
+  controller.smartRouter.jev = undefined; controller.jevCompare = null;
+  controller.trace = require('../src/trace.cjs').NO_TRACE;
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + "); document.querySelector('#settings').click(); new Promise(r => setTimeout(r, 200))");
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#wiki-check-row').hidden"), true, 'hidden without a Jev key');
+  await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').close(); true");
+  console.log('Compare with Jev and wiki check settings passed');
   controller.close();
   window.destroy();
   clearTimeout(deadline);

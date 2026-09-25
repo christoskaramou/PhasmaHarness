@@ -26,7 +26,7 @@ test('citation signals resolve current files with bounded reads and workspace/pr
   assert.equal(resolveCitations(path.join(root, 'nested'), 'escape/example.js:1').references[0].status, 'unassessed');
   assert.equal(resolveCitations(root, Array.from({length:25}, (_, i) => `example.js:${i+1}`).join(' ')).references.length, 20);
 });
-const { shouldTrack, createTask, gateOutcome, summaryLine, correctionText, validateChecks, confirmTermination, identityFromProbe, MEASURED_REAP } = require('../src/tasks.cjs');
+const { shouldTrack, createTask, gateOutcome, summaryLine, correctionText, failureExcerpt, validateChecks, confirmTermination, identityFromProbe, MEASURED_REAP } = require('../src/tasks.cjs');
 
 test('task tracking defaults on and only explicit off skips it', () => {
   for (const mode of [undefined, 'on', 'auto']) assert.equal(shouldTrack(mode), true);
@@ -61,6 +61,32 @@ test('summaries and correction text keep the failed output', () => {
   assert.match(correctionText(task), /unit: exit 2/);
   assert.match(correctionText(task), /boom/);
   assert.match(correctionText(task), /keep the header/);
+});
+
+test('a failed check keeps its old excerpt, and only adds error lines it would otherwise miss', () => {
+  const old = result => (result.stdout || result.stderr || '').slice(-2000);
+  const noise = Array.from({ length: 400 }, (_, i) => `[${i}/400] Compiling module_${i}.cpp`).join('\n');
+  // Unchanged whenever the old excerpt already shows an error, or there is none anywhere.
+  const nearEnd = { stdout: `${Array.from({ length: 14 }, (_, i) => `-- Performing Test HAVE_FEATURE_${i} - Failed`).join('\n')}\nsrc/renderer.cpp:42: error: 'swapchain' was not declared\n${noise.slice(-500)}`,
+    stderr: Array.from({ length: 30 }, (_, i) => `warning: unused variable 'v${i}'`).join('\n') };
+  assert.equal(failureExcerpt(nearEnd), old(nearEnd), 'CMake probe lines and stderr warnings do not displace the error');
+  const plain = { stdout: 'x'.repeat(5000), stderr: 'y'.repeat(100) };
+  assert.equal(failureExcerpt(plain), old(plain));
+  assert.equal(failureExcerpt({ stdout: 'boom' }), 'boom');
+  // Python, JavaScript and Go failures count as error lines too, so their tails stay as they were.
+  for (const failure of ['E   AssertionError: expected 3, got 4', "TypeError: Cannot read properties of undefined (reading 'x')", 'FAILED tests/test_x.py::test_y - assert 3 == 4', '--- FAIL: TestRender (0.01s)']) {
+    const output = { stdout: `2026-09-25 ERROR: cache miss (retrying)\n${noise}\n${failure}` };
+    assert.equal(failureExcerpt(output), old(output), failure);
+  }
+  // An early root cause far above the tail, and a Vulkan validation error only on stderr, are added in front.
+  const early = { stdout: `${noise.slice(0, 3000)}\nsrc\\renderer.cpp(42): error C2065: 'swapchain': undeclared identifier\n${noise}`,
+    stderr: 'Validation Error: [ VUID-vkCmdDraw-None-08600 ] descriptor set 0 not bound' };
+  const excerpt = failureExcerpt(early);
+  assert.ok(excerpt.length <= 2000, `${excerpt.length} characters`);
+  assert.match(excerpt, /^Error lines from the full output:\nsrc\\renderer\.cpp\(42\): error C2065: 'swapchain'.*\nValidation Error: \[ VUID-vkCmdDraw-None-08600/);
+  assert.ok(excerpt.endsWith(old(early).slice(-1000)), 'the old tail follows');
+  const shortStdout = { stdout: 'tests failed', stderr: `${'z'.repeat(3000)}\nerror: linker command failed` };
+  assert.ok(failureExcerpt(shortStdout).length <= 'tests failed'.length + 700, 'at most about 600 characters are added');
 });
 
 test('checks stay inside the workspace and within the timeout bounds', () => {

@@ -11,6 +11,8 @@ const { BenchmarkStore, validateSnapshot, MAX_BYTES } = require('./routing/bench
 const { Log } = require('./log.cjs');
 const { buildDiagnostics } = require('./diagnostics.cjs');
 const { checkForUpdate } = require('./updates.cjs');
+const { JevCompareLog } = require('./routing/jev-compare.cjs');
+const { DecisionLog } = require('./trace.cjs');
 
 // Workers and helpers inherit this, so bundled rtk/rg win over any system copies.
 process.env.PATH = path.join(__dirname, '..', 'tools', 'bin') + path.delimiter + process.env.PATH;
@@ -38,6 +40,8 @@ async function start() {
   const wikiStore = new WikiStore(path.join(dataRoot, 'workspace-data'));
   controller = new Controller(path.join(app.getPath('userData'), 'sessions.json'), home, undefined, undefined, { wikiStore });
   controller.log = log;
+  controller.jevCompare = new JevCompareLog(path.join(log.directory, 'jev-compare.jsonl'));
+  controller.trace = new DecisionLog(path.join(log.directory, 'decisions.jsonl'));
   log.info('Started', { version: app.getVersion(), electron: process.versions.electron, platform: `${process.platform} ${process.arch} ${os.release()}`, packaged: app.isPackaged });
   controller.smartRouter.benchmarks = new BenchmarkStore(path.join(app.getPath('userData'), 'benchmarks.json'));
   const { Providers } = require('./providers/providers.cjs');
@@ -233,7 +237,7 @@ async function start() {
   handle('jevRemoveKey', () => {
     if (controller.busy) throw new Error('Stop the current turn before removing the Jev key.');
     jevKey.remove();
-    return controller.settings({ routing: controller.data.settings.routing === 'jev' ? 'smart' : controller.data.settings.routing, contextRanking: 'local', toolSelection: 'off' });
+    return controller.settings({ routing: controller.data.settings.routing === 'jev' ? 'smart' : controller.data.settings.routing, contextRanking: 'local', toolSelection: 'off', jevCompare: false, wikiAssessment: false });
   });
   handle('jevTest', async () => {
     if (controller.busy) throw new Error('Wait for the current turn to finish before testing Jev.');

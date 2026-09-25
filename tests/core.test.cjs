@@ -1328,6 +1328,13 @@ test('"Allow for this session" keys never cover more than the approved action', 
   assert.equal(cursor('execute', ''), null);
   assert.equal(sessionAllowKey({ toolCallId: 'x', kind: 'execute' }), null);
   assert.equal(cursor('other', 'Unknown operation'), null);
+  // Mail through an MCP tool: a different recipient or body is a different action, for Claude and for Cursor.
+  const mail = (to, body) => claude('mcp__mail__send_email', { to, subject: 'Build status', body });
+  assert.notEqual(mail('team@example.com', 'green'), mail('boss@example.com', 'green'));
+  assert.notEqual(mail('team@example.com', 'green'), mail('team@example.com', 'red'));
+  const cursorMail = (to, body) => cursor('other', 'mail: send_email', [{ type: 'content', content: { type: 'text', text: JSON.stringify({ to, body }) } }]);
+  assert.notEqual(cursorMail('team@example.com', 'green'), cursorMail('boss@example.com', 'red'));
+  assert.equal(cursor('other', 'mail: send_email'), null, 'an MCP request without its arguments is never remembered');
   assert.equal(sessionAllowKey({ title: 'Approve Cursor plan', rawInput: {}, kind: 'plan' }), null);
 });
 
@@ -1385,9 +1392,10 @@ test('a router at its usage limit is replaced by another provider\'s router for 
   controller.data.settings.claudeEnabled = true;
   controller.claude.status = { installed: true, loggedIn: true };
   controller.data.settings.routerPreset = 'claude-cli:haiku';
-  const routers = [];
+  const routers = [], catalogs = [];
   smartRouter.choose = async (_text, session) => {
     routers.push(session.routerChoice.id);
+    catalogs.push(session.routingCatalog.map(p => p.provider || 'codex'));
     if (session.routerChoice.provider === 'claude-cli') throw Object.assign(new Error('Smart routing stopped: limit'), { limit: { until: null, reason: 'limit' }, limitProvider: 'claude-cli' });
     return { ...session.routingCatalog.find(p => (p.provider || 'codex') === 'codex'), source: 'model', reason: 'test' };
   };
@@ -1395,6 +1403,8 @@ test('a router at its usage limit is replaced by another provider\'s router for 
   await controller.send({ id: session.id, text: 'hi', mode: 'auto', task: 'off' });
   assert.equal(routers[0], 'claude-cli:haiku');
   assert.ok(routers[1] && !routers[1].startsWith('claude-cli:'));
+  assert.ok(catalogs[0].includes('claude-cli'), 'Claude workers were offered before the limit');
+  assert.ok(!catalogs[1].includes('claude-cli'), 'the replacement router is not offered the limited Claude workers');
   assert.ok(controller.limits.limited('claude-cli'));
   assert.equal(controller.effectiveRouter().provider, 'codex', 'later messages skip the limited router directly');
   assert.equal(controller.data.settings.routerPreset, 'claude-cli:haiku', 'the saved router choice is kept');
@@ -1458,6 +1468,245 @@ test('a Claude Opus weekly limit leaves the other Claude models usable, and only
   assert.match(session.notice, /Claude Opus reached its usage limit/);
   assert.ok(controller.limits.limited('claude-cli', 'opus'), 'a Sonnet success does not lift the Opus limit');
   assert.equal(controller.limits.limited('claude-cli', 'sonnet'), null);
+});
+
+test('Compare with Jev only logs Jev\'s pick next to the model that ran, one comparison at a time', async t => {
+  const { controller, fake, smartRouter } = await setup(t);
+  const records = [];
+  controller.jevCompare = { record: entry => records.push(entry), summary: () => ({ compared: records.length }) };
+  smartRouter.choose = async (_text, session) => ({ ...session.routingCatalog.find(p => p.model === 'gpt-5.6-terra' && p.effort === 'low'), source: 'model', reason: 'test' });
+  const shadows = [];
+  let release;
+  smartRouter.shadowJev = (text, context, signal) => {
+    shadows.push({ text, items: context.items.map(item => item.content?.[0]?.text), catalog: context.routingCatalog.length, signal });
+    return new Promise(resolve => { release = () => resolve({ id: 'codex:gpt-6-astra:high', provider: 'codex', model: 'gpt-6-astra', effort: 'high', confidence: 0.7, costUsd: 0.0001 }); });
+  };
+  const session = controller.create();
+  // Off by default, and it needs a Jev key.
+  await controller.send({ id: session.id, text: 'first', mode: 'auto', task: 'off' });
+  complete(controller, session, fake.turnIds[0]); await flush();
+  assert.equal(shadows.length, 0);
+  assert.throws(() => controller.settings({ jevCompare: true }), /Jev API key/);
+  smartRouter.jev = { configured: true };
+  controller.settings({ jevCompare: true });
+  // A saved "on" never blocks saving settings when the key file is gone.
+  smartRouter.jev = { configured: false };
+  controller.settings({ jevCompare: true, fontScale: 115 });
+  assert.equal(controller.data.settings.fontScale, 115);
+  smartRouter.jev = { configured: true };
+  await controller.send({ id: session.id, text: 'second', mode: 'auto', task: 'off' });
+  assert.equal(shadows.length, 1);
+  assert.deepEqual(shadows[0].items, ['first'], 'Jev sees the conversation as it was before this message');
+  assert.ok(shadows[0].catalog > 0);
+  assert.equal(session.routes.at(-1).model, 'gpt-5.6-terra', 'the routed model runs unchanged');
+  complete(controller, session, fake.turnIds[1]); await flush();
+  // While a comparison is in flight the next message skips it; no calls pile up.
+  await controller.send({ id: session.id, text: 'third', mode: 'codex:gpt-5.6-sol:high', task: 'off' });
+  complete(controller, session, fake.turnIds[2]); await flush();
+  assert.equal(shadows.length, 1);
+  release(); await flush();
+  assert.deepEqual(records[0].used, { id: session.routes[1].id, provider: 'codex', model: 'gpt-5.6-terra', effort: 'low', source: 'router' });
+  assert.equal(records[0].jev.model, 'gpt-6-astra');
+  assert.ok(!JSON.stringify(records).includes('second'), 'no message text is logged');
+  // Manual choices are compared too; with Jev as the router there is nothing to compare.
+  await controller.send({ id: session.id, text: 'fourth', mode: 'codex:gpt-5.6-sol:high', task: 'off' });
+  release(); await flush();
+  assert.equal(records[1].used.source, 'manual');
+  complete(controller, session, fake.turnIds[3]); await flush();
+  controller.data.settings.routing = 'jev';
+  await controller.send({ id: session.id, text: 'fifth', mode: 'codex:gpt-5.6-sol:high', task: 'off' });
+  assert.equal(shadows.length, 2);
+  assert.deepEqual(controller.snapshot().jev.compare, { compared: 2 });
+  // Turning it off stops a comparison in flight without logging it.
+  complete(controller, session, fake.turnIds[4]); await flush();
+  controller.data.settings.routing = 'smart';
+  await controller.send({ id: session.id, text: 'sixth', mode: 'auto', task: 'off' });
+  const signal = shadows.at(-1).signal;
+  controller.settings({ jevCompare: false });
+  assert.equal(signal.aborted, true);
+});
+
+test('one model per task: the task, its worker and the worker\'s reported status follow each turn', async t => {
+  const { controller, fake, smartRouter } = await setup(t);
+  const terra = id => controller.catalog().find(p => p.id === id);
+  let next;
+  smartRouter.choose = async () => ({ ...next, source: 'model', reason: 'test' });
+  const session = controller.create();
+  const reply = (turn, text) => {
+    controller.notification({ method: 'item/completed', params: { threadId: session.threadId, turnId: turn, item: { id: `a-${turn}`, type: 'agentMessage', phase: 'final_answer', text } } });
+    complete(controller, session, turn);
+  };
+  // The first message starts a task on the routed worker; the worker's last line sets its status.
+  next = { ...terra('codex:gpt-5.6-terra:low'), sameTask: false };
+  await controller.send({ id: session.id, text: 'Fix the shadow map flicker', mode: 'auto', task: 'off' });
+  reply(fake.turnIds[0], 'Which cascade flickers?\n\n[task: needs-input]');
+  await flush();
+  assert.deepEqual({ ...session.job, startedAt: 0, updatedAt: 0 }, { goal: 'Fix the shadow map flicker', startedAt: 0, updatedAt: 0, status: 'needs-input', turns: 1,
+    worker: { id: 'codex:gpt-5.6-terra:low', provider: 'codex', model: 'gpt-5.6-terra', effort: 'low', label: terra('codex:gpt-5.6-terra:low').label } });
+  // A reply continues it (the router said so); no status line means "unknown".
+  next = { ...terra('codex:gpt-5.6-terra:low'), sameTask: true };
+  await controller.send({ id: session.id, text: 'The second one', mode: 'auto', task: 'off' });
+  reply(fake.turnIds[1], 'Fixed the bias.');
+  await flush();
+  assert.equal(session.job.goal, 'Fix the shadow map flicker');
+  assert.equal(session.job.turns, 2);
+  assert.equal(session.job.status, 'unknown');
+  // A manual pick after "unknown" starts a new task, so a worker that never reports cannot pin the first task forever.
+  await controller.send({ id: session.id, text: 'Manual question', mode: 'codex:gpt-5.6-terra:low', task: 'off' });
+  reply(fake.turnIds[2], 'Answer.\n**[task: pending]**');
+  await flush();
+  assert.equal(session.job.goal, 'Manual question');
+  assert.equal(session.job.status, 'pending', 'a formatted status line is read too');
+  fake.turnIds.splice(2, 1); // keep the indexes below
+  // A manual pick continues a task reported as pending and becomes its worker.
+  await controller.send({ id: session.id, text: 'use the stronger one for this', mode: 'codex:gpt-5.6-sol:high', task: 'off' });
+  reply(fake.turnIds[2], 'Done.\n[task: done]');
+  await flush();
+  assert.equal(session.job.goal, 'Manual question', 'the pending task continued');
+  assert.equal(session.job.turns, 2);
+  assert.equal(session.job.worker.id, 'codex:gpt-5.6-sol:high');
+  assert.equal(session.job.status, 'done');
+  // The router says the next prompt is a different task: a new task starts; a failed turn leaves it pending.
+  next = { ...terra('codex:gpt-5.6-terra:low'), sameTask: false };
+  await controller.send({ id: session.id, text: 'Now translate the README intro into Greek', mode: 'auto', task: 'off' });
+  complete(controller, session, fake.turnIds[3], 'failed');
+  await flush();
+  assert.equal(session.job.goal, 'Now translate the README intro into Greek');
+  assert.equal(session.job.turns, 1);
+  assert.equal(session.job.status, 'pending');
+  // After "done", a manual pick starts a new task.
+  session.job.status = 'done';
+  await controller.send({ id: session.id, text: 'Something else', mode: 'codex:gpt-5.6-sol:high', task: 'off' });
+  reply(fake.turnIds[4], 'ok\n[task: done]');
+  await flush();
+  assert.equal(session.job.goal, 'Something else');
+});
+
+test('task status lines stay out of handoffs to another provider', async t => {
+  const { controller } = await setup(t);
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  const session = controller.create();
+  session.helperTools = false;
+  controller.claude.run = async ({ onEvent }) => {
+    onEvent({ type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'All set.\n\n[task: done]' }] } });
+    return { result: 'All set.\n\n[task: done]' };
+  };
+  await controller.send({ id: session.id, text: 'rename the file', mode: 'claude-cli:sonnet', task: 'off' });
+  await flush();
+  assert.equal(session.job.status, 'done');
+  assert.ok(session.directContext.length);
+  assert.ok(!JSON.stringify(session.directContext).includes('[task:'), JSON.stringify(session.directContext));
+});
+
+test('decision trace and the log-only wiki check: turns, final checks and each wiki addition, with no text', async t => {
+  const { controller, fake, smartRouter } = await setup(t);
+  const records = [];
+  controller.trace = { record: entry => records.push(entry), summary: () => ({ turns: 0, wiki: {} }) };
+  const judged = [];
+  smartRouter.jev = { configured: true, async evaluate(state, questions) {
+    judged.push(JSON.parse(state));
+    return { model: 'jev-1.13.0', answers: Object.fromEntries(Object.keys(questions).map(key => [key, { choice: key.endsWith('_support') ? 'supported' : 'addition', confidence: 0.8 }])),
+      usage: { inputTokens: 300 }, durationMs: 200, estimatedCostUsd: 0.00001 };
+  } };
+  assert.throws(() => controller.settings({ wikiAssessment: 'yes' }), /Invalid wiki check/);
+  controller.settings({ wikiAssessment: true });
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  arm(controller, fake);
+  addCheck(controller, session, ['unit-tests']);
+  fs.mkdirSync(path.join(session.workspace, 'docs', 'wiki'), { recursive: true });
+  fs.mkdirSync(path.join(session.workspace, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(session.workspace, 'src', 'retry.js'), 'const attempts = 3;\nmodule.exports = { attempts };\n');
+  fs.writeFileSync(path.join(session.workspace, 'docs', 'wiki', 'index.md'), '# Wiki\n');
+  // Only files Git tracks are ever sent as evidence.
+  require('node:child_process').spawnSync('git', ['-C', session.workspace, 'init', '-q']);
+  require('node:child_process').spawnSync('git', ['-C', session.workspace, 'add', 'src/retry.js']);
+  await controller.send({ id: session.id, text: 'Implement retry handling', mode: 'terra-light' });
+  controller.notification({ method: 'item/completed', params: { threadId: session.threadId, turnId: fake.turnIds[0], item: { id: 'a1', type: 'agentMessage', phase: 'final_answer', text: 'Added retries.\n[task: done]' } } });
+  complete(controller, session, fake.turnIds[0]);
+  await controller.gateDone;
+  // The maintenance turn writes the wiki as before; the check only reads it before and after.
+  fs.writeFileSync(path.join(session.workspace, 'docs', 'wiki', 'index.md'), '# Wiki\n\nRetries stop after 3 attempts (src/retry.js:1).\n');
+  complete(controller, session, fake.turnIds[1]);
+  await controller.wikiCheckDone; // the check runs after the turn, including Git discovery
+  const turn = records.find(r => r.event === 'turn' && r.kind === 'message');
+  assert.deepEqual(turn.route, { source: 'manual', provider: 'codex', model: 'gpt-5.6-terra', effort: 'low', sameTask: null, routerPick: null, escalatedFrom: null, failover: false, switched: false });
+  assert.deepEqual(turn.outcome, { status: 'completed', limit: false, reportedTask: 'done' });
+  const checks = records.find(r => r.event === 'checks');
+  assert.deepEqual({ state: checks.state, checks: checks.checks }, { state: 'checks-passed', checks: { configured: 1, ran: 1, passed: 1, failed: 0, blocked: 0 } }, 'checks are traced apart from the reported status');
+  assert.ok(records.some(r => r.event === 'turn' && r.kind === 'wiki-maintenance'));
+  const assessment = records.find(r => r.event === 'wiki-assessment');
+  assert.deepEqual({ file: assessment.file, lines: assessment.lines, verdict: assessment.verdict }, { file: 'index.md', lines: '3-3', verdict: { support: 'supported', supportConfidence: 0.8, novelty: 'addition', noveltyConfidence: 0.8 } });
+  assert.equal(judged[0].blocks.B1.sources[0].ref, 'src/retry.js:1');
+  const update = records.find(r => r.event === 'wiki-update');
+  assert.equal(update.assessed, 1);
+  assert.equal(update.jev.calls, 1);
+  assert.ok(!JSON.stringify(records).includes('Retries stop') && !JSON.stringify(records).includes('Implement retry'), 'no wiki, prompt or reply text in the trace');
+  assert.equal(fs.readFileSync(path.join(session.workspace, 'docs', 'wiki', 'index.md'), 'utf8'), '# Wiki\n\nRetries stop after 3 attempts (src/retry.js:1).\n', 'the check never writes the wiki');
+});
+
+test('traced worker tokens cover the whole turn, not only its last model call', async t => {
+  const { controller, fake } = await setup(t);
+  const records = [];
+  controller.trace = { record: entry => records.push(entry), summary: () => ({ turns: 0, wiki: {} }) };
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  const session = controller.create();
+  session.helperTools = false;
+  // Claude: two model calls in one turn; the result carries the turn's total.
+  controller.claude.run = async ({ onEvent }) => {
+    onEvent({ type: 'assistant', message: { id: 'm1', usage: { input_tokens: 100, output_tokens: 20 }, content: [{ type: 'tool_use', id: 't1', name: 'Read', input: {} }] } });
+    onEvent({ type: 'assistant', message: { id: 'm2', usage: { input_tokens: 150, cache_read_input_tokens: 50, output_tokens: 30 }, content: [{ type: 'text', text: 'Done.' }] } });
+    return { result: 'Done.', usage: { input_tokens: 200, cache_read_input_tokens: 100, output_tokens: 50 } };
+  };
+  await controller.send({ id: session.id, text: 'read it', mode: 'claude-cli:sonnet', task: 'off' });
+  await flush();
+  assert.deepEqual(records.find(r => r.event === 'turn').worker.tokens, { input: 300, cached: 100, output: 50 });
+  // Cursor reports no usage: unknown stays null, never zero.
+  controller.data.settings.cursorEnabled = true;
+  controller.cursor.status = { installed: true, loggedIn: true };
+  controller.cursor.models = [{ id: 'composer-2.5', label: 'Composer 2.5', parameterized: true }];
+  controller.providerSettings({ action: 'enableDiscovered', provider: 'cursor-cli', model: 'composer-2.5', label: 'Composer 2.5' });
+  controller.cursor.run = async () => ({ result: 'Done.' });
+  const cursorSession = controller.create();
+  cursorSession.helperTools = false;
+  await controller.send({ id: cursorSession.id, text: 'read it', mode: 'cursor-cli:composer-2.5:default', task: 'off' });
+  await flush();
+  const cursorTurn = records.filter(r => r.event === 'turn').at(-1);
+  assert.equal(cursorTurn.route.provider, 'cursor-cli');
+  assert.equal(cursorTurn.worker.tokens, null);
+  // Codex: reports after each model call carry the thread total and that call; the turn is their difference.
+  const codex = controller.create();
+  await controller.send({ id: codex.id, text: 'go', mode: 'terra-light', task: 'off' });
+  const turn = fake.turnIds.at(-1);
+  const report = (total, last) => controller.notification({ method: 'thread/tokenUsage/updated', params: { threadId: codex.threadId, turnId: turn,
+    tokenUsage: { total: { inputTokens: total[0], cachedInputTokens: total[1], outputTokens: total[2] }, last: { inputTokens: last[0], cachedInputTokens: last[1], outputTokens: last[2] } } } });
+  report([1100, 400, 90], [100, 0, 20]); // the thread had 1000/400/70 before this turn
+  report([1300, 500, 140], [200, 100, 50]);
+  report([1300, 500, 140], [200, 100, 50]); // a repeated report changes nothing
+  complete(controller, codex, turn);
+  await flush();
+  assert.deepEqual(records.filter(r => r.event === 'turn').at(-1).worker.tokens, { input: 300, cached: 100, output: 70 });
+});
+
+test('without the wiki check setting, maintenance reads nothing extra and calls no Jev', async t => {
+  const { controller, fake, smartRouter } = await setup(t);
+  let calls = 0;
+  smartRouter.jev = { configured: true, async evaluate() { calls++; return {}; } };
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  arm(controller, fake);
+  addCheck(controller, session, ['unit-tests']);
+  fs.mkdirSync(path.join(session.workspace, 'docs', 'wiki'), { recursive: true });
+  fs.writeFileSync(path.join(session.workspace, 'docs', 'wiki', 'index.md'), '# Wiki\n');
+  await controller.send({ id: session.id, text: 'Implement retry handling', mode: 'terra-light' });
+  complete(controller, session, fake.turnIds[0]);
+  await controller.gateDone;
+  assert.equal(controller.wikiSnapshots.size, 0);
+  complete(controller, session, fake.turnIds[1]);
+  await flush();
+  assert.equal(calls, 0);
 });
 
 test('Codex usage windows are shown and a full window marks the limit until its reset', async t => {

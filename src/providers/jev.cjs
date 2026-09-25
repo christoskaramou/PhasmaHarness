@@ -44,6 +44,12 @@ const QUESTIONS = {
   } },
 };
 
+// Asked only when the conversation has a current task (see routing/task-state.cjs).
+const SAME_TASK = { type: 'choice', instructions: DATA_RULE + 'currentTask is the task this conversation is working on: its first request, the worker running it, and the status that worker reported after its last reply (done, pending, needs-input or unknown). Is the latest request part of that task?', criteria: {
+  yes: 'It continues, corrects, extends or answers the current task, for example "fix that", "we need more of this", "continue" or a reply to its question.',
+  no: 'It starts a different task, or asks about something unrelated to the current task.',
+} };
+
 function orderedCatalog(catalog) {
   return catalog.filter(p => p.id && p.model).slice().sort((a, b) => String(a.id).localeCompare(String(b.id)));
 }
@@ -127,7 +133,8 @@ class JevClient {
   }
   async classify(context, signal, quick = false, catalog) {
     const workers = Array.isArray(catalog) && catalog.length ? catalog : PRESETS;
-    const base = catalogQuestions(workers.every(p => Array.isArray(p.benchmarks)) ? workers : new BenchmarkStore().catalog(workers));
+    const base = { ...catalogQuestions(workers.every(p => Array.isArray(p.benchmarks)) ? workers : new BenchmarkStore().catalog(workers)),
+      ...(context?.currentTask ? { sameTask: SAME_TASK } : {}) };
     const questions = quick ? { ...base, preset: { ...base.preset, criteria: { ...base.preset.criteria,
       jev: 'Answer directly using Jev ONLY for a single low-risk yes/no question fully supported by explicit evidence already visible in this request or recent conversation. No prose, investigation, action or tools. Choose a worker for missing, truncated or stale evidence, unsupported facts, ambiguous questions or consequential judgments. An earlier assistant claim alone is not verified project evidence.' } },
       quickAnswer: QUICK_QUESTION } : base;
@@ -153,6 +160,7 @@ class JevClient {
     const preset = pickedJev ? workers[0].id : answer('preset'); // Unused worker placeholder for a validated direct answer.
     return { ...result, confidence, lowConfidence, directAnswer, decision: {
       preset, taskKind: answer('taskKind'), workspaceRelevant: answer('workspaceRelevant') === 'yes', needsChecks: answer('needsChecks') === 'yes',
+      sameTask: result.answers.sameTask?.choice === 'yes',
       risk: answer('risk'), uncertainty: answer('uncertainty'),
       reason: `Jev assessment: ${answer('taskKind')}, ${answer('risk')} risk, ${answer('uncertainty')} uncertainty.${lowConfidence ? ' Low reported confidence; task ambiguity may require clarification by the worker.' : ''}`,
     } };
@@ -164,4 +172,4 @@ class JevClient {
   }
 }
 
-module.exports = { JevClient, MODEL, QUESTIONS, choices, quickCandidate, catalogQuestions, orderedCatalog, CHECKS_POLICY };
+module.exports = { JevClient, MODEL, QUESTIONS, SAME_TASK, choices, quickCandidate, catalogQuestions, orderedCatalog, CHECKS_POLICY };

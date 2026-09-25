@@ -27,6 +27,7 @@ const WORKER_INSTRUCTIONS = `Harness defaults (active unless the user or project
 - Shell: bundled rtk and rg are first on PATH. Prefix shell commands with rtk (rtk proxy <cmd> for raw output). If missing, use native commands and report it; do not install system copies.
 - Knowledge: use the active workspace wiki supplied by Harness; verify claims in live source; propose durable wiki updates with source references and verification dates; no session diaries or competing stores.
 - Model selection and project_context are built into Harness; do not invoke duplicate skills. Respect filesystem and tool permissions.
+- Task status: end every final reply with one last line, exactly [task: done] when the requested task is complete, [task: pending] when work on it remains, or [task: needs-input] when you need the user's answer or decision to continue. Harness reads and hides this line.
 Harness skills (read one only when its topic applies, via router_read_output with {"skill": "<name>"} or the file):
 ${DEFAULT_SKILLS.map(name => `- ${name}: ${SKILLS[name]} (${path.join(skillDir(name), 'SKILL.md').replace(/\\/g, '/')})`).join('\n')}`;
 

@@ -6,6 +6,7 @@ const { ClaudeCLI, handoff } = require('./providers/claude.cjs');
 const { CAPABILITIES, capabilities, isCLI } = require('./providers/capabilities.cjs');
 const { ProviderLimits } = require('./providers/limits.cjs');
 const { NO_LOG } = require('./log.cjs');
+const { NO_TRACE } = require('./trace.cjs');
 const { EventEmitter } = require('node:events');
 const { CodexClient } = require('./providers/codex.cjs');
 const { PRESETS, ROUTER_PRESETS, route } = require('./routing/router.cjs');
@@ -17,6 +18,7 @@ const { RouterBridge } = require('./tools/router-bridge.cjs');
 const { FINAL, canProposeWiki, hasProjectWiki, restartReason, summaryLine } = require('./tasks.cjs');
 const { WORKER_INSTRUCTIONS } = require('./worker-instructions.cjs');
 const { projectInstructions } = require('./workspace/project-instructions.cjs');
+const { stripTaskStatus } = require('./routing/task-state.cjs');
 const { CONTEXT_INSTRUCTIONS, ACCESS_MODES, sameEffort, DEFAULT_ROUTER, sessionAllowKey, accessMode, isMcpConfirmation } = require('./controller/shared.cjs');
 
 class Controller extends EventEmitter {
@@ -46,6 +48,12 @@ class Controller extends EventEmitter {
     this.data.providerLimits ??= {};
     this.limits = new ProviderLimits(this.data.providerLimits);
     this.lastSends = new Map();
+    // Opt-in Jev comparison log (set by the app) and the comparison in flight, if any.
+    this.jevCompare = null; this.jevComparing = null;
+    // Local decision trace (set by the app; see src/trace.cjs), wiki reads taken before maintenance turns for the
+    // opt-in log-only wiki check, and the abort for checks still running when the app closes.
+    this.trace = NO_TRACE; this.startedAt = Date.now();
+    this.wikiSnapshots = new Map(); this.wikiChecks = new AbortController();
     this.log = NO_LOG; // replaced by the app's rotating log file
     this.helperRequests = new Set();
     this.data.settings.largeResponses ??= true;
@@ -157,7 +165,8 @@ class Controller extends EventEmitter {
       codex: this.codex,
       ...this.data, settings: { ...this.data.settings, mode: this.planPreset() ? 'auto' : this.data.settings.mode }, planRouting: this.planPreset(), connection: this.connection, error: this.error, account: this.account, busy: this.busy,
       routing: this.routing, routerModel: this.data.settings.routing === 'jev' ? JEV_MODEL : this.routerChoices().find(p => p.id === this.data.settings.routerPreset)?.model || null,
-      jev: { configured: !!this.smartRouter.jev?.configured, model: JEV_MODEL },
+      jev: { configured: !!this.smartRouter.jev?.configured, model: JEV_MODEL, compare: this.jevCompare?.summary() || null },
+      decisions: this.trace.summary(),
       contextRoot: this.contextSearch?.root || null,
       helperCapabilities: {
         projectContext: { codex: true, responsesApi: true, claudeCli: true, cursorCli: true },
@@ -259,6 +268,18 @@ class Controller extends EventEmitter {
       accessMode(values.access);
       if (this.busy && values.access !== next.access) throw new Error('Stop the current turn before changing access.');
       next.access = values.access;
+    }
+    if (values.jevCompare !== undefined) {
+      if (typeof values.jevCompare !== 'boolean') throw new Error('Invalid Jev comparison setting.');
+      // Only turning it on needs a key; a saved "on" never blocks saving other settings (it is skipped without a key).
+      if (values.jevCompare && !next.jevCompare && !this.smartRouter.jev?.configured) throw new Error('Add your Jev API key in Settings first.');
+      next.jevCompare = values.jevCompare;
+      if (!values.jevCompare) this.jevComparing?.abort();
+    }
+    if (values.wikiAssessment !== undefined) {
+      if (typeof values.wikiAssessment !== 'boolean') throw new Error('Invalid wiki check setting.');
+      if (values.wikiAssessment && !next.wikiAssessment && !this.smartRouter.jev?.configured) throw new Error('Add your Jev API key in Settings first.');
+      next.wikiAssessment = values.wikiAssessment;
     }
     if (values.contextRanking !== undefined) {
       if (!['local', 'jev'].includes(values.contextRanking)) throw new Error('Unknown context ranking mode.');
@@ -506,6 +527,13 @@ class Controller extends EventEmitter {
       }
       if (!this.available(selected)) throw new Error('Selected model is disabled or not available.');
       if (images.length && selected.images === false) throw new Error('Enable image support for this model before sending images.');
+      if (!failover && !this.planPreset()) this.compareWithJev(session, text, images, selected, previousState);
+      if (failover) selected = { ...selected, failover: true }; // recorded on the route for the decision trace
+      // One model per task: whether this message continues the current task (the router's sameTask; a manual pick
+      // continues a task its worker reported as pending or waiting for input). The turn's end then updates the task
+      // or starts a new one (updateJob).
+      if (!wikiTaskId) session.jobDecision = { messageId: clientId, goal: text,
+        continues: selected.sameTask === true || (selected.sameTask === undefined && ['pending', 'needs-input'].includes(session.job?.status)) };
       const tracked = this.openTask(session, selected, text, clientId, task);
       return await this.submitWorker(session, selected, text, images, clientId, tracked);
     } catch (error) {
@@ -704,10 +732,16 @@ class Controller extends EventEmitter {
         ...(lastUsage ? { last: { ...lastUsage, totalTokens: lastUsage.inputTokens + lastUsage.outputTokens } } : {}),
         ...(main ? { modelContextWindow: main.contextWindow } : {}),
       };
+      // The whole turn (every model call in it), for the decision trace; `last` above is only its final call.
+      // A provider that reports no usage (Cursor) keeps it unknown, never zero.
+      const route = session.routes.find(item => item.messageId === clientId);
+      const reported = result.usage && typeof result.usage === 'object' && ['input_tokens', 'output_tokens'].some(key => Number.isFinite(result.usage[key]));
+      if (route && reported) route.turnUsage = { inputTokens: (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0),
+        cachedInputTokens: usage.cache_read_input_tokens || 0, outputTokens: usage.output_tokens || 0 };
       if (result.permission_denials?.length) outcome.error = 'Some Claude tool calls were declined or not permitted under the selected access. Review the response before changing access.';
     } catch (error) { outcome = { status: abort.signal.aborted ? 'interrupted' : 'failed', error: error.message, limit: abort.signal.aborted ? null : error.limit }; }
     finally {
-      const answer = session.items.filter(i => assistantIds.has(i.id)).map(i => i.text).join('\n');
+      const answer = session.items.filter(i => assistantIds.has(i.id)).map(i => stripTaskStatus(i.text)).join('\n');
       (session.directContext ||= []).push({ question: text, answer: answer || `[${backend} turn ${outcome.status}]` });
       if (outcome.status === 'completed') session[lastKey] = session.items.at(-1)?.id;
       else { session[lastKey] = null; session[sessionKey] = null; }
@@ -911,6 +945,8 @@ class Controller extends EventEmitter {
   }
 
   close() {
+    this.jevComparing?.abort();
+    this.wikiChecks.abort();
     this.claude.close(); this.cursor.close();
     this.cancelHelpers();
     this.smartRouter.cancel();
