@@ -60,6 +60,8 @@ async function start() {
     quit: () => { log.info('Installing update', { from: app.getVersion(), to: updater.state.latest }); quitting = true; app.quit(); },
   });
   updater.on('state', state => { if (window && !window.isDestroyed()) window.webContents.send('update', state); });
+  // Before the window can offer "Update and restart": cleaning up later could delete a download already under way.
+  if (updater.installable) updater.cleanup();
   controller.contextSearch.wikiStore = wikiStore;
   const rendererURL = pathToFileURL(path.join(__dirname, '..', 'ui', 'index.html')).href;
   window = new BrowserWindow({
@@ -333,7 +335,6 @@ async function start() {
   // The installed app checks for a newer release shortly after it starts and then every 12 hours, quietly: a failed
   // check is only logged. Installing always waits for the user's "Update and restart".
   if (updater.installable) {
-    updater.cleanup();
     const check = () => updater.check().catch(error => log.info('Automatic update check failed', { message: error.message }));
     setTimeout(check, 10000).unref();
     setInterval(check, 12 * 60 * 60 * 1000).unref();

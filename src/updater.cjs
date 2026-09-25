@@ -53,8 +53,10 @@ class Updater extends EventEmitter {
     return this.installing;
   }
 
-  // Deletes unfinished downloads and installers that are not newer than this version (earlier updates).
+  // Deletes unfinished downloads and installers that are not newer than this version (earlier updates). Never while an
+  // update is downloading: its unfinished file is the one being written.
   cleanup() {
+    if (this.installing) return;
     let names = [];
     try { names = fs.readdirSync(this.directory); } catch { return; }
     for (const name of names) {

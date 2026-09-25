@@ -82,3 +82,36 @@ test('old installers and unfinished downloads are removed at start; a newer one 
   assert.deepEqual(fs.readdirSync(directory).sort(), ['Phasma-Harness-Setup-0.2.0.exe', 'notes.txt']);
   new Updater({ current: '0.1.0', directory: path.join(directory, 'missing') }).cleanup();
 });
+
+test('clearing old downloads while an update is downloading leaves that download alone, so the install still runs', async t => {
+  // 25 Sep, 0.1.3 → 0.1.4: Update and restart was clicked before start-up had finished; the start-up cleanup then
+  // deleted the unfinished download and the install failed with ENOENT on renaming it.
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-updater-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(directory, 'Phasma-Harness-Setup-0.0.9.exe'), 'old');
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const fetch = async url => {
+    if (url === LATEST_URL) return { status: 200, ok: true, json: async () => RELEASE };
+    const body = new ReadableStream({ async start(controller) {
+      controller.enqueue(DATA.subarray(0, 1000));
+      await gate; // the rest arrives once the cleanup has run
+      controller.enqueue(DATA.subarray(1000)); controller.close();
+    } });
+    return new Response(body);
+  };
+  let quit = 0;
+  const spawn = () => { const child = new EventEmitter(); child.unref = () => {}; setImmediate(() => child.emit('spawn')); return child; };
+  const updater = new Updater({ current: '0.1.0', fetch, directory, installable: true, quit: () => quit++, spawn });
+  await updater.check();
+  const installing = updater.install();
+  for (let i = 0; i < 100 && !fs.existsSync(path.join(directory, NAME + '.partial')); i++) await new Promise(r => setTimeout(r, 10));
+  assert.ok(fs.existsSync(path.join(directory, NAME + '.partial')), 'the download is under way');
+  updater.cleanup();
+  assert.ok(fs.existsSync(path.join(directory, NAME + '.partial')), 'the unfinished download is kept');
+  release();
+  await installing;
+  assert.equal(quit, 1, 'the installer ran');
+  updater.cleanup();
+  assert.equal(fs.existsSync(path.join(directory, 'Phasma-Harness-Setup-0.0.9.exe')), false, 'older installers are still cleared when idle');
+});
