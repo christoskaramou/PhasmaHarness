@@ -1919,15 +1919,15 @@ test('without the wiki check setting, maintenance reads nothing extra and calls 
   assert.equal(calls, 0);
 });
 
-test('Codex usage windows are shown and a full window marks the limit until its reset', async t => {
+test('Codex usage windows are tracked and a full window marks the limit until its reset', async t => {
   const { controller } = await setup(t);
   const resetsAt = Math.floor(Date.now() / 1000) + 600;
   controller.notification({ method: 'account/rateLimits/updated', params: { rateLimits: { primary: { usedPercent: 42, windowDurationMins: 300, resetsAt }, secondary: null } } });
-  assert.equal(controller.snapshot().providerUsage.codex.primary.usedPercent, 42);
+  assert.equal(controller.limits.usage.codex.primary.usedPercent, 42);
   assert.equal(controller.limits.limited('codex'), null);
   controller.notification({ method: 'account/rateLimits/updated', params: { rateLimits: { primary: { usedPercent: 100, windowDurationMins: 300, resetsAt } } } });
   assert.equal(controller.limits.limited('codex').until, resetsAt * 1000);
-  assert.equal(controller.snapshot().providerUsage.codex.primary.usedPercent, 100);
+  assert.equal(controller.limits.usage.codex.primary.usedPercent, 100);
 });
 
 test('Codex usage: stale windows, other limit buckets and credits never mark a limit', async t => {
@@ -1939,7 +1939,7 @@ test('Codex usage: stale windows, other limit buckets and credits never mark a l
   assert.equal(controller.limits.current('codex'), null, 'merging a sparse update does not revive the stale window as a limit');
   controller.notification({ method: 'account/rateLimits/updated', params: { rateLimits: { limitId: 'gpt-6-astra', primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: future } } } });
   assert.equal(controller.limits.current('codex'), null, 'another bucket is not the Codex plan window');
-  assert.equal(controller.snapshot().providerUsage.codex.secondary.usedPercent, 10);
+  assert.equal(controller.limits.usage.codex.secondary.usedPercent, 10);
   controller.codexUsage({ limitId: 'codex', primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: future }, credits: { hasCredits: true, unlimited: false, balance: '5' } });
   assert.equal(controller.limits.current('codex'), null, 'credits cover a full window');
 });

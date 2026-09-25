@@ -191,7 +191,6 @@ class Controller extends EventEmitter {
       },
       accessModes: ACCESS_MODES,
       providerLimits: this.limits.active(),
-      providerUsage: this.limits.usage,
       providerCapabilities: CAPABILITIES,
       requests: [...this.requests.values()].map(request => ({
         ...request,
@@ -715,7 +714,6 @@ class Controller extends EventEmitter {
           this.changed();
         }),
         onEvent: event => {
-          if (event.type === 'rate_limit_event' && event.rate_limit_info) this.limits.setUsage('claude-cli', event.rate_limit_info);
           if (session.submission !== submission || submission.state === 'completed') return;
           if (event.session_id) session[sessionKey] = event.session_id;
           if (event.type === 'stream_event') {

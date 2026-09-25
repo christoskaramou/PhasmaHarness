@@ -149,7 +149,8 @@ app.whenReady().then(async () => {
   controller.limits.mark('claude-cli', { until: Date.now() + 3600 * 1000, reason: 'limit' });
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderProviders(); true');
   const usageText = await window.webContents.executeJavaScript("[...document.querySelectorAll('.provider-usage')].map(e => e.textContent + '|' + e.className)");
-  assert.ok(usageText.some(t => /^Used: 42% of 5h \(resets /.test(t)), JSON.stringify(usageText));
+  assert.ok(!usageText.some(t => /Used:|42%/.test(t)), 'no plan usage percentages, for any provider: ' + JSON.stringify(usageText));
+  assert.equal(JSON.stringify(controller.snapshot()).includes('providerUsage'), false, 'and none are sent to the window');
   assert.ok(usageText.some(t => /^Usage limit reached · resets .*\|provider-usage limited$/.test(t)), JSON.stringify(usageText));
   // A model-family limit alone names its family.
   controller.limits.clear('claude-cli');

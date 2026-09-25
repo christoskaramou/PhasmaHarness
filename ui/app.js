@@ -99,8 +99,6 @@ function showEffortCap() {
 
 // Usage and limits as each provider reports them (Settings → Providers).
 const clock = ms => new Date(ms).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
-const windowName = minutes => minutes === 300 ? '5h' : minutes === 10080 ? 'week' : minutes ? `${Math.round(minutes / 60)}h` : 'window';
-const CLAUDE_WINDOWS = { five_hour: '5h', seven_day: 'week', seven_day_opus: 'week (Opus)', seven_day_sonnet: 'week (Sonnet)', overage: 'extra usage' };
 // API providers: add (name, base URL, optional key), enable/disable, replace or clear the key, remove.
 function renderApiProviders() {
   const list = $('#api-provider-list');
@@ -172,8 +170,9 @@ function taskLine(text) {
   return { status: null, text: value.replace(TASK_PARTIAL, '') };
 }
 
-function usageLine(provider) {
-  // The provider-wide limit, or else its model-family limits (for example Claude's weekly Opus window).
+// A provider row shows only a usage limit in force (not plan usage percentages, which Claude and Cursor do not report
+// reliably): the provider-wide limit, or else its model-family limits (for example Claude's weekly Opus window).
+function limitLine(provider) {
   const limits = Object.entries(state?.providerLimits || {})
     .filter(([key, limit]) => (key === provider || key.startsWith(provider + ':')) && limit.until > Date.now());
   const wide = limits.find(([key]) => key === provider);
@@ -181,23 +180,7 @@ function usageLine(provider) {
     const what = limit.family ? `${limit.family[0].toUpperCase()}${limit.family.slice(1)} usage limit reached` : 'Usage limit reached';
     return limit.known ? `${what} · resets ${clock(limit.until)}` : `${what} · retried after ${clock(limit.until)}`;
   });
-  if (shown.length) return { limited: true, text: shown.join(' · ') };
-  const usage = state?.providerUsage?.[provider];
-  if (!usage) return null;
-  if (provider === 'codex') {
-    const parts = [usage.primary, usage.secondary].filter(w => w && Number.isFinite(w.usedPercent))
-      .map(w => `${Math.round(w.usedPercent)}% of ${windowName(w.windowDurationMins)}${w.resetsAt ? ` (resets ${clock(w.resetsAt * 1000)})` : ''}`);
-    return parts.length ? { text: `Used: ${parts.join(' · ')}` } : null;
-  }
-  if (provider === 'claude-cli') {
-    const name = CLAUDE_WINDOWS[usage.rateLimitType] || 'plan';
-    // Claude Code reports utilization as a fraction (its warning thresholds are 0.25–0.9).
-    const used = Number.isFinite(usage.utilization) ? `${Math.round(usage.utilization * 100)}% of ${name}` : null;
-    const reset = Number.isFinite(usage.resetsAt) ? ` (resets ${clock(usage.resetsAt * 1000)})` : '';
-    if (usage.status === 'allowed_warning') return { text: `Near the ${name} limit${used ? ` · ${used}` : ''}${reset}` };
-    return used ? { text: `Used: ${used}${reset}` } : null;
-  }
-  return null;
+  return shown.length ? shown.join(' · ') : null;
 }
 
 function connectedProviders() {
@@ -1279,8 +1262,8 @@ function renderProviders() {
     };
     const text = element('div', 'provider-account-text');
     text.append(element('strong', '', label), document.createTextNode(detail ? ` · ${detail}` : ''));
-    const usage = usageLine(id);
-    if (usage) text.append(element('small', usage.limited ? 'provider-usage limited' : 'provider-usage', usage.text));
+    const limit = limitLine(id);
+    if (limit) text.append(element('small', 'provider-usage limited', limit));
     row.append(plug, text);
     if (installed === false) {
       const install = element('button', 'provider-install', 'Install');
