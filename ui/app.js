@@ -70,6 +70,33 @@ function showMode(id) {
   effort.hidden = variants.length < 2;
 }
 
+// Effort cap for Auto (next to Auto in the composer, and Settings → Routing): Smart and Jev routing only choose efforts up
+// to it. Max means no cap and is marked with a warning, since it is the slowest and most expensive level.
+const EFFORT_CAP_TEXT = {
+  low: 'Auto picks efforts up to low.', medium: 'Auto picks efforts up to medium.', high: 'Auto picks efforts up to high (recommended).',
+  xhigh: 'Auto picks efforts up to xhigh.', max: '⚠ No cap: Auto may pick max effort, the slowest and most expensive level.' };
+function capHint(cap) {
+  return `${EFFORT_CAP_TEXT[cap] || ''} Smart and Jev routing only see models at or below it (a model with no level that low keeps its lowest). Your manual picks are not capped.`;
+}
+// Composer dropdowns are as wide as their selected text (not their longest option), like buttons.
+const measure = document.createElement('canvas').getContext('2d');
+function fitSelect(select) {
+  if (select.hidden || !select.selectedOptions.length) return;
+  const style = getComputedStyle(select);
+  measure.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  const extra = ['paddingLeft', 'paddingRight', 'borderLeftWidth', 'borderRightWidth'].reduce((sum, key) => sum + (parseFloat(style[key]) || 0), 0);
+  select.style.width = `${Math.ceil(measure.measureText(select.selectedOptions[0].textContent).width + extra) + 2}px`;
+}
+function fitComposer() { for (const id of ['#preset', '#effort', '#permissions', '#effort-cap']) fitSelect($(id)); }
+document.fonts?.ready.then(() => { if (state) fitComposer(); });
+function showEffortCap() {
+  const select = $('#effort-cap'), cap = state.settings.effortCap || 'high';
+  select.value = cap;
+  select.hidden = $('#preset').value !== 'auto';
+  select.classList.toggle('max-cap', cap === 'max');
+  select.title = EFFORT_CAP_TEXT[cap] || '';
+}
+
 // Usage and limits as each provider reports them (Settings → Providers).
 const clock = ms => new Date(ms).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
 const windowName = minutes => minutes === 300 ? '5h' : minutes === 10080 ? 'week' : minutes ? `${Math.round(minutes / 60)}h` : 'window';
@@ -513,6 +540,8 @@ function render() {
     preset.dataset.signature = signature;
   }
   showMode(state.settings.mode);
+  showEffortCap();
+  fitComposer();
   const query = $('#search').value.toLowerCase();
   const sessions = state.sessions.filter(s => !s.archived && (s.title + s.workspace).toLowerCase().includes(query));
   $('#session-count').textContent = sessions.length;
@@ -876,6 +905,15 @@ $('#preset').onchange = () => {
   showMode(keep.id); saveMode(keep.id);
 };
 $('#effort').onchange = () => saveMode(currentMode());
+$('#effort-cap').onchange = async () => {
+  try { applyState(await api.settings({ effortCap: $('#effort-cap').value })); updatePreview(); }
+  catch (error) { notify(error); showEffortCap(); }
+};
+$('#settings-effort-cap').onchange = () => {
+  const cap = $('#settings-effort-cap').value;
+  $('#settings-effort-cap').classList.toggle('max-cap', cap === 'max');
+  $('#effort-cap-detail').textContent = capHint(cap);
+};
 $('#permissions').onchange = async () => {
   const access = $('#permissions').value;
   if (!selectedId) { draftAccess = access; render(); return; }
@@ -919,6 +957,8 @@ $('#settings').onclick = async () => {
   $('#settings-access').onchange();
   $('#settings-routing').value = state.settings.routing;
   renderRoutingModels(state.settings.routerPreset);
+  $('#settings-effort-cap').value = state.settings.effortCap || 'high';
+  $('#settings-effort-cap').onchange();
   $('#settings-context').value = state.settings.contextRanking || 'local';
   $('#settings-tools').value = state.settings.toolSelection || 'off';
   $('#settings-quick').value = state.settings.jevQuickAnswers === false ? 'off' : 'on';
@@ -1123,7 +1163,7 @@ $('#settings-form').onsubmit = async event => {
   event.preventDefault();
   // Unsaved check edits (e.g. a removed check) are saved too; a failure keeps the dialog open.
   if (checksDirty) { try { await saveChecks(); } catch (error) { $('#tab-checks')?.click(); notify(error); return; } }
-  try { applyState(await api.settings({ jevQuickAnswers: $('#settings-quick').value === 'on', routerPreset: $('#settings-router-preset').value || undefined, workspace: $('#settings-workspace').value, fontScale: Number($('#settings-font').value), access: $('#settings-access').value, routing: $('#settings-routing').value, contextRanking: $('#settings-context').value, toolSelection: $('#settings-tools').value, jevCompare: $('#settings-jev-compare').value === 'on', wikiAssessment: $('#settings-wiki-check').value === 'on' })); updatePreview(); $('#settings-dialog').close(); } catch (error) { notify(error); }
+  try { applyState(await api.settings({ jevQuickAnswers: $('#settings-quick').value === 'on', routerPreset: $('#settings-router-preset').value || undefined, workspace: $('#settings-workspace').value, fontScale: Number($('#settings-font').value), access: $('#settings-access').value, routing: $('#settings-routing').value, contextRanking: $('#settings-context').value, toolSelection: $('#settings-tools').value, jevCompare: $('#settings-jev-compare').value === 'on', wikiAssessment: $('#settings-wiki-check').value === 'on', effortCap: $('#settings-effort-cap').value })); updatePreview(); $('#settings-dialog').close(); } catch (error) { notify(error); }
 };
 $('#context-meter').onclick = async () => {
   try { await api.compact(selectedId); } catch (error) { notify(error); }

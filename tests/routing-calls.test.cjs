@@ -1,6 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { SmartRouter, contextFor } = require('../src/routing/smart-router.cjs');
+const { capCatalog } = require('../src/routing/effort-cap.cjs');
 const { JevClient } = require('../src/providers/jev.cjs');
 
 const worker = { id: 'worker', model: 'test-model', effort: 'low' };
@@ -138,6 +139,19 @@ const indexed = new SmartRouter(__dirname);
 indexed.benchmarks = { catalog: workers => workers.map(w => ({ ...w, benchmarks: [{ source: 'aa-index', version: '4', harness: 'aa', score: w.model === 'big' ? 70 : 40 }] })) };
 const job = (worker, status = 'pending') => ({ goal: 'Fix the shadow map flicker', worker: { id: worker.id, label: worker.label }, status });
 const pick = (preset, extra = {}) => ({ preset, reason: 'test', taskKind: 'debugging', workspaceRelevant: true, needsChecks: true, risk: 'high', uncertainty: 'medium', sameTask: false, confident: true, ...extra });
+
+test('a lowered effort cap keeps a continued task on its model at the highest effort still offered', async () => {
+  const router = new SmartRouter(__dirname);
+  router.benchmarks = indexed.benchmarks;
+  router.inspect = async () => assert.fail('a continued task needs no workspace scan');
+  router.classifyCodex = async () => ({ decision: pick(small.id, { sameTask: true }), usage: { totalTokens: 100 } });
+  const worker = { id: bigHigh.id, provider: 'codex', model: 'big', effort: 'high', label: bigHigh.label };
+  const session = { routingCatalog: capCatalog(catalog, 'low'), routerChoice: { provider: 'codex', model: 'small', effort: 'low' }, job: { goal: 'Fix the shadow map flicker', worker, status: 'pending' } };
+  const result = await router.choose('continue', session, []);
+  assert.equal(result.id, big.id, 'same model, capped effort');
+  assert.equal(result.sameTask, true);
+  assert.match(result.reason, /^Same task \(pending\): kept big · low\./);
+});
 
 test('a continued task keeps its worker with one routing call, and says when the router would pick another', async () => {
   const router = new SmartRouter(__dirname);

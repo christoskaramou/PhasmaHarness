@@ -1631,7 +1631,7 @@ test('decision trace and the log-only wiki check: turns, final checks and each w
   complete(controller, session, fake.turnIds[1]);
   await controller.wikiCheckDone; // the check runs after the turn, including Git discovery
   const turn = records.find(r => r.event === 'turn' && r.kind === 'message');
-  assert.deepEqual(turn.route, { source: 'manual', provider: 'codex', model: 'gpt-5.6-terra', effort: 'low', sameTask: null, routerPick: null, escalatedFrom: null, failover: false, switched: false });
+  assert.deepEqual(turn.route, { source: 'manual', provider: 'codex', model: 'gpt-5.6-terra', effort: 'low', sameTask: null, routerPick: null, escalatedFrom: null, failover: false, switched: false, effortCap: null });
   assert.deepEqual(turn.outcome, { status: 'completed', limit: false, reportedTask: 'done' });
   const checks = records.find(r => r.event === 'checks');
   assert.deepEqual({ state: checks.state, checks: checks.checks }, { state: 'checks-passed', checks: { configured: 1, ran: 1, passed: 1, failed: 0, blocked: 0 } }, 'checks are traced apart from the reported status');
@@ -1779,4 +1779,25 @@ test('diagnostics list versions, provider state and limits without emails, keys 
   assert.match(text, /API provider lm · localhost:1234/);
   assert.match(text, /Usage limits: cursor-cli until .*\(estimated\)/);
   assert.doesNotMatch(text, /someone@example\.com|Secret project|sk-abcdefghijklmnopqrstu/);
+});
+
+test('the effort cap narrows what Auto routing is offered and is recorded with the route; manual picks are not capped', async t => {
+  const { controller, fake, smartRouter } = await setup(t);
+  assert.equal(controller.data.settings.effortCap, 'high', 'default');
+  assert.throws(() => controller.settings({ effortCap: 'ultra' }), /Unknown effort cap/);
+  controller.settings({ effortCap: 'medium' });
+  const session = controller.create();
+  let offered = null;
+  smartRouter.choose = async (_text, context) => { offered = context.routingCatalog; return { ...controller.resolveWorker('terra-light'), assessment: { taskKind: 'general' } }; };
+  await controller.send({ id: session.id, text: 'hello', mode: 'auto', task: 'off' });
+  const codex = offered.filter(p => p.provider === 'codex');
+  assert.ok(codex.length);
+  assert.deepEqual([...new Set(codex.map(p => p.effort))].sort(), ['low', 'medium']);
+  assert.equal(session.routes.at(-1).effortCap, 'medium');
+  complete(controller, session, session.turnId);
+  await flush();
+  const high = controller.catalog().find(p => p.provider === 'codex' && p.effort === 'xhigh' && controller.available(p));
+  await controller.send({ id: session.id, text: 'manual', mode: high.id, task: 'off' });
+  assert.equal(session.routes.at(-1).effort, 'xhigh', 'a manual pick is not capped');
+  assert.equal(session.routes.at(-1).effortCap, undefined);
 });

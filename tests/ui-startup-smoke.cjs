@@ -243,6 +243,37 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + "); document.querySelector('#update-dismiss').click(); true");
   assert.equal((await banner())[0], true, 'hidden after dismissing');
   console.log('Update banner passed');
+  // Effort cap next to Auto: saved as a setting, max marked with a warning, hidden for a manual model, mirrored in Settings.
+  const cap = () => window.webContents.executeJavaScript("[document.querySelector('#effort-cap').hidden, document.querySelector('#effort-cap').value, document.querySelector('#effort-cap').selectedOptions[0].textContent, document.querySelector('#effort-cap').classList.contains('max-cap')]");
+  assert.ok(await window.webContents.executeJavaScript("!!(document.querySelector('#permissions').compareDocumentPosition(document.querySelector('#effort-cap')) & Node.DOCUMENT_POSITION_FOLLOWING)"), 'the cap comes after the access control');
+  await window.webContents.executeJavaScript("document.querySelector('#preset').value = 'auto'; document.querySelector('#preset').onchange(); new Promise(r => setTimeout(r, 200))");
+  assert.deepEqual(await cap(), [false, 'high', 'Up to high effort', false]);
+  await window.webContents.executeJavaScript("document.querySelector('#effort-cap').value = 'max'; document.querySelector('#effort-cap').onchange(); new Promise(r => setTimeout(r, 200))");
+  assert.equal(controller.data.settings.effortCap, 'max');
+  assert.deepEqual(await cap(), [false, 'max', '⚠ Up to max effort', true]);
+  assert.equal(await window.webContents.executeJavaScript("getComputedStyle(document.querySelector('#effort-cap option[value=high]')).color"), 'rgb(185, 198, 177)', 'other options keep their color');
+  await window.webContents.executeJavaScript("document.querySelector('#settings').click(); new Promise(r => setTimeout(r, 200))");
+  const settingsCap = await window.webContents.executeJavaScript("[document.querySelector('#settings-effort-cap').value, document.querySelector('#effort-cap-detail').textContent]");
+  assert.equal(settingsCap[0], 'max');
+  assert.match(settingsCap[1], /^⚠ No cap: Auto may pick max effort.*Your manual picks are not capped\.$/);
+  await window.webContents.executeJavaScript("document.querySelector('#settings-effort-cap').value = 'high'; document.querySelector('#settings-effort-cap').onchange(); document.querySelector('#settings-form').dispatchEvent(new Event('submit', { cancelable: true })); new Promise(r => setTimeout(r, 300))");
+  assert.equal(controller.data.settings.effortCap, 'high');
+  assert.deepEqual((await cap()).filter((_, i) => i === 1 || i === 3), ['high', false]);
+  const manual = controller.catalog().find(p => p.worker && controller.available(p));
+  if (manual) {
+    await window.webContents.executeJavaScript('applyState(' + JSON.stringify({ ...controller.snapshot(), settings: { ...controller.snapshot().settings, mode: manual.id } }) + '); true');
+    assert.equal((await cap())[0], true, 'hidden for a manual model');
+    await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); true');
+  }
+  // Codex-like composer: access on the left, model picker and cap on the right, each as wide as its selected text.
+  const layout = await window.webContents.executeJavaScript(`(() => {
+    const box = id => document.querySelector(id).getBoundingClientRect();
+    const preset = document.querySelector('#preset');
+    return { accessBeforeModel: box('#permissions').right < box('#preset').left, capAfterModel: box('#preset').right <= box('#effort-cap').left,
+      inModel: !!preset.closest('.composer-model'), fitted: preset.style.width !== '' && box('#preset').width < 260 };
+  })()`);
+  assert.deepEqual(layout, { accessBeforeModel: true, capAfterModel: true, inModel: true, fitted: true });
+  console.log('Effort cap passed');
   // Compare with Jev: shown only with a Jev key while Smart routes, with the agreement so far.
   await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').close(); true");
   const compareRow = () => window.webContents.executeJavaScript("[document.querySelector('#jev-compare-row').hidden, document.querySelector('#jev-compare-detail').textContent]");

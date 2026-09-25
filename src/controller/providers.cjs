@@ -6,6 +6,7 @@ const { validateModel, validateProvider } = require('../providers/providers.cjs'
 const { EFFORTS: CLAUDE_EFFORTS } = require('../providers/claude.cjs');
 const { codexWindowReset } = require('../providers/limits.cjs');
 const { PRESETS, ROUTER_PRESETS } = require('../routing/router.cjs');
+const { capCatalog } = require('../routing/effort-cap.cjs');
 const { DEFAULT_ROUTER, LEGACY_CLAUDE_ROUTERS, PROVIDER_NAMES, cheapRouter } = require('./shared.cjs');
 
 module.exports = {
@@ -293,7 +294,7 @@ module.exports = {
     const settings = this.data.settings;
     if (settings.jevCompare !== true || settings.routing === 'jev' || !this.jevCompare || !this.smartRouter.jev?.configured || !this.smartRouter.shadowJev) return;
     if (!selected?.id || selected.directAnswer || selected.wikiTaskId || this.jevComparing) return;
-    const usable = this.catalog().filter(p => p.worker && this.available(p) && (!images.length || p.images));
+    const usable = capCatalog(this.catalog().filter(p => p.worker && this.available(p) && (!images.length || p.images)), settings.effortCap);
     const unlimited = usable.filter(p => !this.limits.limited(p.provider || 'codex', p.model));
     // A copy of the conversation as it was before this message, like the router saw it.
     const context = { ...session, ...previousState, items: [...(session.items || [])], routes: [...(session.routes || [])], directContext: [...(session.directContext || [])],

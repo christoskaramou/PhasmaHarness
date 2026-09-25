@@ -19,6 +19,7 @@ const { FINAL, canProposeWiki, hasProjectWiki, restartReason, summaryLine } = re
 const { WORKER_INSTRUCTIONS } = require('./worker-instructions.cjs');
 const { projectInstructions } = require('./workspace/project-instructions.cjs');
 const { stripTaskStatus } = require('./routing/task-state.cjs');
+const { EFFORT_CAPS, DEFAULT_EFFORT_CAP, capCatalog } = require('./routing/effort-cap.cjs');
 const { CONTEXT_INSTRUCTIONS, ACCESS_MODES, sameEffort, DEFAULT_ROUTER, sessionAllowKey, accessMode, isMcpConfirmation } = require('./controller/shared.cjs');
 
 class Controller extends EventEmitter {
@@ -58,6 +59,7 @@ class Controller extends EventEmitter {
     this.helperRequests = new Set();
     // Large tool output is always captured as excerpts; the setting is no longer shown, so an old "off" is not kept.
     this.data.settings.largeResponses = true;
+    if (!EFFORT_CAPS.includes(this.data.settings.effortCap)) this.data.settings.effortCap = DEFAULT_EFFORT_CAP;
     this.contextSearch = null;
     this.wikiStore = options.wikiStore || null;
     this.contextRequests = new Set();
@@ -259,6 +261,10 @@ class Controller extends EventEmitter {
     if (values.mode !== undefined) {
       if (values.mode !== 'auto' && !this.resolveWorker(values.mode)) throw new Error('Unknown preset.');
       next.mode = values.mode;
+    }
+    if (values.effortCap !== undefined) {
+      if (!EFFORT_CAPS.includes(values.effortCap)) throw new Error('Unknown effort cap.');
+      next.effortCap = values.effortCap;
     }
     if (values.routing !== undefined) {
       if (!['smart', 'jev'].includes(values.routing)) throw new Error('Unknown routing method.');
@@ -484,8 +490,9 @@ class Controller extends EventEmitter {
         const smartReady = () => !!router && this.available(router);
         if (provider === 'smart' && !smartReady()) throw new Error('The selected router model is disabled or unavailable. Choose an enabled router in Settings.');
         this.routing = id; this.changed();
+        // Only workers within the effort cap are offered, so Smart, Jev, escalation and failover all choose within it.
         // Workers of a provider at its usage limit are left out while another provider can take the message.
-        const usable = this.catalog().filter(p => p.worker && this.available(p) && (!images.length || p.images));
+        const usable = capCatalog(this.catalog().filter(p => p.worker && this.available(p) && (!images.length || p.images)), this.data.settings.effortCap);
         const routingCatalog = () => {
           const unlimited = usable.filter(p => !this.limits.limited(p.provider || 'codex', p.model));
           return unlimited.length ? unlimited : usable;
@@ -514,6 +521,7 @@ class Controller extends EventEmitter {
             selected = { ...selected, routerFallback: note, reason: selected.reason ? `${note} ${selected.reason}` : note };
           }
         } finally { this.routing = null; this.warmRouter(); }
+        selected = { ...selected, effortCap: this.data.settings.effortCap };
         if (this.stopping.has(id)) throw new Error('Turn was stopped before sending.');
       }
       if (selected.directAnswer) {
