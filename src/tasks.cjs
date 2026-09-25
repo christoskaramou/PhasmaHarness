@@ -3,8 +3,9 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 
 const FINAL = new Set(['checks-passed', 'not-checked', 'blocked', 'needs-you', 'cancelled']);
-// Measured 2026-09-23, codex-cli 0.153.4, Windows, dangerFullAccess only.
-const MEASURED_REAP = Object.freeze({ codexVersion: '0.153.4', platform: 'win32', sandbox: 'dangerFullAccess' });
+// Measured 2026-09-25 with tests/codex-reap-live.cjs, codex-cli 0.156.1, Windows, dangerFullAccess only: after Codex
+// exited (input closed, and terminated) none of the check's processes, including a detached one, were still running.
+const MEASURED_REAP = Object.freeze({ codexVersion: '0.156.1', platform: 'win32', sandbox: 'dangerFullAccess' });
 const OUTPUT_CAP = 64 * 1024;
 
 function hasProjectWiki(workspace) {
