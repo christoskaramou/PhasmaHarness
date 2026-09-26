@@ -117,8 +117,9 @@ if (require.main === module) {
       claudeAsync: argv.includes('--claude-async'), dryRun: argv.includes('--dry-run') });
     if (!argv.includes('--uninstall')) {
       process.stdout.write(`\nDone. Restart open Claude Code, Codex and Cursor sessions to load the hook.\n`);
-      if (!process.env.JEV_API_KEY && !process.env.JEV_API_KEY_FILE)
-        process.stdout.write('JEV_API_KEY is not set: without it the pool runs only path-matched cheap and medium tests.\n');
+      const runner = r.runner || fwd(path.join(__dirname, 'testpool.cjs'));
+      if (!require('./testpool.cjs').jevKeySource().source)
+        process.stdout.write(`No Jev key found: without one the pool runs only path-matched cheap and medium tests.\nSave it in Windows Credential Manager with: node "${runner}" set-key\n`);
       if (r.runner) process.stdout.write(`Runner: ${r.runner}\n`);
     }
   } catch (error) {

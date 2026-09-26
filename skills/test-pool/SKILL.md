@@ -105,6 +105,8 @@ The test environment has these variables:
 | `check --dry-run` | Show what the next check would run and why (includes Jev's answers when a key is set). |
 | `check [--since <ref>] [--all] [--no-jev]` | Pick and run tests now. |
 | `baseline` | Mark the current changes as checked without running anything. |
+| `set-key` | Save the Jev key in Windows Credential Manager (hidden prompt; run it yourself in a terminal). |
+| `key-status` | Show where the Jev key comes from and run a live check against Jev. |
 
 Results are written to `.testpool/runs/`: `last.json`, `history.jsonl`, and one log per test.
 
@@ -122,4 +124,4 @@ Results are written to `.testpool/runs/`: `last.json`, `history.jsonl`, and one 
   - `~/.codex/hooks.json`
   - `~/.cursor/hooks.json`
 - The hook does nothing in repositories without `.testpool/catalog.json`.
-- Jev needs `JEV_API_KEY`, or `JEV_API_KEY_FILE` naming a file that holds the key. Without it, only path-matched cheap and medium tests run; expensive ones are listed as suggestions.
+- Jev needs a key. The runner checks, in order: `JEV_API_KEY`, `JEV_API_KEY_FILE` (a file that holds the key), then on Windows the Credential Manager entry saved by `set-key`. Prefer `set-key`: it keeps the key out of the environment of every agent and tool process. Without a key, only path-matched cheap and medium tests run; expensive ones are listed as suggestions. `TESTPOOL_NO_JEV=1` turns Jev off for one process tree.

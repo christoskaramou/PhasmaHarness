@@ -41,6 +41,8 @@ function baseline(dir) {
   assert.equal(r.status, 0, r.stdout + r.stderr);
 }
 const touch = (dir, name, text) => { write(dir, { [name]: text }); const later = new Date(Date.now() + 2000); fs.utimesSync(path.join(dir, name), later, later); };
+// A killed process may linger as an unreaped zombie (state Z) under a container init; that is not running.
+const running = pid => { try { return fs.readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ')[1][0] !== 'Z'; } catch { try { process.kill(pid, 0); return process.platform !== 'linux'; } catch { return false; } } };
 const passCmd = `${NODE} -e "console.log('ok')"`;
 const failCmd = `${NODE} -e "console.log('first line'); console.error('boom: expected 3 got 4'); process.exit(1)"`;
 const testEntry = (id, extra = {}) => ({ id, name: `Test ${id}`, covers: `Behaviour protected by ${id} in the sample repo.`, command: passCmd, cost: 'cheap', ...extra });
@@ -204,22 +206,29 @@ setInterval(() => {}, 1000);` });
   assert.equal(r.status, 'timeout');
   assert.ok(Date.now() - started < 10000);
   await new Promise(resolve => setTimeout(resolve, 300));
-  // A killed process may linger as an unreaped zombie (state Z) under a container init; that is not running.
-  const running = pid => { try { return fs.readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ')[1][0] !== 'Z'; } catch { try { process.kill(pid, 0); return process.platform !== 'linux'; } catch { return false; } } };
   for (const pid of fs.readFileSync(pidFile, 'utf8').split(' ').map(Number)) assert.ok(!running(pid), `process ${pid} still running`);
 });
 
 test('a step that exits but leaves a process holding its output still finishes', async t => {
   const dir = repo(t);
   const pidFile = path.join(dir, 'pid');
+  // The leftover works outside the temporary repo: Windows cannot delete a folder that a running process has as its cwd.
   write(dir, { 'leave.js': `const { spawn } = require('child_process');
-const c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: ['ignore', 'inherit', 'inherit'], detached: true });
+const c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { cwd: require('os').tmpdir(), stdio: ['ignore', 'inherit', 'inherit'], detached: true, windowsHide: true });
 c.unref();
 require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(c.pid));` });
   pool.timing.graceMs = 300;
-  t.after(() => { pool.timing.graceMs = 10000; try { process.kill(Number(fs.readFileSync(pidFile, 'utf8')), 'SIGKILL'); } catch {} });
   const started = Date.now();
-  const r = await pool.runStep('leave', { command: `${NODE} leave.js`, timeoutSec: 20 }, dir, dir, {});
+  let r;
+  try { r = await pool.runStep('leave', { command: `${NODE} leave.js`, timeoutSec: 20 }, dir, dir, {}); }
+  finally {
+    // Stop the leftover and wait until it is gone before the temporary repo is removed.
+    pool.timing.graceMs = 10000;
+    const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+    try { process.kill(pid, 'SIGKILL'); } catch {}
+    for (let i = 0; i < 50 && running(pid); i++) await new Promise(resolve => setTimeout(resolve, 100));
+    assert.ok(!running(pid), `leftover process ${pid} still running`);
+  }
   assert.equal(r.status, 'pass');
   assert.ok(Date.now() - started < 5000, `took ${Date.now() - started} ms`);
 });
@@ -278,7 +287,7 @@ test('without a Jev key only path-matched cheap and medium tests run; expensive 
   const r = await pool.check(dir, { jevKey: null });
   assert.deepEqual(r.outcome.results.map(x => x.id), ['quick']);
   assert.deepEqual(r.plan.suggested.map(s => s.id), ['gpu', 'judged']);
-  assert.match(r.report, /Suggested, not run: gpu \(no JEV_API_KEY\), judged \(no JEV_API_KEY\)/);
+  assert.match(r.report, /Suggested, not run: gpu \(no Jev key\), judged \(no Jev key\)/);
   // A Jev outage falls back the same way and says so.
   touch(dir, 'src/x.cpp', '3\n');
   const down = await pool.check(dir, { jevKey: 'k', fetch: async () => ({ ok: false, status: 503, text: async () => '' }) });
@@ -322,7 +331,10 @@ test('hook replies per agent: Claude and Codex block with exit 2, Cursor sends a
   assert.equal(capped.code, 0, 'third block in a row is not sent');
   assert.match(JSON.parse(capped.stdout).systemMessage, /Still failing after 2 automatic retries/);
   edit(5);
-  assert.equal((await pool.hook('codex', { cwd: dir, session_id: 's1' }, { jevKey: null })).code, 2, 'separate count per agent session');
+  const codex = await pool.hook('codex', { cwd: dir, session_id: 's1' }, { jevKey: null });
+  assert.equal(codex.code, 0, 'Codex gets JSON with exit 0 (exit 2 is not passed through reliably on Windows)');
+  assert.equal(JSON.parse(codex.stdout).decision, 'block', 'separate count per agent session');
+  assert.match(JSON.parse(codex.stdout).reason, /FAILED broken/);
   edit(6);
   const cursor = await pool.hook('cursor', { workspace_roots: [dir], conversation_id: 'c1', status: 'completed', loop_count: 0 }, { jevKey: null });
   assert.equal(cursor.code, 0);
@@ -376,7 +388,7 @@ test('a second run waits for the lock, then gives up without running', async t =
 
 test('CLI: init, validate, list, dry-run check, run and the hook entry point', t => {
   const dir = repo(t, { 'src/x.cpp': '1\n' });
-  const cli = (args, input) => spawnSync(process.execPath, [SCRIPT, ...args], { cwd: dir, encoding: 'utf8', input, env: { ...process.env, JEV_API_KEY: '' } });
+  const cli = (args, input) => spawnSync(process.execPath, [SCRIPT, ...args], { cwd: dir, encoding: 'utf8', input, env: { ...process.env, JEV_API_KEY: '', TESTPOOL_NO_JEV: '1' } });
   assert.match(cli(['init']).stdout, /Pool ready/);
   assert.equal(fs.readFileSync(path.join(dir, '.testpool/.gitignore'), 'utf8'), 'runs/\n');
   assert.match(cli(['validate']).stdout, /OK: 0 tests/);
@@ -385,7 +397,7 @@ test('CLI: init, validate, list, dry-run check, run and the hook entry point', t
   baseline(dir);
   touch(dir, 'src/x.cpp', '2\n');
   const dry = cli(['check', '--dry-run']);
-  assert.match(dry.stdout, /Would run: quick \(paths match \(no JEV_API_KEY\)\), broken/);
+  assert.match(dry.stdout, /Would run: quick \(paths match \(Jev off\)\), broken/);
   assert.ok(!fs.existsSync(path.join(dir, '.testpool/runs/last.json')), 'dry run runs nothing');
   const run = cli(['run', 'quick']);
   assert.equal(run.status, 0, run.stdout + run.stderr);
@@ -459,7 +471,7 @@ test('the installed hook command runs the pool and blocks on a failing test', t 
   catalog(dir, { tests: [testEntry('broken', { paths: ['src/**'], command: failCmd })] });
   baseline(dir);
   touch(dir, 'src/x.cpp', '2\n');
-  const r = spawnSync(command, { shell: true, cwd: os.tmpdir(), input: JSON.stringify({ cwd: dir, session_id: 'x' }), encoding: 'utf8', env: { ...process.env, JEV_API_KEY: '' } });
+  const r = spawnSync(command, { shell: true, cwd: os.tmpdir(), input: JSON.stringify({ cwd: dir, session_id: 'x' }), encoding: 'utf8', env: { ...process.env, JEV_API_KEY: '', TESTPOOL_NO_JEV: '1' } });
   assert.equal(r.status, 2, r.stdout + r.stderr);
   assert.match(r.stderr, /FAILED broken/);
 });

@@ -222,11 +222,36 @@ async function acquireLock(root, waitMs) {
 }
 
 // ---------- Jev ----------
-function jevKey(env = process.env) {
-  if (env.JEV_API_KEY && env.JEV_API_KEY.trim()) return env.JEV_API_KEY.trim();
-  if (env.JEV_API_KEY_FILE) { try { return fs.readFileSync(env.JEV_API_KEY_FILE, 'utf8').trim() || null; } catch {} }
-  return null;
+// The Jev key can live in Windows Credential Manager (Web Credentials, resource "jev", user "api-key"), so it is not
+// in the environment of every agent and tool process. It is read through Windows PowerShell 5.1, which ships with
+// Windows and can load the WinRT PasswordVault; the key never touches a command line or a file.
+const VAULT = { resource: 'jev', user: 'api-key' };
+const psEncode = script => Buffer.from(script, 'utf16le').toString('base64');
+const VAULT_LOAD = "$ErrorActionPreference = 'Stop'\n[void][Windows.Security.Credentials.PasswordVault,Windows.Security.Credentials,ContentType=WindowsRuntime]\n" +
+  '$v = New-Object Windows.Security.Credentials.PasswordVault\n';
+const VAULT_READ = `${VAULT_LOAD}try { $c = $v.Retrieve('${VAULT.resource}', '${VAULT.user}'); $c.RetrievePassword(); [Console]::Out.Write($c.Password) } catch { exit 3 }`;
+const VAULT_SET = `${VAULT_LOAD}$s = Read-Host 'Paste your Jev (TypeSafe) API key' -AsSecureString
+$k = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($s)).Trim()
+if (-not $k) { [Console]::Error.WriteLine('No key entered; nothing saved.'); exit 2 }
+try { foreach ($c in $v.FindAllByResource('${VAULT.resource}')) { if ($c.UserName -eq '${VAULT.user}') { $v.Remove($c) } } } catch {}
+$v.Add((New-Object Windows.Security.Credentials.PasswordCredential('${VAULT.resource}', '${VAULT.user}', $k)))
+'Saved to Windows Credential Manager (Web Credentials: ${VAULT.resource} / ${VAULT.user}).'`;
+
+function vaultKey({ platform = process.platform, run = spawnSync } = {}) {
+  if (platform !== 'win32') return null;
+  const r = run('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', psEncode(VAULT_READ)], { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+  if (!r || r.error || r.status !== 0) return null;
+  return String(r.stdout || '').trim() || null;
 }
+
+// Key sources in order: JEV_API_KEY, JEV_API_KEY_FILE, then Windows Credential Manager. Never logs the key.
+function jevKeySource(env = process.env, vault = vaultKey) {
+  if (env.JEV_API_KEY && env.JEV_API_KEY.trim()) return { key: env.JEV_API_KEY.trim(), source: 'JEV_API_KEY' };
+  if (env.JEV_API_KEY_FILE) { try { const key = fs.readFileSync(env.JEV_API_KEY_FILE, 'utf8').trim(); if (key) return { key, source: 'JEV_API_KEY_FILE' }; } catch {} }
+  const key = vault();
+  return key ? { key, source: 'Windows Credential Manager' } : { key: null, source: null };
+}
+const jevKey = (env, vault) => jevKeySource(env, vault).key;
 
 function jevQuestions(candidates, stats) {
   const questions = {};
@@ -463,9 +488,11 @@ async function check(root, opts = {}) {
     const picked = select(catalog, changed, state, { platform: opts.platform, forceIds: opts.ids || (opts.all ? catalog.tests.filter(t => t.enabled).map(t => t.id) : null) });
     let run = picked.run, skipped = picked.skipped, suggested = [], jev = null, jevError = null;
     if (picked.ask.length) {
-      const key = catalog.settings.jev === 'off' || opts.noJev ? null : (opts.jevKey !== undefined ? opts.jevKey : jevKey());
+      // TESTPOOL_NO_JEV=1 turns Jev off for a whole process tree (the test suite uses it so a key saved on the machine is never used).
+      const off = catalog.settings.jev === 'off' || opts.noJev || process.env.TESTPOOL_NO_JEV === '1';
+      const key = off ? null : (opts.jevKey !== undefined ? opts.jevKey : jevKey());
       if (!key) {
-        const f = fallbackDecisions(picked.ask, catalog.settings.jev === 'off' || opts.noJev ? 'Jev off' : 'no JEV_API_KEY');
+        const f = fallbackDecisions(picked.ask, off ? 'Jev off' : 'no Jev key');
         run = [...run, ...f.run]; suggested = f.suggested;
       } else {
         const stats = historyStats(root);
@@ -538,7 +565,10 @@ async function hook(agent, input, opts = {}) {
   state.blocks[session] = { count: blocks + 1, ids };
   saveState(root, state);
   if (agent === 'cursor') return { code: 0, stdout: JSON.stringify({ followup_message: result.report }) };
-  return { code: 2, stderr: result.report }; // Claude Code and Codex: exit 2 sends stderr back to the model
+  // Codex: JSON on stdout with exit 0. On Windows, Codex starts hooks through a shell that does not reliably pass
+  // exit code 2 through, so the stderr form was dropped and the turn ended without the report.
+  if (agent === 'codex') return { code: 0, stdout: JSON.stringify({ decision: 'block', reason: result.report }) };
+  return { code: 2, stderr: result.report }; // Claude Code: exit 2 sends stderr back to the model (also wakes an asyncRewake hook)
 }
 
 // ---------- CLI ----------
@@ -558,8 +588,11 @@ const HELP = `testpool - pooled regression tests picked by Jev after each agent 
   node testpool.cjs baseline             mark the current changes as checked without running anything
   node testpool.cjs hook --agent claude|codex|cursor
                                          Stop-hook entry point (reads the hook JSON on stdin)
+  node testpool.cjs set-key              save the Jev key in Windows Credential Manager (hidden prompt)
+  node testpool.cjs key-status           show where the Jev key comes from and test it against Jev
 
-Jev: set JEV_API_KEY (or JEV_API_KEY_FILE). Without it, only path-matched cheap and medium tests run.`;
+Jev key: JEV_API_KEY, JEV_API_KEY_FILE, or Windows Credential Manager (set-key), checked in that order.
+Without one, only path-matched cheap and medium tests run.`;
 
 const TEMPLATE = {
   version: 1,
@@ -580,6 +613,26 @@ async function main(argv) {
     if (r.stdout) process.stdout.write(`${r.stdout}\n`);
     if (r.stderr) process.stderr.write(`${r.stderr}\n`);
     return r.code;
+  }
+  if (cmd === 'set-key') {
+    if (process.platform !== 'win32') { out('set-key uses Windows Credential Manager, so it only works on Windows. Elsewhere set JEV_API_KEY or JEV_API_KEY_FILE.'); return 1; }
+    const r = spawnSync('powershell.exe', ['-NoProfile', '-EncodedCommand', psEncode(VAULT_SET)], { stdio: 'inherit' });
+    if (r.error) { out(`Could not start Windows PowerShell: ${r.error.message}`); return 1; }
+    return r.status ?? 1;
+  }
+  if (cmd === 'key-status') {
+    const { key, source } = jevKeySource();
+    if (!key) { out('No Jev key found. Run "node testpool.cjs set-key" on Windows, or set JEV_API_KEY / JEV_API_KEY_FILE.'); return 1; }
+    const started = Date.now();
+    try {
+      const r = await askJev(key, 'Connectivity check from the test pool runner.',
+        { ping: { type: 'choice', instructions: 'Is this text a connectivity check?', criteria: { yes: 'It is a connectivity check.', no: 'It is something else.' } } });
+      out(`Jev key found in ${source}. Live check passed: ${r.model} in ${Date.now() - started} ms.`);
+      return 0;
+    } catch (error) {
+      out(`Jev key found in ${source}, but the live check failed: ${error.message}`);
+      return 1;
+    }
   }
   const root = findRoot(process.cwd());
   if (!root) { out('Not inside a git repository or a directory with .testpool/catalog.json.'); return 1; }
@@ -633,7 +686,7 @@ async function main(argv) {
   return 1;
 }
 
-module.exports = { timing, validate, loadCatalog, globRegex, matcher, snapshot, changedFiles, select, jevQuestions, parseJev, askJev, jevDecisions, fallbackDecisions, runStep, check, hook, report, findRoot, main, JEV_URL, SKIP_EXIT };
+module.exports = { timing, validate, loadCatalog, globRegex, matcher, snapshot, changedFiles, select, jevQuestions, parseJev, askJev, jevDecisions, fallbackDecisions, runStep, check, hook, report, findRoot, main, JEV_URL, SKIP_EXIT, jevKey, jevKeySource, vaultKey, psEncode, VAULT, VAULT_READ, VAULT_SET };
 
 if (require.main === module) {
   process.stdout.on('error', error => { if (error.code === 'EPIPE') process.exit(process.exitCode || 0); }); // e.g. piped into head
