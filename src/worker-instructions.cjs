@@ -9,6 +9,7 @@ const SKILLS = {
   'large-responses': 'capture and search bulky command/tool output with exact line references (Node helper)',
   rtk: 'RTK usage details',
   caveman: 'OPT-IN ultra-compressed replies; use only when the user asks for caveman mode or fewer words',
+  'test-pool': 'after a fix or task, add its regression test to .testpool; handle "Test pool:" failure reports',
 };
 const DEFAULT_SKILLS = Object.keys(SKILLS);
 const skillDir = name => path.resolve(__dirname, '..', 'skills', name);
