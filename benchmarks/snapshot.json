@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-09-25",
+  "updatedAt": "2026-09-30",
   "records": [
     {
       "source": "aa-critpt",
@@ -8121,6 +8121,516 @@
       "url": "https://artificialanalysis.ai/models/grok-4-7",
       "metrics": {
         "passPercent": 57.41
+      }
+    },
+    {
+      "source": "aa-index",
+      "model": "claude-sonnet-5-5",
+      "effort": "max",
+      "version": "4.3.2",
+      "harness": "api-default-fallback",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-sonnet-5-5",
+      "metrics": {
+        "score": 56.0,
+        "costUsd": 7.6026,
+        "inputUsdPerMillion": 2,
+        "outputUsdPerMillion": 10,
+        "cacheReadUsdPerMillion": 0.2,
+        "cacheWriteUsdPerMillion": 2.5
+      }
+    },
+    {
+      "source": "aa-hle",
+      "model": "claude-sonnet-5-5",
+      "effort": "max",
+      "version": "aa-2026-09",
+      "harness": "api-default-fallback",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-sonnet-5-5",
+      "metrics": {
+        "passPercent": 54.96
+      }
+    },
+    {
+      "source": "scicode",
+      "model": "claude-sonnet-5-5",
+      "effort": "max",
+      "version": "1.0.1",
+      "harness": "api-default-fallback",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-sonnet-5-5",
+      "metrics": {
+        "passPercent": 61.0
+      }
+    },
+    {
+      "source": "aa-lcr",
+      "model": "claude-sonnet-5-5",
+      "effort": "max",
+      "version": "1.1",
+      "harness": "api-default-fallback",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-sonnet-5-5",
+      "metrics": {
+        "score": 82.67
+      }
+    },
+    {
+      "source": "aa-critpt",
+      "model": "claude-sonnet-5-5",
+      "effort": "max",
+      "version": "aa-2026-09",
+      "harness": "api-default-fallback",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-sonnet-5-5",
+      "metrics": {
+        "passPercent": 31.43
+      }
+    },
+    {
+      "source": "aa-terminal",
+      "model": "claude-sonnet-5-5",
+      "effort": "max",
+      "version": "4.0",
+      "harness": "mini-swe-agent-default-fallback",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-sonnet-5-5",
+      "metrics": {
+        "passPercent": 63.64
+      }
+    },
+    {
+      "source": "aa-omniscience",
+      "model": "claude-sonnet-5-5",
+      "effort": "max",
+      "version": "aa-2026-09",
+      "harness": "api-default-fallback",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-sonnet-5-5",
+      "metrics": {
+        "score": 32.3,
+        "accuracyPercent": 53.95,
+        "nonHallucinationPercent": 52.99
+      }
+    },
+    {
+      "source": "aa-index",
+      "model": "claude-sonnet-5-5",
+      "effort": "xhigh",
+      "version": "4.3.2",
+      "harness": "api-default-fallback",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-sonnet-5-5-xhigh",
+      "metrics": {
+        "score": 51.9,
+        "costUsd": 2.7426,
+        "inputUsdPerMillion": 2,
+        "outputUsdPerMillion": 10,
+        "cacheReadUsdPerMillion": 0.2,
+        "cacheWriteUsdPerMillion": 2.5
+      }
+    },
+    {
+      "source": "aa-hle",
+      "model": "claude-sonnet-5-5",
+      "effort": "xhigh",
+      "version": "aa-2026-09",
+      "harness": "api-default-fallback",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-sonnet-5-5-xhigh",
+      "metrics": {
+        "passPercent": 50.0
+      }
+    },
+    {
+      "source": "scicode",
+      "model": "claude-sonnet-5-5",
+      "effort": "xhigh",
+      "version": "1.0.1",
+      "harness": "api-default-fallback",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-sonnet-5-5-xhigh",
+      "metrics": {
+        "passPercent": 57.29
+      }
+    },
+    {
+      "source": "aa-lcr",
+      "model": "claude-sonnet-5-5",
+      "effort": "xhigh",
+      "version": "1.1",
+      "harness": "api-default-fallback",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-sonnet-5-5-xhigh",
+      "metrics": {
+        "score": 79.67
+      }
+    },
+    {
+      "source": "aa-critpt",
+      "model": "claude-sonnet-5-5",
+      "effort": "xhigh",
+      "version": "aa-2026-09",
+      "harness": "api-default-fallback",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-sonnet-5-5-xhigh",
+      "metrics": {
+        "passPercent": 31.14
+      }
+    },
+    {
+      "source": "aa-terminal",
+      "model": "claude-sonnet-5-5",
+      "effort": "xhigh",
+      "version": "4.0",
+      "harness": "mini-swe-agent-default-fallback",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-sonnet-5-5-xhigh",
+      "metrics": {
+        "passPercent": 57.07
+      }
+    },
+    {
+      "source": "aa-omniscience",
+      "model": "claude-sonnet-5-5",
+      "effort": "xhigh",
+      "version": "aa-2026-09",
+      "harness": "api-default-fallback",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-sonnet-5-5-xhigh",
+      "metrics": {
+        "score": 23.5,
+        "accuracyPercent": 53.03,
+        "nonHallucinationPercent": 37.12
+      }
+    },
+    {
+      "source": "aa-index",
+      "model": "gpt-6.1-sol",
+      "effort": "max",
+      "version": "4.3.2",
+      "harness": "api",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/gpt-6-1-sol",
+      "metrics": {
+        "score": 51.8,
+        "costUsd": 0.7242,
+        "inputUsdPerMillion": 2,
+        "outputUsdPerMillion": 10,
+        "cacheReadUsdPerMillion": 0.1,
+        "cacheWriteUsdPerMillion": 2.5
+      }
+    },
+    {
+      "source": "aa-hle",
+      "model": "gpt-6.1-sol",
+      "effort": "max",
+      "version": "aa-2026-09",
+      "harness": "api",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/gpt-6-1-sol",
+      "metrics": {
+        "passPercent": 52.92
+      }
+    },
+    {
+      "source": "scicode",
+      "model": "gpt-6.1-sol",
+      "effort": "max",
+      "version": "1.0.1",
+      "harness": "api",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/gpt-6-1-sol",
+      "metrics": {
+        "passPercent": 54.17
+      }
+    },
+    {
+      "source": "aa-lcr",
+      "model": "gpt-6.1-sol",
+      "effort": "max",
+      "version": "1.1",
+      "harness": "api",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/gpt-6-1-sol",
+      "metrics": {
+        "score": 83.0
+      }
+    },
+    {
+      "source": "aa-critpt",
+      "model": "gpt-6.1-sol",
+      "effort": "max",
+      "version": "aa-2026-09",
+      "harness": "api",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/gpt-6-1-sol",
+      "metrics": {
+        "passPercent": 31.71
+      }
+    },
+    {
+      "source": "aa-terminal",
+      "model": "gpt-6.1-sol",
+      "effort": "max",
+      "version": "4.0",
+      "harness": "mini-swe-agent",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/gpt-6-1-sol",
+      "metrics": {
+        "passPercent": 56.06
+      }
+    },
+    {
+      "source": "aa-omniscience",
+      "model": "gpt-6.1-sol",
+      "effort": "max",
+      "version": "aa-2026-09",
+      "harness": "api",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/gpt-6-1-sol",
+      "metrics": {
+        "score": 41.53,
+        "accuracyPercent": 62.1,
+        "nonHallucinationPercent": 45.73
+      }
+    },
+    {
+      "source": "aa-index",
+      "model": "gpt-6.1-sol",
+      "effort": "xhigh",
+      "version": "4.3.2",
+      "harness": "api",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/gpt-6-1-sol-xhigh",
+      "metrics": {
+        "score": 51.0,
+        "costUsd": 0.3929,
+        "inputUsdPerMillion": 2,
+        "outputUsdPerMillion": 10,
+        "cacheReadUsdPerMillion": 0.1
+      }
+    },
+    {
+      "source": "aa-index",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "version": "4.3.2",
+      "harness": "api",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/gpt-6-1-sol-high",
+      "metrics": {
+        "score": 50.2,
+        "costUsd": 0.3191,
+        "inputUsdPerMillion": 2,
+        "outputUsdPerMillion": 10,
+        "cacheReadUsdPerMillion": 0.1
+      }
+    },
+    {
+      "source": "aa-index",
+      "model": "gpt-6.1-sol",
+      "effort": "medium",
+      "version": "4.3.2",
+      "harness": "api",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/gpt-6-1-sol-medium",
+      "metrics": {
+        "score": 47.8,
+        "costUsd": 0.2137,
+        "inputUsdPerMillion": 2,
+        "outputUsdPerMillion": 10,
+        "cacheReadUsdPerMillion": 0.1
+      }
+    },
+    {
+      "source": "aa-index",
+      "model": "claude-sonnet-5-5",
+      "effort": "high",
+      "version": "4.3.2",
+      "harness": "api-default-fallback",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-sonnet-5-5-high",
+      "metrics": {
+        "score": 46.7,
+        "costUsd": 1.0798,
+        "inputUsdPerMillion": 2,
+        "outputUsdPerMillion": 10,
+        "cacheReadUsdPerMillion": 0.2,
+        "cacheWriteUsdPerMillion": 2.5
+      }
+    },
+    {
+      "source": "aa-hle",
+      "model": "claude-sonnet-5-5",
+      "effort": "high",
+      "version": "aa-2026-09",
+      "harness": "api-default-fallback",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-sonnet-5-5-high",
+      "metrics": {
+        "passPercent": 45.83
+      }
+    },
+    {
+      "source": "scicode",
+      "model": "claude-sonnet-5-5",
+      "effort": "high",
+      "version": "1.0.1",
+      "harness": "api-default-fallback",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-sonnet-5-5-high",
+      "metrics": {
+        "passPercent": 53.7
+      }
+    },
+    {
+      "source": "aa-lcr",
+      "model": "claude-sonnet-5-5",
+      "effort": "high",
+      "version": "1.1",
+      "harness": "api-default-fallback",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-sonnet-5-5-high",
+      "metrics": {
+        "score": 78.0
+      }
+    },
+    {
+      "source": "aa-critpt",
+      "model": "claude-sonnet-5-5",
+      "effort": "high",
+      "version": "aa-2026-09",
+      "harness": "api-default-fallback",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-sonnet-5-5-high",
+      "metrics": {
+        "passPercent": 24.57
+      }
+    },
+    {
+      "source": "aa-terminal",
+      "model": "claude-sonnet-5-5",
+      "effort": "high",
+      "version": "4.0",
+      "harness": "mini-swe-agent-default-fallback",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-sonnet-5-5-high",
+      "metrics": {
+        "passPercent": 43.94
+      }
+    },
+    {
+      "source": "aa-omniscience",
+      "model": "claude-sonnet-5-5",
+      "effort": "high",
+      "version": "aa-2026-09",
+      "harness": "api-default-fallback",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-sonnet-5-5-high",
+      "metrics": {
+        "score": 20.95,
+        "accuracyPercent": 51.98,
+        "nonHallucinationPercent": 35.37
+      }
+    },
+    {
+      "source": "aa-index",
+      "model": "claude-sonnet-5-5",
+      "effort": "medium",
+      "version": "4.3.2",
+      "harness": "api-default-fallback",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-sonnet-5-5-medium",
+      "metrics": {
+        "score": 40.7,
+        "costUsd": 0.5862,
+        "inputUsdPerMillion": 2,
+        "outputUsdPerMillion": 10,
+        "cacheReadUsdPerMillion": 0.2
+      }
+    },
+    {
+      "source": "aa-index",
+      "model": "gpt-6.1-sol",
+      "effort": "low",
+      "version": "4.3.2",
+      "harness": "api",
+      "observedAt": "2026-09-30",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/gpt-6-1-sol-low",
+      "metrics": {
+        "score": 42.1,
+        "costUsd": 0.1308,
+        "inputUsdPerMillion": 2,
+        "outputUsdPerMillion": 10,
+        "cacheReadUsdPerMillion": 0.1
       }
     }
   ]

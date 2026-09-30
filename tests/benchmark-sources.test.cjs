@@ -58,3 +58,10 @@ test('the router sees a model measured only with a provider fallback (Opus 5.5 a
   assert.equal(sonnet.fallback, undefined);
   assert.match(ROUTER_POLICY, /fallback = some values come from the evaluator runs labelled as allowing a provider fallback/);
 });
+
+test('the refresh prompt covers models released since the snapshot, under the provider\'s model ID', () => {
+  const prompt = new BenchmarkStore().refreshPrompt([]);
+  assert.match(prompt, /first measured after the snapshot's `updatedAt`/);
+  assert.match(prompt, /exact model ID its provider reports/);
+  assert.match(prompt, /models first measured since the snapshot's `updatedAt`/, 'and the report lists them');
+});
