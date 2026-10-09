@@ -33,6 +33,15 @@ app.whenReady().then(async () => {
   ipcMain.handle('chooseWorkspace', () => chosenWorkspace);
   ipcMain.handle('providerSettings', (_event, value) => controller.providerSettings(value));
   const providerKeys = new Map();
+  let localModelLoaded = false, localModelError = false;
+  const localModelActions = [];
+  ipcMain.handle('localModel', (_event, choice, action) => {
+    localModelActions.push({ choice, action });
+    if (localModelError) throw new Error('Local server unavailable');
+    if (action === 'load') localModelLoaded = true;
+    if (action === 'unload') localModelLoaded = false;
+    return { supported: true, loaded: localModelLoaded, contextLength: localModelLoaded ? 32768 : null, canResize: true, busy: false };
+  });
   ipcMain.handle('providerKey', (_event, id, key) => { if (key) providerKeys.set(id, key); else providerKeys.delete(id); return controller.snapshot(); });
   ipcMain.handle('appInfo', () => ({ version: '0.1.0', packaged: true }));
   let updateResult = { current: '0.1.0', latest: '0.2.0', newer: true, url: 'https://github.com/x/y/releases/tag/v0.2.0', installer: 'Phasma-Harness-Setup-0.2.0.exe' };
@@ -75,7 +84,7 @@ app.whenReady().then(async () => {
   // Directly exercise the same renderer function as the IPC state event.
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + ')');
   await window.webContents.executeJavaScript(`document.querySelector('#prompt').value = 'hello'; document.querySelector('#prompt').dispatchEvent(new Event('input'));`);
-  assert.match(await window.webContents.executeJavaScript("document.querySelector('#connection-label').textContent"), /Connected Providers: 1/);
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#send').disabled"), false, 'connected providers enable sending');
   console.log('Connected-state UI smoke passed');
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#task-card')"), null);
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#skip-checks')"), null);
@@ -236,6 +245,34 @@ app.whenReady().then(async () => {
   const groups = await window.webContents.executeJavaScript("[...document.querySelectorAll('#provider-model-list .provider-model-group')].map(e => e.textContent)");
   assert.ok(groups.includes('LM Studio'), JSON.stringify(groups));
   const providerAction = code => window.webContents.executeJavaScript(`(async () => { ${code}; await new Promise(r => setTimeout(r, 50)); })()`);
+  controller.providerSettings({ action: 'enableDiscovered', provider: 'lm-studio', model: 'gemma' });
+  const previousMode = controller.data.settings.mode;
+  controller.data.settings.mode = 'lm-studio:gemma:default';
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); true');
+  await providerAction('await refreshLocalModel(true)');
+  assert.deepEqual(await window.webContents.executeJavaScript("[document.querySelector('#local-model-controls').hidden, document.querySelector('#local-model-toggle').textContent, document.querySelector('#local-model-unload').hidden]"), [false, '○ Load', true]);
+  await providerAction("document.querySelector('#local-model-toggle').click()");
+  assert.equal(localModelLoaded, true);
+  assert.equal(localModelActions.find(a => a.action === 'load').choice.model, 'gemma');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#local-model-toggle').classList.contains('loaded')"), true);
+  assert.match(await window.webContents.executeJavaScript("document.querySelector('#local-model-toggle').title"), /32,768/);
+  await providerAction('state.anyAgentBusy = true; renderLocalModel()');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#local-model-unload').disabled"), true);
+  await providerAction("state.anyAgentBusy = false; renderLocalModel(); document.querySelector('#local-model-unload').click()");
+  assert.equal(localModelLoaded, false);
+  localModelError = true;
+  await providerAction('await refreshLocalModel(true)');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#local-model-toggle').textContent"), 'Retry status');
+  localModelError = false;
+  await providerAction("document.querySelector('#local-model-toggle').click()");
+  assert.equal(localModelLoaded, false, 'retry only checks status');
+  await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').close(); true");
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/local-model-controls.png'), (await window.webContents.capturePage()).toPNG());
+  controller.data.settings.mode = previousMode;
+  controller.data.settings.providerModels = controller.data.settings.providerModels.filter(p => p.model !== 'gemma');
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); true');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#local-model-controls').hidden"), true);
+  console.log('Local model status, load, unload, busy protection and retry passed');
   controller.providerSettings({ action: 'provider', provider: { id: 'other', name: 'Other', baseUrl: 'https://example.com/v1', enabled: false } });
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderProviders(); true');
   await providerAction("document.querySelector('.api-provider-row summary').click(); document.querySelector('.api-provider-row input[type=password]').value = 'test-provider-key'; renderProviders()");
@@ -643,9 +680,10 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
   const agentLayout = await window.webContents.executeJavaScript(`(() => {
     const list = document.querySelector('#agent-list'), main = document.querySelector('#main-agent-list');
+    const add = document.querySelector('#agent-new').getBoundingClientRect();
     const before = main.getBoundingClientRect().top; list.scrollTop = list.scrollHeight;
     return { scrolls: list.scrollHeight > list.clientHeight, room: list.clientHeight > 100, pinned: main.getBoundingClientRect().top === before,
-      controlsFit: document.querySelector('#agent-actions').getBoundingClientRect().bottom <= innerHeight };
+      controlsFit: add.top >= main.getBoundingClientRect().bottom && add.bottom <= list.getBoundingClientRect().top && add.bottom <= innerHeight };
   })()`);
   assert.deepEqual(agentLayout, { scrolls: true, room: true, pinned: true, controlsFit: true });
   controller.data.settings.fontScale = 100; window.setSize(1320, 900);

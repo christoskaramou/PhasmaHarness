@@ -230,6 +230,8 @@ class SmartRouter {
       return { decision, usage: result.usage || null };
     }
     if (abort.signal.aborted) throw Object.assign(new Error('Routing stopped.'), { name: 'AbortError' });
+    await this.providers?.prepare?.(choice, abort.signal);
+    abort.signal.throwIfAborted();
     const connection = this.connect(), client = connection.client;
     let finish, fail, usage = null, threadId, timer, onAbort, success = false, finished = false;
     const timing = { startupMs: 0, setupMs: 0, inferenceMs: 0, cleanupMs: 0 };

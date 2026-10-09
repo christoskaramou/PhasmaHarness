@@ -68,6 +68,7 @@ async function start() {
     worker.log = log; worker.trace = controller.trace;
     worker.smartRouter.benchmarks = controller.smartRouter.benchmarks;
     worker.providers = new Providers(path.join(app.getPath('userData'), 'provider-keys'), safeStorage, () => controller.data.settings.providers || [], (...args) => net.fetch(...args));
+    worker.providers.local = controller.providers.local;
     await worker.providers.start();
     worker.smartRouter.providers = worker.providers;
     worker.smartRouter.jev = new JevClient(jevKey, (...args) => net.fetch(...args), () => controller.data.settings.jevEnabled !== false);
@@ -270,6 +271,16 @@ async function start() {
     }
     if (id === 'codex') return controller.models.map(m => ({ id: m.model, label: m.model }));
     return (await controller.providers.models(id)).map(model => ({ id: model, label: model }));
+  });
+  handle('localModel', async (choice, action = 'status') => {
+    if (!['status', 'load', 'unload'].includes(action)) throw new Error('Unknown model action.');
+    if (!controller.catalog().some(p => p.provider === choice?.provider && p.model === choice?.model)) throw new Error('Choose an enabled model first.');
+    if (action !== 'status') {
+      if (agents.busy) throw new Error('Wait for all agents to finish before loading or unloading a model.');
+      if (action === 'load') await controller.providers.prepare(choice);
+      else await controller.providers.local.unload(choice);
+    }
+    return controller.providers.local.status(choice);
   });
 
   handle('jevSaveKey', value => {

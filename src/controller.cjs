@@ -50,6 +50,7 @@ class Controller extends EventEmitter {
     this.data.providerLimits ??= {};
     this.limits = new ProviderLimits(this.data.providerLimits);
     this.lastSends = new Map();
+    this.loadedModelConfigs = new Map();
     // Opt-in Jev comparison log (set by the app) and the comparison in flight, if any.
     this.jevCompare = null; this.jevComparing = null;
     // Local decision trace (set by the app; see src/trace.cjs), wiki reads taken before maintenance turns for the
@@ -455,6 +456,7 @@ class Controller extends EventEmitter {
       this.save();
     }
     session.activeProvider = choice.provider || 'codex';
+    this.loadedModelConfigs.set(session.id, JSON.stringify(providerConfig));
     this.loadedInstructions.set(session.id, workerInstructions);
     this.loaded.add(session.id);
   }
@@ -602,6 +604,14 @@ class Controller extends EventEmitter {
       if (refusal) throw new Error(refusal.blocked || 'Turn was stopped before sending.');
       projectInstructions(session.workspace, permissions.id !== 'read-only');
       if (isCLI(selected.provider)) return await this.sendCLI(session, selected, text, images, clientId, task);
+      if (this.providers?.prepare) {
+        const abort = new AbortController(); this.modelPreparation = abort;
+        try {
+          await this.providers.prepare(selected, abort.signal);
+          if (this.loadedModelConfigs.get(id) !== JSON.stringify(this.providers.config(selected))) this.loaded.delete(id);
+        } finally { if (this.modelPreparation === abort) this.modelPreparation = null; }
+        if (this.stopping.has(id)) throw new Error('Turn was stopped before sending.');
+      }
       await this.resume(session, selected);
       if (this.stopping.has(id)) throw new Error('Turn was stopped before sending.');
       if (!this.available(selected)) throw new Error(`${selected.label} is not available on your account. Choose another preset.`);
@@ -929,6 +939,7 @@ class Controller extends EventEmitter {
 
   async stop() {
     if (!this.busy) return;
+    this.modelPreparation?.abort();
     const session = this.session(this.busy);
     session.queuePaused = true;
     if (session.waitingForAgent) { this.stopping.add(session.id); this.changed(); return; }

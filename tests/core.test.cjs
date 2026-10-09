@@ -2016,6 +2016,33 @@ test('API providers: add, enable a discovered model, and remove the provider wit
   assert.throws(() => controller.providerSettings({ action: 'removeProvider', id: 'lm-studio' }), /Unknown provider/);
 });
 
+test('local context preparation refreshes existing thread configuration and Stop prevents sending', async t => {
+  const { controller, fake } = await setup(t);
+  let context = 8192, prepare;
+  controller.providers = {
+    configured: () => false,
+    config: () => ({ modelProvider: 'phasma_local', config: { model_context_window: context } }),
+    prepare: async (_choice, signal) => { if (prepare) await prepare(signal); context = 32768; },
+  };
+  controller.providerSettings({ action: 'provider', provider: { id: 'local', name: 'Local', baseUrl: 'http://localhost:1234/v1' } });
+  controller.providerSettings({ action: 'enableDiscovered', provider: 'local', model: 'gemma' });
+  const mode = 'local:gemma:default', session = controller.create();
+  await controller.resume(session, controller.resolveWorker(mode));
+  assert.equal(fake.calls.find(c => c.method === 'thread/start').params.config.model_context_window, 8192);
+  await controller.send({ id: session.id, text: 'hello', mode, task: 'off' });
+  assert.equal(fake.calls.findLast(c => c.method === 'thread/resume').params.config.model_context_window, 32768);
+  complete(controller, session, session.turnId);
+  await flush();
+  const sends = fake.calls.filter(c => c.method === 'turn/start').length;
+  let started;
+  const waiting = new Promise(resolve => { started = resolve; });
+  prepare = signal => new Promise((_resolve, reject) => { signal.addEventListener('abort', () => reject(signal.reason), { once: true }); started(); });
+  const pending = controller.send({ id: session.id, text: 'stop this', mode, task: 'off' });
+  await waiting; await controller.stop();
+  await pending.catch(() => {});
+  assert.equal(fake.calls.filter(c => c.method === 'turn/start').length, sends);
+});
+
 test('diagnostics list versions, provider state and limits without emails, keys or chat content', async t => {
   const { buildDiagnostics } = require('../src/diagnostics.cjs');
   const { controller } = await setup(t);

@@ -81,7 +81,55 @@ function showMode(id) {
   }
   effort.value = variants.find(p => p.id === id)?.effort || values[0] || '';
   effort.hidden = variants.length < 2;
+  refreshLocalModel();
 }
+
+let localModelKey = '', localModelState = null, localModelChecked = 0, localModelPending = false, localModelAction = false;
+function localModelChoice() {
+  const choice = state?.presets.find(p => p.id === currentMode()) || (currentMode() === 'auto' ? current()?.routes?.findLast(p => !p.directAnswer) : null);
+  return choice && state.settings.providers?.some(p => p.id === choice.provider && p.enabled !== false) ? { provider: choice.provider, model: choice.model } : null;
+}
+function renderLocalModel() {
+  const controls = $('#local-model-controls'), button = $('#local-model-toggle'), unload = $('#local-model-unload');
+  controls.hidden = !localModelKey || (!localModelPending && !localModelAction && !localModelState?.supported && !localModelState?.error);
+  const loaded = localModelState?.loaded;
+  button.textContent = localModelAction ? 'Working…' : localModelState?.error ? 'Retry status' : localModelPending && !localModelState ? 'Checking…' : loaded ? '● Loaded' : '○ Load';
+  button.classList.toggle('loaded', !!loaded);
+  button.title = localModelState?.error || (loaded ? `Loaded${localModelState.contextLength ? ` · ${localModelState.contextLength.toLocaleString()} context` : ''}${localModelState.canResize === false ? ' · Context is set on the server' : ''}` : 'Load this model. Sending a message also loads it automatically.');
+  button.setAttribute('aria-label', loaded ? button.title : button.textContent);
+  button.disabled = localModelAction || localModelPending || !!loaded || !!(state?.anyAgentBusy || state?.busy || localModelState?.busy);
+  unload.hidden = !loaded;
+  unload.disabled = localModelAction || !!(state?.anyAgentBusy || state?.busy || localModelState?.busy);
+  unload.title = 'Unload this model from memory. Downloaded files stay on disk.';
+}
+async function refreshLocalModel(force = false) {
+  if (!api.localModel) return;
+  const choice = localModelChoice(), key = choice ? JSON.stringify(choice) : '';
+  if (key !== localModelKey) { localModelKey = key; localModelState = null; localModelChecked = 0; localModelPending = false; localModelAction = false; }
+  renderLocalModel();
+  if (!key || localModelPending || localModelAction || (!force && Date.now() - localModelChecked < 10000)) return;
+  localModelPending = true; renderLocalModel();
+  try {
+    const result = await api.localModel(choice, 'status');
+    if (key === localModelKey) localModelState = result;
+  } catch (error) { if (key === localModelKey) localModelState = { error: error.message }; }
+  finally { if (key === localModelKey) { localModelPending = false; localModelChecked = Date.now(); renderLocalModel(); } }
+}
+async function changeLocalModel(action) {
+  const choice = localModelChoice(), key = localModelKey;
+  if (!choice || localModelAction) return;
+  if (localModelState?.error) return refreshLocalModel(true);
+  localModelAction = true; renderLocalModel();
+  try {
+    const result = await api.localModel(choice, action);
+    if (key === localModelKey) localModelState = result;
+  } catch (error) { notify(error); }
+  finally { if (key === localModelKey) { localModelAction = false; localModelChecked = 0; refreshLocalModel(true); } }
+}
+$('#local-model-toggle').onclick = () => changeLocalModel('load');
+$('#local-model-unload').onclick = () => changeLocalModel('unload');
+setInterval(() => { if (!document.hidden) refreshLocalModel(); }, 10000);
+window.addEventListener('focus', () => refreshLocalModel(true));
 
 // Effort cap for Auto (next to Auto in the composer, and Settings → Routing): Smart and Jev routing only choose efforts up
 // to it. Max means no cap and is marked with a warning, since it is the slowest and most expensive level.
@@ -223,14 +271,6 @@ function limitLine(provider) {
   return shown.length ? shown.join(' · ') : null;
 }
 
-function connectedProviders() {
-  if (!state) return [];
-  const rows = [];
-  if (state.account) rows.push('ChatGPT');
-  if (claudeInUse()) rows.push('Claude');
-  if (cursorInUse()) rows.push('Cursor');
-  return rows;
-}
 marked.use({ extensions: [{
   name: 'equation', level: 'inline',
   start: src => src.search(/\\\[|\\\(|\$\$/),
@@ -369,7 +409,6 @@ function editAgent(profile) {
   $('#agent-error').textContent = ''; dialog.showModal(); $('#agent-name').focus();
 }
 $('#agent-new').onclick = () => editAgent();
-$('#agent-edit').onclick = () => editAgent(state.agents.find(a => a.id === selectedAgent));
 $('#agent-browse').onclick = async () => { try { const folder = await api.chooseWorkspace(); if (folder) $('#agent-workspace').value = folder; } catch (error) { $('#agent-error').textContent = error.message; } };
 $('#agent-form').onsubmit = async event => {
   event.preventDefault(); $('#agent-save').disabled = true; $('#agent-save').textContent = 'Saving…';
@@ -471,9 +510,6 @@ function renderAgents() {
       accessLabel: worker.accessModes.find(a => a.id === (conversation?.access || worker.settings.access))?.label,
       error: !['ready', 'connecting'].includes(worker.connection) ? worker.error : null };
   });
-  $('#agent-edit').disabled = selectedAgent === 'main' || !!state.busy || rows.find(a => a.id === selectedAgent)?.queued;
-  $('#agent-actions').hidden = selectedAgent === 'main';
-  $('#agent-edit').hidden = selectedAgent === 'main';
   const active = agents.filter(a => a.busy).length;
   $('#agent-roster-label').textContent = `YOUR AGENTS · ${agents.length - 1}`;
   $('#agents-summary').textContent = `${agents.length} agents · ${active} working · Up to 3 simultaneous tasks`;
@@ -700,12 +736,6 @@ function render() {
   const session = current();
   renderAgents();
   const ready = state.connection === 'ready';
-  const providers = connectedProviders();
-  const connecting = state.connection === 'connecting';
-  $('#connection-dot').className = `dot ${providers.length || ready ? 'ready' : ''}`;
-  $('#connection-label').textContent = connecting && !providers.length
-    ? 'Connecting…'
-    : `Connected Providers: ${providers.length}`;
   $('#session-title').textContent = state.agents?.find(a => a.id === selectedAgent)?.name || 'Main';
   $('#session-path').textContent = session?.workspace || state.settings.workspace;
   const compactable = session?.activeProvider === 'claude-cli' ? !!session.claudeSessionId : session?.activeProvider !== 'cursor-cli' && !!session?.threadId;
