@@ -908,3 +908,32 @@ test('a result waits while its source agent works in another conversation', asyn
   assert.equal(source.agentReplyActive, true);
   complete(primary, source);
 });
+
+test('Jev plug state persists, keeps preferences and keys, and stops calls across agents', async t => {
+  const { agents, primary, add } = await setup(t);
+  const child = await add('Jev worker');
+  const { JevClient } = require('../src/providers/jev.cjs');
+  let reads = 0, requests = 0;
+  const key = { configured: true, read() { reads++; return 'test-key'; } };
+  for (const c of [primary, child]) c.smartRouter.jev = new JevClient(key, async () => { requests++; throw new Error('stub transport'); }, () => primary.data.settings.jevEnabled !== false);
+  Object.assign(primary.data.settings, { routing: 'jev', contextRanking: 'jev', toolSelection: 'jev', jevCompare: true, wikiAssessment: true });
+  assert.throws(() => agents.settings({ jevEnabled: 'false' }), /Invalid Jev enabled/);
+  agents.settings({ jevEnabled: false }, child.agentId);
+  assert.equal(JSON.parse(fs.readFileSync(primary.filename, 'utf8')).settings.jevEnabled, false);
+  assert.equal(primary.snapshot().jev.keySaved, true);
+  assert.equal(primary.snapshot().jev.configured, false);
+  assert.equal(primary.routingProvider, 'smart');
+  assert.equal(child.routingProvider, 'smart');
+  for (const c of [primary, child]) await assert.rejects(c.smartRouter.jev.test(), /Jev is disabled/);
+  assert.equal(reads, 0); assert.equal(requests, 0);
+  assert.equal(key.configured, true);
+  child.busy = 'working';
+  assert.throws(() => agents.settings({ jevEnabled: true }), /Stop all agents/);
+  child.busy = null;
+  agents.settings({ jevEnabled: true });
+  assert.equal(primary.routingProvider, 'jev');
+  assert.equal(child.smartRouter.jev.configured, true);
+  assert.deepEqual(['contextRanking', 'toolSelection', 'jevCompare', 'wikiAssessment'].map(k => primary.data.settings[k]), ['jev', 'jev', true, true]);
+  await assert.rejects(child.smartRouter.jev.test(), /transport error/);
+  assert.equal(reads, 1); assert.equal(requests, 1);
+});

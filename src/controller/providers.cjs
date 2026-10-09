@@ -235,7 +235,7 @@ module.exports = {
   },
 
   warmRouter() {
-    if (this.data.settings.routing === 'jev' || this.connection !== 'ready' || !this.smartRouter.warm || this.planPreset()) return;
+    if (this.routingProvider === 'jev' || this.connection !== 'ready' || !this.smartRouter.warm || this.planPreset()) return;
     const choice = this.routerChoices().find(p => p.id === this.data.settings.routerPreset && this.available(p));
     if (choice) this.smartRouter.warm(choice);
   },
@@ -371,7 +371,7 @@ module.exports = {
       const p = validateProvider(value.provider);
       const old = this.data.settings.providers?.find(v => v.id === p.id);
       if (old && old.baseUrl !== p.baseUrl) this.providers?.key(p.id).remove();
-      this.data.settings.providers = [...(this.data.settings.providers || []).filter(v => v.id !== p.id), p];
+      this.data.settings.providers = old ? this.data.settings.providers.map(v => v.id === p.id ? p : v) : [...(this.data.settings.providers || []), p];
     } else if (value.action === 'removeProvider') {
       const provider = (this.data.settings.providers || []).find(p => p.id === value.id);
       if (!provider) throw new Error('Unknown provider.');

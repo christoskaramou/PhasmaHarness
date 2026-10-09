@@ -36,6 +36,7 @@ function claudeDetail(account) {
 const claudeInUse = () => !!state?.claude?.loggedIn && state.claude.enabled !== false;
 const cursorInUse = () => !!state?.cursor?.loggedIn && state.cursor.enabled !== false;
 const KEPT_SIGNED_IN = 'disconnected';
+const PROVIDER_PLUG_ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a6 6 0 0 1-12 0V8z"/></svg>';
 
 // Manual selection: pick a model, then one of the efforts it supports. A worker ID is claude-cli:<model>:<effort>,
 // codex:<model>:<effort>, …; variants of one model share provider + model.
@@ -114,25 +115,48 @@ const clock = ms => new Date(ms).toLocaleString([], { weekday: 'short', hour: '2
 // API providers: add (name, base URL, optional key), enable/disable, replace or clear the key, remove.
 function renderApiProviders() {
   const list = $('#api-provider-list');
+  const previous = new Map([...list.children].map(row => [row.dataset.providerId, { open: row.open, key: row.querySelector('input[type=password]').value }]));
   list.replaceChildren(...(state.providers || []).map(p => {
-    const row = element('div', 'api-provider-row');
-    const toggle = document.createElement('input'); toggle.type = 'checkbox'; toggle.checked = p.enabled !== false; toggle.disabled = !!state.busy;
-    toggle.setAttribute('aria-label', `Use ${p.name}`);
-    toggle.onchange = () => apiProviderAction(() => api.providerSettings({ action: 'provider', provider: { id: p.id, name: p.name, baseUrl: p.baseUrl, enabled: toggle.checked } }));
-    // Electron has no prompt(): a key is typed into an inline password field.
-    const keyInput = document.createElement('input'); keyInput.type = 'password'; keyInput.placeholder = 'API key'; keyInput.autocomplete = 'off';
-    keyInput.hidden = !!p.configured; keyInput.setAttribute('aria-label', `API key for ${p.name}`);
-    const key = element('button', '', p.configured ? 'Clear key' : 'Save key');
+    const saved = previous.get(p.id), busy = !!(state.anyAgentBusy || state.busy);
+    const row = element('details', 'api-provider-row provider-settings');
+    row.dataset.providerId = p.id;
+    row.open = saved?.open || false;
+    const summary = element('summary', 'provider-account-row');
+    summary.title = `Manage ${p.name}`;
+    const plug = element('button', `provider-plug ${p.enabled ? 'connected' : 'disconnected'}`);
+    plug.type = 'button'; plug.disabled = busy;
+    plug.title = `${p.enabled ? 'Disable' : 'Enable'} ${p.name}`;
+    plug.setAttribute('aria-label', plug.title);
+    plug.setAttribute('aria-pressed', String(!!p.enabled));
+    plug.innerHTML = PROVIDER_PLUG_ICON;
+    plug.onclick = event => {
+      event.preventDefault(); event.stopPropagation(); plug.disabled = true;
+      apiProviderAction(() => api.providerSettings({ action: 'provider', provider: { id: p.id, name: p.name, baseUrl: p.baseUrl, enabled: !p.enabled } })).finally(() => { plug.disabled = busy; });
+    };
+    const text = element('span', 'provider-account-text');
+    text.append(element('strong', '', p.name), document.createTextNode(` · ${!p.enabled ? 'Disabled' : state.codex?.connected ? 'Enabled' : 'Needs Codex'}`));
+    summary.append(plug, text);
+    const options = element('div', 'provider-options');
+    const endpoint = element('p', 'provider-endpoint', p.baseUrl);
+    const keyLabel = element('label', '', p.configured ? 'API key saved' : 'API key (optional)');
+    const keyInput = document.createElement('input'); keyInput.type = 'password'; keyInput.placeholder = 'Paste a key'; keyInput.autocomplete = 'off';
+    keyInput.value = p.configured ? '' : saved?.key || '';
+    keyInput.hidden = !!p.configured; keyInput.disabled = busy; keyInput.setAttribute('aria-label', `API key for ${p.name}`);
+    keyLabel.append(keyInput);
+    const key = element('button', '', p.configured ? 'Clear key' : 'Save key'); key.type = 'button'; key.disabled = busy;
     key.onclick = () => {
       if (p.configured) return apiProviderAction(() => api.providerKey(p.id, null));
       if (keyInput.value) apiProviderAction(() => api.providerKey(p.id, keyInput.value));
     };
-    const remove = element('button', '', 'Remove');
+    const remove = element('button', 'provider-remove', 'Remove'); remove.type = 'button'; remove.disabled = busy;
     remove.onclick = async () => {
       if (await confirmAction({ title: `Remove ${p.name}?`, message: 'This removes the provider, its saved API key and its models from Harness.', confirmLabel: 'Remove provider', danger: true }))
         apiProviderAction(() => api.providerSettings({ action: 'removeProvider', id: p.id }));
     };
-    row.append(toggle, element('span', '', `${p.name} · ${p.baseUrl}${p.configured ? ' · key saved' : ''}${state.codex?.connected ? '' : ' · needs Codex'}`), keyInput, key, remove);
+    const actions = element('div', 'jev-actions');
+    actions.append(key, remove);
+    options.append(endpoint, keyLabel, actions);
+    row.append(summary, options);
     return row;
   }));
 }
@@ -153,6 +177,7 @@ $('#api-add').onclick = () => {
     let next = await api.providerSettings({ action: 'provider', provider: { id, name, baseUrl, enabled: true } });
     if (key) next = await api.providerKey(id, key);
     $('#api-name').value = ''; $('#api-url').value = ''; $('#api-key').value = '';
+    $('#api-providers').open = false;
     return next;
   });
 };
@@ -697,16 +722,24 @@ function render() {
   $('#permissions').classList.toggle('full-access', permission.id === 'danger-full-access');
   $('#permissions-detail').textContent = permission.description;
   $('#browse-session').disabled = !selectedId;
-  $('#quick-routing').value = state.settings.routing;
+  $('#quick-routing').value = state.routingProvider || state.settings.routing;
   $('#quick-routing').disabled = !!state.planRouting;
-  $('#quick-routing').title = state.planRouting ? state.planRouting.reason : state.jev.configured ? 'Choose Smart or Jev routing' : 'Choose routing. Add a Jev key in Settings to enable Jev.';
+  $('#quick-routing').title = state.planRouting ? state.planRouting.reason : state.jev.configured ? 'Choose Smart or Jev routing' : 'Enable Jev with a saved API key in Providers to use Jev routing.';
   $('#quick-routing option[value="jev"]').disabled = !state.jev.configured;
-  $('#jev-status').textContent = state.jev.configured ? 'Key saved' : 'No key saved';
-  $('#jev-health').textContent = jevHealth();
+  const jevIssue = jevHealth();
+  const jevKeySaved = state.jev.keySaved ?? state.jev.configured;
+  const jevBusy = !!(state.anyAgentBusy || state.busy || testingJev);
+  $('#jev-status').textContent = testingJev ? 'Testing…' : state.jev.enabled === false ? 'Disabled' : jevIssue ? 'Unavailable' : state.jev.configured ? 'Key saved' : 'No key saved';
+  $('#jev-plug').className = `provider-plug ${jevIssue ? 'unavailable' : state.jev.configured ? 'connected' : 'disconnected'}`;
+  $('#jev-plug').disabled = jevBusy;
+  $('#jev-plug').title = !jevKeySaved ? 'Add Jev API key' : state.jev.enabled === false ? 'Enable Jev' : 'Disable Jev';
+  $('#jev-plug').setAttribute('aria-label', $('#jev-plug').title);
+  $('#jev-plug').setAttribute('aria-pressed', String(!!state.jev.configured));
+  $('#jev-health').textContent = jevIssue;
   $('#settings-routing').onchange();
-  $('#jev-test').disabled = !state.jev.configured || !!state.busy || testingJev;
-  $('#jev-remove').disabled = !state.jev.configured || !!state.busy || testingJev;
-  $('#jev-save').disabled = !!state.busy || testingJev;
+  $('#jev-test').disabled = !state.jev.configured || jevBusy;
+  $('#jev-remove').disabled = !jevKeySaved || jevBusy;
+  $('#jev-save').disabled = jevBusy;
   clearTimeout(noticeTimer);
   const sticky = state.error || (state.busy && state.busy !== selectedId ? 'Another session is working. You can browse here while it finishes.' : '');
   const noticeExpiresAt = session?.noticeExpiresAt ?? (session?.notice?.startsWith('Context compacted.') ? 0 : Infinity);
@@ -1364,10 +1397,13 @@ async function changeAccess(access) {
 $('#permissions').onchange = () => changeAccess($('#permissions').value).catch(notify);
 $('#stop').onclick = () => api.stop().catch(notify);
 $('#settings-browse').onclick = async () => {
+  const agentId = selectedAgent;
   try {
     const folder = await api.chooseWorkspace();
     if (!folder) return;
+    if (agentId !== selectedAgent) return;
     $('#settings-workspace').value = folder;
+    await saveSetting($('#settings-workspace'), 'workspace', folder, agentId);
   } catch (error) { notify(error); }
 };
 function renderRoutingModels(selected = $('#settings-router-preset').value || state.settings.routerPreset) {
@@ -1403,8 +1439,10 @@ $('#settings').onclick = async () => {
   $('#settings-routing').onchange();
   $('#jev-key').value = '';
   $('#jev-result').textContent = '';
+  $('#jev-provider').open = false;
   renderProviders();
-  renderChecks(); // saved checks, not leftovers from an earlier unsaved edit
+  renderChecks();
+  $('#settings-save-status').textContent = '';
   showAbout();
   $('#settings-dialog').showModal();
 };
@@ -1573,14 +1611,22 @@ $('#settings-routing').onchange = () => {
   renderWikiCheck();
   const provider = $('#settings-routing').value;
   $('#settings-router-preset').disabled = provider !== 'smart' || !!state.planRouting;
-  $('#router-detail').textContent = state.planRouting ? state.planRouting.reason + ' This overrides the saved routing preference.' : provider === 'jev' && !state.jev.configured ? 'Save your Jev API key below to enable this routing option, then save settings.'
+  $('#router-detail').textContent = state.planRouting ? state.planRouting.reason + ' This overrides the saved routing preference.' : provider === 'jev' && state.jev.enabled === false ? 'Jev is disabled in Providers. Auto uses Smart until you enable Jev again.' : provider === 'jev' && !state.jev.configured ? 'Save your Jev API key in Providers to enable this routing option.'
 
     : provider === 'jev' ? 'Jev picks the model and effort for each Auto prompt.'
     : 'The routing model picks the model and effort for each Auto prompt.';
 };
+$('#jev-plug').onclick = async event => {
+  event.preventDefault(); event.stopPropagation();
+  if (!(state.jev.keySaved ?? state.jev.configured)) { $('#jev-provider').open = true; $('#jev-key').focus(); return; }
+  $('#jev-plug').disabled = true;
+  try { applyState(await api.settings({ jevEnabled: state.jev.enabled === false })); $('#jev-result').textContent = ''; }
+  catch (error) { notify(error); }
+  finally { render(); }
+};
 $('#jev-save').onclick = async () => {
   const key = $('#jev-key').value; $('#jev-key').value = '';
-  try { applyState(await api.jevSaveKey(key)); renderJevCompare(); renderWikiCheck(); $('#jev-result').textContent = 'Key saved. Test the connection, then select Jev above and save settings.'; }
+  try { applyState(await api.jevSaveKey(key)); renderJevCompare(); renderWikiCheck(); $('#jev-result').textContent = state.jev.enabled === false ? 'Key saved. Use the plug to enable Jev.' : 'Key saved. Test the connection, then select Jev under General → Router.'; }
   catch (error) { notify(error); }
 };
 $('#jev-test').onclick = async () => {
@@ -1596,12 +1642,61 @@ $('#jev-remove').onclick = async () => {
   try { applyState(await api.jevRemoveKey()); $('#settings-routing').value = state.settings.routing; $('#settings-context').value = state.settings.contextRanking || 'local'; $('#settings-tools').value = state.settings.toolSelection || 'off'; $('#settings-jev-compare').value = 'off'; $('#settings-wiki-check').value = 'off'; $('#settings-routing').onchange(); $('#jev-result').textContent = 'Saved key removed.'; }
   catch (error) { notify(error); }
 };
-$('#settings-form').onsubmit = async event => {
-  event.preventDefault();
-  // Unsaved check edits (e.g. a removed check) are saved too; a failure keeps the dialog open.
-  if (checksDirty) { try { await saveChecks(); } catch (error) { $('#tab-checks')?.click(); notify(error); return; } }
-  try { applyState(await api.settings({ jevQuickAnswers: $('#settings-quick').value === 'on', routerPreset: $('#settings-router-preset').value || undefined, workspace: $('#settings-workspace').value, fontScale: Number($('#settings-font').value), access: $('#settings-access').value, routing: $('#settings-routing').value, contextRanking: $('#settings-context').value, toolSelection: $('#settings-tools').value, jevCompare: $('#settings-jev-compare').value === 'on', wikiAssessment: $('#settings-wiki-check').value === 'on', effortCap: $('#settings-effort-cap').value })); updatePreview(); $('#settings-dialog').close(); } catch (error) { notify(error); }
+let settingsWrites = Promise.resolve();
+function queueSettingsWrite(write) {
+  settingsWrites = settingsWrites.catch(() => {}).then(write);
+  return settingsWrites;
+}
+async function saveSetting(control, key, value, agentId = selectedAgent) {
+  control.disabled = true;
+  $('#settings-save-status').textContent = 'Saving…';
+  try {
+    if (key === 'workspace' && checksDirty) await saveChecks();
+    applyState(await queueSettingsWrite(() => window.router.settings({ [key]: value }, agentId)));
+    if (agentId === selectedAgent) control.value = typeof value === 'boolean' ? (value ? 'on' : 'off') : String(value);
+    updatePreview();
+    if (key === 'workspace' && agentId === selectedAgent) renderChecks();
+    $('#settings-save-status').textContent = 'Saved';
+  } catch (error) {
+    if (agentId === selectedAgent) {
+      const saved = ((key === 'workspace' || key === 'access') ? current()?.[key] ?? state.settings[key] : state.settings[key])
+        ?? { fontScale: 100, effortCap: 'high', contextRanking: 'local', toolSelection: 'off', jevQuickAnswers: true, jevCompare: false, wikiAssessment: false }[key];
+      control.value = typeof value === 'boolean' ? (saved ? 'on' : 'off') : String(saved ?? '');
+      control.onchange?.();
+    }
+    $('#settings-save-status').textContent = 'Change could not be saved.';
+    notify(error);
+  } finally {
+    control.disabled = false;
+    $('#settings-routing').onchange();
+  }
+}
+const settingsFields = {
+  'settings-font': 'fontScale', 'settings-access': 'access', 'settings-routing': 'routing',
+  'settings-router-preset': 'routerPreset', 'settings-effort-cap': 'effortCap',
+  'settings-context': 'contextRanking', 'settings-tools': 'toolSelection',
+  'settings-quick': 'jevQuickAnswers', 'settings-jev-compare': 'jevCompare', 'settings-wiki-check': 'wikiAssessment',
 };
+$('#settings-form').addEventListener('change', event => {
+  const control = event.target, key = settingsFields[control.id];
+  if (!key) return;
+  const value = key === 'fontScale' ? Number(control.value)
+    : ['jevQuickAnswers', 'jevCompare', 'wikiAssessment'].includes(key) ? control.value === 'on' : control.value;
+  saveSetting(control, key, value);
+});
+$('#settings-form').onsubmit = event => event.preventDefault();
+async function closeSettings() {
+  try {
+    await settingsWrites.catch(() => {});
+    if (checksDirty) await saveChecks();
+    $('#settings-dialog').close();
+  } catch (error) {
+    $('#tab-checks').click();
+    notify(error);
+  }
+}
+$('#settings-close').onclick = closeSettings;
+$('#settings-dialog').addEventListener('cancel', event => { event.preventDefault(); closeSettings(); });
 $('#context-meter').onclick = () => runCommand('compact');
 $('#context-search').onclick = () => {
   contextVersion++;
@@ -1658,7 +1753,10 @@ $('#delete-form').onsubmit = async event => {
   finally { deletingAgent = false; $('#delete-confirm').disabled = false; render(); }
 };
 $('#delete-dialog').addEventListener('close', () => window.getSelection()?.removeAllRanges());
-document.querySelectorAll('.close-dialog').forEach(button => { button.onclick = () => button.closest('dialog').close(); });
+document.querySelectorAll('.close-dialog').forEach(button => { button.onclick = () => {
+  const dialog = button.closest('dialog');
+  if (dialog.id === 'settings-dialog') closeSettings(); else dialog.close();
+}; });
 $('#request-dialog').addEventListener('cancel', event => event.preventDefault());
 document.querySelectorAll('[data-prompt]').forEach(button => { button.onclick = () => { $('#prompt').value = button.dataset.prompt; $('#prompt').focus(); updatePreview(); }; });
 document.addEventListener('click', event => {
@@ -1694,7 +1792,7 @@ function renderProviders() {
     plug.disabled = !!(state.anyAgentBusy || state.busy) || installed === false;
     plug.title = connected ? 'Connected — click to disconnect' : 'Not connected — click to connect';
     plug.setAttribute('aria-label', connected ? `Disconnect ${label}` : `Connect ${label}`);
-    plug.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a6 6 0 0 1-12 0V8z"/></svg>';
+    plug.innerHTML = PROVIDER_PLUG_ICON;
     plug.onclick = async () => {
       $('#provider-status').textContent = connected ? `Disconnecting ${label}…` : `Connecting ${label}…`;
       try {
@@ -1996,7 +2094,7 @@ function checkRow(check = {}) {
   const remove = document.createElement('button');
   remove.type = 'button';
   remove.textContent = 'Remove';
-  remove.onclick = () => { row.remove(); checksDirty = true; };
+  remove.onclick = () => { row.remove(); markChecksDirty(); saveChecks().catch(() => {}); };
   const field = (text, input, className) => {
     const label = document.createElement('label');
     label.className = className;
@@ -2009,23 +2107,28 @@ function checkRow(check = {}) {
   return row;
 }
 
-// Edits on the Checks tab (add, remove, change) are saved with the rest of Settings by the dialog's Save button.
-let checksDirty = false;
-$('#checks-list').addEventListener('input', () => { checksDirty = true; });
-$('#checks-list').addEventListener('change', () => { checksDirty = true; });
+let checksDirty = false, checksRevision = 0, checksWorkspace = null;
+function markChecksDirty() { checksDirty = true; checksRevision++; }
+$('#checks-list').addEventListener('input', markChecksDirty);
+$('#checks-list').addEventListener('change', () => { markChecksDirty(); saveChecks().catch(() => {}); });
 function renderChecks() {
+  if (checksDirty) return;
   const workspace = current()?.workspace || state.settings.workspace;
   const checks = state.settings.checks?.[workspace] || [];
   const list = $('#checks-list');
   list.replaceChildren(...checks.map(checkRow));
-  checksDirty = false;
+  checksWorkspace = workspace;
   $('#checks-workspace').textContent = workspace || 'No workspace selected';
   $('#checks-status').textContent = '';
 }
 
-$('#checks-add').onclick = () => { $('#checks-list').append(checkRow()); checksDirty = true; };
+$('#checks-add').onclick = () => {
+  const row = checkRow(); $('#checks-list').append(row); markChecksDirty();
+  $('#checks-status').textContent = 'Enter a name and command. Changes save when you leave a field.';
+  row.querySelector('.check-name').focus();
+};
 async function saveChecks() {
-  const workspace = current()?.workspace || state.settings.workspace;
+  const workspace = checksWorkspace, revision = checksRevision;
   const list = [...$('#checks-list').children].map(row => ({
     name: row.querySelector('.check-name').value.trim(),
     argv: splitCommand(row.querySelector('.check-command').value),
@@ -2033,7 +2136,13 @@ async function saveChecks() {
     timeoutMs: Number(row.querySelector('.check-timeout').value) * 1000,
     readOnlySafe: row.querySelector('.check-readonly').checked,
   }));
-  await api.checks(workspace, list);
-  state.settings.checks = { ...(state.settings.checks || {}), [workspace]: list };
-  checksDirty = false;
+  $('#checks-status').textContent = 'Saving…';
+  try {
+    const saved = await queueSettingsWrite(() => api.checks(workspace, list));
+    state.settings.checks = { ...(state.settings.checks || {}), [workspace]: saved };
+    if (checksRevision === revision) { checksDirty = false; $('#checks-status').textContent = 'Saved'; }
+  } catch (error) {
+    $('#checks-status').textContent = 'Not saved: ' + String(error.message || error).replace(/^Error invoking remote method '[^']+': Error: /, '');
+    throw error;
+  }
 }

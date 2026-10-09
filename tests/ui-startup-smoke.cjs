@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { Controller } = require('../src/controller.cjs');
+const { JevClient } = require('../src/providers/jev.cjs');
 const { confirmations } = require('../src/confirmations.cjs');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-ui-'));
 app.setPath('userData', root);
@@ -28,8 +29,11 @@ app.whenReady().then(async () => {
   const savedChecks = [];
   ipcMain.handle('checks', (_event, workspace, list) => { savedChecks.push(list); return controller.checks(workspace, list); });
   ipcMain.handle('settings', (_event, values) => controller.settings(values));
+  let chosenWorkspace = root;
+  ipcMain.handle('chooseWorkspace', () => chosenWorkspace);
   ipcMain.handle('providerSettings', (_event, value) => controller.providerSettings(value));
-  ipcMain.handle('providerKey', () => controller.snapshot());
+  const providerKeys = new Map();
+  ipcMain.handle('providerKey', (_event, id, key) => { if (key) providerKeys.set(id, key); else providerKeys.delete(id); return controller.snapshot(); });
   ipcMain.handle('appInfo', () => ({ version: '0.1.0', packaged: true }));
   let updateResult = { current: '0.1.0', latest: '0.2.0', newer: true, url: 'https://github.com/x/y/releases/tag/v0.2.0', installer: 'Phasma-Harness-Setup-0.2.0.exe' };
   ipcMain.handle('checkUpdates', () => { if (updateResult instanceof Error) throw updateResult; return updateResult; });
@@ -214,7 +218,7 @@ app.whenReady().then(async () => {
   controller.limits.clear('claude-cli', 'opus'); controller.account = null; controller.data.settings.claudeEnabled = false;
   console.log('Provider usage and limits are shown passed');
   // Adding an API provider from Settings.
-  controller.providers = { configured: () => false, key: () => ({ remove() {} }) };
+  controller.providers = { configured: id => providerKeys.has(id), key: id => ({ remove() { providerKeys.delete(id); } }) };
   controller.codex = { installed: true, connected: true };
   await window.webContents.executeJavaScript(`(async () => {
     document.querySelector('#api-name').value = 'LM Studio';
@@ -223,12 +227,42 @@ app.whenReady().then(async () => {
     await new Promise(r => setTimeout(r, 300));
   })()`);
   assert.deepEqual(controller.data.settings.providers.map(p => [p.id, p.name, p.baseUrl]), [['lm-studio', 'LM Studio', 'http://localhost:1234/v1']]);
-  const apiRows = await window.webContents.executeJavaScript("[...document.querySelectorAll('.api-provider-row span')].map(e => e.textContent)");
-  assert.deepEqual(apiRows, ['LM Studio · http://localhost:1234/v1']);
+  const apiRow = await window.webContents.executeJavaScript(`(() => {
+    const row = document.querySelector('.api-provider-row');
+    return { text: row.querySelector('.provider-account-text').textContent, endpoint: row.querySelector('.provider-endpoint').textContent,
+      grouped: !!row.closest('.provider-accounts'), outsideAdd: !row.closest('#api-providers'), collapsed: !row.open };
+  })()`);
+  assert.deepEqual(apiRow, { text: 'LM Studio · Enabled', endpoint: 'http://localhost:1234/v1', grouped: true, outsideAdd: true, collapsed: true });
   const groups = await window.webContents.executeJavaScript("[...document.querySelectorAll('#provider-model-list .provider-model-group')].map(e => e.textContent)");
   assert.ok(groups.includes('LM Studio'), JSON.stringify(groups));
+  const providerAction = code => window.webContents.executeJavaScript(`(async () => { ${code}; await new Promise(r => setTimeout(r, 50)); })()`);
+  controller.providerSettings({ action: 'provider', provider: { id: 'other', name: 'Other', baseUrl: 'https://example.com/v1', enabled: false } });
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderProviders(); true');
+  await providerAction("document.querySelector('.api-provider-row summary').click(); document.querySelector('.api-provider-row input[type=password]').value = 'test-provider-key'; renderProviders()");
+  assert.deepEqual(await window.webContents.executeJavaScript("[document.querySelector('.api-provider-row').open, document.querySelector('.api-provider-row input[type=password]').value]"), [true, 'test-provider-key'], 'expanded provider and key draft survive model refresh');
+  await providerAction("document.querySelector('.api-provider-row').open = false; document.querySelector('.api-provider-row .provider-plug').click()");
+  assert.equal(controller.data.settings.providers[0].enabled, false);
+  assert.deepEqual(controller.data.settings.providers.map(p => p.id), ['lm-studio', 'other'], 'toggling does not move another provider under the pointer');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('.api-provider-row .provider-account-text').textContent"), 'LM Studio · Disabled');
+  assert.deepEqual(await window.webContents.executeJavaScript("[document.querySelector('.api-provider-row').open, document.querySelector('.api-provider-row .provider-plug').getAttribute('aria-pressed')]"), [false, 'false'], 'plug toggles without expanding settings');
+  await providerAction("document.querySelector('.api-provider-row .provider-plug').click()");
+  assert.equal(controller.data.settings.providers[0].enabled, true);
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('.api-provider-row').open"), false);
+  await providerAction("document.querySelector('.api-provider-row summary').click()");
+  await providerAction("document.querySelector('.api-provider-row .jev-actions button').click()");
+  assert.equal(providerKeys.get('lm-studio'), 'test-provider-key');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('.api-provider-row input[type=password]').hidden"), true);
+  await providerAction("document.querySelector('.api-provider-row .jev-actions button').click()");
+  assert.equal(providerKeys.has('lm-studio'), false);
+  await providerAction("document.querySelector('.api-provider-row .provider-remove').click()");
+  await providerAction("document.querySelector('.confirmation-cancel').click()");
+  assert.equal(controller.data.settings.providers.length, 2, 'cancel keeps the provider');
+  await providerAction("document.querySelector('.api-provider-row .provider-remove').click()");
+  await providerAction("document.querySelector('.confirmation-accept').click()");
+  assert.deepEqual(controller.data.settings.providers.map(p => p.id), ['other']);
+  assert.equal(await window.webContents.executeJavaScript("document.querySelectorAll('.api-provider-row').length"), 1);
   controller.data.settings.providers = [];
-  console.log('API providers can be added from Settings passed');
+  console.log('API provider rows, expansion, key actions and confirmed removal passed');
   // Settings loads Cursor's full model list even when some models are already enabled; rows show model names only.
   failModels = false; finishFetch = null;
   nextModels = [{ id: 'grok-4.7', label: 'Grok 4.7' }, { id: 'kimi-k3', label: 'Kimi K3' }, { id: 'gpt-5.5', label: 'GPT-5.5' }];
@@ -243,18 +277,68 @@ app.whenReady().then(async () => {
   const cursorRows = await window.webContents.executeJavaScript(`[...document.querySelectorAll('#provider-model-list .provider-model-row')].map(r => r.textContent).filter(t => t.endsWith('· Cursor'))`);
   assert.deepEqual(cursorRows, ['GPT-5.5 · Cursor', 'Grok 4.7 · Cursor', 'Kimi K3 · Cursor']);
   console.log('Cursor settings list the full model list, one row per model, no efforts passed');
-  // Removing a check and pressing the dialog's Save persists the removal (it used to need "Save checks").
+  // Check removal saves immediately without closing Settings.
   controller.data.settings.checks[controller.data.settings.workspace] = [{ id: 'c1', name: 'Syntax', argv: ['node', '--check', 'demo.js'], cwd: controller.data.settings.workspace, timeoutMs: 120000, readOnlySafe: false }];
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderChecks(); true');
   assert.equal(await window.webContents.executeJavaScript("document.querySelectorAll('#checks-list .check-row').length"), 1);
   await window.webContents.executeJavaScript(`(async () => {
     [...document.querySelectorAll('#checks-list .check-row button')].find(b => b.textContent === 'Remove').click();
-    document.querySelector('#settings-form').dispatchEvent(new Event('submit', { cancelable: true }));
     await new Promise(r => setTimeout(r, 300));
   })()`);
   assert.deepEqual(savedChecks.at(-1), [], 'the removal was saved');
   assert.deepEqual(controller.data.settings.checks[controller.data.settings.workspace], []);
-  console.log('Removed checks are saved by the dialog Save passed');
+  console.log('Removed checks save immediately passed');
+  await window.webContents.executeJavaScript("document.querySelector('#settings').click(); new Promise(r => setTimeout(r, 100))");
+  const changeSetting = (id, value) => window.webContents.executeJavaScript(`(async () => {
+    const control = document.getElementById(${JSON.stringify(id)}); control.value = ${JSON.stringify(value)};
+    control.dispatchEvent(new Event('change', { bubbles: true }));
+    await settingsWrites.catch(() => {}); await new Promise(r => setTimeout(r, 10));
+  })()`);
+  await changeSetting('settings-font', '115');
+  assert.equal(controller.data.settings.fontScale, 115);
+  const originalWorkspace = controller.data.settings.workspace;
+  await window.webContents.executeJavaScript("document.querySelector('#settings-browse').onclick()");
+  assert.equal(controller.data.settings.workspace, fs.realpathSync(root), 'choosing a workspace saves immediately');
+  chosenWorkspace = originalWorkspace;
+  await window.webContents.executeJavaScript("document.querySelector('#settings-browse').onclick()");
+  assert.equal(controller.data.settings.workspace, originalWorkspace);
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').open"), true);
+  await changeSetting('settings-context', 'jev');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-context').value"), 'local', 'a rejected option returns to the saved value');
+  assert.equal(controller.data.settings.fontScale, 115, 'a failed save does not undo another setting');
+  await changeSetting('settings-quick', 'off');
+  assert.equal(controller.data.settings.jevQuickAnswers, false, 'the write queue recovers after rejection');
+  await changeSetting('settings-font', '100');
+  await changeSetting('settings-quick', 'on');
+  await window.webContents.executeJavaScript(`(async () => {
+    document.querySelector('#settings-close').click(); await new Promise(r => setTimeout(r, 20));
+    document.querySelector('#settings').click(); await new Promise(r => setTimeout(r, 100));
+  })()`);
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-font').value"), '100');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-close').textContent"), 'Close');
+  // Incomplete checks survive tab changes and block Close, the X and Escape until fixed or removed.
+  await window.webContents.executeJavaScript(`document.querySelector('#tab-checks').click(); document.querySelector('#checks-add').click();
+    document.querySelector('#checks-list .check-name').value = 'Auto saved check';
+    document.querySelector('#checks-list .check-name').dispatchEvent(new Event('change', { bubbles: true })); true`);
+  await window.webContents.executeJavaScript('settingsWrites.catch(() => {})');
+  for (const action of ["document.querySelector('#settings-close').click()", "document.querySelector('#settings-dialog .close-dialog').click()", "document.querySelector('#settings-dialog').dispatchEvent(new Event('cancel', { cancelable: true }))"]) {
+    await window.webContents.executeJavaScript(action + '; new Promise(r => setTimeout(r, 20))');
+    assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').open"), true);
+  }
+  await window.webContents.executeJavaScript("document.querySelector('#tab-general').click(); document.querySelector('#tab-checks').click(); true");
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#checks-list .check-name').value"), 'Auto saved check');
+  await window.webContents.executeJavaScript(`(async () => {
+    const command = document.querySelector('#checks-list .check-command'); command.value = 'node --check demo.js';
+    command.dispatchEvent(new Event('change', { bubbles: true })); await settingsWrites;
+  })()`);
+  assert.equal(controller.data.settings.checks[controller.data.settings.workspace][0].name, 'Auto saved check');
+  await window.webContents.executeJavaScript(`(async () => {
+    document.querySelector('#checks-list button').click(); await settingsWrites;
+    document.querySelector('#settings-close').click(); await new Promise(r => setTimeout(r, 20));
+  })()`);
+  assert.deepEqual(controller.data.settings.checks[controller.data.settings.workspace], []);
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').open"), false);
+  console.log('Settings autosave, rejection recovery and check draft protection passed');
   // Settings shows the app version; the manual update check reports and links, and never downloads.
   await window.webContents.executeJavaScript("document.querySelector('#settings').click(); new Promise(r => setTimeout(r, 200))");
   await window.webContents.executeJavaScript("document.querySelector('#tab-about').click(); true");
@@ -320,7 +404,7 @@ app.whenReady().then(async () => {
   const settingsCap = await window.webContents.executeJavaScript("[document.querySelector('#settings-effort-cap').value, document.querySelector('#effort-cap-detail').textContent]");
   assert.equal(settingsCap[0], 'max');
   assert.match(settingsCap[1], /^⚠ No cap: Auto may pick max effort.*Your manual picks are not capped\.$/);
-  await window.webContents.executeJavaScript("document.querySelector('#settings-effort-cap').value = 'high'; document.querySelector('#settings-effort-cap').onchange(); document.querySelector('#settings-form').dispatchEvent(new Event('submit', { cancelable: true })); new Promise(r => setTimeout(r, 300))");
+  await window.webContents.executeJavaScript("document.querySelector('#settings-effort-cap').value = 'high'; document.querySelector('#settings-effort-cap').dispatchEvent(new Event('change', { bubbles: true })); document.querySelector('#settings-close').click(); new Promise(r => setTimeout(r, 300))");
   assert.equal(controller.data.settings.effortCap, 'high');
   assert.deepEqual((await cap()).filter((_, i) => i === 1 || i === 3), ['high', false]);
   const manual = controller.catalog().find(p => p.worker && controller.available(p));
@@ -343,10 +427,40 @@ app.whenReady().then(async () => {
   const compareRow = () => window.webContents.executeJavaScript("[document.querySelector('#jev-compare-row').hidden, document.querySelector('#jev-compare-detail').textContent]");
   await window.webContents.executeJavaScript("document.querySelector('#settings').click(); new Promise(r => setTimeout(r, 200))");
   assert.equal((await compareRow())[0], true, 'hidden without a Jev key');
-  controller.smartRouter.jev = { configured: true };
+  const jevPanel = await window.webContents.executeJavaScript(`(() => {
+    document.querySelector('#tab-providers').click();
+    const panel = document.querySelector('#jev-provider');
+    const input = document.querySelector('#jev-key');
+    const collapsed = !panel.open && !input.checkVisibility();
+    panel.querySelector('summary').click();
+    input.value = 'unsaved-test-key';
+    renderProviders();
+    panel.querySelector('summary').focus();
+    return { collapsed, expanded: panel.open && input.checkVisibility(), draft: input.value,
+      text: document.querySelector('#jev-status').textContent, plug: document.querySelector('#jev-plug').className,
+      selectable: getComputedStyle(panel.querySelector('summary')).userSelect };
+  })()`);
+  assert.deepEqual(jevPanel, { collapsed: true, expanded: true, draft: 'unsaved-test-key', text: 'No key saved', plug: 'provider-plug disconnected', selectable: 'none' });
+  window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
+  window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+  await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 20))');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#jev-provider').open"), false, 'Jev expander supports keyboard activation');
+  await window.webContents.executeJavaScript("document.querySelector('#tab-general').click(); true");
+  controller.smartRouter.jev = new JevClient({ configured: true, read() { throw new Error('A plug toggle must not read the key'); } }, () => { throw new Error('No live Jev request in UI smoke'); }, () => controller.data.settings.jevEnabled !== false);
   controller.jevCompare = { summary: () => ({ compared: 4, errors: 1, sameWorker: 1, sameModel: 2, sameProvider: 3, manual: 2, manualSameModel: 1, costUsd: 0.0004 }) };
   await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').close(); true");
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + "); document.querySelector('#settings').click(); new Promise(r => setTimeout(r, 200))");
+  assert.deepEqual(await window.webContents.executeJavaScript("[document.querySelector('#jev-provider').open, document.querySelector('#jev-key').value, document.querySelector('#jev-plug').className]"), [false, '', 'provider-plug connected']);
+  await providerAction("document.querySelector('#tab-providers').click(); document.querySelector('#jev-plug').click()");
+  assert.equal(controller.data.settings.jevEnabled, false);
+  assert.deepEqual(await window.webContents.executeJavaScript("[document.querySelector('#jev-provider').open, document.querySelector('#jev-status').textContent, document.querySelector('#jev-test').disabled, document.querySelector('#jev-remove').disabled]"), [false, 'Disabled', true, false]);
+  await window.webContents.executeJavaScript("document.querySelector('#jev-plug').focus()");
+  window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' });
+  window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' });
+  await providerAction('');
+  assert.equal(controller.data.settings.jevEnabled, true, 'plug supports keyboard re-enabling');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#jev-provider').open"), false);
+  await providerAction("document.querySelector('#tab-general').click()");
   const [hidden, detail] = await compareRow();
   assert.equal(hidden, false);
   assert.match(detail, /^Log only\. When on, .*do not change\. 4 compared: same model 50% \(and effort 25%\), same provider 75%; your manual picks 50% same model · Jev cost \$0\.0004 · 1 failed\.$/);
@@ -366,9 +480,11 @@ app.whenReady().then(async () => {
   controller.smartRouter.jev = { configured: true, health: { since: Date.now(), error: 'Jev timed out after 15 seconds.', at: Date.now() } };
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); true');
   assert.match(await window.webContents.executeJavaScript("document.querySelector('#jev-health').textContent"), /^Unavailable since .+: Jev timed out after 15 seconds\. Meanwhile .*project search uses local ranking/);
+  assert.deepEqual(await window.webContents.executeJavaScript("[document.querySelector('#jev-status').textContent, document.querySelector('#jev-plug').className]"), ['Unavailable', 'provider-plug unavailable']);
   controller.smartRouter.jev = { configured: true, health: { since: null, error: null, at: null } };
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); true');
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#jev-health').textContent"), '');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#jev-status').textContent"), 'Key saved');
   controller.data.settings.contextRanking = savedRanking;
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-output')"), null, 'large output is always captured, not a setting');
   console.log('Jev fallback status passed');
@@ -438,6 +554,13 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('selectAgent(' + JSON.stringify(profile.id) + ')');
   await window.webContents.executeJavaScript('api.browseWorkspace(null, "changes")');
   assert.equal(browseCalls.at(-1).at(-1), profile.id, 'new conversations browse the selected agent workspace');
+  const mainAccessBefore = controller.data.settings.access, agentAccessBefore = agents.profile(profile.id).access;
+  await window.webContents.executeJavaScript("document.querySelector('#settings').onclick()");
+  await changeSetting('settings-access', 'danger-full-access');
+  assert.equal(agents.profile(profile.id).access, 'danger-full-access');
+  assert.equal(controller.data.settings.access, mainAccessBefore, 'settings autosave targets the selected agent');
+  await changeSetting('settings-access', agentAccessBefore);
+  await window.webContents.executeJavaScript('closeSettings()');
   await window.webContents.executeJavaScript(`document.querySelector('#prompt').value = 'Researcher draft'; imageDrafts.set(draftKey(), ['data:image/png;base64,']); selectAgent('main')`);
   assert.notEqual(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), 'Researcher draft');
   assert.equal(await window.webContents.executeJavaScript('attachedImages().includes("data:image/png;base64,")'), false);

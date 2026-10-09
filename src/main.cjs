@@ -62,7 +62,7 @@ async function start() {
   await controller.providers.start();
   controller.smartRouter.providers = controller.providers;
   const jevKey = new JevKey(path.join(app.getPath('userData'), 'jev-key.enc'), safeStorage);
-  controller.smartRouter.jev = new JevClient(jevKey, (...args) => net.fetch(...args));
+  controller.smartRouter.jev = new JevClient(jevKey, (...args) => net.fetch(...args), () => controller.data.settings.jevEnabled !== false);
   controller.contextSearch = new ContextSearch(home, controller.smartRouter.jev);
   agents = new Agents(controller, async worker => {
     worker.log = log; worker.trace = controller.trace;
@@ -70,7 +70,7 @@ async function start() {
     worker.providers = new Providers(path.join(app.getPath('userData'), 'provider-keys'), safeStorage, () => controller.data.settings.providers || [], (...args) => net.fetch(...args));
     await worker.providers.start();
     worker.smartRouter.providers = worker.providers;
-    worker.smartRouter.jev = new JevClient(jevKey, (...args) => net.fetch(...args));
+    worker.smartRouter.jev = new JevClient(jevKey, (...args) => net.fetch(...args), () => controller.data.settings.jevEnabled !== false);
     worker.contextSearch = new ContextSearch(home, worker.smartRouter.jev);
     worker.contextSearch.wikiStore = wikiStore;
   });

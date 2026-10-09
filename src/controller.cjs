@@ -178,6 +178,8 @@ class Controller extends EventEmitter {
     this.changed();
   }
 
+  get routingProvider() { return this.data.settings.jevEnabled === false && this.data.settings.routing === 'jev' ? 'smart' : this.data.settings.routing; }
+
   snapshot() {
     return {
       benchmarks: this.smartRouter.benchmarks?.summary(this.catalog().filter(p => p.worker && p.enabled && this.available(p))),
@@ -185,8 +187,8 @@ class Controller extends EventEmitter {
       claude: { ...this.claude.status, enabled: !!this.data.settings.claudeEnabled },
       codex: this.codex,
       ...this.data, settings: { ...this.data.settings, mode: this.planPreset() ? 'auto' : this.data.settings.mode }, planRouting: this.planPreset(), connection: this.connection, error: this.error, account: this.account, busy: this.busy,
-      routing: this.routing, routerModel: this.data.settings.routing === 'jev' ? JEV_MODEL : this.routerChoices().find(p => p.id === this.data.settings.routerPreset)?.model || null,
-      jev: { configured: !!this.smartRouter.jev?.configured, model: JEV_MODEL, compare: this.jevCompare?.summary() || null, health: this.smartRouter.jev?.health || null },
+      routing: this.routing, routingProvider: this.routingProvider, routerModel: this.routingProvider === 'jev' ? JEV_MODEL : this.routerChoices().find(p => p.id === this.data.settings.routerPreset)?.model || null,
+      jev: { configured: !!this.smartRouter.jev?.configured, keySaved: !!(this.smartRouter.jev?.keyStore?.configured ?? this.smartRouter.jev?.configured), enabled: this.data.settings.jevEnabled !== false, model: JEV_MODEL, compare: this.jevCompare?.summary() || null, health: this.smartRouter.jev?.health || null },
       decisions: this.trace.summary(),
       contextRoot: this.contextSearch?.root || null,
       helperCapabilities: {
@@ -246,6 +248,12 @@ class Controller extends EventEmitter {
   settings(values) {
     if (!values || typeof values !== 'object') throw new Error('Invalid settings.');
     const next = { ...this.data.settings };
+    if (values.jevEnabled !== undefined) {
+      if (typeof values.jevEnabled !== 'boolean') throw new Error('Invalid Jev enabled setting.');
+      if (this.busy) throw new Error('Stop the current turn before changing Jev.');
+      if (values.jevEnabled && !(this.smartRouter.jev?.keyStore?.configured ?? this.smartRouter.jev?.configured)) throw new Error('Add your Jev API key in Providers first.');
+      next.jevEnabled = values.jevEnabled;
+    }
     if (values.routingBias !== undefined) {
       // Legacy field ignored — the router choice is not adjusted after classification.
     }
@@ -267,7 +275,7 @@ class Controller extends EventEmitter {
         (values.largeResponses !== undefined && values.largeResponses !== next.largeResponses))) throw new Error('Stop the current turn before changing tool helpers.');
       if (values.toolSelection !== undefined) {
         if (!['off', 'jev'].includes(values.toolSelection)) throw new Error('Unknown tool selection mode.');
-        if (values.toolSelection === 'jev' && !this.smartRouter.jev?.configured) throw new Error('Add your Jev API key in Settings first.');
+        if (values.toolSelection === 'jev' && !this.smartRouter.jev?.configured) throw new Error('Add a Jev API key and enable Jev in Providers first.');
         next.toolSelection = values.toolSelection;
       }
       if (values.largeResponses !== undefined) {
@@ -286,7 +294,7 @@ class Controller extends EventEmitter {
     }
     if (values.routing !== undefined) {
       if (!['smart', 'jev'].includes(values.routing)) throw new Error('Unknown routing method.');
-      if (values.routing === 'jev' && !this.smartRouter.jev?.configured) throw new Error('Add your Jev API key in Settings first.');
+      if (values.routing === 'jev' && !this.smartRouter.jev?.configured) throw new Error('Add a Jev API key and enable Jev in Providers first.');
       next.routing = values.routing;
     }
     if (values.access !== undefined) {
@@ -297,21 +305,22 @@ class Controller extends EventEmitter {
     if (values.jevCompare !== undefined) {
       if (typeof values.jevCompare !== 'boolean') throw new Error('Invalid Jev comparison setting.');
       // Only turning it on needs a key; a saved "on" never blocks saving other settings (it is skipped without a key).
-      if (values.jevCompare && !next.jevCompare && !this.smartRouter.jev?.configured) throw new Error('Add your Jev API key in Settings first.');
+      if (values.jevCompare && !next.jevCompare && !this.smartRouter.jev?.configured) throw new Error('Add a Jev API key and enable Jev in Providers first.');
       next.jevCompare = values.jevCompare;
       if (!values.jevCompare) this.jevComparing?.abort();
     }
     if (values.wikiAssessment !== undefined) {
       if (typeof values.wikiAssessment !== 'boolean') throw new Error('Invalid wiki check setting.');
-      if (values.wikiAssessment && !next.wikiAssessment && !this.smartRouter.jev?.configured) throw new Error('Add your Jev API key in Settings first.');
+      if (values.wikiAssessment && !next.wikiAssessment && !this.smartRouter.jev?.configured) throw new Error('Add a Jev API key and enable Jev in Providers first.');
       next.wikiAssessment = values.wikiAssessment;
     }
     if (values.contextRanking !== undefined) {
       if (!['local', 'jev'].includes(values.contextRanking)) throw new Error('Unknown context ranking mode.');
-      if (values.contextRanking === 'jev' && !this.smartRouter.jev?.configured) throw new Error('Add your Jev API key in Settings first.');
+      if (values.contextRanking === 'jev' && !this.smartRouter.jev?.configured) throw new Error('Add a Jev API key and enable Jev in Providers first.');
       next.contextRanking = values.contextRanking;
     }
     if (next.toolSelection !== this.data.settings.toolSelection || next.largeResponses !== this.data.settings.largeResponses) this.loaded.clear();
+    if (next.jevEnabled !== this.data.settings.jevEnabled) { this.jevComparing?.abort(); this.smartRouter.jev?.resetHealth?.(); }
     this.data.settings = next; this.save(); this.changed();
     return this.snapshot();
   }
@@ -494,7 +503,7 @@ class Controller extends EventEmitter {
     if (chosenMode !== 'auto' && !selected?.model) throw new Error('Unknown model selection.');
     if (this.planPreset() && !this.models.some(m => m.model === selected.model && m.supportedReasoningEfforts.some(e => e.reasoningEffort === selected.effort)))
       throw new Error('Terra light is not currently available on your account. Refresh your Codex login or restart the app.');
-    const provider = this.data.settings.routing;
+    const provider = this.routingProvider;
     const useSmart = !this.planPreset() && chosenMode === 'auto';
     const previousState = { status: session.status, error: session.error };
     this.busy = id; session.status = 'running'; session.error = null; session.turnId = null;

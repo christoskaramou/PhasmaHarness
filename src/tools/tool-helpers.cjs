@@ -63,7 +63,7 @@ class ToolHelpers {
     const result = { source: 'local', recommendation: null, candidates: ranked, catalogCount: catalog.length,
       note: 'Partial candidate list. Recommendations do not authorize execution. Refine the query if the correct tool is missing.' };
     if (!useJev || !ranked.length || ranked.length === 1) return result;
-    if (!this.jev?.configured) return { ...result, source: 'fallback', warning: 'No Jev key; use local candidates.' };
+    if (!this.jev?.configured) return { ...result, source: 'fallback', warning: this.jev?.enabled === false ? 'Jev is disabled; use local candidates.' : 'No Jev key; use local candidates.' };
     try {
       const criteria = { none: 'None of these tools is clearly adequate; abstain and let the worker investigate.' };
       ranked.forEach((tool, index) => { criteria[`tool${index}`] = `${tool.server}/${tool.name}: ${tool.description}`; });

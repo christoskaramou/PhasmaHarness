@@ -129,7 +129,7 @@ class ContextSearch {
     const result = { query: collection.query, requested: mode, mode: 'local', hits: collection.candidates.slice(0, 6), warnings: [...collection.warnings], candidateCount: collection.candidates.length,
       files: collection.files, corpusHash: collection.corpusHash, jev: null };
     if (mode === 'jev' && collection.candidates.length) {
-      if (!this.jev?.configured) result.warnings.push('No Jev key saved; using local ranking.');
+      if (!this.jev?.configured) result.warnings.push(this.jev?.enabled === false ? 'Jev is disabled; using local ranking.' : 'No Jev key saved; using local ranking.');
       else try {
         // Each question names its excerpt by an ID key (E1, E2, …), never by its position in a list. Paths and text
         // stay in the data, so nothing from the workspace becomes part of a question.

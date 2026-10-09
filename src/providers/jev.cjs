@@ -100,8 +100,9 @@ function choices(response, questions) {
 }
 
 class JevClient {
-  constructor(keyStore, fetchFn = fetch) { this.keyStore = keyStore; this.fetch = fetchFn; this.resetHealth(); }
-  get configured() { return this.keyStore.configured; }
+  constructor(keyStore, fetchFn = fetch, enabled = () => true) { this.keyStore = keyStore; this.fetch = fetchFn; this.isEnabled = enabled; this.resetHealth(); }
+  get enabled() { return this.isEnabled(); }
+  get configured() { return this.enabled && this.keyStore.configured; }
   // Every Jev feature shares this client, so one failing call means its features are on their fallbacks (Smart router,
   // local ranking, local tool candidates). since: when the current run of failures began; cleared by the next answer.
   resetHealth() { this.health = { since: null, error: null, at: null }; }
@@ -116,6 +117,7 @@ class JevClient {
     }
   }
   async request(state, questions, signal, timeoutMs) {
+    if (!this.enabled) throw new Error('Jev is disabled. Enable it in Providers.');
     const key = this.keyStore.read();
     const started = Date.now();
     const deadline = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(timeoutMs)]);
