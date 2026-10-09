@@ -379,6 +379,9 @@ function closeAgentMenu(restoreFocus = false) {
   agentMenu.hidePopover();
   if (restoreFocus) agentMenuOpener?.focus();
 }
+function preferredMode(group) {
+  return (group.variants.find(p => (p.effort || '') === $('#effort').value) || group.variants.find(p => p.effort === 'medium') || group.variants[0]).id;
+}
 function agentContextMenu(event) {
   const entry = event.target.closest('.agent-nav, .agent-card');
   const id = entry?.dataset.agent || entry?.querySelector('button[data-agent]')?.dataset.agent;
@@ -783,9 +786,7 @@ function render() {
     ? `Choosing a model with ${routerName(state.routerModel)}…` : `${session?.routes.at(-1)?.label || 'Codex'} is working…`);
   const usage = session?.usage;
   const total = usage?.total;
-  const contextWindow = usage?.modelContextWindow;
-  const contextTokens = usage?.last?.totalTokens ?? (Number.isFinite(usage?.last?.inputTokens) && Number.isFinite(usage?.last?.outputTokens) ? usage.last.inputTokens + usage.last.outputTokens : null);
-  const contextKnown = providerCaps(session?.activeProvider).usage && Number.isFinite(contextTokens) && contextTokens >= 0 && Number.isFinite(contextWindow) && contextWindow > 0;
+  const { contextWindow, contextTokens, contextKnown } = contextUsage(session);
   const contextPercent = contextKnown ? Math.min(100, Math.max(0, contextTokens / contextWindow * 100)) : 0;
   const contextLabel = contextKnown ? `${Math.round(contextPercent)}% context used (estimate from the latest provider report: ${contextTokens.toLocaleString()} / ${contextWindow.toLocaleString()} tokens)` : 'Context usage unavailable until the provider reports the context size and token usage.';
   $('#context-meter').style.setProperty('--context-used', `${contextPercent}%`);
@@ -803,6 +804,14 @@ function render() {
     : '\n\nHover lists providers. Token totals appear after the provider reports usage.');
   renderMessages(session);
   renderRequest();
+  renderCommandPanel();
+}
+
+function contextUsage(session) {
+  const usage = session?.usage, contextWindow = usage?.modelContextWindow;
+  const contextTokens = usage?.last?.totalTokens ?? (Number.isFinite(usage?.last?.inputTokens) && Number.isFinite(usage?.last?.outputTokens) ? usage.last.inputTokens + usage.last.outputTokens : null);
+  const contextKnown = providerCaps(session?.activeProvider).usage && Number.isFinite(contextTokens) && contextTokens >= 0 && Number.isFinite(contextWindow) && contextWindow > 0;
+  return { contextWindow, contextTokens, contextKnown };
 }
 
 function providerConnectionSummary() {
@@ -1055,7 +1064,141 @@ const COMMANDS = {
   stop: { description: 'Stop this agent and its pending child tasks.', run: () => api.stop() },
   agents: { description: 'Open the agent overview.', run: () => $('#agents-overview').click() },
   settings: { description: 'Open Harness settings.', run: () => $('#settings').onclick() },
+  context: { description: 'Show context usage, remaining capacity and last compaction.', run: () => openCommandPanel('context') },
+  model: { description: 'Choose Auto or an available model for this agent.', run: () => openCommandPanel('model') },
+  effort: { description: 'Choose model effort, or the shared effort cap for Auto.', run: () => openCommandPanel('effort') },
+  access: { description: 'Change access for this agent’s conversation.', run: () => openCommandPanel('access') },
+  switch: { description: 'Find and switch to another agent.', run: () => openCommandPanel('switch') },
+  export: { description: 'Save conversation messages and plans as Markdown; images are noted as attachments.', run: async () => {
+    if (!selectedId) throw new Error('Start a conversation before exporting.');
+    const file = await api.exportConversation(selectedId);
+    if (!file) return false;
+    notify(`Conversation saved to ${file}`);
+  } },
+  status: { description: 'Show the current task, queued work and child agents.', run: () => openCommandPanel('status') },
 };
+let commandPanel = null, commandPicking = false;
+function openCommandPanel(name) {
+  commandPanel = { name, agent: selectedAgent, session: selectedId };
+  $('#command-title').textContent = ({ context: 'Context usage', model: 'Choose model', effort: 'Choose effort', access: 'Conversation access', switch: 'Switch agent', status: 'Agent status' })[name];
+  $('#command-description').textContent = COMMANDS[name].description;
+  $('#command-search').hidden = ['context', 'status'].includes(name);
+  $('#command-search').value = ''; $('#command-error').textContent = '';
+  $('#command-content').dataset.signature = '';
+  renderCommandPanel(); $('#command-dialog').showModal();
+  ($('#command-search').hidden ? $('#command-dialog .close-dialog') : $('#command-search')).focus();
+}
+function commandChoices(name) {
+  const mode = state.settings.mode, groups = presetGroups();
+  const group = groups.find(g => g.variants.some(p => p.id === mode));
+  if (name === 'model') return [
+    { id: 'auto', label: 'Auto', detail: 'Choose a model automatically for each request.', selected: mode === 'auto' },
+    ...groups.map(g => ({ id: g.key, label: g.label, detail: providerTitle(g.provider), selected: g === group })),
+  ];
+  if (name === 'effort') return mode === 'auto'
+    ? Object.entries(EFFORT_CAP_TEXT).map(([id, detail]) => ({ id, label: id === 'max' ? 'No cap' : `Up to ${id}`, detail, selected: id === (state.settings.effortCap || 'high'), disabled: !!state.anyAgentBusy || !!state.busy }))
+    : (group?.variants || []).map(p => ({ id: p.id, label: p.effort || 'Default', detail: group.label, selected: p.id === mode }));
+  if (name === 'access') return state.accessModes.map(a => ({ id: a.id, label: a.label, detail: a.description, selected: a.id === (current()?.access || draftAccess || state.settings.access), disabled: !!state.busy || !!state.waitingForAgents?.length }));
+  if (name === 'switch') return (state.agents || [{ id: 'main', name: 'Main' }]).map(a => ({ id: a.id, label: a.name, detail: a.workspace || '', selected: a.id === selectedAgent }));
+  return [];
+}
+function commandDetails(name) {
+  const session = current();
+  const agentName = state.agents?.find(a => a.id === selectedAgent)?.name || 'Main';
+  if (name === 'context') {
+    const { contextTokens, contextWindow, contextKnown } = contextUsage(session);
+    const timestamp = session?.lastCompactedAt;
+    return [
+      ['Agent', agentName],
+      ['Context used', contextKnown ? `${contextTokens.toLocaleString()} / ${contextWindow.toLocaleString()} tokens (${Math.round(contextTokens / contextWindow * 100)}%)` : 'Unavailable — the provider has not reported current context usage.'],
+      ['Remaining capacity', contextKnown ? `About ${Math.max(0, contextWindow - contextTokens).toLocaleString()} tokens` : 'Unknown'],
+      ['Last compaction', session?.compacting ? 'Compacting now…' : timestamp ? new Date(timestamp).toLocaleString() : 'No compaction time recorded'],
+      ['About these numbers', 'Estimates from the latest provider report, not a live token count. /compact retains the visible chat; /clear starts fresh after confirmation.'],
+    ];
+  }
+  const task = session?.tasks?.at(-1);
+  const children = Object.entries(fleetState?.agentStates || {}).flatMap(([id, worker]) => worker.sessions
+    .filter(s => session && s.delegation?.source === session.id && !s.delegation.delivered)
+    .map(s => `${state.agents?.find(a => a.id === id)?.name || id}: ${s.delegation.state}${s.waitingForAgent ? ` — ${s.waitingForAgent}` : ''}`));
+  const queue = session?.queue || [];
+  return [
+    ['Agent', agentName], ['Connection', state.connection],
+    ['Activity', session?.compacting ? 'Compacting' : session?.waitingForAgent || (state.waitingForAgents?.length ? 'Waiting for child agents' : state.busy ? 'Working' : session?.delegation?.state === 'queued' ? 'Queued' : 'Idle')],
+    ['Current task', task ? `${task.goal}\n${task.state}` : session?.pendingMessage ? 'Sending message…' : 'No tracked task'],
+    ['Model', state.presets.find(p => p.id === state.settings.mode)?.label || (state.settings.mode === 'auto' ? 'Auto' : state.settings.mode)],
+    ['Access', state.accessModes.find(a => a.id === (session?.access || draftAccess || state.settings.access))?.label || 'Unknown'],
+    ['Queued work', queue.length ? queue.map((m, i) => `${i + 1}. ${m.text || 'Image attachment'}${m.error ? ` — ${m.error}` : ''}`).join('\n') : 'None'],
+    ['Child agents with pending work', children.join('\n') || 'None'],
+    ['Requests needing input', String(state.requests.length)],
+    ...(session?.error || state.error ? [['Error', session?.error || state.error]] : []),
+  ];
+}
+function renderCommandPanel() {
+  if (!commandPanel) return;
+  const dialog = $('#command-dialog');
+  if (commandPanel.agent !== selectedAgent || commandPanel.session !== selectedId) { dialog.close(); commandPanel = null; return; }
+  const name = commandPanel.name, search = $('#command-search'), content = $('#command-content');
+  search.disabled = commandPicking;
+  $('#command-dialog .close-dialog').disabled = commandPicking;
+  const query = search.value.trim().toLocaleLowerCase();
+  const choices = !search.hidden;
+  const rows = choices ? commandChoices(name).filter(row => `${row.label} ${row.detail}`.toLocaleLowerCase().includes(query)) : commandDetails(name);
+  const signature = JSON.stringify([name, rows, commandPicking]);
+  if (content.dataset.signature === signature) return;
+  const focused = content.contains(document.activeElement) ? document.activeElement.dataset.choice : null;
+  content.dataset.signature = signature;
+  content.replaceChildren(...rows.map(row => {
+    if (!choices) {
+      const detail = element('div', 'command-detail');
+      detail.append(element('strong', '', row[0]), element('p', '', row[1])); return detail;
+    }
+    const button = element('button', 'command-choice'); button.type = 'button'; button.dataset.choice = row.id;
+    button.setAttribute('aria-pressed', String(!!row.selected)); button.disabled = commandPicking || !!row.disabled;
+    button.append(element('strong', '', row.label), element('span', '', row.detail));
+    button.onclick = () => pickCommandChoice(row.id); return button;
+  }));
+  if (!rows.length) content.append(element('p', 'muted', query ? 'No matching choices.' : 'No available choices.'));
+  if (focused !== null) ([...content.children].find(b => b.dataset.choice === focused && !b.disabled) || search).focus();
+}
+async function pickCommandChoice(id) {
+  if (!commandPanel || commandPicking || submitting || readingImages || changingPermissions) return;
+  const { name, agent, session } = commandPanel;
+  commandPicking = true; $('#command-error').textContent = ''; renderCommandPanel();
+  try {
+    if (agent !== selectedAgent || session !== selectedId) throw new Error('The conversation changed. Open the command again.');
+    const choice = commandChoices(name).find(row => row.id === id);
+    if (!choice || choice.disabled) throw new Error('This choice is unavailable while work is pending.');
+    if (name === 'model') await changeMode(id === 'auto' ? 'auto' : preferredMode(presetGroups().find(g => g.key === id)));
+    if (name === 'effort') {
+      if (state.settings.mode === 'auto') { applyState(await api.settings({ effortCap: id })); updatePreview(); }
+      else await changeMode(id);
+    }
+    if (name === 'access') {
+      if (selectedId) await changeAccess(id);
+      else { applyState(await api.settings({ access: id })); draftAccess = null; render(); }
+    }
+    if (name === 'switch') await selectAgent(id);
+    $('#command-dialog').close();
+  } catch (error) { $('#command-error').textContent = String(error.message || error).replace(/^Error invoking remote method '[^']+': Error: /, ''); }
+  finally { commandPicking = false; renderCommandPanel(); }
+}
+$('#command-search').oninput = renderCommandPanel;
+$('#command-dialog').addEventListener('close', () => {
+  // A queued close event can arrive after another command has reopened the dialog.
+  if ($('#command-dialog').open) return;
+  commandPanel = null; $('#prompt').focus();
+});
+$('#command-dialog').addEventListener('cancel', event => { if (commandPicking) event.preventDefault(); });
+$('#command-dialog').addEventListener('keydown', event => {
+  if (event.isComposing || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+  const buttons = [...$('#command-content').querySelectorAll('button:not(:disabled)')];
+  const index = buttons.indexOf(document.activeElement), searching = document.activeElement === $('#command-search');
+  if (searching && event.key === 'Enter' && buttons.length) { event.preventDefault(); buttons[0].click(); }
+  if (buttons.length && (searching || index >= 0) && ['ArrowDown', 'ArrowUp'].includes(event.key)) {
+    const next = searching ? (event.key === 'ArrowDown' ? 0 : buttons.length - 1) : (index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
+    event.preventDefault(); buttons[next].focus();
+  }
+});
 let slashIndex = 0, slashDismissed = false;
 function hideSlashMenu() {
   $('#slash-menu').hidden = true;
@@ -1193,13 +1336,14 @@ $('#prompt').addEventListener('keydown', event => {
   }
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); $('#composer').requestSubmit(); }
 });
-const saveMode = async mode => { try { applyState(await api.settings({ mode })); updatePreview(); } catch (error) { notify(error); showMode(state.settings.mode); } };
+const changeMode = async mode => { applyState(await api.settings({ mode })); updatePreview(); };
+const saveMode = async mode => { try { await changeMode(mode); } catch (error) { notify(error); showMode(state.settings.mode); } };
 // A new model keeps the current effort when it supports it, else medium, else its lowest effort.
 $('#preset').onchange = () => {
   const group = presetGroups().find(g => g.key === $('#preset').value);
   if (!group) return saveMode('auto');
-  const keep = group.variants.find(p => (p.effort || '') === $('#effort').value) || group.variants.find(p => p.effort === 'medium') || group.variants[0];
-  showMode(keep.id); saveMode(keep.id);
+  const mode = preferredMode(group);
+  showMode(mode); saveMode(mode);
 };
 $('#effort').onchange = () => saveMode(currentMode());
 $('#effort-cap').onchange = async () => {
@@ -1211,14 +1355,13 @@ $('#settings-effort-cap').onchange = () => {
   $('#settings-effort-cap').classList.toggle('max-cap', cap === 'max');
   $('#effort-cap-detail').textContent = capHint(cap);
 };
-$('#permissions').onchange = async () => {
-  const access = $('#permissions').value;
+async function changeAccess(access) {
   if (!selectedId) { draftAccess = access; render(); return; }
   changingPermissions = true; render();
   try { applyState(await api.permissions(selectedId, access)); }
-  catch (error) { notify(error); }
   finally { changingPermissions = false; render(); }
-};
+}
+$('#permissions').onchange = () => changeAccess($('#permissions').value).catch(notify);
 $('#stop').onclick = () => api.stop().catch(notify);
 $('#settings-browse').onclick = async () => {
   try {

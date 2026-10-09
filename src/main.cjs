@@ -332,6 +332,10 @@ async function start() {
     if (typeof text !== 'string' || text.length > 2000000) throw new Error('Message is too large to copy.');
     clipboard.writeText(text);
   });
+  handle('exportConversation', async id => {
+    if (typeof id !== 'string' || !id) throw new Error('Choose a conversation to export.');
+    return require('./conversation-export.cjs').exportConversation(window, agents.owner(id).session(id));
+  });
   handle('queuedMessage', (id, messageId, action) => agents.owner(id).queuedMessage(id, messageId, action));
   handle('compact', id => agents.owner(id).compact(id));
   handle('clearConversation', async agentId => {

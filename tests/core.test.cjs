@@ -359,11 +359,13 @@ test('compaction finishes through thread/compacted or turn/completed for the own
   controller.notification({ method: 'thread/compacted', params: { threadId: session.threadId, turnId: 'other-turn' } });
   assert.equal(controller.busy, session.id);
   assert.equal(session.submission.turnId, null);
+  assert.equal(session.lastCompactedAt, undefined, 'unowned compaction events do not update the timestamp');
   controller.notification({ method: 'turn/started', params: { threadId: session.threadId, turn: { id: 'compact-1' } } });
   controller.notification({ method: 'thread/compacted', params: { threadId: session.threadId, turnId: 'compact-1' } });
   assert.equal(controller.busy, null);
   assert.equal(session.submission.state, 'completed');
   assert.match(session.notice, /Context compacted/);
+  assert.ok(Number.isFinite(session.lastCompactedAt), 'successful Codex compaction records its time');
   const items = JSON.stringify(session.items);
   await controller.compact(session.id);
   controller.notification({ method: 'turn/started', params: { threadId: session.threadId, turn: { id: 'compact-2' } } });
@@ -371,6 +373,18 @@ test('compaction finishes through thread/compacted or turn/completed for the own
   assert.equal(controller.busy, null);
   assert.equal(session.submission.turnId, 'compact-2');
   assert.equal(JSON.stringify(session.items), items);
+});
+
+test('automatic compaction records its time only after the owned item completes', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  await controller.send({ id: session.id, text: 'hello', mode: 'terra-light', task: 'off' });
+  const params = { threadId: session.threadId, turnId: fake.turnIds[0], item: { id: 'auto-compact', type: 'contextCompaction' } };
+  controller.notification({ method: 'item/started', params });
+  assert.equal(session.lastCompactedAt, undefined);
+  controller.notification({ method: 'item/completed', params });
+  assert.ok(Number.isFinite(session.lastCompactedAt));
+  complete(controller, session, fake.turnIds[0]);
 });
 
 test('Jev direct answers drain through settle', async t => {

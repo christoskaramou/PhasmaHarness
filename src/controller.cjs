@@ -866,6 +866,7 @@ class Controller extends EventEmitter {
         onEvent: event => { if (event.session_id) session.claudeSessionId = event.session_id; },
       });
       session.notice = 'Context compacted. The visible chat history is retained.';
+      session.lastCompactedAt = Date.now();
       if (session.usage) delete session.usage.last;
     } catch (error) {
       session.error = abort.signal.aborted ? 'Compaction stopped.' : error.message;

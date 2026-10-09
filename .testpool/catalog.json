@@ -57,7 +57,7 @@
     {
       "id": "agents-ui",
       "name": "Agent UI and delete dialog selection",
-      "covers": "Agent creation, switching, deletion through the context menu without sidebar delete buttons, pinned Main and sidebar scrolling; reopening Delete clears stale text selection. Right-click and Shift+F10 menus use Open/Edit/Delete labels with red Delete, stay within the viewport, support arrow/Enter/Escape navigation and focus restoration, target the clicked agent, and respect Main/busy protections. Slash commands /help /compact /clear /stop /agents /settings run locally without routing/model calls. Clear asks for confirmation and resets only the selected conversation; cancel retains the input. Delegate controls are absent; an agent waiting for nested tasks shows Waiting and keeps Stop targeting its conversation. All buttons and nested button labels are unselectable, including dynamic dialogs, while composer text stays selectable. Shared in-app confirmations show clear/close/startup messages, default to cancellation, handle Escape and repeated opens, retain drafts on cancellation and keep cursor styles visible. Typing / shows all commands, name prefixes filter case-insensitively, arrows and active-descendant track selection, Tab only completes, Enter/click dispatch locally, Escape/blur dismiss, unknown prefixes show an empty state, and the menu fits at 840x640 with 150% text. Selecting clear still confirms. Settings Version tab owns the version, diagnostics, logs and update controls; tab switching hides other panels and existing update checks still work. Offscreen screenshots use software rendering for Linux/Xvfb and Windows, with the output directory created before the first capture.",
+      "covers": "Agent creation, switching, deletion through the context menu without sidebar delete buttons, pinned Main and sidebar scrolling; reopening Delete clears stale text selection. Right-click and Shift+F10 menus use Open/Edit/Delete labels with red Delete, stay within the viewport, support arrow/Enter/Escape navigation and focus restoration, target the clicked agent, and respect Main/busy protections. Slash commands /help /compact /clear /stop /agents /settings run locally without routing/model calls. Clear asks for confirmation and resets only the selected conversation; cancel retains the input. Delegate controls are absent; an agent waiting for nested tasks shows Waiting and keeps Stop targeting its conversation. All buttons and nested button labels are unselectable, including dynamic dialogs, while composer text stays selectable. Shared in-app confirmations show clear/close/startup messages, default to cancellation, handle Escape and repeated opens, retain drafts on cancellation and keep cursor styles visible. Typing / shows all commands, name prefixes filter case-insensitively, arrows and active-descendant track selection, Tab only completes, Enter/click dispatch locally, Escape/blur dismiss, unknown prefixes show an empty state, and the menu fits at 840x640 with 150% text. Selecting clear still confirms. Settings Version tab owns the version, diagnostics, logs and update controls; tab switching hides other panels and existing update checks still work. Offscreen screenshots use software rendering for Linux/Xvfb and Windows, with the output directory created before the first capture. All thirteen slash commands are listed. New command pickers search models, supported efforts, access modes and agents, support keyboard selection and Escape, retain target-agent drafts, persist access for agents without conversations, reject unavailable/busy changes, survive queued close events and fit large text. Context distinguishes reported usage from unsupported providers; status displays task/queue/child data safely. Export writes selected-agent Markdown via a mocked save picker, writes nothing on cancel and preserves input on write errors. Startup and UI checks have separate 30-second budgets so cold Chromium startup cannot consume the test budget; timeout errors report the active phase.",
       "paths": [
         "ui/app.js",
         "ui/index.html",
@@ -68,11 +68,12 @@
         "ui/dialogs.js",
         "ui/startup-error.html",
         "ui/startup-error.js",
-        "src/confirmations.cjs"
+        "src/confirmations.cjs",
+        "src/conversation-export.cjs"
       ],
       "command": "node -e \"const {spawnSync}=require('node:child_process');const check=spawnSync(process.execPath,['--check','tests/ui-startup-smoke.cjs'],{stdio:'inherit',windowsHide:true});if(check.status!==0)process.exit(check.status||1);const env={...process.env};delete env.ELECTRON_RUN_AS_NODE;const result=spawnSync(require('electron'),['tests/ui-startup-smoke.cjs'],{env,stdio:'inherit',windowsHide:true});process.exit(result.status??1)\"",
       "cost": "cheap",
-      "timeoutSec": 30,
+      "timeoutSec": 75,
       "origin": {
         "problem": "Delete dialog retained text selection between deletions.",
         "fix": "Clear selection on dialog open/close and prevent selection of button labels.",
@@ -95,6 +96,28 @@
       "origin": {
         "problem": "Native confirmations interrupted the Harness UI and obscured the pointer.",
         "fix": "Use styled in-app dialogs over a sender-validated request/reply bridge; cancel requests when their window disappears.",
+        "date": "2026-10-09"
+      }
+    },
+    {
+      "id": "command-data",
+      "name": "Conversation export and compaction records",
+      "covers": "Markdown export preserves visible messages, plans and Unicode while omitting attachments, pending messages, internal/wiki-maintenance messages, tool arguments and private reasoning. Successful owned Codex and Claude compactions record timestamps; ignored compaction events do not.",
+      "paths": [
+        "src/conversation-export.cjs",
+        "src/controller.cjs",
+        "src/controller/turns.cjs",
+        "src/routing/task-state.cjs",
+        "tests/conversation-export.test.cjs",
+        "tests/core.test.cjs",
+        "tests/providers-optional.test.cjs"
+      ],
+      "command": "node --test --test-name-pattern=\"compaction|export\" tests/conversation-export.test.cjs tests/core.test.cjs tests/providers-optional.test.cjs",
+      "cost": "medium",
+      "timeoutSec": 60,
+      "origin": {
+        "problem": "Context and export slash commands need provider compaction timestamps and a text-only conversation export.",
+        "fix": "Record successful compactions and export only visible messages/plans, with regression coverage.",
         "date": "2026-10-09"
       }
     }

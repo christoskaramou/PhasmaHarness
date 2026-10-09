@@ -46,6 +46,12 @@
     </div>
   </main>
   <dialog id="commands-dialog" aria-labelledby="commands-title"><div class="dialog-heading"><h2 id="commands-title">Commands</h2><button type="button" class="close-dialog icon-button" aria-label="Close commands">×</button></div><p class="hint">Type a command and press Enter, or choose one below. Commands apply to the selected agent.</p><div id="commands-list"></div></dialog>
+  <dialog id="command-dialog" aria-labelledby="command-title" aria-describedby="command-description">
+    <div class="dialog-heading"><h2 id="command-title"></h2><button type="button" class="close-dialog icon-button" aria-label="Close command">×</button></div>
+    <p id="command-description" class="hint"></p>
+    <input id="command-search" type="search" placeholder="Search choices…" aria-label="Search command choices" autocomplete="off">
+    <div id="command-content"></div><p id="command-error" class="error" role="alert"></p>
+  </dialog>
   <div id="agent-menu" popover="auto" role="menu" aria-label="Agent options"></div>
   <dialog id="agents-dialog" aria-labelledby="agents-title">
     <div class="dialog-heading"><div><div class="eyebrow">LOCAL AGENT TEAM</div><h2 id="agents-title">Your agents</h2></div><button type="button" class="close-dialog icon-button" aria-label="Close agent overview">×</button></div>

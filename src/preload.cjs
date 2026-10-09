@@ -4,6 +4,7 @@ for (const method of ['benchmarkData', 'benchmarkRefresh', 'benchmarkImport', 'b
   api[method] = (...args) => ipcRenderer.invoke(method, ...args);
 }
 api.copyText = text => ipcRenderer.invoke('copyText', text);
+api.exportConversation = id => ipcRenderer.invoke('exportConversation', id);
 api.saveAgent = value => ipcRenderer.invoke('saveAgent', value);
 api.deleteAgent = id => ipcRenderer.invoke('deleteAgent', id);
 api.clearConversation = agentId => ipcRenderer.invoke('clearConversation', agentId);

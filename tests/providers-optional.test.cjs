@@ -308,6 +308,7 @@ test('Claude turns feed the context meter and support manual compaction', async 
   assert.equal(session.claudeSessionId, 'claude-2');
   assert.equal(session.usage.last, undefined);
   assert.match(session.notice, /compacted/);
+  assert.ok(Number.isFinite(session.lastCompactedAt), 'successful Claude compaction records its time');
   controller.data.sessions.find(s => s.id === session.id).activeProvider = 'cursor-cli';
   await assert.rejects(controller.compact(session.id), /Cursor manages its context automatically/);
 });

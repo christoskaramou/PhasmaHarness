@@ -131,6 +131,7 @@ module.exports = {
     }
     if (submission.kind === 'compaction' && outcome.status === 'completed') {
       session.notice = 'Context compacted. The visible chat history is retained.';
+      session.lastCompactedAt = Date.now();
       session.noticeExpiresAt = Date.now() + 5000;
     }
     const stopping = this.stopping.has(session.id);
@@ -247,6 +248,7 @@ module.exports = {
       if (submission?.kind !== 'compaction') this.providerOutcome(session, provider, route?.model, messageId, outcome);
     }
     if ((method === 'item/started' || method === 'item/completed') && this.visible(p.item)) {
+      if (method === 'item/completed' && p.item.type === 'contextCompaction') session.lastCompactedAt = Date.now();
       p.item.turnId = p.turnId;
       p.item.routeLabel = session.routes.at(-1)?.label;
       const index = session.items.findIndex(i => i.id === p.item.id || (p.item.clientId && i.clientId === p.item.clientId));
