@@ -1794,6 +1794,7 @@ document.querySelectorAll('.settings-tab').forEach(tab => {
     $('#panel-providers').hidden = name !== 'providers';
     $('#panel-checks').hidden = name !== 'checks';
     $('#panel-wiki').hidden = name !== 'wiki';
+    $('#panel-version').hidden = name !== 'version';
     if (name === 'wiki') {
       $('#wiki-kind').textContent = '';
       $('#wiki-location').textContent = 'Loading…';

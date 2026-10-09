@@ -69,6 +69,7 @@
       <button type="button" class="settings-tab" role="tab" id="tab-providers" aria-selected="false" aria-controls="panel-providers" data-tab="providers">Providers</button>
       <button type="button" class="settings-tab" role="tab" id="tab-checks" aria-selected="false" aria-controls="panel-checks" data-tab="checks">Checks</button>
       <button type="button" class="settings-tab" role="tab" id="tab-wiki" aria-selected="false" aria-controls="panel-wiki" data-tab="wiki">Wiki</button>
+      <button type="button" class="settings-tab" role="tab" id="tab-version" aria-selected="false" aria-controls="panel-version" data-tab="version">Version</button>
     </div>
     <div class="settings-body">
     <div id="panel-wiki" class="settings-panel" role="tabpanel" aria-labelledby="tab-wiki" hidden>
@@ -102,6 +103,8 @@
     <h3 class="settings-section">Jev <span id="jev-status" class="hint">No key saved</span></h3>
     <p id="jev-health" class="hint" role="status"></p>
     <div class="jev-note"><label>API key<input id="jev-key" type="password" autocomplete="off" spellcheck="false" maxlength="4096" placeholder="Paste a key to save or replace" aria-label="Jev API key"></label><div class="jev-actions"><button id="jev-save" type="button">Save</button><button id="jev-test" type="button">Test</button><button id="jev-remove" type="button">Remove</button></div><p id="jev-result" class="hint" role="status"></p></div>
+    </div>
+    <div id="panel-version" class="settings-panel" role="tabpanel" aria-labelledby="tab-version" hidden>
     <h3 class="settings-section">App <span id="app-version" class="hint"></span></h3>
     <div class="compact-actions"><button type="button" id="copy-diagnostics">Copy diagnostics</button><button type="button" id="open-logs">Open logs folder</button><button type="button" id="check-updates">Check for updates</button><button type="button" id="install-update" hidden>Update and restart</button><button type="button" id="open-release" hidden>Open release page</button></div>
     <p id="diagnostics-status" class="hint" role="status"></p>

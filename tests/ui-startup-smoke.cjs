@@ -8,6 +8,9 @@ const { Controller } = require('../src/controller.cjs');
 const { confirmations } = require('../src/confirmations.cjs');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-ui-'));
 app.setPath('userData', root);
+// Xvfb runners may lack a working GPU readback path for offscreen screenshots.
+app.disableHardwareAcceleration();
+fs.mkdirSync(path.resolve(__dirname, '../.scratch'), { recursive: true });
 const deadline = setTimeout(() => { console.error('UI startup timed out'); app.exit(1); }, 15000);
 app.whenReady().then(async () => {
   const controller = new Controller(path.join(root, 'sessions.json'), root);
@@ -248,6 +251,14 @@ app.whenReady().then(async () => {
   console.log('Removed checks are saved by the dialog Save passed');
   // Settings shows the app version; the manual update check reports and links, and never downloads.
   await window.webContents.executeJavaScript("document.querySelector('#settings').click(); new Promise(r => setTimeout(r, 200))");
+  await window.webContents.executeJavaScript("document.querySelector('#tab-version').click(); true");
+  assert.deepEqual(await window.webContents.executeJavaScript(`({
+    selected: document.querySelector('#tab-version').getAttribute('aria-selected'),
+    visiblePanels: [...document.querySelectorAll('.settings-panel')].filter(panel => !panel.hidden).map(panel => panel.id),
+    controlsMoved: ['app-version', 'copy-diagnostics', 'open-logs', 'check-updates', 'install-update', 'open-release', 'diagnostics-status', 'update-status'].every(id => document.querySelector('#' + id).closest('#panel-version'))
+  })`), { selected: 'true', visiblePanels: ['panel-version'], controlsMoved: true });
+  await new Promise(resolve => setTimeout(resolve, 100));
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/settings-version.png'), (await window.webContents.capturePage()).toPNG());
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#app-version').textContent"), 'Version 0.1.0');
   const checkUpdates = () => window.webContents.executeJavaScript(`(async () => {
     document.querySelector('#check-updates').click();
@@ -267,6 +278,8 @@ app.whenReady().then(async () => {
   const [installable] = await checkUpdates();
   assert.match(installable, /Version 0\.2\.0 is available\. Update and restart downloads and installs it/);
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#install-update').hidden"), false);
+  await window.webContents.executeJavaScript("document.querySelector('#tab-general').click(); true");
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#panel-version').hidden"), true);
   console.log('Version and manual update check passed');
   // The automatic update banner: offered when the installed app finds a release, disabled while a turn runs.
   await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').close(); true");
@@ -471,7 +484,6 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); document.querySelector("#agents-overview").click(); true');
   await new Promise(resolve => setTimeout(resolve, 250));
   const screenshot = path.resolve(__dirname, '../.scratch/agents-ui.png');
-  fs.mkdirSync(path.dirname(screenshot), { recursive: true });
   fs.writeFileSync(screenshot, (await window.webContents.capturePage()).toPNG());
   worker.busy = null; workerSession.status = 'idle';
   await window.webContents.executeJavaScript('document.querySelector("#prompt").value = "Main draft stays"; true');
