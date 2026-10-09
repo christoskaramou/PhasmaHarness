@@ -1405,7 +1405,7 @@ $('#settings').onclick = async () => {
   $('#jev-result').textContent = '';
   renderProviders();
   renderChecks(); // saved checks, not leftovers from an earlier unsaved edit
-  showVersion();
+  showAbout();
   $('#settings-dialog').showModal();
 };
 // Versions, provider state and recent log lines (no prompts, replies or keys), for bug reports.
@@ -1416,9 +1416,9 @@ $('#copy-diagnostics').onclick = async () => {
 };
 $('#open-logs').onclick = () => api.openLogs().catch(notify);
 let appInfo = null, releaseURL = null;
-async function showVersion() {
+async function showAbout() {
   appInfo ??= await api.appInfo().catch(() => null);
-  if (appInfo) $('#app-version').textContent = `Version ${appInfo.version}${appInfo.packaged ? '' : ' (source folder)'}`;
+  if (appInfo) $('#app-version').textContent = `Version ${appInfo.version}`;
 }
 // Asks GitHub for the latest release. The installed app can then update itself (Update and restart); a source folder
 // only gets the link.
@@ -1937,7 +1937,7 @@ document.querySelectorAll('.settings-tab').forEach(tab => {
     $('#panel-providers').hidden = name !== 'providers';
     $('#panel-checks').hidden = name !== 'checks';
     $('#panel-wiki').hidden = name !== 'wiki';
-    $('#panel-version').hidden = name !== 'version';
+    $('#panel-about').hidden = name !== 'about';
     if (name === 'wiki') {
       $('#wiki-kind').textContent = '';
       $('#wiki-location').textContent = 'Loading…';

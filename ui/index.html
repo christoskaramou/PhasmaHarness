@@ -15,22 +15,22 @@
 </head>
 <body>
   <aside class="sidebar">
-    <div class="brand"><span class="brand-mark">↗</span><span>Phasma <b>Harness</b></span></div>
+    <div class="brand"><span>Phasma <b>Harness</b></span></div>
     <section class="main-agent" aria-label="Main agent"><div class="agents-heading"><span>MAIN AGENT</span></div><div id="main-agent-list"></div></section>
     <section class="agent-picker" aria-label="Your agents">
-      <div class="agents-heading"><span id="agent-roster-label">YOUR AGENTS</span><button id="agents-overview" type="button">Overview ↗</button></div>
+      <div class="agents-heading"><span id="agent-roster-label">YOUR AGENTS</span><button id="agents-overview" type="button">Overview</button></div>
       <div id="agent-list" aria-label="Choose an agent"></div>
       <button id="agent-new" type="button">＋ New agent</button>
       <div id="agent-actions" class="compact-actions" hidden><button id="agent-edit" type="button" disabled>Edit</button></div>
     </section>
   </aside>
   <main>
-    <header><div><h1 id="session-title">New session</h1><span id="session-path">Your workspace, your models.</span></div><div class="header-actions"><button id="settings" class="compact-action" type="button" title="Settings" aria-label="Settings">&#9881;</button><select id="quick-routing" class="rules-tag" aria-label="Model routing" title="Choose Smart or Jev routing"><option value="smart">SMART ROUTING</option><option value="jev">JEV ROUTING</option></select><button id="browse-session" class="compact-action" type="button" title="Session changes" aria-label="Session changes" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z M14 2v6h6 M8 13h8 M8 17h5"/></svg></button><button id="browse-files" class="compact-action" type="button" title="Browse workspace files" aria-label="Browse workspace files"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></svg></button><button id="browse-changes" class="compact-action" type="button" title="View Git changes" aria-label="View Git changes" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="5" r="3"/><circle cx="6" cy="19" r="3"/><circle cx="18" cy="6" r="3"/><path d="M6 8v8m12-7a10 10 0 0 1-9 10"/></svg></button></div></header>
+    <header><div><h1 id="session-title">New session</h1><span id="session-path">Your workspace, your models.</span></div><div class="header-actions"><select id="quick-routing" class="rules-tag" aria-label="Model routing" title="Choose Smart or Jev routing"><option value="smart">SMART ROUTING</option><option value="jev">JEV ROUTING</option></select><button id="browse-session" class="compact-action" type="button" title="Session changes" aria-label="Session changes" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z M14 2v6h6 M8 13h8 M8 17h5"/></svg></button><button id="browse-files" class="compact-action" type="button" title="Browse workspace files" aria-label="Browse workspace files"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></svg></button><button id="browse-changes" class="compact-action" type="button" title="View Git changes" aria-label="View Git changes" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="5" r="3"/><circle cx="6" cy="19" r="3"/><circle cx="18" cy="6" r="3"/><path d="M6 8v8m12-7a10 10 0 0 1-9 10"/></svg></button><button id="settings" class="compact-action" type="button" title="Settings" aria-label="Settings">&#9881;</button></div></header>
     <div id="banner" class="banner" role="status" hidden></div>
     <div id="update-banner" class="update-banner" role="status" hidden><span id="update-text"></span><button type="button" id="update-install">Update and restart</button><button type="button" id="update-notes">What's new</button><button type="button" id="update-dismiss" class="icon-button" aria-label="Hide until the next start">×</button></div>
     <section id="conversation" aria-label="Conversation" aria-live="polite">
       <div id="welcome" class="welcome">
-        <div class="welcome-symbol">↗</div><div class="eyebrow">A LITTLE LESS OVERHEAD.</div>
+        <div class="eyebrow">A LITTLE LESS OVERHEAD.</div>
         <div class="suggestions"><button data-prompt="Explain the structure of this workspace and where I should start."><span>⌕</span><strong>Explore this workspace</strong><small>Find the important pieces</small></button><button data-prompt="Review my current changes for correctness. Keep the review read-only."><span>⎇</span><strong>Review my changes</strong><small>Get a focused second look</small></button><button data-prompt="Help me investigate this bug: "><span>⌁</span><strong>Work through a bug</strong><small>Start with the evidence</small></button></div>
       </div>
       <div id="messages"></div>
@@ -40,7 +40,7 @@
     <div class="composer-area">
       <div id="message-queue" aria-label="Queued messages"></div>
       <div id="route-preview" class="route-preview"><span class="route-dot"></span><strong>Auto</strong><span>Choose a starting preset for each message.</span></div>
-      <form id="composer" class="composer"><div id="slash-menu" hidden><div class="slash-menu-heading"><span>Commands</span><span>↑ ↓ select · Enter run · Tab complete</span></div><div id="slash-options" role="listbox" aria-label="Slash commands"></div><p id="slash-empty" role="status" hidden>No matching commands</p></div><div id="image-previews" aria-label="Attached images"></div><textarea id="prompt" rows="3" placeholder="What would you like to work on? Type / for commands." aria-label="Message" role="combobox" aria-autocomplete="list" aria-controls="slash-options" aria-haspopup="listbox" aria-expanded="false" maxlength="200000"></textarea><div class="composer-bottom"><div class="composer-controls"><select id="permissions" class="permissions-control" aria-label="Session permissions" aria-describedby="permissions-detail"></select></div><div class="composer-model"><label class="preset-control"><span>↗</span><select id="preset" aria-label="Model"><option value="auto">Auto · choose for me</option></select><select id="effort" aria-label="Reasoning effort" title="Reasoning effort" hidden></select></label><select id="effort-cap" class="effort-cap-control" aria-label="Effort cap for Auto" hidden><option value="low">Up to low effort</option><option value="medium">Up to medium effort</option><option value="high">Up to high effort</option><option value="xhigh">Up to xhigh effort</option><option value="max">⚠ Up to max effort</option></select></div><button id="send" type="submit" aria-label="Send message" title="Send message">↑</button><button id="stop" type="button" class="stop" aria-label="Stop task" title="Stop task" hidden><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1" fill="currentColor"/></svg></button></div></form>
+      <form id="composer" class="composer"><div id="slash-menu" hidden><div class="slash-menu-heading"><span>Commands</span><span>↑ ↓ select · Enter run · Tab complete</span></div><div id="slash-options" role="listbox" aria-label="Slash commands"></div><p id="slash-empty" role="status" hidden>No matching commands</p></div><div id="image-previews" aria-label="Attached images"></div><textarea id="prompt" rows="3" placeholder="What would you like to work on? Type / for commands." aria-label="Message" role="combobox" aria-autocomplete="list" aria-controls="slash-options" aria-haspopup="listbox" aria-expanded="false" maxlength="200000"></textarea><div class="composer-bottom"><div class="composer-controls"><select id="permissions" class="permissions-control" aria-label="Session permissions" aria-describedby="permissions-detail"></select></div><div class="composer-model"><label class="preset-control"><select id="preset" aria-label="Model"><option value="auto">Auto · choose for me</option></select><select id="effort" aria-label="Reasoning effort" title="Reasoning effort" hidden></select></label><select id="effort-cap" class="effort-cap-control" aria-label="Effort cap for Auto" hidden><option value="low">Up to low effort</option><option value="medium">Up to medium effort</option><option value="high">Up to high effort</option><option value="xhigh">Up to xhigh effort</option><option value="max">⚠ Up to max effort</option></select></div><button id="send" type="submit" aria-label="Send message" title="Send message">↑</button><button id="stop" type="button" class="stop" aria-label="Stop task" title="Stop task" hidden><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1" fill="currentColor"/></svg></button></div></form>
       <p id="permissions-detail" class="permissions-detail"></p>
       <div class="composer-footer"><span>Enter to send <span class="separator">·</span> Shift + Enter for a new line <span class="separator">·</span> ↑ for sent history <span class="separator">·</span> <button id="commands-help" type="button">Commands /</button></span><div class="usage-controls"><button id="clear-conversation" type="button" title="Clear this conversation after confirmation">Clear</button><span id="usage">Connected</span><div class="context-meter-wrap"><button id="context-meter" type="button" aria-label="Compact context" aria-describedby="context-meter-tip"><span class="context-ring" aria-hidden="true"></span></button><span id="context-meter-tip" role="tooltip">Context usage unavailable</span></div></div></div>
     </div>
@@ -75,7 +75,7 @@
       <button type="button" class="settings-tab" role="tab" id="tab-providers" aria-selected="false" aria-controls="panel-providers" data-tab="providers">Providers</button>
       <button type="button" class="settings-tab" role="tab" id="tab-checks" aria-selected="false" aria-controls="panel-checks" data-tab="checks">Checks</button>
       <button type="button" class="settings-tab" role="tab" id="tab-wiki" aria-selected="false" aria-controls="panel-wiki" data-tab="wiki">Wiki</button>
-      <button type="button" class="settings-tab" role="tab" id="tab-version" aria-selected="false" aria-controls="panel-version" data-tab="version">Version</button>
+      <button type="button" class="settings-tab" role="tab" id="tab-about" aria-selected="false" aria-controls="panel-about" data-tab="about">About</button>
     </div>
     <div class="settings-body">
     <div id="panel-wiki" class="settings-panel" role="tabpanel" aria-labelledby="tab-wiki" hidden>
@@ -110,11 +110,24 @@
     <p id="jev-health" class="hint" role="status"></p>
     <div class="jev-note"><label>API key<input id="jev-key" type="password" autocomplete="off" spellcheck="false" maxlength="4096" placeholder="Paste a key to save or replace" aria-label="Jev API key"></label><div class="jev-actions"><button id="jev-save" type="button">Save</button><button id="jev-test" type="button">Test</button><button id="jev-remove" type="button">Remove</button></div><p id="jev-result" class="hint" role="status"></p></div>
     </div>
-    <div id="panel-version" class="settings-panel" role="tabpanel" aria-labelledby="tab-version" hidden>
-    <h3 class="settings-section">App <span id="app-version" class="hint"></span></h3>
-    <div class="compact-actions"><button type="button" id="copy-diagnostics">Copy diagnostics</button><button type="button" id="open-logs">Open logs folder</button><button type="button" id="check-updates">Check for updates</button><button type="button" id="install-update" hidden>Update and restart</button><button type="button" id="open-release" hidden>Open release page</button></div>
-    <p id="diagnostics-status" class="hint" role="status"></p>
-    <p id="update-status" class="hint" role="status"></p>
+    <div id="panel-about" class="settings-panel" role="tabpanel" aria-labelledby="tab-about" hidden>
+      <div class="about-app">
+        <img src="icon.ico" width="64" height="64" alt="">
+        <h3>Phasma Harness</h3>
+        <p class="muted about-description">A local desktop workspace for AI agents.</p>
+        <p class="hint about-credits">Codex · Claude Code · Cursor · Jev<br>Electron · Node.js · Marked · DOMPurify · KaTeX<br>RTK · ripgrep · Ponytail by DietrichGebert</p>
+        <p class="hint about-rights">© 2026 Christos Karamoustos. All rights reserved.</p>
+        <p id="app-version" class="about-version"></p>
+      </div>
+      <div class="about-updates">
+        <div class="compact-actions"><button type="button" id="check-updates">Check for updates</button><button type="button" id="install-update" hidden>Update and restart</button><button type="button" id="open-release" hidden>Open release page</button></div>
+        <p id="update-status" class="hint" role="status"></p>
+      </div>
+      <section class="about-diagnostics" aria-labelledby="diagnostics-heading">
+        <h3 id="diagnostics-heading">Diagnostics</h3>
+        <div class="compact-actions"><button type="button" id="copy-diagnostics">Copy diagnostics</button><button type="button" id="open-logs">Open logs folder</button></div>
+        <p id="diagnostics-status" class="hint" role="status"></p>
+      </section>
     </div>
     <div id="panel-providers" class="settings-panel" role="tabpanel" aria-labelledby="tab-providers" hidden>
       <p class="muted">Plug icon: gray = connect, green = connected. Click a connected plug to stop using it here; the CLI stays signed in. Tick a model to enable it for Auto.</p>

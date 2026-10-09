@@ -7,8 +7,8 @@ function confirmAction(options) {
     dialog.setAttribute('aria-labelledby', 'confirmation-heading');
     dialog.setAttribute('aria-describedby', 'confirmation-description');
     dialog.innerHTML = `<form method="dialog">
-      <div class="dialog-heading"><span class="confirmation-symbol" aria-hidden="true">↗</span><button type="button" class="icon-button confirmation-close" aria-label="Cancel">×</button></div>
-      <h2 id="confirmation-heading"></h2><p id="confirmation-description" class="muted"></p>
+      <div class="dialog-heading"><h2 id="confirmation-heading"></h2><button type="button" class="icon-button confirmation-close" aria-label="Cancel">×</button></div>
+      <p id="confirmation-description" class="muted"></p>
       <div class="confirmation-details"></div><p class="confirmation-note"></p>
       <div class="dialog-footer"><button type="button" class="confirmation-cancel"></button><button type="submit" value="confirm" class="confirmation-accept"></button></div>
     </form>`;
