@@ -35,7 +35,7 @@ delete process.env.XDG_CONFIG_HOME;
 
 const { app, dialog, BrowserWindow } = require('electron');
 const errorBoxes = [];
-dialog.showMessageBoxSync = () => 1; // "Stop and close"
+dialog.showMessageBoxSync = () => { throw new Error('Unexpected native confirmation'); };
 dialog.showErrorBox = (title, message) => errorBoxes.push(`${title}: ${message}`);
 const main = require('../src/main.cjs');
 
@@ -61,7 +61,16 @@ app.whenReady().then(async () => {
   controller.busy = 'quit-live';
   controller.stop = () => Promise.reject(new Error('interrupt failed (quit test)'));
   closedAt = Date.now();
-  BrowserWindow.getAllWindows()[0].close();
+  const window = BrowserWindow.getAllWindows()[0];
+  window.close();
+  await window.webContents.executeJavaScript(`new Promise((resolve, reject) => {
+    let attempts = 0; const check = () => {
+      const button = document.querySelector('.confirmation-accept');
+      if (button) { button.click(); return resolve(); }
+      if (++attempts > 100) return reject(new Error('Close confirmation did not open'));
+      setTimeout(check, 20);
+    }; check();
+  })`);
 });
 
 app.on('will-quit', () => {

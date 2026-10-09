@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "settings": {
+    "budgetSec": 900,
+    "jev": "auto",
+    "maxBlocks": 2
+  },
+  "setups": {},
+  "tests": [
+    {
+      "id": "local-agents",
+      "name": "Local agent creation, concurrency and delegation",
+      "covers": "Main, named and delegated agents create idle persistent agents through tools, inheriting conversation permissions and rejecting inactive calls, edits and permission overrides. New and resumed Codex chats receive a session-bound MCP configuration without replacing history. Agent conversations request native subagents disabled even when untracked; resume appends current developer instructions naming the real creation tool. Only local agent tools are preapproved. Stop, delete and access-setting tools work across provider bridges with compact acknowledgements; Main is undeletable but stoppable and configurable. Idle/access guards reject privilege escalation, extra arguments, self-management and late deletion after a caller stops. Child and grandchild creation inherit all three current conversation access levels rather than profile defaults. Confirmed clear archives Main or a named conversation, creates fresh provider context without changing role/workspace/access, survives restart, rejects pending work and late state changes, and rolls back failed saves. Agent profiles save without waiting for provider startup, reuse discovery and expose startup errors. Independent workers retain separate sessions, serialize overlapping workspaces and Full access, stop individually, return delegated results once, preserve permissions, and fail closed on cleanup or restart. Context reads include Main, search bounded visible transcripts with hash and line provenance, exclude private reasoning and hidden metadata, require an active turn and enforce current workspace/access checks on every call. Each agent retains one conversation, legacy chats migrate without losing history, deletion protects Main and pending work, and repeated delegations return only their own results. Every provider can send exact pasted text to Main; nested task requests wait for final results, reject circular chains, preserve request budgets, and cascade Stop without restarting paused conversations. Agent-created children default to Auto; available model discovery exposes supported efforts, and explicit model/effort selection persists and reaches actual turn parameters across provider bridges without changing the parent. Invalid, disabled and unavailable selections create nothing.",
+      "paths": [
+        "src/agents.cjs",
+        "src/controller.cjs",
+        "src/controller/**",
+        "src/tools/agent-tools.cjs",
+        "src/tools/tool-helpers.cjs",
+        "src/tools/router-bridge.cjs",
+        "src/main.cjs",
+        "tests/agents.test.cjs"
+      ],
+      "command": "node --test tests/agents.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 30,
+      "origin": {
+        "problem": "Harness could run only one active session and had no persistent agent delegation.",
+        "fix": "Coordinate independent controllers with bounded execution, workspace leases and permission-preserving task handoffs.",
+        "date": "2026-10-09"
+      }
+    },
+    {
+      "id": "agent-tools-smoke",
+      "name": "Codex agent creation reaches the sidebar",
+      "covers": "Installed Codex resumes an old conversation, receives explicit developer instructions, executes the real agent_create MCP against the Harness backend without another approval, persists inherited permissions and renders the new agent from the state event. Local Responses mock only; no paid inference or user data changes. The new agent_models tool dispatches through real Codex MCP before creation, and the created profile defaults to Auto.",
+      "paths": [
+        "src/agents.cjs",
+        "src/controller.cjs",
+        "src/controller/helpers.cjs",
+        "src/tools/agent-tools.cjs",
+        "src/tools/router-bridge.cjs",
+        "src/tools/router-mcp.cjs",
+        "src/preload.cjs",
+        "ui/app.js",
+        "tests/agent-tools-smoke.cjs"
+      ],
+      "command": "node -e \"const {spawnSync}=require('node:child_process');const file='tests/agent-tools-smoke.cjs';const check=spawnSync(process.execPath,['--check',file],{stdio:'inherit',windowsHide:true});if(check.status!==0)process.exit(check.status||1);const env={...process.env};delete env.ELECTRON_RUN_AS_NODE;const result=spawnSync(require('electron'),[file],{env,stdio:'inherit',windowsHide:true});process.exit(result.status??1)\"",
+      "cost": "expensive",
+      "timeoutSec": 50,
+      "origin": {
+        "problem": "A chat claimed to create an agent using the provider's native subagent tool, while no Harness profile existed; MCP discovery alone missed an execution approval block.",
+        "fix": "Append current Harness instructions on resume and preapprove only the permission-checked local agent tools; verify a real MCP call through the sidebar.",
+        "date": "2026-10-09"
+      }
+    },
+    {
+      "id": "agents-ui",
+      "name": "Agent UI and delete dialog selection",
+      "covers": "Agent creation, switching, deletion through the context menu without sidebar delete buttons, pinned Main and sidebar scrolling; reopening Delete clears stale text selection. Right-click and Shift+F10 menus use Open/Edit/Delete labels with red Delete, stay within the viewport, support arrow/Enter/Escape navigation and focus restoration, target the clicked agent, and respect Main/busy protections. Slash commands /help /compact /clear /stop /agents /settings run locally without routing/model calls. Clear asks for confirmation and resets only the selected conversation; cancel retains the input. Delegate controls are absent; an agent waiting for nested tasks shows Waiting and keeps Stop targeting its conversation. All buttons and nested button labels are unselectable, including dynamic dialogs, while composer text stays selectable. Shared in-app confirmations show clear/close/startup messages, default to cancellation, handle Escape and repeated opens, retain drafts on cancellation and keep cursor styles visible. Typing / shows all commands, name prefixes filter case-insensitively, arrows and active-descendant track selection, Tab only completes, Enter/click dispatch locally, Escape/blur dismiss, unknown prefixes show an empty state, and the menu fits at 840x640 with 150% text. Selecting clear still confirms.",
+      "paths": [
+        "ui/app.js",
+        "ui/index.html",
+        "ui/style.css",
+        "src/preload.cjs",
+        "tests/ui-startup-smoke.cjs",
+        "src/main.cjs",
+        "ui/dialogs.js",
+        "ui/startup-error.html",
+        "ui/startup-error.js",
+        "src/confirmations.cjs"
+      ],
+      "command": "node -e \"const {spawnSync}=require('node:child_process');const check=spawnSync(process.execPath,['--check','tests/ui-startup-smoke.cjs'],{stdio:'inherit',windowsHide:true});if(check.status!==0)process.exit(check.status||1);const env={...process.env};delete env.ELECTRON_RUN_AS_NODE;const result=spawnSync(require('electron'),['tests/ui-startup-smoke.cjs'],{env,stdio:'inherit',windowsHide:true});process.exit(result.status??1)\"",
+      "cost": "cheap",
+      "timeoutSec": 30,
+      "origin": {
+        "problem": "Delete dialog retained text selection between deletions.",
+        "fix": "Clear selection on dialog open/close and prevent selection of button labels.",
+        "date": "2026-10-09"
+      }
+    },
+    {
+      "id": "confirmations",
+      "name": "App confirmation replies and cancellation",
+      "covers": "Confirmation replies require a matching pending id and an explicit boolean. Window close, renderer crash and reload cancel pending operations; unavailable windows never approve.",
+      "paths": [
+        "src/confirmations.cjs",
+        "src/main.cjs",
+        "src/preload.cjs",
+        "tests/confirmations.test.cjs"
+      ],
+      "command": "node --test tests/confirmations.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 10,
+      "origin": {
+        "problem": "Native confirmations interrupted the Harness UI and obscured the pointer.",
+        "fix": "Use styled in-app dialogs over a sender-validated request/reply bridge; cancel requests when their window disappears.",
+        "date": "2026-10-09"
+      }
+    }
+  ]
+}

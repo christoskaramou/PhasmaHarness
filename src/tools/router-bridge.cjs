@@ -4,9 +4,10 @@ const { randomBytes } = require('node:crypto');
 const path = require('node:path');
 const { TOOL: CONTEXT_TOOL } = require('../workspace/context-search.cjs');
 const { TOOLS: HELPER_TOOLS, INSTRUCTIONS: HELPER_INSTRUCTIONS } = require('./tool-helpers.cjs');
+const { TOOLS: AGENT_TOOLS } = require('./agent-tools.cjs');
 
 const SERVER_NAME = 'phasma_harness';
-const MCP_TOOLS = [CONTEXT_TOOL, ...HELPER_TOOLS].map(({ type, ...tool }) => tool);
+const MCP_TOOLS = [CONTEXT_TOOL, ...HELPER_TOOLS, ...AGENT_TOOLS].map(({ type, ...tool }) => tool);
 const CLI_HELPER_INSTRUCTIONS =
   ' For project investigation, use project_context from the bundled phasma_harness MCP server when useful. It is a partial search: read project instructions normally, verify important claims in live source, and search further for missing or conflicting evidence. Do not repeat identical searches unless files or the question changed.' +
   HELPER_INSTRUCTIONS +
@@ -31,6 +32,7 @@ function claudeAllowedHelpers(access) {
     `mcp__${SERVER_NAME}__project_context`,
     `mcp__${SERVER_NAME}__router_find_tools`,
     `mcp__${SERVER_NAME}__router_read_output`,
+    ...AGENT_TOOLS.map(tool => `mcp__${SERVER_NAME}__${tool.name}`),
   ];
   return access === 'read-only' ? read : [...read, `mcp__${SERVER_NAME}__router_call_tool`];
 }
@@ -80,6 +82,7 @@ class RouterBridge {
       env,
       claudeConfig: mcpConfig(process.execPath, [script], env),
       cursorServers: cursorMcpServers(process.execPath, [script], env),
+      codexConfig: { [`mcp_servers.${SERVER_NAME}`]: { command: process.execPath, args: [script], env, enabled: true, enabled_tools: AGENT_TOOLS.map(tool => tool.name), tools: Object.fromEntries(AGENT_TOOLS.map(tool => [tool.name, { approval_mode: 'approve' }])) } },
       allowedTools: access => claudeAllowedHelpers(access),
       serverName: SERVER_NAME,
       instructions: CLI_HELPER_INSTRUCTIONS,

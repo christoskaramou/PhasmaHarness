@@ -4,6 +4,8 @@ const path = require('node:path');
 const os = require('node:os');
 const { pathToFileURL } = require('node:url');
 const { Controller } = require('./controller.cjs');
+const { Agents } = require('./agents.cjs');
+const { confirmations } = require('./confirmations.cjs');
 const { JevKey } = require('./providers/jev-key.cjs');
 const { JevClient } = require('./providers/jev.cjs');
 const { ContextSearch } = require('./workspace/context-search.cjs');
@@ -21,16 +23,24 @@ app.setName('Phasma Harness');
 // The installed app's shortcuts carry the appId (electron-builder), and Windows shows a shortcut's icon on the taskbar for
 // windows with the same ID. Only the installed app uses it; a source-folder run keeps its own window icon.
 if (process.platform === 'win32' && app.isPackaged) app.setAppUserModelId('com.phasma.harness');
-let window, controller, quitting = false, closing = null, closed = false;
+let window, controller, agents, quitting = false, closing = null, closed = false;
 const log = new Log(path.join(app.getPath('userData'), 'logs'));
 process.on('uncaughtExceptionMonitor', error => log.error('Uncaught exception', { message: error?.message, stack: String(error?.stack || '').slice(0, 1500) }));
 process.on('unhandledRejection', reason => log.error('Unhandled rejection', { message: reason?.message || String(reason) }));
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', () => { if (closing) return; window?.show(); window?.focus(); });
-  app.whenReady().then(start).catch(error => {
-    dialog.showErrorBox('Phasma Harness could not start', error.message);
-    app.exit(1);
+  app.whenReady().then(start).catch(async error => {
+    log.error('Startup failed', { message: error.message });
+    try {
+      const previous = window;
+      quitting = true;
+      window = new BrowserWindow({ width: 640, height: 480, title: 'Phasma Harness', backgroundColor: '#151719', show: false, autoHideMenuBar: true,
+        webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } });
+      if (previous && !previous.isDestroyed()) previous.destroy();
+      await window.loadFile(path.join(__dirname, '..', 'ui', 'startup-error.html'), { query: { message: error.message } });
+      window.show();
+    } catch (failure) { log.error('Error window failed', { message: failure.message }); app.exit(1); }
   });
 }
 
@@ -54,9 +64,19 @@ async function start() {
   const jevKey = new JevKey(path.join(app.getPath('userData'), 'jev-key.enc'), safeStorage);
   controller.smartRouter.jev = new JevClient(jevKey, (...args) => net.fetch(...args));
   controller.contextSearch = new ContextSearch(home, controller.smartRouter.jev);
+  agents = new Agents(controller, async worker => {
+    worker.log = log; worker.trace = controller.trace;
+    worker.smartRouter.benchmarks = controller.smartRouter.benchmarks;
+    worker.providers = new Providers(path.join(app.getPath('userData'), 'provider-keys'), safeStorage, () => controller.data.settings.providers || [], (...args) => net.fetch(...args));
+    await worker.providers.start();
+    worker.smartRouter.providers = worker.providers;
+    worker.smartRouter.jev = new JevClient(jevKey, (...args) => net.fetch(...args));
+    worker.contextSearch = new ContextSearch(home, worker.smartRouter.jev);
+    worker.contextSearch.wikiStore = wikiStore;
+  });
   const updater = new Updater({
     current: app.getVersion(), fetch: (...args) => net.fetch(...args), directory: path.join(app.getPath('userData'), 'updates'),
-    installable: app.isPackaged && process.platform === 'win32', busy: () => !!controller.busy,
+    installable: app.isPackaged && process.platform === 'win32', busy: () => agents.busy,
     quit: () => { log.info('Installing update', { from: app.getVersion(), to: updater.state.latest }); quitting = true; app.quit(); },
   });
   updater.on('state', state => { if (window && !window.isDestroyed()) window.webContents.send('update', state); });
@@ -75,36 +95,45 @@ async function start() {
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
-  controller.on('state', state => { if (!window.isDestroyed()) window.webContents.send('state', state); });
+  agents.on('state', state => { if (!window.isDestroyed()) window.webContents.send('state', state); });
+  const sharedChanges = new Set(['benchmarkApply', 'benchmarkReset', 'cursorLogin', 'cursorRefresh', 'cursorLogout', 'claudeLogin', 'claudeRefresh', 'claudeLogout', 'connectChatGPT', 'logoutChatGPT', 'installProvider', 'providerSettings', 'providerKey', 'renewModels', 'jevSaveKey', 'jevRemoveKey', 'jevTest', 'checks']);
   const handle = (name, fn) => ipcMain.handle(name, async (event, ...args) => {
     if (event.sender !== window.webContents || event.senderFrame?.url !== rendererURL) throw new Error('Untrusted caller.');
-    try { return await fn(...args); }
+    try {
+      if (sharedChanges.has(name) && agents.busy) throw new Error('Stop all agents before changing shared settings or providers.');
+      const result = await fn(...args);
+      if (sharedChanges.has(name)) await agents.refresh();
+      return result?.sessions && result?.settings ? agents.snapshot() : result;
+    }
     catch (error) { log.warn(`Action ${name} failed`, { error: String(error?.message || error).slice(0, 300) }); throw error; }
   });
-  handle('bootstrap', () => controller.snapshot());
-  handle('workspaceWiki', id => wikiStore.ensure(id ? controller.session(id).workspace : controller.data.settings.workspace));
-  handle('chooseWorkspaceWiki', async (id, reset = false) => {
-    const workspace = id ? controller.session(id).workspace : controller.data.settings.workspace;
+  handle('bootstrap', () => agents.snapshot());
+  const confirmation = confirmations(window);
+  handle('answerConfirmation', (id, accepted) => confirmation.answer(id, accepted));
+  handle('saveAgent', value => agents.saveAgent(value));
+  handle('deleteAgent', id => agents.deleteAgent(id));
+  handle('workspaceWiki', (id, agentId) => wikiStore.ensure(id ? agents.owner(id).session(id).workspace : agents.controller(agentId).data.settings.workspace));
+  handle('chooseWorkspaceWiki', async (id, reset = false, agentId) => {
+    const workspace = id ? agents.owner(id).session(id).workspace : agents.controller(agentId).data.settings.workspace;
     if (reset === true) {
-      const answer = await dialog.showMessageBox(window, {
-        type: 'question', buttons: ['Reset', 'Cancel'], defaultId: 1, cancelId: 1,
-        message: 'Reset this workspace wiki to the default folder?',
-        detail: `The wiki will point to the default folder again. Pages in the current folder are not moved or deleted.\n\nCurrent: ${wikiStore.ensure(workspace).root}`,
+      const accepted = await confirmation.ask({
+        title: 'Reset the wiki folder?', message: 'Use the default wiki folder for this workspace again.', confirmLabel: 'Reset folder',
+        details: [{ label: 'Current folder', text: wikiStore.ensure(workspace).root }], note: 'Pages in the current folder stay where they are.',
       });
-      return answer.response === 0 ? wikiStore.setLocation(workspace, null) : wikiStore.ensure(workspace);
+      return accepted ? wikiStore.setLocation(workspace, null) : wikiStore.ensure(workspace);
     }
     const selection = await dialog.showOpenDialog(window, { title: 'Choose wiki folder for this workspace', properties: ['openDirectory'] });
     if (selection.canceled) return wikiStore.ensure(workspace);
     return wikiStore.setLocation(workspace, selection.filePaths[0]);
   });
-  handle('openWorkspaceWiki', async id => {
-    const wiki = wikiStore.ensure(id ? controller.session(id).workspace : controller.data.settings.workspace);
+  handle('openWorkspaceWiki', async (id, agentId) => {
+    const wiki = wikiStore.ensure(id ? agents.owner(id).session(id).workspace : agents.controller(agentId).data.settings.workspace);
     const error = await shell.openPath(wiki.root);
     if (error) throw new Error(error);
   });
-  handle('browseWorkspace', (id, action, relative, kind) => require('./workspace/workspace-browser.cjs').browse(
-    id ? controller.session(id).workspace : controller.data.settings.workspace, action, relative, kind));
-  handle('settings', values => { const snapshot = controller.settings(values); controller.warmRouter(); return snapshot; });
+  handle('browseWorkspace', (id, action, relative, kind, agentId) => require('./workspace/workspace-browser.cjs').browse(
+    id ? agents.owner(id).session(id).workspace : agents.controller(agentId).data.settings.workspace, action, relative, kind));
+  handle('settings', (values, agentId) => { const snapshot = agents.settings(values, agentId); controller.warmRouter(); return snapshot; });
   const benchmarkWorkers = () => controller.catalog().filter(p => p.worker && p.enabled && controller.available(p));
   handle('benchmarkData', () => ({ data: controller.smartRouter.benchmarks.data, summary: controller.smartRouter.benchmarks.summary(benchmarkWorkers()) }));
   handle('benchmarkRefresh', () => {
@@ -186,11 +215,12 @@ async function start() {
     if (installing) throw new Error(`Wait for the ${installing} install to finish.`);
     const { installer, install } = require('./providers/install.cjs');
     const { label, command } = installer(id);
-    const answer = await dialog.showMessageBox(window, {
-      type: 'question', buttons: ['Install', 'Cancel'], defaultId: 0, cancelId: 1,
-      message: `Install ${label}?`, detail: `This runs the official installer:\n\n${command}`,
+    const accepted = await confirmation.ask({
+      title: `Install ${label}?`, message: 'Harness will run the official installer on this computer.', confirmLabel: 'Install',
+      details: [{ label: 'Installer command', text: command }],
     });
-    if (answer.response !== 0 || installing) return controller.snapshot();
+    if (!accepted || installing) return controller.snapshot();
+    if (agents.busy) throw new Error('Stop all agents before installing a provider.');
     installing = label;
     try {
       await install(id);
@@ -255,19 +285,20 @@ async function start() {
     if (controller.busy) throw new Error('Wait for the current turn to finish before testing Jev.');
     try { return await controller.smartRouter.jev.test(); } finally { controller.changed(); }
   });
-  handle('create', (workspace, access) => controller.create(workspace, access));
-  handle('permissions', (id, access) => controller.permissions(id, access));
-  handle('load', id => controller.load(id));
-  handle('rename', (id, title) => controller.rename(id, title));
-  handle('archive', id => controller.archive(id));
-  handle('deleteSession', id => controller.deleteSession(id));
-  handle('findContext', (id, query, mode) => controller.findContext(id, query, mode));
-  handle('cancelContext', () => { if (!controller.busy) controller.contextSearch.cancel(); });
-  handle('preview', (id, text, mode) => controller.preview(id, text, mode));
+  handle('create', (workspace, access, agentId) => agents.conversation(agents.controller(agentId), true, workspace, access));
+  handle('permissions', (id, access) => agents.owner(id).permissions(id, access));
+  handle('load', id => agents.owner(id).load(id));
+  handle('rename', (id, title) => agents.owner(id).rename(id, title));
+  handle('archive', id => agents.owner(id).archive(id));
+  handle('deleteSession', id => agents.owner(id).deleteSession(id));
+  handle('findContext', (id, query, mode, agentId) => (id ? agents.owner(id) : agents.controller(agentId)).findContext(id, query, mode));
+  handle('cancelContext', agentId => { const worker = agents.controller(agentId); if (!worker.busy) worker.contextSearch.cancel(); });
+  handle('preview', (id, text, mode, agentId) => (id ? agents.owner(id) : agents.controller(agentId)).preview(id, text, mode));
   handle('send', message => {
     const images = message.images || [];
     if (!Array.isArray(images) || images.length > 4 || images.some(url => typeof url !== 'string') || images.reduce((n, url) => n + url.length, 0) > 12 * 1024 * 1024) throw new Error('Attach up to four images, under 8 MB total.');
-    return controller.send({ ...message, images: images.map(url => {
+    const worker = agents.owner(message.id); agents.sync(worker);
+    return worker.send({ ...message, images: images.map(url => {
       if (!/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(url)) throw new Error('Use PNG, JPEG or WebP images.');
       const image = nativeImage.createFromDataURL(url);
       const size = image.getSize();
@@ -275,7 +306,7 @@ async function start() {
       return image.toDataURL();
     }) });
   });
-  handle('stop', () => controller.stop());
+  handle('stop', id => agents.stop(id));
   handle('diagnostics', async () => {
     const version = async run => { try { return (await run()).trim().split(/\s+/).find(part => /\d+\.\d+/.test(part)) || '?'; } catch { return 'not available'; } };
     const [claude, cursor] = await Promise.all([
@@ -301,12 +332,21 @@ async function start() {
     if (typeof text !== 'string' || text.length > 2000000) throw new Error('Message is too large to copy.');
     clipboard.writeText(text);
   });
-  handle('queuedMessage', (id, messageId, action) => controller.queuedMessage(id, messageId, action));
-  handle('compact', id => controller.compact(id));
+  handle('queuedMessage', (id, messageId, action) => agents.owner(id).queuedMessage(id, messageId, action));
+  handle('compact', id => agents.owner(id).compact(id));
+  handle('clearConversation', async agentId => {
+    const session = await agents.clearConversation(agentId, name => confirmation.ask({
+      title: 'Start a fresh conversation?', message: `Clear the current context for ${name} and start with a blank chat.`,
+      details: [{ label: 'Fresh context', text: 'The current conversation, draft and attachments leave the chat.' },
+        { label: 'Same agent', text: 'Role, workspace and access stay the same.' }],
+      note: 'Your previous conversation is archived on this computer.', confirmLabel: 'Clear conversation', cancelLabel: 'Keep conversation', danger: true,
+    }));
+    return { cleared: !!session, sessionId: session?.id, state: agents.snapshot() };
+  });
   handle('checks', (workspace, list) => controller.checks(workspace, list));
-  handle('acknowledgeTask', (id, taskId) => controller.acknowledgeTask(id, taskId));
-  handle('proposeWiki', (id, taskId) => controller.proposeWiki(id, taskId));
-  handle('answer', (id, answer) => controller.answer(id, answer));
+  handle('acknowledgeTask', (id, taskId) => agents.owner(id).acknowledgeTask(id, taskId));
+  handle('proposeWiki', (id, taskId) => agents.owner(id).proposeWiki(id, taskId));
+  handle('answer', (id, answer, agentId) => agents.controller(agentId).answer(id, answer));
   handle('chooseWorkspace', async () => {
     const selection = await dialog.showOpenDialog(window, { title: 'Choose workspace', properties: ['openDirectory'], defaultPath: controller.data.settings.workspace });
     if (selection.canceled) return null;
@@ -317,20 +357,21 @@ async function start() {
     if (!['https:', 'http:'].includes(url.protocol)) throw new Error('Only web links can be opened.');
     await shell.openExternal(url.href);
   });
+  let closeConfirmation = null;
   window.on('close', event => {
-    if (controller.busy && !quitting) {
+    if (agents.busy && !quitting) {
       event.preventDefault();
-      const choice = dialog.showMessageBoxSync(window, {
-        type: 'question', title: 'A task is still running', message: 'Stop the running task and close Phasma Harness?',
-        buttons: ['Keep working', 'Stop and close'], defaultId: 0, cancelId: 0,
-      });
-      // Quitting stops the task itself (Controller.shutdown), within a time limit, so a failed or hung Stop cannot keep the app open.
-      if (choice === 1) { quitting = true; app.quit(); }
+      if (closeConfirmation) return;
+      closeConfirmation = confirmation.ask({ title: 'Close Harness?', message: 'Agents are still working. Closing Harness will stop all running tasks.',
+        confirmLabel: 'Stop and close', cancelLabel: 'Keep working', danger: true })
+        .then(accepted => { if (accepted) { quitting = true; app.quit(); } })
+        .finally(() => { closeConfirmation = null; });
     }
   });
   await window.loadURL(rendererURL);
   window.show();
   await controller.initialize();
+  await agents.initialize();
   controller.warmRouter();
   // The installed app checks for a newer release shortly after it starts and then every 12 hours, quietly: a failed
   // check is only logged. Installing always waits for the user's "Update and restart".
@@ -347,13 +388,13 @@ module.exports = { controller: () => controller };
 // Quitting waits for the workers: the window goes away at once, then Controller.shutdown stops the task and every
 // process the app started (bounded, about 12 s at most) before the app exits.
 app.on('before-quit', event => {
-  if (controller?.busy && !quitting) { event.preventDefault(); window?.close(); return; }
+  if (agents?.busy && !quitting) { event.preventDefault(); window?.close(); return; }
   if (closed || !controller) return;
   event.preventDefault();
   if (closing) return;
   quitting = true;
   if (window && !window.isDestroyed()) window.hide();
-  closing = controller.shutdown()
+  closing = (agents ? agents.shutdown() : controller.shutdown())
     .then(result => { if (result.stopped || result.remaining.length) log.info('Stopped leftover processes', result); },
       error => log.error('Shutdown cleanup failed', { message: error.message }))
     .finally(() => {

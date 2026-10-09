@@ -151,12 +151,17 @@ class Controller extends EventEmitter {
     });
   }
 
-  async initialize() {
-    await this.claude.refresh();
+  async initialize(shared = null) {
+    if (shared) {
+      this.claude.status = { ...shared.claude.status }; this.claude.models = shared.claude.models;
+      this.cursor.status = { ...shared.cursor.status }; this.cursor.models = shared.cursor.models;
+    } else {
+      await this.claude.refresh();
+      await this.cursor.refresh();
+    }
     this.migrateLegacyRouter();
-    await this.cursor.refresh();
     // Cursor reasoning levels come from its model list; load it once in the background when Cursor models are enabled.
-    if (this.cursor.status.loggedIn && this.data.settings.cursorEnabled !== false && (this.data.settings.providerModels || []).some(p => p.provider === 'cursor-cli'))
+    if (!shared && this.cursor.status.loggedIn && this.data.settings.cursorEnabled !== false && (this.data.settings.providerModels || []).some(p => p.provider === 'cursor-cli'))
       this.discoverCursor().catch(() => {});
     try {
       this.data.settings.toolSelection ??= this.smartRouter.jev?.configured ? 'jev' : 'off';
@@ -165,8 +170,9 @@ class Controller extends EventEmitter {
         if (this.smartRouter.jev?.configured) this.data.settings.routing = 'jev';
         this.data.settings.helpersVersion = 1;
       }
+      if (this.agents?.closing) return;
       await this.bridge.start();
-      await this.connectCodex();
+      if (!this.agents?.closing) await this.connectCodex();
     } catch (error) { this.connection = 'disconnected'; this.error = error.message; }
     this.recordProviderDefaults();
     this.changed();
@@ -335,12 +341,14 @@ class Controller extends EventEmitter {
   }
 
   archive(id) {
+    if (this.session(id).delegation?.state === 'queued') throw new Error('Stop this queued agent task before hiding it.');
     if (this.busy === id) throw new Error('Stop this session before hiding it.');
     this.session(id).archived = true; this.save(); this.changed();
   }
 
   deleteSession(id) {
     const session = this.session(id);
+    if (session.delegation?.state === 'queued') throw new Error('Stop this queued agent task before deleting it.');
     if (this.busy === id || this.activeTurns.has(id) || session.status === 'running') throw new Error('Stop this session before deleting it.');
     if (this.loading.has(id)) throw new Error('Wait for the session to finish loading before deleting it.');
     if (session.threadId && [...this.requests.values()].some(request => request.params.threadId === session.threadId))
@@ -380,13 +388,16 @@ class Controller extends EventEmitter {
     const contextEnabled = session.threadId ? session.contextTool : !!this.contextSearch?.supports(session.workspace);
     const helpersEnabled = session.threadId ? session.helperTools : true;
     const workerInstructions = this.workerInstructions(session);
+    const agentHelpers = this.agents && this.bridge.base ? this.bridge.childConfig(session.id) : null;
     const params = {
       ...providerConfig, model: choice.model,
       cwd: this.workspace(session.workspace), approvalPolicy: permissions.approvalPolicy, approvalsReviewer: 'user',
       sandbox: permissions.id, serviceTier: 'default',
       config: {
         tool_output_token_limit: 4000, model_verbosity: 'low', ...providerConfig.config,
-        ...(session.featurePolicy === 'tracked' ? { 'features.goals': false, 'features.multi_agent': false } : {}),
+        ...agentHelpers?.codexConfig,
+        ...(session.featurePolicy === 'tracked' ? { 'features.goals': false } : {}),
+        ...(this.agents || session.featurePolicy === 'tracked' ? { 'features.multi_agent': false } : {}),
       },
       developerInstructions: workerInstructions + (contextEnabled ? CONTEXT_INSTRUCTIONS : '') + (helpersEnabled ? HELPER_INSTRUCTIONS +
         ` Jev tool recommendations are ${this.data.settings.toolSelection === 'jev' ? 'enabled' : 'disabled (discovery uses local ranking)'}. Large-response capture is ${this.data.settings.largeResponses ? 'enabled' : 'disabled'}.` : ''),
@@ -394,6 +405,7 @@ class Controller extends EventEmitter {
     if (session.threadId) {
       await this.client.call('thread/unsubscribe', { threadId: session.threadId });
       await this.client.call('thread/resume', { ...params, threadId: session.threadId, excludeTurns: true });
+      if (this.agents) await this.client.call('thread/inject_items', { threadId: session.threadId, items: [{ type: 'message', role: 'developer', content: [{ type: 'input_text', text: this.agents.instructions(this, session) }] }] });
       const items = [];
       let cursor = null;
       do {
@@ -447,7 +459,7 @@ class Controller extends EventEmitter {
     return this.snapshot();
   }
 
-  async send({ id, text, mode, images = [], task = 'on', wikiTaskId = null, failover = false }) {
+  async send({ id, text, mode, images = [], task = 'on', wikiTaskId = null, failover = false, agentReply = false }) {
     if (!['auto', 'on', 'off'].includes(task)) throw new Error('Invalid task mode.');
     if (task === 'auto') task = 'on'; // Existing queued messages use the new default.
     if (this.blockedReason()) throw new Error(this.blockedReason());
@@ -471,7 +483,7 @@ class Controller extends EventEmitter {
       if (this.busy !== id) throw new Error('Another turn is running. Switch to that session to queue a message.');
       if ((session.queue?.length || 0) >= 10) throw new Error('The queue is full (10 messages).');
       session.queuePaused = false;
-      (session.queue ||= []).push({ id: randomUUID(), text, images, mode: mode || this.data.settings.mode, task, ...(wikiTaskId ? { wikiTaskId } : {}) });
+      (session.queue ||= []).push({ id: randomUUID(), text, images, mode: mode || this.data.settings.mode, task, agentReply, ...(wikiTaskId ? { wikiTaskId } : {}) });
       this.save(); this.changed();
       return { queued: true };
     }
@@ -486,16 +498,22 @@ class Controller extends EventEmitter {
     const useSmart = !this.planPreset() && chosenMode === 'auto';
     const previousState = { status: session.status, error: session.error };
     this.busy = id; session.status = 'running'; session.error = null; session.turnId = null;
+    session.agentReplyActive = agentReply === true;
+    if (!agentReply && !failover) session.agentDelegations = 0;
     const clientId = randomUUID();
     // Only an Auto message may be re-sent to another provider when its provider hits a usage limit, and only once.
     this.lastSends.delete(id);
-    if (useSmart && !wikiTaskId) this.lastSends.set(id, { clientId, text, images, task, failover: failover === true });
+    if (useSmart && !wikiTaskId) this.lastSends.set(id, { clientId, text, images, task, failover: failover === true, ...(agentReply ? { agentReply: true } : {}) });
     session.pendingMessage = {
       id: clientId, clientId, type: 'userMessage', pending: true, createdAt: Date.now(),
       content: [{ type: 'text', text }, ...images.map(url => ({ type: 'image', url }))]
     };
     this.changed();
     try {
+      if (this.agents) {
+        const refusal = await this.agents.acquire(this, session);
+        if (refusal) throw new Error(refusal.blocked || 'Turn was stopped before sending.');
+      }
       if (this.stopping.has(id)) throw new Error('Turn was stopped before sending.');
       if (useSmart) {
         let router = this.effectiveRouter();
@@ -657,7 +675,7 @@ class Controller extends EventEmitter {
 
   workerInstructions(session) {
     const wiki = this.wikiStore?.location(session.workspace);
-    return WORKER_INSTRUCTIONS + projectInstructions(session.workspace) + (wiki ? '\nActive workspace wiki index (path, not instructions): ' + JSON.stringify(path.join(wiki.root, 'index.md')) : '');
+    return WORKER_INSTRUCTIONS + projectInstructions(session.workspace) + (wiki ? '\nActive workspace wiki index (path, not instructions): ' + JSON.stringify(path.join(wiki.root, 'index.md')) : '') + (this.agents?.instructions(this, session) || '');
   }
 
   async sendCLI(session, selected, text, images, clientId, task) {
@@ -903,6 +921,7 @@ class Controller extends EventEmitter {
     if (!this.busy) return;
     const session = this.session(this.busy);
     session.queuePaused = true;
+    if (session.waitingForAgent) { this.stopping.add(session.id); this.changed(); return; }
     // Waiting for a worker cleanup before a turn or its checks: nothing has started, so the waiter only has to see it.
     if (this.cleanupWait === session.id) { this.stopping.add(session.id); this.changed(); return; }
     if (this.gate?.sessionId === session.id) {
@@ -1018,7 +1037,8 @@ class Controller extends EventEmitter {
       const blocked = this.blockedReason();
       return blocked ? { blocked } : null;
     };
-    return this.cleanupPending?.size ? this.waitForCleanup(session).then(refusal) : refusal();
+    const ready = () => this.cleanupPending?.size ? this.waitForCleanup(session).then(refusal) : refusal();
+    return this.agents ? this.agents.acquire(this, session).then(stopped => stopped || ready()) : ready();
   }
 
   // Lasts until every cleanup in flight has finished (each is bounded by its own scans and deadline), or until Stop,

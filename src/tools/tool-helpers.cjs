@@ -15,6 +15,24 @@ function boundedString(value, max, name) {
   return value;
 }
 
+function readText(text, provenance, args) {
+  const line = args.line ?? 1, column = args.column ?? 1;
+  if (![line, column].every(x => Number.isSafeInteger(x) && x >= 1)) throw new Error('Line and column must be positive integers.');
+  if (args.query !== undefined) boundedString(args.query, 500, 'query');
+  const lines = text.split(/\r?\n/), excerpts = [];
+  let remaining = 8000, more = false;
+  for (let i = line - 1; i < lines.length; i++) {
+    const position = args.query ? lines[i].toLowerCase().indexOf(args.query.toLowerCase()) : -1;
+    if (args.query && position < 0) continue;
+    if (excerpts.length >= 30 || remaining <= 0) { more = true; break; }
+    const start = Math.max(column - 1, position >= 0 ? position - 200 : 0);
+    const part = lines[i].slice(start, start + Math.min(2000, remaining));
+    excerpts.push({ line: i + 1, column: start + 1, text: part, clipped: start > 0 || start + part.length < lines[i].length }); remaining -= part.length;
+  }
+  return { ...provenance, sha256: createHash('sha256').update(text).digest('hex'), bytes: Buffer.byteLength(text), excerpts, more,
+    note: 'Partial exact lines. Use line/column or a different query for omitted content. Line numbers refer to source above.' };
+}
+
 class ToolHelpers {
   constructor(directory, client, jev) { this.directory = path.resolve(directory); this.client = client; this.jev = jev; this.abort = new AbortController(); }
   cancel() { this.abort.abort(); this.abort = new AbortController(); }
@@ -116,21 +134,7 @@ class ToolHelpers {
       origin = { source: file };
     }
     if (!fs.statSync(file).isFile() || fs.statSync(file).size > 32 * 1024 * 1024) throw new Error('Use the normal shell to split files larger than 32 MB before reading.');
-    const line = args.line ?? 1, column = args.column ?? 1;
-    if (![line, column].every(x => Number.isSafeInteger(x) && x >= 1)) throw new Error('Line and column must be positive integers.');
-    if (args.query !== undefined) boundedString(args.query, 500, 'query');
-    const text = fs.readFileSync(file, 'utf8'), lines = text.split(/\r?\n/), excerpts = [];
-    let remaining = 8000, more = false;
-    for (let i = line - 1; i < lines.length; i++) {
-      const position = args.query ? lines[i].toLowerCase().indexOf(args.query.toLowerCase()) : -1;
-      if (args.query && position < 0) continue;
-      if (excerpts.length >= 30 || remaining <= 0) { more = true; break; }
-      const start = Math.max(column - 1, position >= 0 ? position - 200 : 0);
-      const part = lines[i].slice(start, start + Math.min(2000, remaining));
-      excerpts.push({ line: i + 1, column: start + 1, text: part, clipped: start > 0 || start + part.length < lines[i].length }); remaining -= part.length;
-    }
-    return { origin, outputId: args.outputId || null, source: file, sha256: createHash('sha256').update(text).digest('hex'), bytes: Buffer.byteLength(text), excerpts, more,
-      note: 'Partial exact lines. Use line/column or a different query for omitted content. Line numbers refer to source above.' };
+    return readText(fs.readFileSync(file, 'utf8'), { origin, outputId: args.outputId || null, source: file }, args);
   }
 }
-module.exports = { ToolHelpers, TOOLS, INSTRUCTIONS };
+module.exports = { ToolHelpers, TOOLS, INSTRUCTIONS, readText };

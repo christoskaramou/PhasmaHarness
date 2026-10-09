@@ -31,6 +31,7 @@ module.exports = {
   async connectCodex() {
     try {
       await this.client.start();
+      if (this.agents?.closing) { this.client.close(); return; }
       this.codex = { installed: true, connected: true };
     } catch (error) {
       this.codex = { installed: error.code !== 'ENOENT', connected: false, error: error.message };

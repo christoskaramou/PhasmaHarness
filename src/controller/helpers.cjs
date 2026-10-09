@@ -5,6 +5,7 @@ const { randomUUID } = require('node:crypto');
 const { isCLI } = require('../providers/capabilities.cjs');
 const { TOOL: CONTEXT_TOOL } = require('../workspace/context-search.cjs');
 const { TOOLS: HELPER_TOOLS } = require('../tools/tool-helpers.cjs');
+const { TOOLS: AGENT_TOOLS } = require('../tools/agent-tools.cjs');
 
 module.exports = {
   async findContext(id, query, mode) {
@@ -33,10 +34,12 @@ module.exports = {
 
   async bridgeTool(sessionId, tool, args, signal) {
     const session = this.session(sessionId);
-    if (this.busy !== session.id || this.stopping.has(session.id) || !isCLI(session.activeProvider)) {
-      throw new Error('Helper MCP call rejected: no active Claude/Cursor turn for this session.');
+    if (this.busy !== session.id || this.stopping.has(session.id) || !this.activeTurns.has(session.id)) {
+      throw new Error('Helper MCP call rejected: no active turn for this session.');
     }
     if (signal?.aborted || this.cliAbort?.signal.aborted) throw new Error('Helper call stopped.');
+    if (this.agents && AGENT_TOOLS.some(item => item.name === tool)) return this.agents.tool(this, session, tool, args);
+    if (!isCLI(session.activeProvider)) throw new Error('Only agent tools are available through the Codex helper MCP.');
     this.toolHelpers.jev = this.smartRouter.jev;
     if (tool === CONTEXT_TOOL.name) {
       if (!session.contextTool || !this.contextSearch) throw new Error('Project context is unavailable for this session.');
@@ -102,7 +105,7 @@ module.exports = {
   async helperToolCall(message) {
     const p = message.params, session = this.data.sessions.find(s => s.threadId === p?.threadId);
     const active = () => session?.helperTools && this.busy === session.id && !this.stopping.has(session.id) && this.activeTurns.get(session.id) === p.turnId;
-    if (!active() || p.namespace || !HELPER_TOOLS.some(tool => tool.name === p.tool) || this.helperRequests.has(message.id) ||
+    if (!active() || p.namespace || ![...HELPER_TOOLS, ...(this.agents ? AGENT_TOOLS : [])].some(tool => tool.name === p.tool) || this.helperRequests.has(message.id) ||
       !p.arguments || typeof p.arguments !== 'object' || Array.isArray(p.arguments)) {
       this.client.rejectRequest(message.id, 'Unsupported or inactive tool-helper call.'); return;
     }
@@ -111,7 +114,8 @@ module.exports = {
       const a = p.arguments;
       let result;
       this.toolHelpers.jev = this.smartRouter.jev;
-      if (p.tool === 'router_find_tools') {
+      if (AGENT_TOOLS.some(tool => tool.name === p.tool)) result = await this.agents.tool(this, session, p.tool, a);
+      else if (p.tool === 'router_find_tools') {
         if (Object.keys(a).some(key => key !== 'query')) throw new Error('Invalid discovery arguments.');
         result = await this.toolHelpers.find(session.threadId, a.query, this.data.settings.toolSelection === 'jev');
         const decisions = session.toolDecisions ||= [];
