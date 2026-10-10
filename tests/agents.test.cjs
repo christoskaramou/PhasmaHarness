@@ -575,49 +575,53 @@ test('successive delegated tasks reuse the conversation and deliver only their o
   agents.pump(); assert.equal(source.queue.length, 2);
 });
 
-test('three workers run concurrently; the fourth waits and starts when a slot is free', async t => {
-  const { agents, primary, add, directory } = await setup(t);
+test('five Full-access workers in the same workspace start independently and Stop targets one agent', async t => {
+  const { agents, primary, add } = await setup(t);
   const workers = [primary];
-  for (let i = 0; i < 3; i++) { const cwd = path.join(directory, `project-${i}`); fs.mkdirSync(cwd); workers.push(await add(`Agent ${i}`, cwd)); }
-  const sessions = workers.map(c => c.create());
-  await Promise.all(workers.slice(0, 3).map((c, i) => start(c, sessions[i])));
-  assert.equal(agents.leases.size, 3);
-  const fourth = start(workers[3], sessions[3]);
-  await until(() => !!sessions[3].waitingForAgent);
-  assert.equal(workers[3].client.calls.filter(c => c.method === 'turn/start').length, 0);
-  complete(workers[1], sessions[1]); agents.pump();
-  await fourth;
-  assert.ok(sessions[3].turnId);
+  for (let i = 0; i < 4; i++) workers.push(await add(`Agent ${i}`));
+  const sessions = workers.map(c => c.create(undefined, 'danger-full-access'));
+  const starts = Promise.allSettled(workers.map((c, i) => start(c, sessions[i])));
+  await until(() => sessions.every(s => !!s.turnId));
+  assert.ok((await starts).every(result => result.status === 'fulfilled'));
+  assert.equal(new Set(sessions.map(s => s.threadId)).size, 5, 'every worker has its own provider conversation');
+  assert.ok(sessions.every(s => !s.waitingForAgent && s.access === 'danger-full-access'));
+  await start(workers[0], sessions[0]);
+  assert.equal(sessions[0].queue.length, 1, 'messages to the same busy agent still queue');
+  assert.ok(sessions.slice(1).every(s => !s.queue?.length), 'other agents do not share that queue');
+  sessions[0].queuePaused = true;
   await agents.stop(sessions[2].id);
   await until(() => !workers[2].busy);
-  assert.ok(primary.busy, 'Stopping one agent leaves the other agents running');
-  complete(primary, sessions[0]); complete(workers[3], sessions[3]);
+  for (let i = 0; i < workers.length; i++) if (i !== 2) {
+    assert.equal(workers[i].busy, sessions[i].id, 'Stopping one agent leaves the other agents running');
+    complete(workers[i], sessions[i]);
+  }
 });
 
-test('overlapping workspaces serialize turns; a stopped waiter never starts', async t => {
+test('nested workspaces run independently without reducing permissions', async t => {
   const { agents, primary, add, workspace } = await setup(t);
   const nested = path.join(workspace, 'nested'); fs.mkdirSync(nested);
   const worker = await add('Nested', nested);
   const source = primary.create(), target = worker.create();
   await start(primary, source);
-  const waiting = start(worker, target);
-  const rejected = assert.rejects(waiting, /stopped/);
-  await until(() => !!target.waitingForAgent);
-  await agents.stop(target.id); await rejected;
-  assert.equal(worker.client.calls.filter(c => c.method === 'turn/start').length, 0);
+  await start(worker, target);
+  assert.ok(target.turnId); assert.equal(target.access, 'workspace-write');
+  await agents.stop(target.id);
+  await until(() => !worker.busy);
+  assert.equal(worker.client.calls.filter(c => c.method === 'turn/start').length, 1);
   assert.ok(primary.busy);
   complete(primary, source);
 });
 
-test('Full access holds an exclusive slot even for a different workspace', async t => {
+test('Full access does not block an independent worker in another workspace', async t => {
   const { agents, primary, add, directory } = await setup(t);
   const other = path.join(directory, 'other'); fs.mkdirSync(other);
   const worker = await add('Other', other);
   const source = primary.create(undefined, 'danger-full-access'), target = worker.create();
   await start(primary, source);
-  const waiting = start(worker, target);
-  assert.ok(target.waitingForAgent);
-  complete(primary, source); agents.pump(); await waiting;
+  await start(worker, target);
+  assert.ok(source.turnId && target.turnId);
+  assert.equal(primary.busy, source.id);
+  complete(primary, source);
   complete(worker, target);
 });
 
@@ -877,7 +881,7 @@ test('shutdown stops all controllers and invokes process cleanup once', async t 
   worker.close = originalClose;
 });
 
-test('changing an idle conversation to Full access does not reuse a weaker lease', async t => {
+test('changing an idle conversation to Full access preserves independent execution and the new sandbox', async t => {
   const { agents, primary, add, directory } = await setup(t);
   const other = path.join(directory, 'other'); fs.mkdirSync(other);
   const worker = await add('Other', other);
@@ -885,11 +889,11 @@ test('changing an idle conversation to Full access does not reuse a weaker lease
   await start(primary, source); await start(worker, target);
   complete(primary, source);
   primary.permissions(source.id, 'danger-full-access');
-  const waiting = start(primary, source);
-  assert.ok(source.waitingForAgent);
-  assert.equal(primary.client.calls.filter(c => c.method === 'turn/start').length, 1);
-  complete(worker, target); agents.pump(); await waiting;
-  assert.equal(agents.leases.get(primary).exclusive, true);
+  await start(primary, source);
+  assert.equal(primary.client.calls.filter(c => c.method === 'turn/start').length, 2);
+  assert.equal(primary.client.calls.filter(c => c.method === 'turn/start').at(-1).params.sandboxPolicy.type, 'dangerFullAccess');
+  assert.equal(worker.busy, target.id);
+  complete(worker, target);
   complete(primary, source);
 });
 

@@ -957,7 +957,6 @@ class Controller extends EventEmitter {
     const session = this.session(this.busy);
     session.queuePaused = true;
     if (this.coordinatorAbort) { this.stopping.add(session.id); this.coordinatorAbort.abort(); return; }
-    if (session.waitingForAgent) { this.stopping.add(session.id); this.changed(); return; }
     // Waiting for a worker cleanup before a turn or its checks: nothing has started, so the waiter only has to see it.
     if (this.cleanupWait === session.id) { this.stopping.add(session.id); this.changed(); return; }
     if (this.gate?.sessionId === session.id) {

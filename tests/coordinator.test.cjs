@@ -352,7 +352,7 @@ test('Hub creates Auto workers with inherited access and images, stays responsiv
   const work = agents.conversation(worker);
   assert.deepEqual(work.delegation.images, [image]);
   assert.match(work.delegation.task, /agent_read_context/);
-  assert.equal(agents.leases.has(hub), false);
+  assert.equal(hub.busy, null, 'Hub is free to chat while its worker runs');
   assert.equal(worker.busy, work.id);
   await send('Can we chat while that runs?');
   assert.equal(session.items.at(-1).text, 'Hello.');
@@ -527,6 +527,145 @@ test('Hub honors explicit worker model and effort without changing its chat mode
   replies.push(action('agent_work', { name: 'Invalid', task: 'Review.', mode: 'terra-light', effort: 'unsupported' }));
   await assert.rejects(send('Another review'), /Unsupported effort/);
   assert.equal(hub.data.agents.length, 1);
+});
+
+test('Hub dispatches four explicitly configured reviewers and waits for every result', async t => {
+  const { hub, session, agents, replies, calls, send } = await setup(t);
+  session.access = 'danger-full-access';
+  hub.models.forEach(model => model.supportedReasoningEfforts.push({ reasoningEffort: 'xhigh' }));
+  agents.configure = async worker => {
+    const call = worker.client.call.bind(worker.client);
+    worker.client.call = (method, params) => method === 'model/list' ? Promise.resolve({ data: hub.models }) : call(method, params);
+  };
+  const original = 'Create four reviewers using Sol at xhigh. Have each review the whole project without edits.';
+  replies.push(action('agent_work', { name: 'Reviewer', count: 4, task: 'Review the whole project without edits.', mode: 'codex:gpt-5.6-sol:medium', effort: 'xhigh' }));
+  await send(original);
+  assert.equal(hub.data.agents.length, 4);
+  assert.equal(session.agentDelegations, 4);
+  assert.equal(hub.data.settings.mode, 'terra-light');
+  assert.match(session.items.at(-1).text, /4 agents/);
+  const workers = hub.data.agents.map(profile => agents.controller(profile.id));
+  await until(() => workers.every(worker => worker.activeTurns.size > 0));
+  assert.ok(workers.every(worker => agents.conversation(worker).access === 'danger-full-access'));
+  for (const [index, worker] of workers.entries()) {
+    const work = agents.conversation(worker);
+    await until(() => worker.activeTurns.size > 0);
+    assert.equal(worker.resolveWorker(worker.data.settings.mode).effort, 'xhigh');
+    assert.equal(worker.resolveWorker(worker.data.settings.mode).model, 'gpt-5.6-sol');
+    const turn = worker.client.calls.findLast(call => call.method === 'turn/start');
+    assert.equal(turn.params.effort, 'xhigh'); assert.equal(turn.params.model, 'gpt-5.6-sol');
+    assert.equal(work.workspace, session.workspace); assert.equal(work.access, session.access);
+    assert.equal(work.delegation.originalRequest.text, original);
+    assert.equal(work.delegation.originalRequest.batch.index, index + 1);
+    assert.match(work.delegation.task, /one of 4 independent workers/i);
+    assert.ok(workers.slice(index).every(other => other.activeTurns.size > 0), 'all unfinished reviewers run concurrently');
+    if (index === 3) replies.push(answer('All four reviews are complete. Here are the combined findings.'));
+    worker.notification({ method: 'item/completed', params: { threadId: work.threadId, turnId: work.turnId, item: { id: randomUUID(), type: 'agentMessage', phase: 'final_answer', text: `Review ${index + 1}: inspected every file; finding in file${index + 1}.c:12.` } } });
+    worker.notification({ method: 'turn/completed', params: { threadId: work.threadId, turn: { id: work.turnId, status: 'completed' } } });
+    await until(() => !hub.busy && session.items.some(item => item.hubBatchResult?.index === index + 1));
+    if (index < 3) {
+      assert.match(session.items.at(-1).text, new RegExp(`${index + 1}/4`));
+      assert.equal(session.hubCompletion.fulfilled, false);
+      assert.equal(calls.filter(c => c.request.schema.properties.action).length, 1, 'no final synthesis before all four return');
+    }
+  }
+  assert.match(session.items.at(-1).text, /All four reviews are complete/);
+  const synthesis = JSON.parse(calls.at(-1).request.prompt);
+  assert.equal(synthesis.batchResults.length, 4);
+  assert.ok(synthesis.batchResults.every((result, i) => result.text.includes(`file${i + 1}.c:12`)));
+  const saved = JSON.parse(fs.readFileSync(hub.filename)).sessions.find(s => s.id === session.id);
+  assert.equal(saved.items.filter(item => item.hubBatchResult).length, 4);
+  assert.equal(session.hubCompletion.fulfilled, true);
+});
+
+test('Hub batch bounds and capacity reject the whole request before creating workers', async t => {
+  const { hub, session, replies, agents, send } = await setup(t);
+  for (const count of [0, 11, 1.5, '4']) {
+    replies.push(action('agent_work', { name: 'Reviewer', count, task: 'Review.' }));
+    await assert.rejects(send('Create reviewers'), /invalid action arguments/);
+    assert.equal(hub.data.agents.length, 0);
+  }
+  const profile = await agents.saveAgent({ name: 'Existing', instructions: '', workspace: session.workspace, mode: 'auto', access: session.access });
+  await agents.initialize();
+  const worker = agents.controller(profile.id);
+  for (let index = 0; index < 7; index++) worker.data.sessions.push({ id: randomUUID(), delegation: { delivered: false, state: 'held' } });
+  replies.push(action('agent_work', { name: 'Reviewer', count: 4, task: 'Review.' }));
+  await assert.rejects(send('Create four reviewers'), /queue is full/);
+  assert.equal(hub.data.agents.length, 1, 'no partial batch when queue capacity is already known');
+});
+
+test('Hub batch partial dispatch reports missing workers instead of waiting forever', async t => {
+  const { hub, session, agents, replies, send } = await setup(t);
+  const create = agents.saveAgent.bind(agents);
+  agents.saveAgent = value => {
+    if (hub.data.agents.length === 2) throw new Error('Provider became unavailable.');
+    return create(value);
+  };
+  replies.push(action('agent_work', { name: 'Reviewer', count: 4, task: 'Review.' }));
+  await assert.rejects(send('Create four independent reviewers'), /Sent 2\/4 agent tasks/);
+  assert.equal(hub.data.agents.length, 2);
+  for (const profile of hub.data.agents) {
+    const worker = agents.controller(profile.id), work = agents.conversation(worker);
+    await until(() => worker.activeTurns.size > 0);
+    worker.notification({ method: 'item/completed', params: { threadId: work.threadId, turnId: work.turnId, item: { id: randomUUID(), type: 'agentMessage', phase: 'final_answer', text: 'Reviewed the project. No findings; all source files inspected.' } } });
+    worker.notification({ method: 'turn/completed', params: { threadId: work.threadId, turn: { id: work.turnId, status: 'completed' } } });
+    await until(() => !hub.busy && session.items.some(item => item.hubBatchResult?.agentId === worker.agentId));
+  }
+  assert.equal(session.hubCompletion.fulfilled, false);
+  assert.match(session.items.at(-1).text, /2 requested workers were not dispatched/);
+  assert.doesNotMatch(session.items.at(-1).text, /Waiting for the remaining/);
+});
+
+test('cancelled batch results are recorded without starting replacement workers', async t => {
+  const { hub, session, agents, replies, calls, send } = await setup(t);
+  replies.push(action('agent_work', { name: 'Reviewer', count: 4, task: 'Review.' }));
+  await send('Create four independent reviewers');
+  await agents.stop(session.id);
+  await until(() => hub.data.agents.every(profile => agents.conversation(agents.controller(profile.id)).delegation.delivered));
+  const queued = [...session.queue];
+  session.queue = []; session.queuePaused = true;
+  for (const result of queued) {
+    assert.equal(result.agentReplyCancelled, true);
+    await hub.send({ ...result, id: session.id });
+  }
+  assert.equal(hub.data.agents.length, 4);
+  assert.equal(session.hubCompletion.fulfilled, false);
+  assert.match(session.items.at(-1).text, /Worker was cancelled/);
+  assert.equal(calls.filter(call => call.request.schema.properties.action).length, 1);
+});
+
+test('Hub batch follow-ups retain one assignment and exhausted dispatch budgets settle incomplete results', async t => {
+  for (const exhausted of [false, true]) await t.test(exhausted ? 'budget exhausted' : 'one follow-up', async t => {
+    const { hub, session, agents, replies, assessments, calls, send } = await setup(t);
+    replies.push(action('agent_work', { name: 'Reviewer', count: 2, task: 'Review.' }));
+    await send('Create two independent full project reviewers');
+    if (exhausted) session.agentDelegations = 10;
+    const workers = hub.data.agents.map(profile => agents.controller(profile.id));
+    const sequence = exhausted ? workers : [...workers, workers[0]];
+    for (const [index, worker] of sequence.entries()) {
+      const work = agents.conversation(worker);
+      await until(() => worker.activeTurns.size > 0);
+      const oldJob = work.delegation;
+      if (index === 0) assessments.push({ fulfilled: false, evidence: 'Only a summary.', gaps: ['Inspect actual code.'] });
+      if (index === 2) replies.push(answer('Both independent reviews returned.'));
+      worker.notification({ method: 'item/completed', params: { threadId: work.threadId, turnId: work.turnId, item: { id: randomUUID(), type: 'agentMessage', phase: 'final_answer', text: index === 0 ? 'Summary only.' : `Reviewed code for ${worker.agentId}; no findings.` } } });
+      worker.notification({ method: 'turn/completed', params: { threadId: work.threadId, turn: { id: work.turnId, status: 'completed' } } });
+      if (index === 0 && !exhausted) {
+        await until(() => work.delegation.id !== oldJob.id);
+        assert.deepEqual(work.delegation.originalRequest.batch, oldJob.originalRequest.batch);
+        assert.equal(work.delegation.originalRequest.attempts, 2);
+      } else await until(() => !hub.busy && session.items.some(item => item.hubBatchResult?.agentId === worker.agentId));
+    }
+    assert.equal(hub.data.agents.length, 2);
+    assert.equal(session.error, null);
+    assert.equal(session.hubCompletion.fulfilled, !exhausted);
+    if (exhausted) assert.match(session.items.at(-1).text, /2\/2 agent results returned.*not been confirmed complete/);
+    else {
+      const context = JSON.parse(calls.at(-1).request.prompt);
+      assert.equal(context.batchResults.length, 2);
+      assert.ok(context.batchResults.every(result => !result.text.includes('Summary only.')));
+    }
+  });
 });
 
 test('Hub never restarts a cancelled result and failed compaction preserves original messages', async t => {
