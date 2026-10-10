@@ -33,6 +33,8 @@ async function setup(t) {
   const workspace = path.join(directory, 'project'); fs.mkdirSync(workspace);
   const factory = (file, cwd, options) => {
     const c = new Controller(file, cwd, new Fake(), { cancel() {}, close() {}, async choose() { throw new Error('Unexpected model routing'); } }, options);
+    // These fixtures exercise execution-capable workers; Hub's restricted runtime is covered in coordinator.test.cjs.
+    c.isCoordinator = () => false;
     c.claude.refresh = async () => c.claude.status;
     c.cursor.refresh = async () => c.cursor.status;
     return c;
@@ -82,7 +84,7 @@ test('Main creates a persistent idle agent through a dynamic tool using conversa
   await agents.initializeController(child);
   assert.equal(child.busy, null);
   assert.equal(child.client.calls.some(call => call.method === 'turn/start'), false);
-  const task = agents.delegate(primary, source, profile.id, 'Review source.', true);
+  const task = agents.delegate(primary, source, profile.id, 'Review source.');
   assert.equal(child.session(task.sessionId).access, 'read-only');
   await agents.stop(task.sessionId);
   source.queuePaused = true;
@@ -122,7 +124,7 @@ test('agent creation rejects inactive calls, edits, permission overrides and inv
   for (const override of [{ id: profile.id }, { workspace }, { access: 'danger-full-access' }, { task: 'Start automatically' }]) {
     await assert.rejects(primary.bridgeTool(source.id, 'agent_create', { ...args, ...override }), /Invalid/);
   }
-  for (const invalid of [{ name: '' }, { name: 'Main' }, { name: 'Helper' }, { instructions: null }, { mode: 'missing-model' }, { mode: null }]) {
+  for (const invalid of [{ name: '' }, { name: 'Hub' }, { name: 'Helper' }, { instructions: null }, { mode: 'missing-model' }, { mode: null }]) {
     await assert.rejects(primary.bridgeTool(source.id, 'agent_create', { ...args, name: 'New helper', ...invalid }));
   }
   const save = primary.save;
@@ -345,7 +347,7 @@ test('clear requires confirmation, archives history and starts fresh context for
     const before = fs.readFileSync(controller.filename, 'utf8');
     assert.equal(await agents.clearConversation(controller.agentId, () => false), null);
     assert.equal(fs.readFileSync(controller.filename, 'utf8'), before);
-    const fresh = await agents.clearConversation(controller.agentId, name => { assert.equal(name, controller === primary ? 'Main' : 'Reviewer'); return true; });
+    const fresh = await agents.clearConversation(controller.agentId, name => { assert.equal(name, controller === primary ? 'Hub' : 'Reviewer'); return true; });
     assert.notEqual(fresh.id, old.id);
     assert.equal(fresh.workspace, workspace); assert.equal(fresh.access, 'read-only');
     assert.deepEqual(fresh.items, []); assert.equal(fresh.usage, null);
@@ -412,7 +414,7 @@ test('one conversation is retained per agent and old chats migrate once without 
   migrated.migrateConversations();
   assert.equal(restored.data.agents.length, 1);
   assert.equal(restored.data.sessions.length, 1);
-  assert.equal(migrated.snapshot().agents[0].name, 'Main');
+  assert.equal(migrated.snapshot().agents[0].name, 'Hub');
 });
 
 test('agent deletion protects Main and pending work, persists removal, and keeps recovery files', async t => {
@@ -478,13 +480,13 @@ test('named agents can stop Main and change its access but cannot delete Main', 
   await until(() => !primary.busy);
   assert.equal(main.queuePaused, true);
   assert.ok(primary.client.calls.some(call => call.method === 'turn/interrupt' && call.params.threadId === main.threadId));
-  await assert.rejects(manager.bridgeTool(source.id, 'agent_delete', { agentId: 'main' }), /Main.*cannot be deleted/);
+  await assert.rejects(manager.bridgeTool(source.id, 'agent_delete', { agentId: 'main' }), /Hub.*cannot be deleted/);
   await assert.rejects(manager.bridgeTool(source.id, 'agent_set_access', { agentId: 'main', access: 'read-only' }), /different workspace/);
   complete(manager, source);
   manager.permissions(source.id, 'danger-full-access');
   await start(manager, source);
   const changed = await manager.bridgeTool(source.id, 'agent_set_access', { agentId: 'main', access: 'read-only' });
-  assert.equal(changed.name, 'Main'); assert.equal(main.access, 'read-only');
+  assert.equal(changed.name, 'Hub'); assert.equal(main.access, 'read-only');
   assert.equal(primary.data.settings.access, 'read-only');
   assert.equal(JSON.parse(fs.readFileSync(primary.filename)).settings.access, 'read-only');
   complete(manager, source);
@@ -657,7 +659,7 @@ test('every provider can send pasted text to Main and receive its result', async
     await start(requester, source);
     source.activeProvider = provider;
     const result = await requester.bridgeTool(source.id, 'agent_delegate', { agentId: 'main', task: pasted });
-    assert.equal(result.agent, 'Main');
+    assert.equal(result.agent, 'Hub');
     const target = primary.session(result.sessionId);
     assert.ok(target.delegation.task.endsWith(pasted), 'pasted whitespace and content are preserved');
     assert.match(target.delegation.task, /Task from agent "Requester"/);
@@ -667,7 +669,7 @@ test('every provider can send pasted text to Main and receive its result', async
     await until(() => !!target.turnId);
     complete(primary, target, `Reviewed pasted text for ${provider}.`);
     await primary.gateDone; agents.pump();
-    assert.match(source.queue[0].text, /Result from agent "Main"/);
+    assert.match(source.queue[0].text, /Result from agent "Hub"/);
     assert.ok(source.queue[0].text.includes(provider));
     await requester.queuedMessage(source.id, source.queue[0].id, 'remove');
   }
@@ -761,7 +763,7 @@ test('agents search bounded visible context and Main through every provider brid
   const source = primary.create(workspace, 'read-only');
   await start(primary, source);
   const roster = await primary.bridgeTool(source.id, 'agents_list', {});
-  assert.ok(roster.some(agent => agent.id === 'main' && agent.name === 'Main'));
+  assert.ok(roster.some(agent => agent.id === 'main' && agent.name === 'Hub'));
   const result = await primary.bridgeTool(source.id, 'agent_read_context', { agentId: worker.agentId, query: 'MATERIAL' });
   assert.equal(result.origin.agentId, worker.agentId);
   assert.equal(result.origin.sessionId, target.id);
@@ -794,7 +796,7 @@ test('agents search bounded visible context and Main through every provider brid
     target.activeProvider = provider;
     const main = await worker.bridgeTool(target.id, 'agent_read_context', { agentId: 'main', query: 'Main context evidence' });
     assert.match(main.excerpts[0].text, /Main context evidence/);
-    assert.equal(main.origin.name, 'Main');
+    assert.equal(main.origin.name, 'Hub');
   }
   delete target.delegation; target.activeProvider = 'codex';
   complete(worker, target);

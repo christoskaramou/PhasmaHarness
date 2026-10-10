@@ -1,0 +1,22 @@
+[
+  {
+    "id": "low",
+    "expected": "low",
+    "text": "In PhasmaHarness, change only the button label \"Save\" to \"Close\" in the Settings footer. Do not change behavior, layout or other text."
+  },
+  {
+    "id": "medium",
+    "expected": "medium",
+    "text": "In PhasmaHarness, explain how one message travels from the composer to a worker and how the reply appears in the UI. Trace the main calls and state updates with source references. Do not modify files."
+  },
+  {
+    "id": "high",
+    "expected": "high",
+    "text": "In PhasmaHarness, investigate what happens when a provider disconnects while an agent is working. Trace cancellation, queued messages and reconnection. Identify any path that could lose a message or deliver it twice, and propose the smallest fix with source references. Do not modify files yet."
+  },
+  {
+    "id": "xhigh",
+    "expected": "xhigh",
+    "text": "Review all uncommitted PhasmaEngine changes across CPU job scheduling, GPU submission and synchronization, resource ownership, and C++/HLSL boundaries. Trace how the systems interact and report concrete correctness bugs with file and line references. Include untracked source files and state coverage gaps. Review the actual code, not just the diff summary; do not modify files."
+  }
+]

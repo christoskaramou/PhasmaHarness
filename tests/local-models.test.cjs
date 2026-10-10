@@ -20,7 +20,7 @@ function setup(handler) {
   providers.configured = () => false;
   return { providers, calls, provider };
 }
-function lm({ context = 8192, max = 131072, fail = false, response } = {}) {
+function lm({ context = 8192, max = 131072, fail = false, response, chat } = {}) {
   let instance = context ? { id: 'gemma', config: { context_length: context, flash_attention: true } } : null;
   const fixture = setup((endpoint, body) => {
     if (endpoint === '/api/v1/models') return json({ models: [{ key: 'gemma', type: 'llm', max_context_length: max, loaded_instances: instance ? [instance] : [] }] });
@@ -31,6 +31,7 @@ function lm({ context = 8192, max = 131072, fail = false, response } = {}) {
       return json({ status: 'loaded', instance_id: instance.id });
     }
     if (endpoint === '/v1/responses') return response ? response(body) : new Response('data: {"type":"response.completed"}\n\n', { headers: { 'content-type': 'text/event-stream' } });
+    if (endpoint === '/v1/chat/completions' && chat) return chat(body);
   });
   return { ...fixture, evict: () => { instance = null; } };
 }
@@ -51,6 +52,83 @@ test('LM Studio reloads 8k to 32k, preserves settings, uses the returned instanc
   assert.equal((await providers.local.status(choice)).loaded, false);
   await providers.prepare(choice);
   assert.equal((await providers.local.status(choice)).contextLength, 32768);
+});
+
+const hubSchema = { type: 'object', properties: { reply: { type: 'string' }, action: { type: 'null' } }, required: ['reply', 'action'], additionalProperties: false };
+const hubRequest = { instructions: 'You are Hub. Only return the requested JSON.', prompt: 'Say hello.', schema: hubSchema, images: [] };
+const hubReply = { reply: 'Hello!', action: null };
+const completion = (content = JSON.stringify(hubReply), finish_reason = 'stop') => json({ choices: [{ finish_reason, message: { content } }], usage: { prompt_tokens: 32, completion_tokens: 16, prompt_tokens_details: { cached_tokens: 8 } } });
+
+test('local structured inference uses the schema-enabled chat endpoint and prepared runtime model', async () => {
+  const { providers, calls } = lm({ chat: () => completion() });
+  const result = await providers.structured(choice, { ...hubRequest, images: ['data:image/png;base64,aGVsbG8='] }, new AbortController().signal);
+  assert.deepEqual(result.decision, hubReply);
+  assert.deepEqual(result.usage, { inputTokens: 32, cachedInputTokens: 8, outputTokens: 16 });
+  const request = calls.find(c => c.endpoint === '/v1/chat/completions').body;
+  assert.equal(request.model, 'gemma-runtime');
+  assert.deepEqual(request.response_format, { type: 'json_schema', json_schema: { name: 'harness_response', strict: true, schema: hubSchema } });
+  assert.equal(request.messages[0].role, 'system'); assert.match(request.messages[0].content, /You are Hub/);
+  assert.deepEqual(request.messages[1], { role: 'user', content: [{ type: 'text', text: hubRequest.prompt }, { type: 'image_url', image_url: { url: 'data:image/png;base64,aGVsbG8=' } }] });
+  assert.equal(request.stream, false); assert.equal(request.max_tokens, 4096);
+  assert.equal(request.tools, undefined); assert.equal(request.reasoning_effort, undefined);
+  assert.equal(calls.some(c => c.endpoint === '/v1/responses'), false);
+});
+
+test('local structured responses reject plain text and incomplete output without leaking model text', async () => {
+  for (const chat of [() => completion('Hello! Private model text'), () => completion(JSON.stringify(hubReply), 'length')]) {
+    const { providers } = lm({ chat });
+    await assert.rejects(providers.structured(choice, hubRequest, new AbortController().signal), error => {
+      assert.match(error.message, /structured response|incomplete response/);
+      assert.doesNotMatch(error.message, /Private model text|Unexpected token/);
+      return true;
+    });
+  }
+});
+
+test('local structured requests retain context growth, retry and Stop protection', async () => {
+  let attempts = 0;
+  const { providers, calls } = lm({ context: 32768, chat: () => ++attempts === 1
+    ? json({ error: { message: 'request (50000 tokens) exceeds the available context size (32768 tokens)' } }, 400) : completion() });
+  await providers.structured(choice, hubRequest, new AbortController().signal);
+  assert.equal(attempts, 2);
+  assert.equal(calls.find(c => c.endpoint === '/api/v1/models/load').body.context_length, 65536);
+  const large = lm({ context: 32768, chat: () => completion() });
+  await large.providers.structured(choice, { ...hubRequest, prompt: 'a'.repeat(150000) }, new AbortController().signal);
+  assert.equal(large.calls.find(c => c.endpoint === '/api/v1/models/load').body.context_length, 65536);
+  const abort = new AbortController(); abort.abort();
+  const before = calls.length;
+  await assert.rejects(providers.structured(choice, hubRequest, abort.signal), { name: 'AbortError' });
+  assert.equal(calls.length, before);
+});
+
+test('structured inference retains the provider lock and discards replies after Stop', async () => {
+  let started, release;
+  const pending = new Promise(resolve => { started = resolve; });
+  const fixture = lm({ chat: () => { started(); return new Promise(resolve => { release = resolve; }); } });
+  const abort = new AbortController();
+  const request = fixture.providers.structured(choice, hubRequest, abort.signal);
+  await pending;
+  await assert.rejects(fixture.providers.local.unload(choice), /finish before unloading/);
+  const stopped = assert.rejects(request, { name: 'AbortError' });
+  abort.abort(); release(completion());
+  await stopped;
+  await fixture.providers.local.exclusive(choice, () => {});
+  assert.equal(fixture.providers.local.locks.size, 0);
+});
+
+test('structured inference uses each managed server format and leaves hosted providers unchanged', async () => {
+  for (const kind of ['ollama', 'llama.cpp']) {
+    const { providers, calls } = setup(endpoint => endpoint === '/v1/chat/completions' ? completion() : null);
+    const state = { supported: true, kind, runtimeModel: 'managed-local', contextLength: 32768 };
+    providers.local.inspect = providers.local.load = async () => state;
+    await providers.structured(choice, hubRequest, new AbortController().signal);
+    const request = calls[0].body;
+    assert.equal(request.model, 'managed-local');
+    assert.deepEqual(kind === 'llama.cpp' ? request.response_format.schema : request.response_format.json_schema.schema, hubSchema);
+  }
+  const { providers, calls } = setup(() => null);
+  assert.equal(await providers.structured(choice, hubRequest, new AbortController().signal), null);
+  assert.equal(calls.some(c => c.endpoint === '/v1/chat/completions'), false);
 });
 
 test('larger loaded contexts are retained, small model limits are respected, eviction triggers reload', async () => {

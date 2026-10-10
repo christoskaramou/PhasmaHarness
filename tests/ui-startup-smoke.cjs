@@ -214,6 +214,18 @@ app.whenReady().then(async () => {
   const writers = await window.webContents.executeJavaScript("[...document.querySelectorAll('.message-label')].map(e => e.firstChild.textContent)");
   assert.deepEqual(writers, ['Codex', 'Claude', 'Cursor', 'Jev', 'Codex']);
   console.log('Reply labels name their provider passed');
+  await window.webContents.executeJavaScript(`renderMessages({ items: [
+    { id: 'hub-auto', type: 'userMessage', content: [{ type: 'text', text: 'Hello' }] },
+    { id: 'hub-manual', type: 'userMessage', content: [{ type: 'text', text: 'Hello again' }] }
+  ], routes: [
+    { messageId: 'hub-auto', source: 'hub-auto', label: 'Balanced model · low' },
+    { messageId: 'hub-manual', source: 'manual', label: 'Chosen model · medium' }
+  ] });`);
+  assert.deepEqual(await window.webContents.executeJavaScript("[...document.querySelectorAll('.routing-row')].map(e => e.textContent)"), [
+    'Model: Balanced model · low · Auto-selected for Hub', 'Model: Chosen model · medium · manual selection',
+  ]);
+  assert.equal(await window.webContents.executeJavaScript("document.querySelectorAll('#messages details.activity').length"), 0, 'pinned Hub routes do not claim another routing call');
+  console.log('Hub Auto and manual selection labels passed');
   await window.webContents.executeJavaScript(`window.fetchTest = Promise.all([loadDiscoveredModels('cursor-cli'), loadDiscoveredModels('cursor-cli')]).catch(() => null); true;`);
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#models-loading').hidden"), false);
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#provider-connection').hidden"), false);
@@ -646,6 +658,7 @@ app.whenReady().then(async () => {
     worker.initialize = async () => { worker.connection = 'ready'; worker.models = controller.models; worker.account = controller.account; };
     return worker;
   });
+  assert.equal(agents.snapshot().agents[0].name, 'Hub');
   ipcMain.removeHandler('bootstrap'); ipcMain.handle('bootstrap', () => agents.snapshot());
   ipcMain.removeHandler('settings'); ipcMain.handle('settings', (_event, values, agentId) => agents.settings(values, agentId));
   ipcMain.handle('permissions', (_event, id, access) => { agents.owner(id).permissions(id, access); return agents.snapshot(); });
@@ -775,6 +788,8 @@ app.whenReady().then(async () => {
   await until(() => !agents.profile(profile.id), 'Delete removes the selected agent');
   for (let i = 0; i < 100 && await window.webContents.executeJavaScript('selectedAgent') !== 'main'; i++) await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(await window.webContents.executeJavaScript('selectedAgent'), 'main');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#session-title').textContent"), 'Hub');
+  assert.match(await window.webContents.executeJavaScript("document.querySelector('#permissions-detail').textContent"), /Hub chats and delegates/);
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), 'Main draft stays');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#main-agent-list [data-action=delete]")'), null, 'Main cannot be deleted');
   const names = ['Researcher', 'Reviewer', 'Builder', 'Test runner', 'Documentation', 'Planner', 'Code search', 'UI designer', 'Release notes', 'Performance', 'Refactor', 'Verifier'];
@@ -1028,7 +1043,7 @@ app.whenReady().then(async () => {
   assert.equal(previews, previewsBeforeCommands, 'new commands stay local');
   await window.webContents.executeJavaScript('drafts.set(' + JSON.stringify(mainConversationId) + ', "/help"); true');
   await openCommand('switch');
-  assert.deepEqual(await filterChoices('MAIN'), ['main']);
+  assert.deepEqual(await filterChoices('HUB'), ['main']);
   await pickChoice('main');
   assert.equal(await window.webContents.executeJavaScript('selectedAgent'), 'main');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), '/help');

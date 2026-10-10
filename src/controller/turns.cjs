@@ -166,6 +166,7 @@ module.exports = {
       const goal = decision?.goal ?? (message?.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n');
       session.job = { goal: String(goal || '').slice(0, 2000), startedAt: now, worker, status, turns: 1, updatedAt: now };
     } else session.job = { ...session.job, worker, status, turns: (session.job.turns || 0) + 1, updatedAt: now };
+    if (decision?.originalRequestId) session.job.originalRequestId = decision.originalRequestId;
   },
 
   // Decision trace: one entry per worker turn, with no prompt or reply text (see src/trace.cjs). The status the worker
@@ -188,7 +189,7 @@ module.exports = {
         sameTask: typeof route.sameTask === 'boolean' ? route.sameTask : null, routerPick: route.routerPick || null, escalatedFrom: route.escalatedFrom || null,
         failover: !!route.failover, switched: !!previous && ((previous.provider || 'codex') !== (route.provider || 'codex') || previous.model !== route.model),
         effortCap: source === 'manual' ? null : route.effortCap || null },
-      assessment: route.assessment ? { taskKind: route.assessment.taskKind, risk: route.assessment.risk, uncertainty: route.assessment.uncertainty, needsChecks: route.assessment.needsChecks } : null,
+      assessment: route.assessment ? { taskKind: route.assessment.taskKind, difficulty: route.assessment.difficulty, risk: route.assessment.risk, uncertainty: route.assessment.uncertainty, needsChecks: route.assessment.needsChecks } : null,
       routing: router ? { classifier: router.model || null, calls: router.timings?.classifications?.length || null, durationMs: router.durationMs ?? null,
         tokens: router.usage?.totalTokens ?? null, costUsd: router.estimatedCostUsd ?? null, confidence: router.confidence ?? null } : null,
       worker: { durationMs: route.at ? Date.now() - route.at : null,

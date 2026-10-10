@@ -591,7 +591,7 @@ for (const container of [$('#agent-list'), $('#main-agent-list'), $('#agent-card
 }
 let agentRenderKey = '';
 function renderAgents() {
-  const agents = state.agents || [{ id: 'main', name: 'Main' }];
+  const agents = state.agents || [{ id: 'main', name: 'Hub' }];
   const switching = submitting || readingImages || changingPermissions;
   const rows = agents.map(agent => {
     const worker = fleetState?.agentStates?.[agent.id] || state;
@@ -830,10 +830,11 @@ function render() {
   $('#benchmark-summary').textContent = state.benchmarks ? `${state.benchmarks.records} benchmark records · ${state.benchmarks.matched}/${state.benchmarks.workers} models matched` : 'Routing benchmarks';
   const session = current();
   renderAgents();
+  $('#route-preview').hidden = !!state.coordinator;
   const ready = state.connection === 'ready';
-  $('#session-title').textContent = state.agents?.find(a => a.id === selectedAgent)?.name || 'Main';
+  $('#session-title').textContent = state.agents?.find(a => a.id === selectedAgent)?.name || 'Hub';
   $('#session-path').textContent = session?.workspace || state.settings.workspace;
-  const compactable = session?.activeProvider === 'claude-cli' ? !!session.claudeSessionId : session?.activeProvider !== 'cursor-cli' && !!session?.threadId;
+  const compactable = state.coordinator ? !!session?.items.length : session?.activeProvider === 'claude-cli' ? !!session.claudeSessionId : session?.activeProvider !== 'cursor-cli' && !!session?.threadId;
   $('#context-meter').disabled = !compactable || !ready || !session?.items.some(item => item.type === 'userMessage') || !!state.busy || submitting;
   $('#clear-conversation').disabled = !session || !!state.busy || submitting || readingImages || changingPermissions || !!state.waitingForAgents?.length;
   $('#context-search').disabled = !!state.busy || !state.contextRoot;
@@ -845,8 +846,9 @@ function render() {
   $('#permissions').title = permission.description;
   $('#permissions').disabled = changingPermissions || submitting || !!(session && state.busy === session.id);
   $('#permissions').classList.toggle('full-access', permission.id === 'danger-full-access');
-  $('#permissions-detail').textContent = permission.description;
+  $('#permissions-detail').textContent = state.coordinator ? 'Hub chats and delegates. This access level is inherited by its workers.' : permission.description;
   $('#browse-session').disabled = !selectedId;
+  $('#quick-routing').title = state.coordinator ? 'Automatic model routing for workers. Hub keeps its chat model.' : 'Choose Smart or Jev routing';
   $('#quick-routing').value = state.routingProvider || state.settings.routing;
   $('#quick-routing').disabled = !!state.planRouting;
   $('#quick-routing').title = state.planRouting ? state.planRouting.reason : state.jev.configured ? 'Choose Smart or Jev routing' : 'Enable Jev with a saved API key in Providers to use Jev routing.';
@@ -914,7 +916,7 @@ function render() {
       if (action === 'edit') button.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15Z"/></svg>';
       if (action === 'remove') button.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>';
       button.setAttribute('aria-label', action === 'remove' ? 'Remove queued message' : action === 'edit' ? 'Edit queued message' : label);
-      button.disabled = (action === 'steer' && !providerCaps(session.activeProvider).steer) || !!session.queueSending || (action !== 'remove' && (message.uncertain || (action !== 'edit' && (!ready || (state.busy && (state.busy !== selectedId || !session.turnId || session.compacting))))));
+      button.disabled = (action === 'steer' && (state.coordinator || !providerCaps(session.activeProvider).steer)) || !!session.queueSending || (action !== 'remove' && (message.uncertain || (action !== 'edit' && (!ready || (state.busy && (state.busy !== selectedId || !session.turnId || session.compacting))))));
       button.title = action === 'edit' ? 'Move back to the composer to edit and resend' : button.getAttribute('aria-label');
       button.onclick = async () => {
         try {
@@ -950,7 +952,7 @@ function render() {
   $('#context-meter').style.setProperty('--context-used', `${contextPercent}%`);
   $('#context-meter').classList.toggle('unknown', !contextKnown);
   $('#context-meter').setAttribute('aria-label', `${contextLabel}. Compact context`);
-  $('#context-meter-tip').textContent = !providerCaps(session?.activeProvider).usage ? 'Cursor manages context automatically and reports no token usage.' : contextLabel + (session?.compacting ? '\nCompacting context…' : '\nClick to compact context.');
+  $('#context-meter-tip').textContent = state.coordinator ? (session?.compacting ? 'Compacting Hub context…' : 'Hub summarizes older context automatically. Click to compact now; visible history is kept.') : !providerCaps(session?.activeProvider).usage ? 'Cursor manages context automatically and reports no token usage.' : contextLabel + (session?.compacting ? '\nCompacting context…' : '\nClick to compact context.');
   const compact = n => new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(n);
   const hasBreakdown = Number.isFinite(total?.inputTokens) && Number.isFinite(total?.cachedInputTokens) && Number.isFinite(total?.outputTokens);
   const providerHover = providerConnectionSummary();
@@ -1065,8 +1067,9 @@ function renderMessages(session) {
         entry.routeNode = row; node.after(row);
         if (item.pending) row.append(element('p', 'routing-status', item.error ? `Not sent: ${item.error}` : state.planRouting ? state.planRouting.reason : `Choosing a model with ${routerName(state.routerModel)}…`));
         else if (selected.source === 'manual') row.append(element('p', 'muted', `Model: ${selected.label} · manual selection`));
+        else if (selected.source === 'hub-auto') row.append(element('p', 'muted', `Model: ${selected.label} · Auto-selected for Hub`));
       }
-      if (selected && selected.source !== 'manual') {
+      if (selected && selected.source !== 'manual' && selected.source !== 'hub-auto') {
         const details = element('details', 'activity');
         const meter = selected.router;
         const cost = meter ? ` · ${meter.skipped ? 'local preflight · no model call' : routerName(meter.model, meter.effort)} · ${(meter.durationMs / 1000).toFixed(1)}s${meter.usage ? ` · ${meter.usage.totalTokens.toLocaleString()} router tokens` : ''}` : ' · no model call';
@@ -1128,6 +1131,7 @@ async function updatePreview() {
   const version = ++routeVersion;
   const prompt = $('#prompt').value;
   $('#send').disabled = (state?.connection !== 'ready' && !slashCommand(prompt)) || changingPermissions || submitting || readingImages || (!prompt.trim() && !attachedImages().length);
+  if (state?.coordinator) return;
   const command = slashCommand(prompt);
   if (command) {
     $('#route-preview').replaceChildren(element('strong', '', '/' + command), element('span', '', COMMANDS[command]?.description || (Object.keys(COMMANDS).some(name => name.startsWith(command)) ? 'Choose a command from the menu.' : 'Unknown command. Use /help.')));
@@ -1258,12 +1262,12 @@ function commandChoices(name) {
     ? Object.entries(EFFORT_CAP_TEXT).map(([id, detail]) => ({ id, label: id === 'max' ? 'No cap' : `Up to ${id}`, detail, selected: id === (state.settings.effortCap || 'high'), disabled: !!state.anyAgentBusy || !!state.busy }))
     : (group?.variants || []).map(p => ({ id: p.id, label: p.effort || 'Default', detail: group.label, selected: p.id === mode }));
   if (name === 'access') return state.accessModes.map(a => ({ id: a.id, label: a.label, detail: a.description, selected: a.id === (current()?.access || draftAccess || state.settings.access), disabled: !!state.busy || !!state.waitingForAgents?.length }));
-  if (name === 'switch') return (state.agents || [{ id: 'main', name: 'Main' }]).map(a => ({ id: a.id, label: a.name, detail: a.workspace || '', selected: a.id === selectedAgent }));
+  if (name === 'switch') return (state.agents || [{ id: 'main', name: 'Hub' }]).map(a => ({ id: a.id, label: a.name, detail: a.workspace || '', selected: a.id === selectedAgent }));
   return [];
 }
 function commandDetails(name) {
   const session = current();
-  const agentName = state.agents?.find(a => a.id === selectedAgent)?.name || 'Main';
+  const agentName = state.agents?.find(a => a.id === selectedAgent)?.name || 'Hub';
   if (name === 'context') {
     const { contextTokens, contextWindow, contextKnown } = contextUsage(session);
     const timestamp = session?.lastCompactedAt;

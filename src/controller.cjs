@@ -190,6 +190,7 @@ class Controller extends EventEmitter {
       cursor: { ...this.cursor.status, enabled: this.data.settings.cursorEnabled !== false },
       claude: { ...this.claude.status, enabled: !!this.data.settings.claudeEnabled },
       codex: this.codex,
+      coordinator: this.isCoordinator(), hubMode: this.data.hubMode || null,
       connectingProviders: [...new Set([...this.connectingProviders.keys(), ...(this.chatgptLoginPending ? ['codex'] : [])])],
       chatgptLoginPending: this.chatgptLoginPending,
       ...this.data, settings: { ...this.data.settings, mode: this.planPreset() ? 'auto' : this.data.settings.mode }, planRouting: this.planPreset(), connection: this.connection, error: this.error, account: this.account, busy: this.busy,
@@ -467,6 +468,7 @@ class Controller extends EventEmitter {
   }
 
   async load(id) {
+    if (this.isCoordinator()) return this.snapshot();
     const session = this.session(id);
     if (isCLI(session.activeProvider)) return this.snapshot();
     if (this.connection === 'ready' && session.threadId && !this.loaded.has(id)) {
@@ -475,7 +477,7 @@ class Controller extends EventEmitter {
     return this.snapshot();
   }
 
-  async send({ id, text, mode, images = [], task = 'on', wikiTaskId = null, failover = false, agentReply = false }) {
+  async send({ id, text, mode, images = [], task = 'on', wikiTaskId = null, failover = false, agentReply = false, agentReplyCancelled = false, agentResult = null }) {
     if (!['auto', 'on', 'off'].includes(task)) throw new Error('Invalid task mode.');
     if (task === 'auto') task = 'on'; // Existing queued messages use the new default.
     if (this.blockedReason()) throw new Error(this.blockedReason());
@@ -499,14 +501,17 @@ class Controller extends EventEmitter {
       if (this.busy !== id) throw new Error('Another turn is running. Switch to that session to queue a message.');
       if ((session.queue?.length || 0) >= 10) throw new Error('The queue is full (10 messages).');
       session.queuePaused = false;
-      (session.queue ||= []).push({ id: randomUUID(), text, images, mode: mode || this.data.settings.mode, task, agentReply, ...(wikiTaskId ? { wikiTaskId } : {}) });
+      (session.queue ||= []).push({ id: randomUUID(), text, images, mode: mode || this.data.settings.mode, task, agentReply, agentReplyCancelled, ...(agentResult ? { agentResult } : {}), ...(wikiTaskId ? { wikiTaskId } : {}) });
       this.save(); this.changed();
       return { queued: true };
     }
     session.queuePaused = false;
     const chosenMode = mode || this.data.settings.mode;
+    if (this.isCoordinator()) return this.sendCoordinator(session, { text, images, mode: chosenMode, agentReply, agentReplyCancelled, agentResult });
+    const originalRequest = session.delegation?.task === text ? session.delegation.originalRequest : null;
+    const routingText = originalRequest?.text || text;
     let selected = wikiWorker ? { ...wikiWorker, wikiTaskId, source: 'manual', reason: 'Wiki proposal using the original task worker.' }
-      : this.planPreset() || (chosenMode === 'auto' ? route(text) : { ...this.resolveWorker(chosenMode), source: 'manual', reason: 'Your manual selection.' });
+      : this.planPreset() || (chosenMode === 'auto' ? route(routingText) : { ...this.resolveWorker(chosenMode), source: 'manual', reason: 'Your manual selection.' });
     if (chosenMode !== 'auto' && !selected?.model) throw new Error('Unknown model selection.');
     if (this.planPreset() && !this.models.some(m => m.model === selected.model && m.supportedReasoningEfforts.some(e => e.reasoningEffort === selected.effort)))
       throw new Error('Terra light is not currently available on your account. Refresh your Codex login or restart the app.');
@@ -544,8 +549,10 @@ class Controller extends EventEmitter {
           return unlimited.length ? unlimited : usable;
         };
         const context = { ...session, ...previousState, configuredChecks: this.data.settings.checks?.[session.workspace] || [], routingCatalog: routingCatalog(), routerChoice: router, jevQuickAnswers: this.data.settings.jevQuickAnswers, attachedImageCount: images.length };
+        // A fresh delegation is not forced onto the model of an older, possibly misinterpreted task.
+        if (originalRequest && session.job?.originalRequestId !== originalRequest.id) context.job = null;
         const smart = async () => {
-          try { return await this.smartRouter.choose(text, { ...context, routerChoice: router }, this.models, 'smart', router?.id); }
+          try { return await this.smartRouter.choose(routingText, { ...context, routerChoice: router }, this.models, 'smart', router?.id); }
           catch (error) {
             // The router's own provider hit its usage limit: record it and route once with another provider's router.
             if (!error.limit || error.name === 'AbortError' || this.stopping.has(id)) throw error;
@@ -553,11 +560,11 @@ class Controller extends EventEmitter {
             const next = this.effectiveRouter();
             if (!next || next.id === router?.id || !this.available(next)) throw error;
             router = next;
-            return this.smartRouter.choose(text, { ...context, routingCatalog: routingCatalog(), routerChoice: router }, this.models, 'smart', router.id);
+            return this.smartRouter.choose(routingText, { ...context, routingCatalog: routingCatalog(), routerChoice: router }, this.models, 'smart', router.id);
           }
         };
         try {
-          try { selected = provider === 'jev' ? await this.smartRouter.choose(text, context, this.models, provider, router?.id) : await smart(); }
+          try { selected = provider === 'jev' ? await this.smartRouter.choose(routingText, context, this.models, provider, router?.id) : await smart(); }
           catch (error) {
             // Jev unavailable (down, timeout, key removed): route the same message with the smart router instead of failing.
             // A stop is never retried, and without a usable smart router the Jev error stands.
@@ -582,13 +589,13 @@ class Controller extends EventEmitter {
       }
       if (!this.available(selected)) throw new Error('Selected model is disabled or not available.');
       if (images.length && selected.images === false) throw new Error('Enable image support for this model before sending images.');
-      if (!failover && !this.planPreset()) this.compareWithJev(session, text, images, selected, previousState);
+      if (!failover && !this.planPreset()) this.compareWithJev(session, routingText, images, selected, previousState);
       if (failover) selected = { ...selected, failover: true }; // recorded on the route for the decision trace
       // One model per task: whether this message continues the current task (the router's sameTask; a manual pick
       // continues a task its worker reported as pending or waiting for input). The turn's end then updates the task
       // or starts a new one (updateJob).
-      if (!wikiTaskId) session.jobDecision = { messageId: clientId, goal: text,
-        continues: selected.sameTask === true || (selected.sameTask === undefined && ['pending', 'needs-input'].includes(session.job?.status)) };
+      if (!wikiTaskId) session.jobDecision = { messageId: clientId, goal: routingText, ...(originalRequest ? { originalRequestId: originalRequest.id } : {}),
+        continues: (!originalRequest || session.job?.originalRequestId === originalRequest.id) && (selected.sameTask === true || (selected.sameTask === undefined && ['pending', 'needs-input'].includes(session.job?.status))) };
       const tracked = this.openTask(session, selected, text, clientId, task);
       return await this.submitWorker(session, selected, text, images, clientId, tracked);
     } catch (error) {
@@ -832,6 +839,7 @@ class Controller extends EventEmitter {
   }
 
   async queuedMessage(id, messageId, action) {
+    if (action === 'steer' && this.isCoordinator()) throw new Error('Hub accepts queued follow-ups. Stop its reply to send immediately.');
     const session = this.session(id);
     if (action === 'steer' && !capabilities(session.activeProvider).steer) throw new Error('This CLI supports queued follow-ups here. Stop the turn to send the correction immediately.');
     const message = session.queue?.find(m => m.id === messageId);
@@ -907,6 +915,7 @@ class Controller extends EventEmitter {
     if (this.connection !== 'ready') throw new Error('No provider is connected.');
     if (this.busy) throw new Error('Wait for the current task to finish before compacting.');
     const session = this.session(id);
+    if (this.isCoordinator()) return this.compactCoordinator(session);
     if (!capabilities(session.activeProvider).compact) throw new Error('Cursor manages its context automatically and has no manual compaction.');
     if (session.activeProvider === 'claude-cli') return this.compactClaude(session);
     if (!session.threadId || !session.items.some(item => item.type === 'userMessage')) throw new Error('Send a message before compacting this chat.');
@@ -947,6 +956,7 @@ class Controller extends EventEmitter {
     this.modelPreparation?.abort();
     const session = this.session(this.busy);
     session.queuePaused = true;
+    if (this.coordinatorAbort) { this.stopping.add(session.id); this.coordinatorAbort.abort(); return; }
     if (session.waitingForAgent) { this.stopping.add(session.id); this.changed(); return; }
     // Waiting for a worker cleanup before a turn or its checks: nothing has started, so the waiter only has to see it.
     if (this.cleanupWait === session.id) { this.stopping.add(session.id); this.changed(); return; }
@@ -1138,6 +1148,7 @@ class Controller extends EventEmitter {
     this.bridge?.close();
     this.save();
     this.client.removeAllListeners('notification');
+    this.coordinatorAbort?.abort();
     this.client.removeAllListeners('request');
     this.client.removeAllListeners('disconnected');
     this.client.close();
@@ -1149,6 +1160,7 @@ class Controller extends EventEmitter {
 
 // The Controller's methods are split by area; each file below adds its methods to the class.
 for (const methods of [
+  require('./controller/coordinator.cjs'),
   require('./controller/providers.cjs'),
   require('./controller/turns.cjs'),
   require('./controller/helpers.cjs'),

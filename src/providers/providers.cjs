@@ -67,6 +67,60 @@ class Providers {
       supports_websockets: false, request_max_retries: 0, stream_max_retries: 0,
     }, ...(context ? { model_context_window: context, model_auto_compact_token_limit: Math.floor(context * 0.75) } : {}), web_search: 'disabled', model_supports_reasoning_summaries: false, 'features.code_mode.enabled': false, 'features.multi_agent': false, 'features.apps': false, 'features.plugins': false, 'features.remote_plugin': false } };
   }
+  async structured(choice, { instructions, prompt, schema, images = [] }, signal) {
+    signal.throwIfAborted();
+    const local = await this.local.inspect(choice, signal);
+    if (!local.supported) return null;
+    const p = this.provider(choice.provider);
+    const body = { model: choice.model, stream: false,
+      messages: [{ role: 'system', content: instructions + '\nReturn only JSON matching this schema: ' + JSON.stringify(schema) },
+        { role: 'user', content: [{ type: 'text', text: prompt }, ...images.map(url => ({ type: 'image_url', image_url: { url } }))] }],
+      response_format: local.kind === 'llama.cpp' ? { type: 'json_schema', schema } : { type: 'json_schema', json_schema: { name: 'harness_response', strict: true, schema } },
+      ...(choice.effort ? { reasoning_effort: choice.effort } : {}) };
+    return this.local.exclusive(choice, async () => {
+      const response = await this.modelRequest(choice, body, local, signal, 'chat/completions');
+      if (!response.ok) throw new Error((await response.json()).error.message);
+      let result;
+      try { result = await response.json(); }
+      catch { signal.throwIfAborted(); throw new Error(`${p.name} returned an invalid structured response. No action was taken. Try another model.`); }
+      signal.throwIfAborted();
+      if (result.choices?.[0]?.finish_reason !== 'stop') throw new Error(`${p.name} returned an incomplete response. No action was taken. Shorten the request or try another model.`);
+      const usage = result.usage ? { inputTokens: result.usage.prompt_tokens || 0,
+        cachedInputTokens: result.usage.prompt_tokens_details?.cached_tokens || 0, outputTokens: result.usage.completion_tokens || 0 } : null;
+      try { return { decision: require('./structured.cjs').structuredResponse(result.choices[0].message?.content, schema), usage }; }
+      catch (error) { throw Object.assign(error, { usage }); }
+    }, signal);
+  }
+  async modelRequest(choice, body, local, signal, endpoint = 'responses') {
+    const p = this.provider(choice.provider);
+    let loaded;
+    if (local.supported) {
+      // Image bytes are not text tokens; both inference APIs reserve context for the actual prompt and schema.
+      const prompt = JSON.stringify(body, (key, value) => ['image_url', 'image', 'file_data'].includes(key) ? undefined : value);
+      const minimum = Math.max(32768, 2 ** Math.ceil(Math.log2(Buffer.byteLength(prompt) / 3 + 4096)));
+      loaded = await this.local.load(choice, signal, Math.min(minimum, 262144));
+      signal.throwIfAborted();
+      body.model = loaded.runtimeModel;
+      const limit = endpoint === 'responses' ? 'max_output_tokens' : 'max_tokens';
+      body[limit] = Math.min(body[limit] || 4096, 4096, Math.floor(loaded.contextLength / 4));
+    }
+    const send = () => this.fetch(`${p.baseUrl}/${endpoint}`, { method: 'POST', headers: this.headers(p.id), body: JSON.stringify(body), redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(600000)]) });
+    let response = await send();
+    let message = `Provider request failed (HTTP ${response.status}). Check model compatibility, key and API balance.`;
+    if (!response.ok && local.supported) {
+      const error = (await response.text()).slice(0, 16384);
+      const required = Number(error.match(/request \((\d+) tokens\)/i)?.[1] || error.match(/"n_prompt_tokens"\s*:\s*(\d+)/)?.[1]);
+      if (loaded.canResize && required > 0 && required + 4096 > loaded.contextLength) {
+        const larger = await this.local.load(choice, signal, Math.min(262144, 2 ** Math.ceil(Math.log2(required + 4096))));
+        signal.throwIfAborted();
+        if (larger.contextLength > loaded.contextLength) { body.model = larger.runtimeModel; loaded = larger; response = await send(); }
+      }
+      message = /context|n_ctx|token.*limit/i.test(error)
+        ? `${p.name}: this request exceeds the model's context. ${loaded.canResize ? 'Compact the conversation, shorten the message, or choose a larger-context model.' : 'Increase the server context size, or compact the conversation.'}`
+        : `${p.name}: request failed (HTTP ${response.status}). Check the model and server.`;
+    }
+    return response.ok ? response : new Response(JSON.stringify({ error: { message } }), { status: response.status, headers: { 'Content-Type': 'application/json' } });
+  }
   async forward(req, res) {
     const abort = new AbortController();
     res.on('close', () => abort.abort());
@@ -93,33 +147,8 @@ class Providers {
       const choice = { provider: p.id, model: body.model };
       const local = await this.local.inspect(choice, abort.signal);
       const forward = async () => {
-        let loaded;
-        if (local.supported) {
-          // Images are not text tokens. Leave tokenization to the server; this estimate only reserves extra room.
-          const prompt = JSON.stringify({ instructions: body.instructions, tools: body.tools, input: body.input }, (key, value) => ['image_url', 'image', 'file_data'].includes(key) ? undefined : value);
-          const minimum = Math.max(32768, 2 ** Math.ceil(Math.log2(Buffer.byteLength(prompt) / 3 + 4096)));
-          loaded = await this.local.load(choice, abort.signal, Math.min(minimum, 262144));
-          body.model = loaded.runtimeModel;
-          // Bound requested output to the actual local context; history compaction uses the same window.
-          body.max_output_tokens = Math.min(body.max_output_tokens || 4096, 4096, Math.floor(loaded.contextLength / 4));
-        }
-        const send = () => this.fetch(`${p.baseUrl}/responses`, { method: 'POST', headers: this.headers(p.id), body: JSON.stringify(body), redirect: 'error', signal: AbortSignal.any([abort.signal, AbortSignal.timeout(600000)]) });
-        let response = await send();
-        if (!response.ok && local.supported) {
-          const error = (await response.text()).slice(0, 16384);
-          const required = Number(error.match(/request \((\d+) tokens\)/i)?.[1] || error.match(/"n_prompt_tokens"\s*:\s*(\d+)/)?.[1]);
-          if (loaded.canResize && required > 0 && required + 4096 > loaded.contextLength) {
-            const larger = await this.local.load(choice, abort.signal, Math.min(262144, 2 ** Math.ceil(Math.log2(required + 4096))));
-            if (larger.contextLength > loaded.contextLength) { body.model = larger.runtimeModel; loaded = larger; response = await send(); }
-          }
-          if (!response.ok) {
-            const message = /context|n_ctx|token.*limit/i.test(error)
-              ? `${p.name}: this request exceeds the model's context. ${loaded.canResize ? 'Compact the conversation, shorten the message, or choose a larger-context model.' : 'Increase the server context size, or compact the conversation.'}`
-              : `${p.name}: request failed (HTTP ${response.status}). Check the model and server.`;
-            res.writeHead(response.status, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message } })); return;
-          }
-        }
-        if (!response.ok) { res.writeHead(response.status, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: `Provider request failed (HTTP ${response.status}). Check model compatibility, key and API balance.` } })); return; }
+        const response = await this.modelRequest(choice, body, local, abort.signal);
+        if (!response.ok) { res.writeHead(response.status, { 'Content-Type': 'application/json' }).end(await response.text()); return; }
         res.writeHead(200, { 'Content-Type': response.headers.get('content-type') || 'text/event-stream' });
         for await (const chunk of response.body) { if (!res.write(Buffer.from(chunk))) await once(res, 'drain', { signal: abort.signal }); }
         res.end();
