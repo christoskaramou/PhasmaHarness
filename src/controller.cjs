@@ -77,6 +77,8 @@ class Controller extends EventEmitter {
     this.contextRequests = new Set();
     this.routing = null;
     this.connection = 'connecting';
+    this.connectingProviders = new Map();
+    this.chatgptLoginPending = false;
     this.codex = { installed: null, connected: false };
     this.error = null;
     this.account = null;
@@ -121,6 +123,7 @@ class Controller extends EventEmitter {
     client.on('notification', message => this.notification(message));
     client.on('request', message => this.serverRequest(message));
     client.on('disconnected', error => {
+      this.chatgptLoginPending = false;
       const message = typeof error === 'string' ? error : error?.message;
       this.codex = { ...this.codex, connected: false, error: message };
       this.log.warn('Codex app-server disconnected', { error: message });
@@ -157,8 +160,8 @@ class Controller extends EventEmitter {
       this.claude.status = { ...shared.claude.status }; this.claude.models = shared.claude.models;
       this.cursor.status = { ...shared.cursor.status }; this.cursor.models = shared.cursor.models;
     } else {
-      await this.claude.refresh();
-      await this.cursor.refresh();
+      await this.withProviderConnection('claude-cli', () => this.claude.refresh());
+      await this.withProviderConnection('cursor-cli', () => this.cursor.refresh());
     }
     this.migrateLegacyRouter();
     // Cursor reasoning levels come from its model list; load it once in the background when Cursor models are enabled.
@@ -187,6 +190,8 @@ class Controller extends EventEmitter {
       cursor: { ...this.cursor.status, enabled: this.data.settings.cursorEnabled !== false },
       claude: { ...this.claude.status, enabled: !!this.data.settings.claudeEnabled },
       codex: this.codex,
+      connectingProviders: [...new Set([...this.connectingProviders.keys(), ...(this.chatgptLoginPending ? ['codex'] : [])])],
+      chatgptLoginPending: this.chatgptLoginPending,
       ...this.data, settings: { ...this.data.settings, mode: this.planPreset() ? 'auto' : this.data.settings.mode }, planRouting: this.planPreset(), connection: this.connection, error: this.error, account: this.account, busy: this.busy,
       routing: this.routing, routingProvider: this.routingProvider, routerModel: this.routingProvider === 'jev' ? JEV_MODEL : this.routerChoices().find(p => p.id === this.data.settings.routerPreset)?.model || null,
       jev: { configured: !!this.smartRouter.jev?.configured, keySaved: !!(this.smartRouter.jev?.keyStore?.configured ?? this.smartRouter.jev?.configured), enabled: this.data.settings.jevEnabled !== false, model: JEV_MODEL, compare: this.jevCompare?.summary() || null, health: this.smartRouter.jev?.health || null },

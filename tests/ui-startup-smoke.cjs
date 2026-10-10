@@ -57,9 +57,10 @@ app.whenReady().then(async () => {
     if (holdSend) return new Promise(() => {});
     return { queued: true };
   });
-  let modelRequests = 0, failModels = false, finishFetch, nextModels = [];
-  ipcMain.handle('providerModels', async () => {
+  let modelRequests = 0, failModels = false, finishFetch, nextModels = [], holdApiModels = false;
+  ipcMain.handle('providerModels', async (_event, id) => {
     modelRequests++;
+    if (id !== 'cursor-cli' && !holdApiModels) return [];
     await new Promise(resolve => { finishFetch = resolve; });
     if (failModels) throw new Error('Test model fetch failed');
     return nextModels;
@@ -78,6 +79,51 @@ app.whenReady().then(async () => {
     return { banner: document.querySelector('#banner').textContent };
   })()`);
   assert.equal(result.banner, '');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#provider-connection').hidden"), false, 'startup shows connection progress');
+  const initialWindowSize = window.getSize();
+  const sidebarSize = () => window.webContents.executeJavaScript(`({ width: document.querySelector('#agents-sidebar').getBoundingClientRect().width,
+    saved: localStorage.getItem('sidebarWidth'), now: document.querySelector('#sidebar-resizer').getAttribute('aria-valuenow'),
+    dragging: document.body.classList.contains('resizing-sidebar'), max: innerWidth - 486 })`);
+  const resizeKey = key => window.webContents.executeJavaScript(`document.querySelector('#sidebar-resizer').dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(key)}, bubbles: true, cancelable: true })); true`);
+  const dragSidebar = async (delta, cancel = false) => {
+    const x = await window.webContents.executeJavaScript("Math.round(document.querySelector('#sidebar-resizer').getBoundingClientRect().left + 3)");
+    window.webContents.sendInputEvent({ type: 'mouseMove', x, y: 200 });
+    window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', x, y: 200, clickCount: 1 });
+    window.webContents.sendInputEvent({ type: 'mouseMove', x: x + delta, y: 200 });
+    await new Promise(r => setTimeout(r, 30));
+    if (cancel) await resizeKey('Escape');
+    window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', x: x + delta, y: 200, clickCount: 1 });
+    await new Promise(r => setTimeout(r, 30));
+  };
+  const initialSidebar = await sidebarSize();
+  await dragSidebar(70);
+  const resizedSidebar = await sidebarSize();
+  assert.equal(resizedSidebar.width, initialSidebar.width + 70);
+  assert.equal(resizedSidebar.saved, String(resizedSidebar.width));
+  assert.equal(resizedSidebar.now, resizedSidebar.saved);
+  assert.equal(resizedSidebar.dragging, false);
+  await dragSidebar(-40, true);
+  assert.deepEqual(await sidebarSize(), resizedSidebar, 'Escape cancels the resize without changing the saved width');
+  await window.loadFile(path.resolve(__dirname, '../ui/index.html'));
+  assert.equal((await sidebarSize()).width, resizedSidebar.width, 'sidebar width survives a reload');
+  await resizeKey('ArrowLeft');
+  assert.equal((await sidebarSize()).width, resizedSidebar.width - 10);
+  window.setSize(1320, 900); await new Promise(r => setTimeout(r, 50));
+  await resizeKey('End');
+  assert.equal((await sidebarSize()).width, 520);
+  window.setSize(840, 640); await new Promise(r => setTimeout(r, 50));
+  const constrainedSidebar = await sidebarSize();
+  assert.ok(constrainedSidebar.width <= constrainedSidebar.max, 'chat retains room when the window shrinks');
+  assert.equal(constrainedSidebar.saved, '520');
+  window.setSize(1320, 900); await new Promise(r => setTimeout(r, 50));
+  assert.equal((await sidebarSize()).width, 520, 'growing the window restores the preferred width');
+  await resizeKey('Home');
+  assert.equal((await sidebarSize()).width, 200);
+  window.setSize(...initialWindowSize); await new Promise(r => setTimeout(r, 50));
+  await window.webContents.executeJavaScript("document.querySelector('#sidebar-resizer').dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); true");
+  assert.equal((await sidebarSize()).width, initialSidebar.width);
+  assert.equal((await sidebarSize()).saved, null);
+  console.log('Sidebar drag, keyboard controls, cancel, persistence and viewport limits passed');
   controller.account = { type: 'chatgpt', plan: 'pro' };
   controller.models = [{ model: 'gpt-6-sol', supportedReasoningEfforts: [{ reasoningEffort: 'low' }] }];
   controller.connection = 'ready';
@@ -86,6 +132,26 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript(`document.querySelector('#prompt').value = 'hello'; document.querySelector('#prompt').dispatchEvent(new Event('input'));`);
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#send').disabled"), false, 'connected providers enable sending');
   console.log('Connected-state UI smoke passed');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#provider-connection').hidden"), true);
+  controller.chatgptLoginPending = true;
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderProviders(); true');
+  const connecting = await window.webContents.executeJavaScript(`(() => {
+    const row = document.querySelector('[data-connection-provider="codex"]');
+    return { visible: !document.querySelector('#provider-connection').hidden, usageHidden: document.querySelector('#usage').hidden,
+      busy: row.getAttribute('aria-busy'), disabled: row.querySelector('button').disabled, status: row.querySelector('.provider-connecting').textContent };
+  })()`);
+  assert.deepEqual(connecting, { visible: true, usageHidden: true, busy: 'true', disabled: true, status: 'Waiting for sign-in…' });
+  controller.chatgptLoginPending = false;
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + ')');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#provider-connection').hidden"), true);
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('[data-connection-provider=codex] button').disabled"), false);
+  const fleet = controller.snapshot();
+  fleet.agentStates = { main: { ...fleet }, worker: { ...fleet, connectingProviders: ['claude-cli'] } };
+  fleet.agents = [{ id: 'main', name: 'Main' }, { id: 'worker', name: 'Worker' }];
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(fleet) + ')');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#provider-connection').hidden"), false, 'another agent connecting remains visible');
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + ')');
+  console.log('Provider connecting indicators and browser sign-in cleanup passed');
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#task-card')"), null);
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#skip-checks')"), null);
   const submit = (text, wait = true) => window.webContents.executeJavaScript(`(async () => {
@@ -150,6 +216,8 @@ app.whenReady().then(async () => {
   console.log('Reply labels name their provider passed');
   await window.webContents.executeJavaScript(`window.fetchTest = Promise.all([loadDiscoveredModels('cursor-cli'), loadDiscoveredModels('cursor-cli')]).catch(() => null); true;`);
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#models-loading').hidden"), false);
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#provider-connection').hidden"), false);
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('[data-connection-provider=cursor-cli]').getAttribute('aria-busy')"), 'true');
   while (!finishFetch) await new Promise(setImmediate);
   finishFetch();
   await window.webContents.executeJavaScript('window.fetchTest');
@@ -162,6 +230,7 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('window.fetchTest');
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#models-loading').hidden"), true);
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#renew-models').disabled"), false);
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#provider-connection').hidden"), true, 'failed provider request clears progress');
   console.log('Model-fetch indicator, deduplication and failure cleanup passed');
   controller.data.settings.claudeEnabled = true;
   controller.claude.status = { installed: true, loggedIn: true };
@@ -229,6 +298,7 @@ app.whenReady().then(async () => {
   // Adding an API provider from Settings.
   controller.providers = { configured: id => providerKeys.has(id), key: id => ({ remove() { providerKeys.delete(id); } }) };
   controller.codex = { installed: true, connected: true };
+  holdApiModels = true; failModels = false; finishFetch = null;
   await window.webContents.executeJavaScript(`(async () => {
     document.querySelector('#api-name').value = 'LM Studio';
     document.querySelector('#api-url').value = 'http://localhost:1234/v1';
@@ -236,6 +306,18 @@ app.whenReady().then(async () => {
     await new Promise(r => setTimeout(r, 300));
   })()`);
   assert.deepEqual(controller.data.settings.providers.map(p => [p.id, p.name, p.baseUrl]), [['lm-studio', 'LM Studio', 'http://localhost:1234/v1']]);
+  assert.deepEqual(await window.webContents.executeJavaScript(`(() => {
+    const row = document.querySelector('[data-connection-provider="lm-studio"]');
+    return [row.querySelector('.provider-detail').hidden, row.querySelector('.provider-connecting').textContent, row.querySelector('button').disabled];
+  })()`), [true, 'Connecting…', true]);
+  await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').showModal(); document.querySelector('#tab-providers').click(); new Promise(r => setTimeout(r, 100))");
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/providers-connecting.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript("document.querySelector('#tab-general').click(); document.querySelector('#settings-dialog').close(); new Promise(r => setTimeout(r, 100))");
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/connection-indicator.png'), (await window.webContents.capturePage()).toPNG());
+  holdApiModels = false;
+  while (!finishFetch) await new Promise(setImmediate);
+  finishFetch();
+  await window.webContents.executeJavaScript("loadDiscoveredModels('lm-studio')");
   const apiRow = await window.webContents.executeJavaScript(`(() => {
     const row = document.querySelector('.api-provider-row');
     return { text: row.querySelector('.provider-account-text').textContent, endpoint: row.querySelector('.provider-endpoint').textContent,
@@ -326,6 +408,29 @@ app.whenReady().then(async () => {
   assert.deepEqual(controller.data.settings.checks[controller.data.settings.workspace], []);
   console.log('Removed checks save immediately passed');
   await window.webContents.executeJavaScript("document.querySelector('#settings').click(); new Promise(r => setTimeout(r, 100))");
+  const dialogSize = () => window.webContents.executeJavaScript(`(() => {
+    const dialog = document.querySelector('#settings-dialog'), box = dialog.getBoundingClientRect();
+    return { width: box.width, height: box.height, right: box.right, bottom: box.bottom, resize: getComputedStyle(dialog).resize,
+      fits: box.left >= 0 && box.top >= 0 && box.right <= innerWidth && box.bottom <= innerHeight,
+      footerFits: document.querySelector('#settings-close').getBoundingClientRect().bottom <= box.bottom };
+  })()`);
+  const originalDialog = await dialogSize();
+  assert.equal(originalDialog.resize, 'both');
+  const corner = { x: Math.floor(originalDialog.right - 4), y: Math.floor(originalDialog.bottom - 4) };
+  window.webContents.sendInputEvent({ type: 'mouseMove', ...corner });
+  window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...corner });
+  window.webContents.sendInputEvent({ type: 'mouseMove', x: corner.x + 70, y: corner.y - 60 });
+  window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: corner.x + 70, y: corner.y - 60 });
+  await new Promise(r => setTimeout(r, 50));
+  const resizedDialog = await dialogSize();
+  assert.ok(resizedDialog.width > originalDialog.width, 'the Settings corner resizes horizontally');
+  assert.ok(resizedDialog.height < originalDialog.height, 'the Settings corner resizes vertically');
+  assert.ok(resizedDialog.fits && resizedDialog.footerFits);
+  await window.webContents.executeJavaScript("document.querySelector('#settings-close').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true, cancelable: true })); true");
+  assert.equal((await dialogSize()).width, resizedDialog.width - 20, 'Alt and arrow keys resize the focused dialog');
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/resized-settings.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').style.removeProperty('width'); document.querySelector('#settings-dialog').style.removeProperty('height'); true");
+  console.log('Dialog corner and keyboard resizing with visible footer passed');
   const changeSetting = (id, value) => window.webContents.executeJavaScript(`(async () => {
     const control = document.getElementById(${JSON.stringify(id)}); control.value = ${JSON.stringify(value)};
     control.dispatchEvent(new Event('change', { bubbles: true }));
@@ -675,17 +780,59 @@ app.whenReady().then(async () => {
   const names = ['Researcher', 'Reviewer', 'Builder', 'Test runner', 'Documentation', 'Planner', 'Code search', 'UI designer', 'Release notes', 'Performance', 'Refactor', 'Verifier'];
   for (const name of names) await agents.saveAgent({ name, instructions: '', workspace: root, mode: 'auto', access: 'read-only' });
   await agents.initialize();
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
+  const narrowOverview = await window.webContents.executeJavaScript(`(() => {
+    const dialog = document.querySelector('#agents-dialog');
+    dialog.style.width = '400px'; dialog.style.height = '420px'; document.querySelector('#agents-overview').click();
+    const box = dialog.getBoundingClientRect();
+    return { scrolls: dialog.scrollHeight > dialog.clientHeight,
+      fits: [...document.querySelectorAll('.agent-card')].every(card => card.getBoundingClientRect().right <= box.right),
+      columns: getComputedStyle(document.querySelector('#agent-cards')).gridTemplateColumns.split(' ').length };
+  })()`);
+  assert.deepEqual(narrowOverview, { scrolls: true, fits: true, columns: 1 }, 'Overview cards fit a narrowed dialog');
+  await new Promise(r => setTimeout(r, 100));
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/resized-agents.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript("document.querySelector('#agents-dialog').close(); document.querySelector('#agents-dialog').style.removeProperty('width'); document.querySelector('#agents-dialog').style.removeProperty('height'); true");
+  const fontScaling = await window.webContents.executeJavaScript(`(() => {
+    const root = document.documentElement, previous = root.style.getPropertyValue('--font-scale');
+    const text = [...document.body.querySelectorAll('*')].filter(node =>
+      node.matches('input,textarea,select') || [...node.childNodes].some(child => child.nodeType === Node.TEXT_NODE && child.textContent.trim()));
+    const failures = [];
+    try {
+      root.style.setProperty('--font-scale', '1');
+      const baseline = text.map(node => ({ node, size: parseFloat(getComputedStyle(node).fontSize) }));
+      const add = document.querySelector('#agent-new svg'), icon = add.getBoundingClientRect().width;
+      for (const scale of [.85, 1.15, 1.3, 1.5]) {
+        root.style.setProperty('--font-scale', String(scale));
+        for (const { node, size } of baseline) {
+          const actual = parseFloat(getComputedStyle(node).fontSize);
+          if (Math.abs(actual - size * scale) > .1) failures.push({ element: node.id || node.className || node.tagName, scale, actual, expected: size * scale });
+        }
+        if (Math.abs(add.getBoundingClientRect().width - icon * scale) > .1) failures.push({ element: 'add agent icon', scale });
+      }
+    } finally { root.style.setProperty('--font-scale', previous); }
+    return { checked: text.length, failures };
+  })()`);
+  assert.ok(fontScaling.checked > 100, 'the font audit covers controls, conversation, sidebar and dialogs');
+  assert.deepEqual(fontScaling.failures, [], 'all Harness text and the add-agent icon follow every Font Size option');
   controller.data.settings.fontScale = 150;
   window.setSize(840, 640);
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
   const agentLayout = await window.webContents.executeJavaScript(`(() => {
     const list = document.querySelector('#agent-list'), main = document.querySelector('#main-agent-list');
     const add = document.querySelector('#agent-new').getBoundingClientRect();
+    const access = document.querySelector('#permissions'), roster = document.querySelector('#agent-roster-label').getBoundingClientRect();
+    const overview = document.querySelector('#agents-overview').getBoundingClientRect();
     const before = main.getBoundingClientRect().top; list.scrollTop = list.scrollHeight;
     return { scrolls: list.scrollHeight > list.clientHeight, room: list.clientHeight > 100, pinned: main.getBoundingClientRect().top === before,
+      accessFits: access.getBoundingClientRect().width >= parseFloat(access.style.width) - 1,
+      headingFits: roster.right <= overview.left || roster.bottom <= overview.top,
       controlsFit: add.top >= main.getBoundingClientRect().bottom && add.bottom <= list.getBoundingClientRect().top && add.bottom <= innerHeight };
   })()`);
-  assert.deepEqual(agentLayout, { scrolls: true, room: true, pinned: true, controlsFit: true });
+  assert.deepEqual(agentLayout, { scrolls: true, room: true, pinned: true, accessFits: true, headingFits: true, controlsFit: true });
+  await window.webContents.executeJavaScript('document.querySelector("#agent-list").scrollTop = 0; document.querySelector("#toast").hidden = true; true');
+  await new Promise(resolve => setTimeout(resolve, 100));
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/agents-font-150.png'), (await window.webContents.capturePage()).toPNG());
   controller.data.settings.fontScale = 100; window.setSize(1320, 900);
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); selectAgent(' + JSON.stringify(agents.primary.data.agents[0].id) + ')');
   await window.webContents.executeJavaScript('document.querySelector("#toast").hidden = true; true');

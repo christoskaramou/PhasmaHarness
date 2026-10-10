@@ -198,7 +198,11 @@ module.exports = {
   },
 
   notification({ method, params: p }) {
-    if (method === 'account/login/completed' && p.success) { this.refreshAccount().catch(error => { this.error = error.message; this.changed(); }); return; }
+    if (method === 'account/login/completed') {
+      const refresh = p.success ? this.refreshAccount() : Promise.reject(new Error(p.error || 'ChatGPT sign-in did not complete.'));
+      refresh.catch(error => { this.error = error.message; }).finally(() => { this.chatgptLoginPending = false; this.changed(); });
+      return;
+    }
     if (method === 'serverRequest/resolved') { this.requests.delete(p.requestId); this.changed(); return; }
     if (method === 'account/rateLimits/updated') { this.codexUsage(p.rateLimits, true); this.changed(); return; }
     const session = this.data.sessions.find(s => s.threadId === p?.threadId);

@@ -128,6 +128,60 @@ async function flush() {
   for (let i = 0; i < 8; i++) await new Promise(setImmediate);
 }
 
+test('provider connecting status follows startup checks and clears after failure', async t => {
+  const { controller, fake } = await setup(t);
+  let finishClaude, finishCodex;
+  controller.bridge.start = async () => {};
+  controller.claude.refresh = () => new Promise(resolve => { finishClaude = resolve; });
+  controller.cursor.refresh = async () => assert.deepEqual(controller.snapshot().connectingProviders, ['cursor-cli']);
+  fake.start = () => new Promise((_resolve, reject) => { finishCodex = reject; });
+  const initializing = controller.initialize();
+  assert.deepEqual(controller.snapshot().connectingProviders, ['claude-cli']);
+  finishClaude(); await flush();
+  assert.deepEqual(controller.snapshot().connectingProviders, ['codex']);
+  finishCodex(new Error('offline')); await initializing;
+  assert.deepEqual(controller.snapshot().connectingProviders, []);
+  assert.equal(controller.codex.connected, false);
+  assert.equal(Object.hasOwn(controller.data, 'connectingProviders'), false, 'progress is never saved');
+});
+
+test('provider connecting status survives overlapping requests and clears on rejection', async t => {
+  const { controller } = await setup(t);
+  let finish;
+  const pending = controller.withProviderConnection('local', () => new Promise(resolve => { finish = resolve; }));
+  await assert.rejects(controller.withProviderConnection('local', async () => { throw new Error('offline'); }), /offline/);
+  assert.deepEqual(controller.snapshot().connectingProviders, ['local']);
+  finish(); await pending;
+  assert.deepEqual(controller.snapshot().connectingProviders, []);
+});
+
+test('provider connecting status covers browser sign-in through success, failure and disconnect', async t => {
+  const { controller, fake } = await setup(t);
+  const call = fake.call.bind(fake);
+  fake.call = (method, params) => method === 'account/login/start' ? Promise.resolve({ authUrl: 'https://auth.openai.com/login' }) : call(method, params);
+  let opened;
+  assert.deepEqual(await controller.loginChatGPT(url => { opened = url; }), { started: true });
+  assert.equal(opened, 'https://auth.openai.com/login');
+  assert.deepEqual(controller.snapshot().connectingProviders, ['codex']);
+  await assert.rejects(controller.loginChatGPT(() => {}), /already open/);
+  let finishRefresh;
+  controller.refreshAccount = () => new Promise(resolve => { finishRefresh = resolve; });
+  controller.notification({ method: 'account/login/completed', params: { success: true } });
+  assert.equal(controller.snapshot().chatgptLoginPending, true);
+  finishRefresh(); await flush();
+  assert.deepEqual(controller.snapshot().connectingProviders, []);
+  await controller.loginChatGPT(() => {});
+  controller.notification({ method: 'account/login/completed', params: { success: false, error: 'Sign-in cancelled' } });
+  await flush();
+  assert.deepEqual(controller.snapshot().connectingProviders, []);
+  assert.equal(controller.error, 'Sign-in cancelled');
+  await assert.rejects(controller.loginChatGPT(() => { throw new Error('Cannot open browser'); }), /Cannot open browser/);
+  assert.deepEqual(controller.snapshot().connectingProviders, []);
+  await controller.loginChatGPT(() => {});
+  fake.emit('disconnected', 'connection lost');
+  assert.deepEqual(controller.snapshot().connectingProviders, []);
+});
+
 for (const stopped of [false, true]) test(`Claude ${stopped ? 'Stop' : 'completion'} publishes the idle state after saving`, async t => {
   const { controller } = await setup(t);
   const session = controller.create();

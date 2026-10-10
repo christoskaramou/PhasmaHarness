@@ -98,11 +98,13 @@ async function start() {
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   agents.on('state', state => { if (!window.isDestroyed()) window.webContents.send('state', state); });
   const sharedChanges = new Set(['benchmarkApply', 'benchmarkReset', 'cursorLogin', 'cursorRefresh', 'cursorLogout', 'claudeLogin', 'claudeRefresh', 'claudeLogout', 'connectChatGPT', 'logoutChatGPT', 'installProvider', 'providerSettings', 'providerKey', 'renewModels', 'jevSaveKey', 'jevRemoveKey', 'jevTest', 'checks']);
+  const connectionActions = { connectChatGPT: 'codex', claudeLogin: 'claude-cli', claudeRefresh: 'claude-cli', cursorLogin: 'cursor-cli', cursorRefresh: 'cursor-cli', jevTest: 'jev' };
   const handle = (name, fn) => ipcMain.handle(name, async (event, ...args) => {
     if (event.sender !== window.webContents || event.senderFrame?.url !== rendererURL) throw new Error('Untrusted caller.');
     try {
       if (sharedChanges.has(name) && agents.busy) throw new Error('Stop all agents before changing shared settings or providers.');
-      const result = await fn(...args);
+      const provider = name === 'providerModels' ? args[0] : connectionActions[name];
+      const result = provider ? await controller.withProviderConnection(provider, () => fn(...args)) : await fn(...args);
       if (sharedChanges.has(name)) await agents.refresh();
       return result?.sessions && result?.settings ? agents.snapshot() : result;
     }
@@ -199,11 +201,7 @@ async function start() {
     controller.setProviderEnabled('codex', true);
     await controller.refreshAccount(); controller.save();
     if (controller.account) return controller.snapshot();
-    const login = await controller.client.call('account/login/start', { type: 'chatgpt' });
-    const url = new URL(login.authUrl);
-    if (url.protocol !== 'https:') throw new Error('Unexpected login URL.');
-    await shell.openExternal(url.href);
-    return { started: true };
+    return controller.loginChatGPT(url => shell.openExternal(url));
   });
   handle('logoutChatGPT', async () => {
     // Stops using ChatGPT in the Harness only; the Codex CLI and other Codex apps stay signed in.

@@ -10,6 +10,35 @@ const { capCatalog } = require('../routing/effort-cap.cjs');
 const { DEFAULT_ROUTER, LEGACY_CLAUDE_ROUTERS, PROVIDER_NAMES, cheapRouter } = require('./shared.cjs');
 
 module.exports = {
+  async withProviderConnection(id, action) {
+    this.connectingProviders.set(id, (this.connectingProviders.get(id) || 0) + 1);
+    this.changed();
+    try { return await action(); }
+    finally {
+      const remaining = this.connectingProviders.get(id) - 1;
+      if (remaining) this.connectingProviders.set(id, remaining);
+      else this.connectingProviders.delete(id);
+      this.changed();
+    }
+  },
+
+  async loginChatGPT(open) {
+    if (this.chatgptLoginPending) throw new Error('Complete the ChatGPT sign-in already open in your browser.');
+    this.chatgptLoginPending = true;
+    this.changed();
+    try {
+      const login = await this.client.call('account/login/start', { type: 'chatgpt' });
+      const url = new URL(login.authUrl);
+      if (url.protocol !== 'https:') throw new Error('Unexpected login URL.');
+      await open(url.href);
+      return { started: true };
+    } catch (error) {
+      this.chatgptLoginPending = false;
+      this.changed();
+      throw error;
+    }
+  },
+
   // A saved provider choice always wins; only the plug (setProviderEnabled) changes it.
   // Without one (first run, or a store from before this setting), record what is in use now:
   // a provider whose CLI is signed in starts enabled. A provider whose state is unknown this run
@@ -29,14 +58,16 @@ module.exports = {
 
   // Codex is optional: a missing CLI leaves Claude/Cursor usable.
   async connectCodex() {
-    try {
-      await this.client.start();
-      if (this.agents?.closing) { this.client.close(); return; }
-      this.codex = { installed: true, connected: true };
-    } catch (error) {
-      this.codex = { installed: error.code !== 'ENOENT', connected: false, error: error.message };
-    }
-    await this.refreshAccount();
+    return this.withProviderConnection('codex', async () => {
+      try {
+        await this.client.start();
+        if (this.agents?.closing) { this.client.close(); return; }
+        this.codex = { installed: true, connected: true };
+      } catch (error) {
+        this.codex = { installed: error.code !== 'ENOENT', connected: false, error: error.message };
+      }
+      await this.refreshAccount();
+    });
   },
 
   async refreshAccount() {

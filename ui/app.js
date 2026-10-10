@@ -1,5 +1,66 @@
 'use strict';
 const $ = selector => document.querySelector(selector);
+const sidebarResizer = $('#sidebar-resizer');
+let sidebarWidth = null, sidebarDrag = null;
+try {
+  const saved = Number(localStorage.getItem('sidebarWidth'));
+  if (Number.isFinite(saved) && saved >= 200 && saved <= 520) sidebarWidth = saved;
+} catch { /* Layout still works when storage is unavailable. */ }
+// Keep 480px for the conversation plus the 6px divider.
+function sidebarMaxWidth() { return Math.max(200, Math.min(520, innerWidth - 486)); }
+function renderSidebarWidth() {
+  const sidebar = $('#agents-sidebar');
+  if (sidebarWidth === null) sidebar.style.removeProperty('width');
+  else sidebar.style.width = `${Math.max(200, Math.min(sidebarMaxWidth(), sidebarWidth))}px`;
+  const width = Math.round(sidebar.getBoundingClientRect().width);
+  sidebarResizer.setAttribute('aria-valuemin', '200');
+  sidebarResizer.setAttribute('aria-valuemax', String(sidebarMaxWidth()));
+  sidebarResizer.setAttribute('aria-valuenow', String(width));
+  sidebarResizer.setAttribute('aria-valuetext', `${width} pixels`);
+}
+function saveSidebarWidth() {
+  try {
+    if (sidebarWidth === null) localStorage.removeItem('sidebarWidth');
+    else localStorage.setItem('sidebarWidth', String(sidebarWidth));
+  } catch { /* Keep the current size even if it cannot be saved. */ }
+}
+function finishSidebarResize(save) {
+  if (!sidebarDrag) return;
+  const drag = sidebarDrag; sidebarDrag = null;
+  if (save) saveSidebarWidth(); else { sidebarWidth = drag.saved; renderSidebarWidth(); }
+  document.body.classList.remove('resizing-sidebar');
+  if (sidebarResizer.hasPointerCapture(drag.id)) sidebarResizer.releasePointerCapture(drag.id);
+}
+sidebarResizer.onpointerdown = event => {
+  if (event.button !== 0 || event.isPrimary === false) return;
+  event.preventDefault(); sidebarResizer.focus();
+  sidebarDrag = { id: event.pointerId, x: event.clientX, width: $('#agents-sidebar').getBoundingClientRect().width, saved: sidebarWidth };
+  sidebarResizer.setPointerCapture(event.pointerId);
+  document.body.classList.add('resizing-sidebar');
+};
+sidebarResizer.onpointermove = event => {
+  if (!sidebarDrag || event.pointerId !== sidebarDrag.id) return;
+  sidebarWidth = Math.round(Math.max(200, Math.min(sidebarMaxWidth(), sidebarDrag.width + event.clientX - sidebarDrag.x)));
+  renderSidebarWidth();
+};
+sidebarResizer.onpointerup = event => { if (event.pointerId === sidebarDrag?.id) finishSidebarResize(true); };
+sidebarResizer.onpointercancel = sidebarResizer.onlostpointercapture = event => { if (event.pointerId === sidebarDrag?.id) finishSidebarResize(false); };
+sidebarResizer.ondblclick = () => { sidebarWidth = null; renderSidebarWidth(); saveSidebarWidth(); };
+sidebarResizer.onkeydown = event => {
+  if (event.key === 'Escape' && sidebarDrag) { event.preventDefault(); finishSidebarResize(false); return; }
+  if (sidebarDrag) return;
+  if (event.key === 'Enter') { event.preventDefault(); sidebarResizer.ondblclick(); return; }
+  const step = event.shiftKey ? 50 : 10;
+  const width = $('#agents-sidebar').getBoundingClientRect().width;
+  const next = { ArrowLeft: width - step, ArrowRight: width + step, Home: 200, End: sidebarMaxWidth() }[event.key];
+  if (next === undefined) return;
+  event.preventDefault(); sidebarWidth = Math.max(200, Math.min(sidebarMaxWidth(), next));
+  renderSidebarWidth(); saveSidebarWidth();
+};
+window.addEventListener('resize', renderSidebarWidth);
+window.addEventListener('blur', () => finishSidebarResize(false));
+renderSidebarWidth();
+
 // Backend capabilities come from the main process; unknown or missing providers run through Codex.
 const CODEX_CAPS = { cli: false, steer: true, compact: true, usage: true };
 function providerCaps(provider) {
@@ -160,6 +221,36 @@ function showEffortCap() {
 
 // Usage and limits as each provider reports them (Settings → Providers).
 const clock = ms => new Date(ms).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+function renderProviderConnections() {
+  if (!state) return;
+  const snapshots = fleetState?.agentStates ? Object.values(fleetState.agentStates) : [state];
+  const connecting = new Set([...snapshots.flatMap(s => s.connectingProviders || []), ...(fleetState?.connectingProviders || []), ...modelFetches.keys()]);
+  if (testingJev) connecting.add('jev');
+  const active = connecting.size > 0 || snapshots.some(s => s.connection === 'connecting');
+  const indicator = $('#provider-connection');
+  indicator.hidden = !active;
+  indicator.title = connecting.size ? `Connecting: ${[...connecting].map(id => id === 'jev' ? 'Jev' : providerTitle(id)).join(', ')}` : 'Connecting providers';
+  indicator.setAttribute('aria-label', indicator.title);
+  $('#usage').hidden = active;
+  for (const row of document.querySelectorAll('[data-connection-provider]')) {
+    const id = row.dataset.connectionProvider, pending = connecting.has(id);
+    const wasPending = row.classList.contains('connecting');
+    row.classList.toggle('connecting', pending);
+    row.setAttribute('aria-busy', String(pending));
+    row.querySelector('.provider-detail').hidden = pending;
+    let status = row.querySelector('.provider-connecting');
+    if (!status) {
+      status = element('span', 'provider-connecting'); status.setAttribute('role', 'status');
+      const spinner = element('span', 'models-spinner'); spinner.setAttribute('aria-hidden', 'true');
+      status.append(spinner, element('span'));
+      row.querySelector('.provider-account-text').append(status);
+    }
+    status.hidden = !pending;
+    status.lastChild.textContent = !pending ? '' : id === 'codex' && fleetState?.chatgptLoginPending ? 'Waiting for sign-in…' : 'Connecting…';
+    if (pending || wasPending) row.querySelector('.provider-plug').disabled = pending || !!(state.anyAgentBusy || state.busy) || row.dataset.installed === 'false';
+  }
+}
+
 // API providers: add (name, base URL, optional key), enable/disable, replace or clear the key, remove.
 function renderApiProviders() {
   const list = $('#api-provider-list');
@@ -170,6 +261,7 @@ function renderApiProviders() {
     row.dataset.providerId = p.id;
     row.open = saved?.open || false;
     const summary = element('summary', 'provider-account-row');
+    summary.dataset.connectionProvider = p.id;
     summary.title = `Manage ${p.name}`;
     const plug = element('button', `provider-plug ${p.enabled ? 'connected' : 'disconnected'}`);
     plug.type = 'button'; plug.disabled = busy;
@@ -182,7 +274,7 @@ function renderApiProviders() {
       apiProviderAction(() => api.providerSettings({ action: 'provider', provider: { id: p.id, name: p.name, baseUrl: p.baseUrl, enabled: !p.enabled } })).finally(() => { plug.disabled = busy; });
     };
     const text = element('span', 'provider-account-text');
-    text.append(element('strong', '', p.name), document.createTextNode(` · ${!p.enabled ? 'Disabled' : state.codex?.connected ? 'Enabled' : 'Needs Codex'}`));
+    text.append(element('strong', '', p.name), element('span', 'provider-detail', ` · ${!p.enabled ? 'Disabled' : state.codex?.connected ? 'Enabled' : 'Needs Codex'}`));
     summary.append(plug, text);
     const options = element('div', 'provider-options');
     const endpoint = element('p', 'provider-endpoint', p.baseUrl);
@@ -207,6 +299,7 @@ function renderApiProviders() {
     row.append(summary, options);
     return row;
   }));
+  renderProviderConnections();
 }
 async function apiProviderAction(run) {
   try {
@@ -361,6 +454,7 @@ function element(tag, className, text) {
 }
 
 function applyState(next) {
+  const loginFinished = fleetState?.chatgptLoginPending && !next.chatgptLoginPending;
   fleetState = next;
   const removed = next.agentStates && !next.agentStates[selectedAgent];
   if (removed) { selectedAgent = 'main'; selectedId = null; $('#prompt').value = ''; }
@@ -376,6 +470,7 @@ function applyState(next) {
     $('#prompt').value = drafts.get(draftKey()) || '';
   }
   render(); renderUpdate();
+  if (loginFinished && $('#settings-dialog').open) renderProviders();
 }
 
 async function selectAgent(id) {
@@ -865,6 +960,7 @@ function render() {
   $('#usage').title = providerHover + (hasBreakdown
     ? `\n\nSession totals: ${total.inputTokens.toLocaleString()} input (${total.cachedInputTokens.toLocaleString()} cached, ${Math.max(0, total.inputTokens - total.cachedInputTokens).toLocaleString()} uncached), ${total.outputTokens.toLocaleString()} output. Reasoning is included in output. Latest request input: ${usage.last?.inputTokens?.toLocaleString() ?? 'unknown'}. These are token counts, not dollars or allowance usage.`
     : '\n\nHover lists providers. Token totals appear after the provider reports usage.');
+  renderProviderConnections();
   renderMessages(session);
   renderRequest();
   renderCommandPanel();
@@ -1816,6 +1912,7 @@ function renderProviders() {
 
   const addAccount = ({ id, label, connected, installed, detail, connect, disconnect }) => {
     const row = element('div', 'provider-account-row');
+    row.dataset.connectionProvider = id; row.dataset.installed = String(installed);
     const plug = document.createElement('button');
     plug.type = 'button';
     plug.className = `provider-plug ${connected ? 'connected' : 'disconnected'}`;
@@ -1837,7 +1934,7 @@ function renderProviders() {
       } catch (e) { $('#provider-status').textContent = e.message; }
     };
     const text = element('div', 'provider-account-text');
-    text.append(element('strong', '', label), document.createTextNode(detail ? ` · ${detail}` : ''));
+    text.append(element('strong', '', label), element('span', 'provider-detail', detail ? ` · ${detail}` : ''));
     const limit = limitLine(id);
     if (limit) text.append(element('small', 'provider-usage limited', limit));
     row.append(plug, text);
@@ -1997,6 +2094,7 @@ function renderProviders() {
   }
 
   renderRoutingModels();
+  renderProviderConnections();
 }
 
 const discoveredModels = new Map();
@@ -2007,6 +2105,7 @@ function renderModelFetching() {
   $('#models-loading').hidden = !fetching;
   $('#provider-model-list').setAttribute('aria-busy', String(fetching));
   $('#renew-models').disabled = fetching || !!state?.busy;
+  renderProviderConnections();
 }
 function loadDiscoveredModels(providerId) {
   if (modelFetches.has(providerId)) return modelFetches.get(providerId);

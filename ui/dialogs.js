@@ -39,6 +39,23 @@ function confirmAction(options) {
   confirmationQueue = result.catch(() => false);
   return result;
 }
+document.addEventListener('keydown', event => {
+  if (!event.altKey || event.ctrlKey || event.metaKey) return;
+  const direction = { ArrowLeft: ['width', -20], ArrowRight: ['width', 20], ArrowUp: ['height', -20], ArrowDown: ['height', 20] }[event.key];
+  const dialog = event.target.closest?.('dialog[open]');
+  if (!direction || !dialog) return;
+  const style = getComputedStyle(dialog);
+  if (style.resize !== 'both') return;
+  event.preventDefault();
+  const [axis, delta] = direction, name = axis === 'width' ? 'Width' : 'Height';
+  const minimum = parseFloat(style[`min${name}`]) || 0;
+  const maximum = Math.min(parseFloat(style[`max${name}`]) || Infinity, (axis === 'width' ? innerWidth : innerHeight) - 48);
+  dialog.style[axis] = `${Math.min(maximum, Math.max(minimum, dialog.getBoundingClientRect()[axis] + delta))}px`;
+});
+document.addEventListener('focusin', event => {
+  event.target.closest?.('dialog')?.setAttribute('aria-keyshortcuts', 'Alt+ArrowLeft Alt+ArrowRight Alt+ArrowUp Alt+ArrowDown');
+});
+
 window.router?.onConfirmation(options => {
   confirmAction(options).then(accepted => window.router.answerConfirmation(options.id, accepted)).catch(console.error);
 });
