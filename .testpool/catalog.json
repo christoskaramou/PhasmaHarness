@@ -10,21 +10,24 @@
     {
       "id": "local-agents",
       "name": "Local agent creation, concurrency and delegation",
-      "covers": "Main, named and delegated agents create idle persistent agents through tools, inheriting conversation permissions and rejecting inactive calls, edits and permission overrides. New and resumed Codex chats receive a session-bound MCP configuration without replacing history. Agent conversations request native subagents disabled even when untracked; resume appends current developer instructions naming the real creation tool. Only local agent tools are preapproved. Stop, delete and access-setting tools work across provider bridges with compact acknowledgements; Main is undeletable but stoppable and configurable. Idle/access guards reject privilege escalation, extra arguments, self-management and late deletion after a caller stops. Child and grandchild creation inherit all three current conversation access levels rather than profile defaults. Confirmed clear archives Main or a named conversation, creates fresh provider context without changing role/workspace/access, survives restart, rejects pending work and late state changes, and rolls back failed saves. Agent profiles save without waiting for provider startup, reuse discovery and expose startup errors. Independent workers retain separate sessions, start at least five simultaneous Full-access turns in the same workspace without global slots or locks, allow nested workspaces, retain independent message queues, stop individually, return delegated results once, preserve permissions, and fail closed on cleanup or restart. Context reads include Main, search bounded visible transcripts with hash and line provenance, exclude private reasoning and hidden metadata, require an active turn and enforce current workspace/access checks on every call. Each agent retains one conversation, legacy chats migrate without losing history, deletion protects Main and pending work, and repeated delegations return only their own results. Every provider can send exact pasted text to Main; nested task requests wait for final results, reject circular chains, preserve request budgets, and cascade Stop without restarting paused conversations. Agent-created children default to Auto; available model discovery exposes supported efforts, and explicit model/effort selection persists and reaches actual turn parameters across provider bridges without changing the parent. Invalid, disabled and unavailable selections create nothing. Jev enable/disable persists across agents, preserves keys and preferences, uses Smart while off and blocks all Jev requests without reading the key; busy agents prevent toggling.",
+      "covers": "Main, named and delegated agents create idle persistent agents through tools, inheriting conversation permissions and rejecting inactive calls, edits and permission overrides. New and resumed Codex chats receive a session-bound MCP configuration without replacing history. Agent conversations request native subagents disabled even when untracked; resume appends current developer instructions naming the real creation tool. Only local agent tools are preapproved. Stop, delete and access-setting tools work across provider bridges with compact acknowledgements; Main is undeletable but stoppable and configurable. Idle/access guards reject privilege escalation, extra arguments, self-management and late deletion after a caller stops. Child and grandchild creation inherit all three current conversation access levels rather than profile defaults. Confirmed clear archives Main or a named conversation, creates fresh provider context without changing role/workspace/access, survives restart, rejects pending work and late state changes, and rolls back failed saves. Agent profiles save without waiting for provider startup, reuse discovery and expose startup errors. Direct foreground workers retain separate sessions and start at least five simultaneous Full-access turns in the same workspace independently of the two background slots, allow nested workspaces, retain independent message queues, stop individually, return delegated results once, preserve permissions, and fail closed on cleanup or restart. Context reads include Main, search bounded visible transcripts with hash and line provenance, exclude private reasoning and hidden metadata, require an active turn and enforce current workspace/access checks on every call. Each agent retains one conversation, legacy chats migrate without losing history, deletion protects Main and pending work, and repeated delegations return only their own results. Every provider can send exact pasted text to Main; nested task requests wait for final results, reject circular chains, preserve request budgets, and cascade Stop without restarting paused conversations. Agent-created children default to Auto; available model discovery exposes supported efforts, and explicit model/effort selection persists and reaches actual turn parameters across provider bridges without changing the parent. Invalid, disabled and unavailable selections create nothing. Jev enable/disable persists across agents, preserves keys and preferences, uses Smart while off and blocks all Jev requests without reading the key; busy agents prevent toggling. Worker result cards persist in the owner conversation before model review, survive a full queue, deduplicate retries and roll back failed saves; context reads retain reports. Busy bots persist FIFO delegationQueue assignments, preserve the active task and permission ceiling, retain accepted model choices, reject dependency cycles and overflow, and cancel queued jobs by stable IDs even after promotion. Question/answer mailboxes persist and deduplicate stable IDs, validate reply/job correlation and access, bound pending messages, service waiting owners, roll back failed saves, and yield priority to direct user follow-ups. Restart retains queued assignments as Needs review; native resume preserves trusted local receipts while rejecting provider-forged mailbox items. A cancellation intent persists before its report; even a failed report save cannot cause the cancelled queued job to execute. Ownership transfer pins stable offers, saves receiver acceptance before commit, rejects stale owner versions and permission escalation, and retries without a second worker or duplicate result. Notification failure preserves committed ownership and restart keeps receipts without replay. Immutable job ancestry preserves cancellation after transfer or parent completion. Transferred ownership does not block or contaminate an unrelated delegated assignment: its notices and reports wait while the recipient processes its own helper replies. Two FIFO background slots preserve direct foreground chat; helper waits release slots, and Stop or Quit cancels admission without provider submission. Reports behind full queues retain a durable deferred review, move once when room opens, roll back failed moves and pause after restart. Deferred helper evidence blocks premature parent completion; foreign ownership mail does not occupy its inbox. Missing owners retain pending reports. Stable assignment amendments use revision checks and durable Received receipts. Native steering marks Applied only after acknowledgment; unsupported execution stops its old subtree before replacement. Unknown steering or cleanup prevents another writer. Stop races never revive work. Earlier-revision helper results remain evidence without automatic continuation. Old approvals and helper actions are rejected after a revision. Direct Apply now consumes text/images with the revision in one save and rolls back failed saves. Interrupted active jobs remain undelivered and visible to their owner after restart; recovery classifications persist without replay. Cancelled-result summaries use read-only execution, reject new agent actions and restore the original access only on a fresh user request. Contained restart resumes never-submitted versioned assignments in FIFO order only after checking workspace, original source, result owner, permission ceilings and parent revision. Attempted, legacy, paused or incompatible jobs stay under review, and interrupted replies cannot silently resume from a late receipt. Stop intent persists before child traversal and survives a crash before child-store cancellation. A failed execution-start save preserves durable acceptance without submitting a worker or inviting a duplicate retry. Foreground and delegated execution use distinct saved controllers under one bot identity. Tests cover simultaneous chat/job execution, automatic reply admission without occupying foreground chat, registered worker restart, empty registration retry, untouched orphan history, scoped mail/context reads and cross-context receipt deduplication, and trusted job-details revisions with stable retries. A controlled host check retains its existing slot without failing queued assignments or foreground chat in another context; an ended, cancelled, mismatched or unconfirmed check still fences admission. A worker context left signed out by a transient Codex account error retries while queued work waits there, and starts that work once the account loads. Another bot's stopping check delays (does not fail) queued background work; an admission failure before checks blocks the task and frees the bot; a rejected turn start closes its budget request; a lost owner chat holds a transferred job for review instead of blocking startup, and chats owning undelivered jobs cannot be deleted. Stopping a Codex job ends the processes its turn started (a real long-lived child) while sparing the app-server and its earlier helpers, and an unreadable process list holds the cleanup and blocks new work. State snapshots carry no inline images (counts kept) and serve each one on demand. A helper's job is held while its question is queued for or being read by the recipient, then delivered after the answered follow-up, once the question was read without an answer, or when the owner cannot receive it (paused queue). Tool-result images and a pending message's images are also kept out of snapshots and served on demand. No agent can delete an agent through any provider bridge; only the user delete path removes a profile and still refuses queued or pending work. After a restart, held assignments change only by a user decision (reconcileJob): Return delivers them to their owner as interrupted, and Start reruns only never-started work that still matches its owner, permissions and workspace; work that may have run is never started again, failed saves keep the job held, and a second restart of resumed work records it as uncertain.",
       "paths": [
         "src/agents.cjs",
         "src/controller.cjs",
         "src/controller/**",
+        "src/process-tree.cjs",
         "src/providers/jev.cjs",
         "src/tools/agent-tools.cjs",
         "src/tools/tool-helpers.cjs",
         "src/tools/router-bridge.cjs",
         "src/main.cjs",
-        "tests/agents.test.cjs"
+        "tests/agents.test.cjs",
+        "src/image-input.cjs",
+        "src/runner-commands.cjs"
       ],
       "command": "node --test tests/agents.test.cjs",
-      "cost": "cheap",
-      "timeoutSec": 30,
+      "cost": "medium",
+      "timeoutSec": 90,
       "origin": {
         "problem": "Harness could run only one active session and had no persistent agent delegation.",
         "fix": "Coordinate independent controllers with concurrent execution and permission-preserving task handoffs; retain cleanup guards and targeted Stop.",
@@ -58,7 +61,7 @@
     {
       "id": "agents-ui",
       "name": "Agent UI and delete dialog selection",
-      "covers": "Agent creation, switching, deletion through the context menu without sidebar delete buttons, pinned Main with the compact + creation button below it, no bottom New agent/Edit controls, and sidebar scrolling; reopening Delete clears stale text selection. Right-click and Shift+F10 menus use Open/Edit/Delete labels with red Delete, stay within the viewport, support arrow/Enter/Escape navigation and focus restoration, target the clicked agent, and respect Main/busy protections. Slash commands /help /compact /clear /stop /agents /settings run locally without routing/model calls. Clear asks for confirmation and resets only the selected conversation; cancel retains the input. Delegate controls are absent; an agent waiting for nested tasks shows Waiting and keeps Stop targeting its conversation. All buttons and nested button labels are unselectable, including dynamic dialogs, while composer text stays selectable. Shared in-app confirmations show clear/close/startup messages, default to cancellation, handle Escape and repeated opens, retain drafts on cancellation and keep cursor styles visible. Typing / shows all commands, name prefixes filter case-insensitively, arrows and active-descendant track selection, Tab only completes, Enter/click dispatch locally, Escape/blur dismiss, unknown prefixes show an empty state, and the menu fits at 840x640 with 150% text. Selecting clear still confirms. Settings save each dropdown and workspace selection immediately, scoped to the selected agent. Failed saves restore saved/default values and do not block later writes. Check edits and removals autosave; incomplete check drafts survive tab changes and block Close, X and Escape until fixed or removed. API providers join the main provider list as expandable rows, preserve key drafts, and retain save/clear key and confirmed removal actions. API and Jev plug buttons toggle enabled state without expanding settings; Jev keeps its key and supports keyboard toggling. Jev appears as a collapsed provider row, expands by click or keyboard, retains key drafts across provider renders, resets on Settings reopen, and reflects configured/unavailable states. Settings About tab owns the app identity, version, diagnostics, logs and update controls; tab switching hides other panels and existing update checks still work. Offscreen screenshots use software rendering for Linux/Xvfb and Windows, with the output directory created before the first capture. All thirteen slash commands are listed. New command pickers search models, supported efforts, access modes and agents, support keyboard selection and Escape, retain target-agent drafts, persist access for agents without conversations, reject unavailable/busy changes, survive queued close events and fit large text. Context distinguishes reported usage from unsupported providers; status displays task/queue/child data safely. Export writes selected-agent Markdown via a mocked save picker, writes nothing on cancel and preserves input on write errors. Startup and UI checks have separate 30-second budgets so cold Chromium startup cannot consume the test budget; timeout errors report the active phase. Local model controls show load state and context, support load/unload and status retry, disable unloading during agent work, and hide for hosted selections. Connection progress appears in the composer footer and provider rows, includes other agents and browser sign-in, disables duplicate connects, and clears after discovery failure or completion. A computed-style audit checks all populated text and controls at every Font Size option, including sidebar/Overview typography, command descriptions, local-model controls and the + icon; the smallest window at 150% keeps the sidebar scrollable and the heading/access controls readable. The agents divider supports pointer capture, Escape cancellation, arrow/Home/End keys and reset, persists its width across reloads, and clamps to leave conversation room while retaining the preferred width. Dialogs support corner dragging and Alt+arrow resizing with viewport limits; Settings keeps its footer visible and narrowed Overview cards reflow to one column.",
+      "covers": "Agent creation, switching, deletion through the context menu without sidebar delete buttons, pinned Main with the compact + creation button below it, no bottom New agent/Edit controls, and sidebar scrolling; reopening Delete clears stale text selection. Right-click and Shift+F10 menus use Open/Edit/Delete labels with red Delete, stay within the viewport, support arrow/Enter/Escape navigation and focus restoration, target the clicked agent, and respect Main/busy protections. Slash commands /help /compact /clear /stop /agents /settings run locally without routing/model calls. Clear asks for confirmation and resets only the selected conversation; cancel retains the input. Delegate controls are absent; an agent waiting for nested tasks shows Waiting and keeps Stop targeting its conversation. All buttons and nested button labels are unselectable, including dynamic dialogs, while composer text stays selectable. Shared in-app confirmations show clear/close/startup messages, default to cancellation, handle Escape and repeated opens, retain drafts on cancellation and keep cursor styles visible. Typing / shows all commands, name prefixes filter case-insensitively, arrows and active-descendant track selection, Tab only completes, Enter/click dispatch locally, Escape/blur dismiss, unknown prefixes show an empty state, and the menu fits at 840x640 with 150% text. Selecting clear still confirms. Settings save each dropdown and workspace selection immediately, scoped to the selected agent. Failed saves restore saved/default values and do not block later writes. Check edits and removals autosave; incomplete check drafts survive tab changes and block Close, X and Escape until fixed or removed. API providers join the main provider list as expandable rows, preserve key drafts, and retain save/clear key and confirmed removal actions. API and Jev plug buttons toggle enabled state without expanding settings; Jev keeps its key and supports keyboard toggling. Jev appears as a collapsed provider row, expands by click or keyboard, retains key drafts across provider renders, resets on Settings reopen, and reflects configured/unavailable states. Settings About tab owns the app identity, version, diagnostics, logs and update controls; tab switching hides other panels and existing update checks still work. Offscreen screenshots use software rendering for Linux/Xvfb and Windows, with the output directory created before the first capture. All thirteen slash commands are listed. New command pickers search models, supported efforts, access modes and agents, support keyboard selection and Escape, retain target-agent drafts, persist access for agents without conversations, reject unavailable/busy changes, survive queued close events and fit large text. Context distinguishes reported usage from unsupported providers; status displays task/queue/child data safely. Export writes selected-agent Markdown via a mocked save picker, writes nothing on cancel and preserves input on write errors. Startup and UI checks have separate 30-second budgets so cold Chromium startup cannot consume the test budget; timeout errors report the active phase. Local model controls show load state and context, support load/unload and status retry, disable unloading during agent work, and hide for hosted selections. Connection progress appears in the header and provider rows, includes other agents and browser sign-in, disables duplicate connects, and clears after discovery failure or completion. A computed-style audit checks all populated text and controls at every Font Size option, including sidebar/Overview typography, command descriptions, local-model controls and the + icon; the smallest window at 150% keeps the sidebar scrollable and the heading/access controls readable. The agents divider supports pointer capture, Escape cancellation, arrow/Home/End keys and reset, persists its width across reloads, and clamps to leave conversation room while retaining the preferred width. Dialogs support corner dragging and Alt+arrow resizing with viewport limits; Settings keeps its footer visible and narrowed Overview cards reflow to one column. Minimal chat keeps Hub in a dedicated pinned tile above specialist previews, with Settings in the sidebar and advanced model/routing controls inside Options. Dark, Light and System appearance follow native palettes, persist on reload, preserve drafts, avoid provider calls, and keep explicit overrides fixed when the OS changes. No persistent text or action footer appears below the composer; Clear, Commands, context, usage and permission details remain hidden inside Options until opened, and connection progress remains in the header. Options stays open for inside controls, closes on outside clicks or Escape, restores trigger focus on Escape, and preserves active tasks and drafts without sending Stop. Background activity shows one result owner, direct Open chat and targeted Stop; reports remain visible while the owner is busy. Fake worker output verifies responsive typing, navigation, queued corrections and local Stop feedback, with separate latency measurements. Queued assignments appear with their actual owner and target Stop by assignment ID without interrupting unrelated work. Collapsed mailbox questions display sender, Received acknowledgment and escaped text; incoming messages are distinct from worker results. Separate foreground/execution snapshots retain one sidebar bot and an enabled Send. Nonmodal job details preserve the draft, render bounded literal evidence, show Received/Applied updates and dismiss on Escape/outside. Explicit background approvals defer and reply to the exact context. Send remains hit-testable at 1320px and 840px with 150% font. Background quota controls validate and save immediately, update their explanation, and show a paused job with its reported allowance reason. Composer file inputs reject binary selections atomically, preserve per-chat drafts and failed snapshots, support file-only send and history recall, and render file contents literally in collapsed details. No routine dialog, button, Repeat action or routine IPC exists. A state update keeps focus on an attachment remove button, message images load on demand.",
       "paths": [
         "ui/app.js",
         "ui/index.html",
@@ -66,14 +69,21 @@
         "src/preload.cjs",
         "tests/ui-startup-smoke.cjs",
         "src/main.cjs",
+        "src/runner-commands.cjs",
         "ui/dialogs.js",
         "ui/startup-error.html",
         "ui/startup-error.js",
         "src/confirmations.cjs",
-        "src/conversation-export.cjs"
+        "src/conversation-export.cjs",
+        "ui/appearance.js",
+        "src/agents.cjs",
+        "src/tools/agent-tools.cjs",
+        "ui/attachments.js",
+        "src/routines.cjs",
+        "src/routine-time.cjs"
       ],
       "command": "node -e \"const {spawnSync}=require('node:child_process');const check=spawnSync(process.execPath,['--check','tests/ui-startup-smoke.cjs'],{stdio:'inherit',windowsHide:true});if(check.status!==0)process.exit(check.status||1);const env={...process.env};delete env.ELECTRON_RUN_AS_NODE;const result=spawnSync(require('electron'),['tests/ui-startup-smoke.cjs'],{env,stdio:'inherit',windowsHide:true});process.exit(result.status??1)\"",
-      "cost": "cheap",
+      "cost": "expensive",
       "timeoutSec": 75,
       "origin": {
         "problem": "Delete dialog retained text selection between deletions.",
@@ -103,7 +113,7 @@
     {
       "id": "command-data",
       "name": "Conversation export and compaction records",
-      "covers": "Markdown export preserves visible messages, plans and Unicode while omitting attachments, pending messages, internal/wiki-maintenance messages, tool arguments and private reasoning. Successful owned Codex and Claude compactions record timestamps; ignored compaction events do not.",
+      "covers": "Markdown export preserves visible messages, plans and Unicode while omitting attachments, pending messages, internal/wiki-maintenance messages, tool arguments and private reasoning. Successful owned Codex and Claude compactions record timestamps; ignored compaction events do not. Markdown exports retain mailbox sender, question text and stable message/reply correlation IDs.",
       "paths": [
         "src/conversation-export.cjs",
         "src/controller.cjs",
@@ -125,7 +135,7 @@
     {
       "id": "local-models",
       "name": "Local model lifecycle and context sizing",
-      "covers": "LM Studio, Ollama and llama.cpp router status, automatic load, unload, actual context limits, context growth, shared-provider serialization, cancellation, hosted-provider fallback and safe load failures. Existing conversations resume with the prepared context before sending. No live inference or downloaded model changes. Structured local inference uses schema-enabled chat completions, preserves runtime model IDs, images, usage and context growth/retry, rejects malformed/truncated responses, holds the provider lock through inference, respects Stop and leaves hosted inference unchanged.",
+      "covers": "LM Studio, Ollama and llama.cpp router status, automatic load, unload, actual context limits, context growth, shared-provider serialization, cancellation, hosted-provider fallback and safe load failures. Existing conversations resume with the prepared context before sending. No live inference or downloaded model changes. Structured local inference uses schema-enabled chat completions, preserves runtime model IDs, images, usage and context growth/retry, rejects malformed/truncated responses, holds the provider lock through inference, respects Stop and leaves hosted inference unchanged. API providers run in Harness's own agent loop (no Codex): tool calls, approvals by access level, saved chat history, Stop; hosted structured calls use JSON mode.",
       "paths": [
         "src/providers/providers.cjs",
         "src/providers/local-models.cjs",
@@ -135,7 +145,7 @@
         "tests/local-models.test.cjs",
         "tests/core.test.cjs"
       ],
-      "command": "node --test tests/local-models.test.cjs tests/core.test.cjs",
+      "command": "node --test tests/api-agent.test.cjs tests/local-models.test.cjs tests/core.test.cjs",
       "cost": "medium",
       "timeoutSec": 60,
       "origin": {
@@ -167,7 +177,7 @@
     {
       "id": "coordinator",
       "name": "Hub chat and automatic delegation",
-      "covers": "Pinned chat model; Hub-only dynamic mid-tier selection using identical Jev/Smart policy and benchmark evidence across arbitrary Codex, Claude-only, Cursor-only and custom-provider models; measured capability extremes are excluded per model without bias from duplicate provider/effort rows, ties and sparse evidence retain usable choices, unknown measurements remain eligible, configurable effort is limited to Low/Medium while fixed/default-effort models stay eligible, pins persist without repeated routing and Auto/manual selection labels retain their origin, legacy pins are reselected, worker catalogs stay unchanged, manual choices work, invalid/high efforts and disabled/rate-limited candidates are rejected, Jev failure falls back to Smart and Stop discards late selections; tool-free inference for all providers, automatic worker creation with Auto and inherited access, attachments, result return through Hub pins despite stale queued/local composer models, persisted effective Hub mode, single Hub dispatch path avoiding manual pins including legacy previous-worker references, explicit worker selection retained, Jev/Smart review routing receives available Claude and local candidates with normal worker effort levels, follow-up reuse, responsive Hub during worker execution, protected identity, rejected escalation, invalid tools, late Stop results, persistent context summaries and retained history. Requested review workspace reaches the worker router; different workspaces require Full access, denied handoffs create nothing, and existing agents are not moved. Auto pins recover from disconnected providers, removed models and usage limits through the same eligible mid-tier policy; Claude-to-OpenAI switching preserves history, persists the replacement and reuses it. Manual pins are never silently replaced. LM Studio-only switching retains history, persists and reuses provider-default effort, skips classification for a sole eligible model, and rejects disabled/limited local models. Jev and Smart both accept fixed-effort candidates; local inference prepares the model and preserves its context configuration without inventing an effort level. Hub uses local structured inference instead of the Responses backend, and malformed replies cannot become agent actions. Typed Hub actions bind tool names to object arguments, preserve Windows/UNC paths, quotes, Unicode and pasted newlines without nested JSON parsing, remove optional nulls while retaining Auto and inherited permissions, and reject legacy strings, arrays, unknown fields, missing required values and invalid types/enums before side effects. Original Hub requests survive misleading notes, saved delegation, result delivery and intervening chat; exact original text drives routing and worker input. New requests reset prior task identity while same-request continuations retain it. Completion checks reject summaries instead of reviews, preserve original scope/images for bounded follow-ups, fail closed on malformed checks and cancelled/failed workers, and mark truncated requests/reports unverified without retries. Explicit batches create the full requested count at the chosen model/effort, start all four Full-access workers concurrently in the same workspace, persist and aggregate every result, reject invalid counts/full queues before side effects, and handle partial dispatch, cancellation and exhausted follow-up budgets without orphaned waits or false completion.",
+      "covers": "Pinned chat model; Hub-only dynamic mid-tier selection using identical Jev/Smart policy and benchmark evidence across arbitrary Codex, Claude-only, Cursor-only and custom-provider models; measured capability extremes are excluded per model without bias from duplicate provider/effort rows, ties and sparse evidence retain usable choices, unknown measurements remain eligible, configurable effort is limited to Low/Medium while fixed/default-effort models stay eligible, pins persist without repeated routing and Auto/manual selection labels retain their origin, legacy pins are reselected, worker catalogs stay unchanged, manual choices work, invalid/high efforts and disabled/rate-limited candidates are rejected, Jev failure falls back to Smart and Stop discards late selections; tool-free inference for all providers, automatic worker creation with Auto and inherited access, attachments, result return through Hub pins despite stale queued/local composer models, persisted effective Hub mode, single Hub dispatch path avoiding manual pins including legacy previous-worker references, explicit worker selection retained, Jev/Smart review routing receives available Claude and local candidates with normal worker effort levels, follow-up reuse, responsive Hub during worker execution, protected identity, rejected escalation, invalid tools, late Stop results, persistent context summaries and retained history. Requested review workspace reaches the worker router; different workspaces require Full access, denied handoffs create nothing, and existing agents are not moved. Auto pins recover from disconnected providers, removed models and usage limits through the same eligible mid-tier policy; Claude-to-OpenAI switching preserves history, persists the replacement and reuses it. Manual pins are never silently replaced. LM Studio-only switching retains history, persists and reuses provider-default effort, skips classification for a sole eligible model, and rejects disabled/limited local models. Jev and Smart both accept fixed-effort candidates; local inference prepares the model and preserves its context configuration without inventing an effort level. Hub uses local structured inference instead of the Responses backend, and malformed replies cannot become agent actions. Typed Hub actions bind tool names to object arguments, preserve Windows/UNC paths, quotes, Unicode and pasted newlines without nested JSON parsing, remove optional nulls while retaining Auto and inherited permissions, and reject legacy strings, arrays, unknown fields, missing required values and invalid types/enums before side effects. Original Hub requests survive misleading notes, saved delegation, result delivery and intervening chat; exact original text drives routing and worker input. New requests reset prior task identity while same-request continuations retain it. Completion checks reject summaries instead of reviews, preserve original scope/images for bounded follow-ups, fail closed on malformed checks and cancelled/failed workers, and mark truncated requests/reports unverified without retries. Explicit batches create the full requested count at the chosen model/effort, queue all four Full-access workers in two bounded execution waves in the same workspace, persist and aggregate every result, reject invalid counts/full queues before side effects, and handle partial dispatch, cancellation and exhausted follow-up budgets without orphaned waits or false completion. Hub queues work for an explicitly selected busy bot with honest feedback, receives mailbox questions separately from completion reports, retains the correlated original request despite later chat, and answers without creating another assignment. Several agents are proposed once, created together on the next confirming message with an accurate created/failed count, and the list schema passes structured validation. Hub cannot delete agents.",
       "paths": [
         "src/controller/coordinator.cjs",
         "src/controller.cjs",
@@ -183,8 +193,8 @@
         "src/controller/turns.cjs"
       ],
       "command": "node --test tests/coordinator.test.cjs",
-      "cost": "cheap",
-      "timeoutSec": 30,
+      "cost": "medium",
+      "timeoutSec": 90,
       "origin": {
         "problem": "The permanent agent mixed chat with execution and retained the task model.",
         "fix": "Give Hub a pinned, isolated chat model and dispatch execution through existing agent controls.",
@@ -215,6 +225,582 @@
         "problem": "Confidence alone promoted a bounded explanation to the strongest model while difficult concurrent queue repair stayed at Medium effort.",
         "fix": "Classify task difficulty explicitly and share difficulty-based capability/effort selection across Jev and Smart without hardcoded models.",
         "date": "2026-10-10"
+      }
+    },
+    {
+      "id": "appearance",
+      "name": "Local Dark Light and System appearance",
+      "covers": "Appearance defaults to System before paint, restores valid choices, rejects corrupt saved values, persists changes locally, and remains usable when storage is unavailable. No provider or model is involved. The chosen appearance is reported to the desktop window so its launch background matches.",
+      "paths": [
+        "ui/appearance.js",
+        "ui/index.html",
+        "ui/style.css",
+        "tests/appearance.test.cjs",
+        "src/main.cjs",
+        "src/preload.cjs"
+      ],
+      "command": "node --test tests/appearance.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 15,
+      "origin": {
+        "problem": "The app had only a hard-coded dark palette and no local appearance preference.",
+        "fix": "Use native light/dark CSS tokens with a validated pre-paint Dark/Light/System preference.",
+        "date": "2026-10-18"
+      }
+    },
+    {
+      "id": "native-cli",
+      "name": "Muse, Antigravity and DeepSeek Harness native CLI protocol and account boundaries",
+      "covers": "Native discovery sends no inference, disabled accounts start no metadata or login process, native-only startup and routing work without Codex or an accidental Claude fallback. Public streaming excludes private reasoning. Resume retains session-bound MCP and explicit permissions; incompatible protocols, unsupported sandbox or continuation, missing usage, rejected approvals and cancellation fail honestly. Fixtures use the official ACP and Muse SDK protocols, with no paid calls. A native-only Gemini owner creates and delegates to a Muse execution context through real local MCP stdio processes and the ACP/MSP adapters. The simulated worker asks and receives an answer while active, retries deduplicate, final delivery has one owner, foreign-context helper calls fail, private thoughts stay hidden and all background slots release. No installed CLI or real-model inference runs. Synchronous Gemini process-creation failure removes its private policy directory and resets admission. Antigravity protocol fixtures cover native metadata, scoped helper credentials inherited outside project files, Full-access-only admission, text-only input, public streaming, generic call_mcp_tool events, explicit resume, unknown resumed usage, stopped startup, cancellation, changed-file preservation and linked-directory rejection. A Gemini owner also exchanges active-worker questions and one final result with an Antigravity execution context over real local MCP stdio. Gemini permission requests without rawInput are never remembered for the session; native muse/agy/gemini executables do not inherit ELECTRON_RUN_AS_NODE; a Muse stdin write error fails the turn instead of crashing. Gemini, Claude, Cursor and Muse send each image with the media type of its data URL. A confirmed Antigravity result survives unconfirmed cleanup, which still removes the generated worker file; a startup sweep removes only unchanged leftovers. Gemini's private system settings keep the administrator's settings and only turn off hooks, telemetry and subagents; a non-JSON admin file fails closed. The administrator's adminPolicyPaths are passed on after Harness's --admin-policy file, and Gemini is refused when system policy .toml files would make it ignore Harness's policy. A Gemini request without a tool name offers one-time approval only.",
+      "paths": [
+        "src/providers/native-cli.cjs",
+        "src/providers/muse.cjs",
+        "src/providers/deepseek.cjs",
+        "src/providers/antigravity.cjs",
+        "src/providers/capabilities.cjs",
+        "src/providers/structured.cjs",
+        "src/controller.cjs",
+        "src/controller/providers.cjs",
+        "src/routing/smart-router.cjs",
+        "src/diagnostics.cjs",
+        "tests/native-cli.test.cjs",
+        "tests/muse.test.cjs",
+        "tests/antigravity.test.cjs",
+        "tests/deepseek.test.cjs",
+        "tests/fixtures/native-cli.cjs",
+        "tests/native-coordination.test.cjs",
+        "src/providers/claude.cjs",
+        "src/providers/cursor.cjs",
+        "src/image-input.cjs",
+        "src/controller/shared.cjs",
+        "src/runner.cjs",
+        "tests/core.test.cjs"
+      ],
+      "command": "node --test tests/native-cli.test.cjs tests/muse.test.cjs tests/antigravity.test.cjs tests/deepseek.test.cjs tests/native-coordination.test.cjs && node --test --test-name-pattern=\"Allow for this session\" tests/core.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 20,
+      "origin": {
+        "problem": "Native adapters were absent, and native-only accounts could retain an unavailable Codex router or silently fall back to Claude.",
+        "fix": "Use native session protocols, explicit capability and permission checks, provider-specific dispatch, and deterministic protocol fixtures.",
+        "date": "2026-10-18"
+      }
+    },
+    {
+      "id": "background-runner",
+      "name": "Background window lifetime and update admission",
+      "covers": "Window close preserves the runner, draft and approval waits; reopen and second launch share one owner. Untrusted renderer IPC is rejected. Explicit Quit stays distinct. Autostart remains opt-in and uses matching source or packaged executable arguments. Updates wait for queued work, approval and cleanup; admission closes before install and reopens on known failure, while uncertain handoff keeps it closed. Unit checks plus an isolated Electron lifecycle smoke use no provider authentication, inference or login-item writes. Recovery verifies one-time original Hub/agent backups before reconciliation, preserves them on later launches and rejects bad backups or escaping agent ids. Deferred reviews and revision operations also block updates. Windows containment requires a private live-parent handshake before worker startup. Kernel jobs end normal detached child trees after runner crash, graceful quit, monitor failure or bounded control-lease loss; a fake installer survives outside the old runner job. Live checks use private fixtures and exact process identities. Installer fixture deletion requires confirmed process cleanup and bounded retries for delayed Windows file release. Invalid and missing handshakes cannot start work. Store-scoped lifetime jobs refuse an overlapping live owner without terminating it and fence prior descendant cleanup before admitting a replacement. Backups include validated registered execution stores. Update admission checks all actual controller connections and pending browser authentication; completed cached initialization promises do not block updates. Shared native/browser commands retain input validation and scoped Stop during asynchronous image preparation; closing or replacing its chat owner cannot admit a delayed message. Linux metadata fixtures reject mismatched service scope, identity or cleanup policy instead of claiming safe recovery. The headless server binds its port before the runner initializes, so a taken port submits no job. A desktop startup failure keeps the lifetime lease so its error window stays open. The Windows job name mixes in a private per-installation secret. A recovery backup is verified before it takes its name, so an interrupted copy cannot block later starts.",
+      "paths": [
+        "src/runner.cjs",
+        "src/server.cjs",
+        "tools/linux-service.cjs",
+        "src/runner-linux.cjs",
+        "src/runner-commands.cjs",
+        "src/main.cjs",
+        "src/preload.cjs",
+        "src/updater.cjs",
+        "tests/runner.test.cjs",
+        "tests/server.test.cjs",
+        "tests/runner-linux.test.cjs",
+        "tests/runner-commands.test.cjs",
+        "tests/runner-live.cjs",
+        "tests/updater.test.cjs",
+        "src/runner-containment.cjs",
+        "src/runner-job.ps1",
+        "src/runner-job-start.ps1",
+        "package.json",
+        "tests/runner-containment.test.cjs"
+      ],
+      "command": "node --test tests/server.test.cjs tests/runner.test.cjs tests/runner-linux.test.cjs tests/runner-commands.test.cjs tests/runner-containment.test.cjs tests/updater.test.cjs && node tests/runner-live.cjs",
+      "cost": "medium",
+      "timeoutSec": 110,
+      "origin": {
+        "problem": "Closing the window stopped all agents, and update checks ignored accepted queues and could admit a new writer while starting the installer.",
+        "fix": "Extract runner startup, keep the view detachable, preserve private IPC and single ownership, and guard update admission.",
+        "date": "2026-10-18"
+      }
+    },
+    {
+      "id": "background-usage",
+      "name": "Background quota reserve and safe limit waits",
+      "covers": "Valid saved allowance reports hold new background work at the configured threshold without consuming a submission attempt, while foreground chat remains usable. Tests cover malformed or unknown usage, reports beyond 100%, reset expiry, no invented reset, shared persistence, restart, threshold validation, cancellation during admission, a timer wake, and actual worker/router limit failures without cross-account failover. Owner tools expose paused state and reason. Remaining quota from unsupported providers stays unknown; active turns may finish. A hold without a reported reset is rechecked after 15 minutes, reading ChatGPT usage again, instead of waiting forever.",
+      "paths": [
+        "src/providers/limits.cjs",
+        "src/agents.cjs",
+        "src/controller.cjs",
+        "src/controller/providers.cjs",
+        "tests/limits.test.cjs",
+        "tests/agents.test.cjs"
+      ],
+      "command": "node --test --test-name-pattern=\"quota|allowance limit|exhausted provider|background routing limit\" tests/limits.test.cjs tests/agents.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 20,
+      "origin": {
+        "problem": "Background work could consume the last reported allowance or automatically switch accounts after a usage limit.",
+        "fix": "Persist supported allowance reports and hold background admission; retain uncertain limit failures for review without failover.",
+        "date": "2026-10-18"
+      }
+    },
+    {
+      "id": "file-inputs",
+      "name": "Text/code attachments and retained snapshots",
+      "covers": "UTF-8 file snapshots preserve exact content and BOMs, reject malformed/binary inputs and path-like names, bound encoded bytes and attachment counts, and quote file contents as untrusted reference data. Controller and Hub tests retain snapshots through queues, metadata refresh, native history replacement and export without extending sandbox permissions. File-only requests get a useful default. Companion agents-ui checks cover selection, compact literal display, history recall and failed-send drafts. Companion document and dictation pools cover the additional inputs.",
+      "paths": [
+        "ui/attachments.js",
+        "ui/app.js",
+        "ui/index.html",
+        "src/main.cjs",
+        "src/controller.cjs",
+        "src/controller/providers.cjs",
+        "src/controller/turns.cjs",
+        "src/controller/coordinator.cjs",
+        "src/conversation-export.cjs",
+        "tests/attachments.test.cjs",
+        "tests/core.test.cjs",
+        "tests/coordinator.test.cjs"
+      ],
+      "command": "node --test --test-name-pattern=\"attachment|file snapshots\" tests/attachments.test.cjs tests/core.test.cjs tests/coordinator.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 20,
+      "origin": {
+        "problem": "The composer accepted pasted images but could not attach immutable text/code files or retain their compact display through provider history replacement.",
+        "fix": "Add bounded UTF-8 snapshots, file chips, preserved display metadata and protected native-history retention.",
+        "date": "2026-10-18"
+      }
+    },
+    {
+      "id": "artifacts",
+      "name": "Saved artifact actions and tracked test processes",
+      "covers": "Bounded workspace publication rejects escapes, credential paths, links and oversized files. File fingerprints, stable task-scoped IDs, versioned replacement, rollback and active-turn checks preserve honest result evidence. Explicit Run rechecks the executable, rejects active writers and stale receipts, uses no shell or arguments and strips provider secrets from its environment. Open folder rejects replacement files. Tracked runs support independent Stop, failed cleanup retry, natural-exit cleanup and Quit; updates wait for them. Downloads freeze fingerprinted files or complete portable ZIP folders, preserve assets and executable modes, reject private/changed inputs and active writers, reserve disk capacity, cap concurrent transfers and release snapshots on Stop or restart. Uncertain cleanup blocks admission and updates. Native history preserves trusted receipts and rejects forged artifacts. Companion agents-ui checks verify literal paths, explicit ID-only actions and targeted test Stop. Fixtures never execute a game or prove a build. One shared credential list (tasks PRIVATE_PATH) blocks npmrc/netrc/git-credentials/docker/kube/ssh keys/keystores from copies, publishing and ZIP downloads. ZIP folder entries made on Windows keep read and search bits after unzip.",
+      "paths": [
+        "src/artifacts.cjs",
+        "src/artifact-downloads.cjs",
+        "src/agents.cjs",
+        "src/tools/agent-tools.cjs",
+        "src/main.cjs",
+        "src/preload.cjs",
+        "src/runner.cjs",
+        "src/conversation-export.cjs",
+        "ui/app.js",
+        "ui/index.html",
+        "ui/style.css",
+        "tests/artifacts.test.cjs",
+        "tests/artifact-downloads.test.cjs",
+        "tests/agents.test.cjs",
+        "tests/runner.test.cjs",
+        "tests/ui-startup-smoke.cjs"
+      ],
+      "command": "node --test tests/artifacts.test.cjs tests/artifact-downloads.test.cjs tests/agents.test.cjs tests/runner.test.cjs tests/conversation-export.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 90,
+      "origin": {
+        "problem": "Worker reports had no saved file evidence or validated artifact actions, and user-started tests had no runner-managed Stop or update guard.",
+        "fix": "Register workspace artifact receipts, validate explicit actions and reuse owned process cleanup for tracked tests.",
+        "date": "2026-10-18"
+      }
+    },
+    {
+      "id": "job-budgets",
+      "name": "Shared time, attempt and reported-token budgets",
+      "covers": "Delegated jobs, helpers, mailbox work and automatic follow-ups retain their original allowance across ownership and content changes. A monotonic shared clock excludes idle, capacity and quota waits. Exhaustion saves a pause before scoped Stop; foreground chat and independent work stay available. Versioned Resume retains consumed time, attempts and usage and requires confirmed cleanup. Model admission persists stable identities before inference; duplicate cumulative reports and cached input count once. Missing, interrupted, malformed or overflowing usage stays incomplete, never a fictional zero. Reported-token limits reject unmetered providers before admission and retain unknown final usage for review. Provider dollar reports are estimates, not invoices; missing costs remain unknown. Formatting retries, worker turns and asynchronous routing requests are accounted separately. API structured-parser failures retain their attached final usage; known under-limit counts permit the single format retry, while reaching the token limit blocks another call. An async comparison keeps its original budget, deadline and cancellation after foreground work changes. Save failures block new admission. Companion agents-ui checks cover editing limits, explicit Resume, unknown/partial totals and a reachable Save action. Direct tracked tasks reserve before routing, preserve checks, corrections and image amendments on explicit private continuation, reject stale approvals, deduplicate a failed source-link save, retain one owner and stop without affecting later chat. Interrupted direct execution after restart holds for review. Complete billing coverage and broader uncertain-execution recovery remain separate work. A restart charges active time only up to the last minute heartbeat, not the downtime after a crash.",
+      "paths": [
+        "src/job-budgets.cjs",
+        "src/conversation-export.cjs",
+        "src/agents.cjs",
+        "src/controller.cjs",
+        "src/controller/coordinator.cjs",
+        "src/controller/turns.cjs",
+        "src/controller/providers.cjs",
+        "src/routing/smart-router.cjs",
+        "src/providers/jev.cjs",
+        "src/providers/providers.cjs",
+        "src/main.cjs",
+        "src/preload.cjs",
+        "ui/app.js",
+        "ui/index.html",
+        "tests/job-budgets.test.cjs",
+        "tests/agents.test.cjs",
+        "tests/coordinator.test.cjs",
+        "tests/local-models.test.cjs",
+        "tests/ui-startup-smoke.cjs",
+        "src/controller/task-gate.cjs",
+        "src/runner.cjs",
+        "tests/runner.test.cjs"
+      ],
+      "command": "node --test --test-concurrency=2 tests/job-budgets.test.cjs tests/agents.test.cjs tests/coordinator.test.cjs tests/local-models.test.cjs tests/runner.test.cjs",
+      "cost": "medium",
+      "timeoutSec": 120,
+      "origin": {
+        "problem": "Background jobs lacked shared execution limits and honest per-job accounting, including asynchronous work that outlives a turn.",
+        "fix": "Persist shared budgets and request identities, validate usage reports and retain job-scoped cancellation across asynchronous continuations.",
+        "date": "2026-10-18"
+      }
+    },
+    {
+      "id": "job-workspaces",
+      "name": "Independent batch project copies",
+      "covers": "Batches capture one coherent working-tree snapshot, retain dirty/untracked inputs and ignored project instructions, copy dirty submodules into independent Git stores and isolate each active wiki. Workers have no hard links, alternates or remotes. Concurrent edits, links, redirected/unregistered storage, tracked credentials, cancelled setup and failed registry saves cannot admit a worker. Hub remains available during setup; original checks and helper handoffs stay in the copy, unrelated scoped Hub history is excluded, and unrelated workspaces keep their permission boundary. Failed setup returns every failed owner result without inference or shared-checkout fallback. Results and exports retain their copy path. Restart holds interrupted setup, and updater guards include live preparation. Companion agents-ui covers Preparing/Needs review, the path, reachable Send and queued close events after reopening Details. Fixtures do not prove a game builds or runs. Short registered paths avoid Windows dependency-path overflow; legacy registrations and original project boundaries survive nested copies. Nested copies retain the original project checks and remap their cwd and arguments without touching the source. Plain folders share these copy, wiki, helper and check boundaries, honor ignore files, preserve one frozen batch input and support empty projects without creating Git metadata. Cancellation removes temporary metadata; unrelated Git failures, broken Git metadata, home directories and drive roots are refused. An aborted first batch copy leaves no input.json for siblings to collide with; budget-paused jobs keep their setup. An untracked nested repository is copied like a submodule, and a case-duplicate instruction file is copied once.",
+      "paths": [
+        "src/workspace/job-workspaces.cjs",
+        "src/agents.cjs",
+        "src/controller/coordinator.cjs",
+        "src/conversation-export.cjs",
+        "src/runner.cjs",
+        "ui/app.js",
+        "ui/index.html",
+        "ui/style.css",
+        "tests/job-workspaces.test.cjs",
+        "tests/coordinator.test.cjs",
+        "tests/runner.test.cjs",
+        "tests/ui-startup-smoke.cjs"
+      ],
+      "command": "node --test --test-concurrency=2 tests/job-workspaces.test.cjs tests/coordinator.test.cjs tests/conversation-export.test.cjs tests/runner.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 90,
+      "origin": {
+        "problem": "Batch workers shared the original checkout and could collide with each other or foreground edits.",
+        "fix": "Prepare registered independent project copies asynchronously, preserve inputs and checks, and return owned results without automatic merge.",
+        "date": "2026-10-18"
+      }
+    },
+    {
+      "id": "job-reports",
+      "name": "Host verification and partial batch reports",
+      "covers": "Only current assignment/revision host evidence with a zero exit code can pass configured checks. Missing, malformed or stale evidence remains unverified. Failed configured checks cannot be overridden by model prose or start an extra retry. Batch summaries retain partial states, current attempts, ownership, files and unknown or incomplete provider estimates. Owner context and Markdown export preserve inspectable commands, directories, exits and check times. Companion agents-ui covers check-kind settings, compact reports, safe text rendering and reachable job details. Fixtures do not prove generated-game acceptance. A follow-up attempt in the same workspace keeps earlier attempts' artifacts (newest version per id). The batch summary counts returned-with-checks-passed (every configured host check passed), returned-not-verified, failed, interrupted, cancelled, waiting and not-dispatched jobs separately, in the snapshot, the UI and Markdown export.",
+      "paths": [
+        "src/job-reports.cjs",
+        "src/tasks.cjs",
+        "src/agents.cjs",
+        "src/controller/task-gate.cjs",
+        "src/controller/coordinator.cjs",
+        "src/conversation-export.cjs",
+        "src/artifacts.cjs",
+        "src/main.cjs",
+        "ui/app.js",
+        "ui/index.html",
+        "ui/style.css",
+        "tests/job-reports.test.cjs",
+        "tests/tasks.test.cjs",
+        "tests/agents.test.cjs",
+        "tests/coordinator.test.cjs",
+        "tests/conversation-export.test.cjs",
+        "tests/ui-startup-smoke.cjs"
+      ],
+      "command": "node --test --test-concurrency=2 tests/job-reports.test.cjs tests/tasks.test.cjs tests/agents.test.cjs tests/coordinator.test.cjs tests/conversation-export.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 90,
+      "origin": {
+        "problem": "Returned worker prose could be confused with verified build, launch or gameplay, and partial batches lacked one evidence report.",
+        "fix": "Derive bound host-check facts and per-job batch summaries from existing saved tasks and receipts, and enforce failed configured checks during completion review.",
+        "date": "2026-10-18"
+      }
+    },
+    {
+      "id": "group-chats",
+      "name": "Durable group chats and targeted mentions",
+      "covers": "Groups preserve the pinned Hub and survive legacy migration/restart without creating extra bots. Leading mentions send only to a current member without Hub inference; files cannot select recipients. Assignment ownership, original context and replies stay in the group, permissions never increase, and a working member cannot be removed. Failed saves admit no worker. Separate queues settle while another chat is busy. Stop cancels only the selected group; archive refuses outstanding work and Clear retains membership without clearing Hub. Companion agents-ui covers create/edit/archive, member picking, selected-group updates, separate drafts, filtered activity and reachable Send. Fixtures do not establish live-provider latency.",
+      "paths": [
+        "src/group-chats.cjs",
+        "src/agents.cjs",
+        "src/controller.cjs",
+        "src/controller/coordinator.cjs",
+        "src/main.cjs",
+        "src/preload.cjs",
+        "src/conversation-export.cjs",
+        "ui/app.js",
+        "ui/index.html",
+        "ui/style.css",
+        "tests/group-chats.test.cjs",
+        "tests/coordinator.test.cjs",
+        "tests/agents.test.cjs",
+        "tests/conversation-export.test.cjs",
+        "tests/ui-startup-smoke.cjs"
+      ],
+      "command": "node --test --test-concurrency=2 --test-name-pattern=group tests/group-chats.test.cjs tests/coordinator.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 30,
+      "origin": {
+        "problem": "Bots had separate chats but no shared group or explicit mention routing into one owned conversation.",
+        "fix": "Keep groups in the primary store and reuse asynchronous assignment/return paths, scoped context, permissions and cancellation.",
+        "date": "2026-10-18"
+      }
+    },
+    {
+      "id": "routines",
+      "name": "Chat-only routines: scheduled text back to an agent, and local Git triggers",
+      "covers": "A routine is saved text that Harness sends back to the agent, in the chat where it was saved, on a schedule, once at a date and time (then it removes itself; past and nonexistent local times are refused), or on each new local Git commit. Calendar schedules keep local weekdays/timezones, skip spring gaps and run autumn folds once; missed times coalesce into one run. Only a message the user typed in that agent's own chat can save, pause, resume or delete a routine; routine runs, automatic results and mail, and assignments are refused. Hub sees and changes every routine, a bot only its own; routines_report names each routine's agent. A bot's routines are deleted with it, Hub's stay. A run waits while its message is queued or running, also across a restart; an unready agent keeps the occurrence. Raised chat access holds a routine until it is saved again from chat. A Git run's own commits become the new baseline (J5). Real timer, real Git fixture commits, paused-read race and shutdown during a Git read. A restricted delegated worker reads only its assigned input. Model inference is fake.",
+      "paths": [
+        "src/routines.cjs",
+        "src/routine-time.cjs",
+        "src/tools/agent-tools.cjs",
+        "src/agents.cjs",
+        "src/controller.cjs",
+        "src/controller/coordinator.cjs",
+        "src/group-chats.cjs",
+        "src/runner.cjs",
+        "src/runner-commands.cjs",
+        "src/preload.cjs",
+        "src/remote.cjs",
+        "ui/app.js",
+        "ui/index.html",
+        "tests/routine-time.test.cjs",
+        "tests/coordinator.test.cjs",
+        "tests/runner.test.cjs",
+        "tests/ui-startup-smoke.cjs"
+      ],
+      "command": "node --test --test-concurrency=2 --test-name-pattern=\"routine|Routine|assigned input\" tests/routine-time.test.cjs tests/coordinator.test.cjs tests/runner.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 45,
+      "origin": {
+        "problem": "Repeating work lacked durable schedules, occurrence deduplication, explicit ownership and future-run controls. Redesigned 2026-10-20: routines are managed only by asking in chat, with no UI.",
+        "fix": "Persist frozen workflows and admission identities, reuse owned asynchronous jobs and add timezone-aware calendar and local Git triggers with bounded controls.",
+        "date": "2026-10-18"
+      }
+    },
+    {
+      "id": "dictation",
+      "name": "Local voice input and confirmed speech-process cleanup",
+      "covers": "Local recognition never starts during language discovery, uses one owned hidden process with bounded output, retains ordered UTF-8 and final words, binds every event to its original chat, rejects stale Stop, and blocks another recording until cleanup is confirmed. Unsupported platforms and malformed events fail explicitly without API fallback.",
+      "paths": [
+        "src/dictation.cjs",
+        "src/dictation.ps1",
+        "src/artifacts.cjs",
+        "src/runner.cjs",
+        "src/main.cjs",
+        "src/preload.cjs",
+        "ui/dictation.js",
+        "ui/app.js",
+        "ui/index.html",
+        "tests/dictation.test.cjs",
+        "tests/ui-startup-smoke.cjs"
+      ],
+      "command": "node --test tests/dictation.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 15,
+      "origin": {
+        "problem": "Voice input was absent and asynchronous dictation could lose final words or place them in another chat.",
+        "fix": "Use installed Windows speech recognition with explicit recording, original-chat drafts, final-word Send and confirmed process cleanup.",
+        "date": "2026-10-18"
+      }
+    },
+    {
+      "id": "installer",
+      "name": "Installer dependency setup and running-Harness guard",
+      "covers": "Installer syntax, winget install/recheck/failure cases, and the guard that waits for the user to quit a running Harness (this folder's electron.exe, case-insensitive) before npm ci deletes node_modules; other Electron apps do not block.",
+      "paths": [
+        "Install Phasma Harness.cmd",
+        "tests/installer.test.ps1"
+      ],
+      "command": "pwsh -NoProfile -File tests/installer.test.ps1",
+      "cost": "cheap",
+      "timeoutSec": 30,
+      "origin": {
+        "problem": "Running the installer while Harness was open let npm ci delete most of node_modules, then fail on Electron files the running app locked, leaving Harness unable to start.",
+        "fix": "Before npm ci, the installer stops and asks the user to quit Harness, repeating until it is closed.",
+        "date": "2026-10-19"
+      }
+    },
+    {
+      "id": "documents",
+      "name": "Local PDF and DOCX text extraction and parser cleanup",
+      "covers": "Real PDF and DOCX inputs read in an isolated owned process, preserve bounded text or XML, reject mismatched formats, malformed data, excessive expansion and forged ZIP sizes, and confirm timeout or Quit cleanup before releasing the parser. PNG/JPEG/WebP use the same owned worker, preserve pixels, strip source metadata, reject disguised vectors, corrupt rasters and excessive pixel counts, and confirm cancellation before another read. Shared commands also bound normalized image output before submission. Extracted snapshots round-trip through the shared attachment format. Companion agents-ui checks exercise actual Electron extraction, Word Unicode and XML rejection, text-only labels and document Send. Images are downscaled to a 2048 px long edge before provider input. Opaque photos are sent as JPEG q85 when that is smaller; images with any transparency stay PNG. Each reader process runs under an OS memory cap (a Windows job-object commit limit through src/document-job.ps1, prlimit --data on Linux), so a 3 KB double-Flate PDF that expands to 1 GiB fails with a memory message near 768 MiB instead of committing GBs, and the reader stays usable. A 2 MiB DOCX part, larger than the IPC pipe buffer, reaches the parent whole because the worker disconnects only after its send completes.",
+      "paths": [
+        "src/documents.cjs",
+        "src/document-worker.cjs",
+        "src/image-input.cjs",
+        "src/runner-commands.cjs",
+        "src/server.cjs",
+        "src/artifacts.cjs",
+        "src/runner.cjs",
+        "src/main.cjs",
+        "src/preload.cjs",
+        "ui/documents.js",
+        "ui/attachments.js",
+        "ui/app.js",
+        "ui/index.html",
+        "package.json",
+        "package-lock.json",
+        "tests/documents.test.cjs",
+        "tests/fixtures/documents.cjs",
+        "tests/fixtures/protected-pdf.base64",
+        "tests/ui-startup-smoke.cjs",
+        "src/document-job.ps1"
+      ],
+      "command": "node --test tests/documents.test.cjs tests/attachments.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 40,
+      "origin": {
+        "problem": "Common documents were rejected, while parsing in the main process could freeze chat or leave unbounded work running.",
+        "fix": "Extract bounded local document text in a separate owned process and retain the existing untrusted attachment snapshots.",
+        "date": "2026-10-18"
+      }
+    },
+    {
+      "id": "claude-allowance",
+      "name": "Native Claude allowance metadata and background admission",
+      "covers": "Native usage queries submit control requests only, disable tools/hooks/MCP, skip transcript scans and confirm cleanup or retain a retryable block. Valid percentage/reset windows classify the full native model name, preserve scope and bind to native auth metadata without retaining transcripts. A complete scoped snapshot removes obsolete holds; malformed lists and other accounts cannot clear them. Background admission holds before inference, direct chat stays available, stale replies cannot change accounts or restart cancelled work, threshold changes and metadata-only timer rechecks release safe waits, and unknown reports never become zero. Companion agents-ui checks scope the visible report to the matching account.",
+      "paths": [
+        "src/providers/claude.cjs",
+        "src/providers/limits.cjs",
+        "src/agents.cjs",
+        "src/controller.cjs",
+        "src/main.cjs",
+        "ui/app.js",
+        "tests/claude-usage.test.cjs",
+        "tests/claude-models.test.cjs",
+        "tests/limits.test.cjs",
+        "tests/agents.test.cjs",
+        "tests/ui-startup-smoke.cjs"
+      ],
+      "command": "node --test --test-concurrency=2 --test-name-pattern=\"native Claude|Claude usage|Claude allowance|Claude CLI/SDK|streaming allowance\" tests/agents.test.cjs tests/limits.test.cjs tests/claude-usage.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 20,
+      "origin": {
+        "problem": "Background Claude work had no supported allowance report and could not reserve the end of a known subscription window.",
+        "fix": "Query the published CLI's structured usage metadata, persist validated scoped reports and reuse asynchronous quota admission without spending model attempts.",
+        "date": "2026-10-18"
+      }
+    },
+    {
+      "id": "headless-server",
+      "name": "Headless Linux runner and authenticated browser operations",
+      "covers": "A private Linux production-dependency install runs the real Node entry without Electron or a display. Generated service arguments retain literal spaces, dollar signs and percent signs. The managed runner verifies its lifetime policy, authenticates a browser, parses image/PDF bytes in an owned process, acknowledges a held fake-model submission, supports independent Stop and streams a ZIP with assets. The shared key never enters normal logs; the explicit connection-link command starts no provider. Saved authentication and one user message survive forced service restart. Only private runtime service links and directories are changed and removed; no persistent services, lingering, sign-ins or real model requests run. Requires Linux/systemd; otherwise skips explicitly.",
+      "paths": [
+        "src/server.cjs",
+        "src/runner.cjs",
+        "src/provider-connection.cjs",
+        "src/runner-commands.cjs",
+        "src/runner-linux.cjs",
+        "src/remote.cjs",
+        "src/remote-settings.cjs",
+        "src/documents.cjs",
+        "src/document-worker.cjs",
+        "src/image-input.cjs",
+        "tools/linux-service.cjs",
+        "tools/fetch.cjs",
+        "tools/manifest.json",
+        "package.json",
+        "package-lock.json",
+        "tests/server.test.cjs",
+        "tests/server-live.cjs",
+        "tests/documents.test.cjs",
+        "tests/attachments.test.cjs",
+        "tests/fixtures/server-native.cjs",
+        "tests/fixtures/documents.cjs",
+        "tests/fixtures/protected-pdf.base64"
+      ],
+      "command": "node tests/server-live.cjs",
+      "cost": "medium",
+      "timeoutSec": 210,
+      "origin": {
+        "problem": "Server execution still required an Electron window and desktop-only command bindings.",
+        "fix": "Reuse the engine and command paths behind a verified headless service with owned file processing and private browser authentication.",
+        "date": "2026-10-19"
+      }
+    },
+    {
+      "id": "linux-service",
+      "name": "Linux systemd cgroup cleanup and fenced restart",
+      "covers": "A real private systemd user service verifies its data-directory scope, MainPID, InvocationID, ControlGroup and cleanup policy before admission. Forced runner death removes detached descendants that ignore SIGTERM before a replacement can start. Cleanup stops only the private test service and verifies no fixture workers survive. Requires Linux and an available user systemd manager; otherwise skips explicitly. No native provider, login or model request runs.",
+      "paths": [
+        "src/runner-linux.cjs",
+        "src/runner-containment.cjs",
+        "tests/runner-linux.test.cjs",
+        "tests/runner-linux-live.cjs"
+      ],
+      "command": "node tests/runner-linux-live.cjs",
+      "cost": "medium",
+      "timeoutSec": 95,
+      "origin": {
+        "problem": "Linux runner restart had no verified service lifetime boundary for detached workers.",
+        "fix": "Verify live store-scoped systemd policy and exercise actual cgroup cleanup before replacement admission.",
+        "date": "2026-10-19"
+      }
+    },
+    {
+      "id": "browser-providers",
+      "name": "Browser native account connections and queued execution",
+      "covers": "Host-native account checks enable only ready providers without interactive sign-in or credential transfer. Refresh and Renew preserve saved plugs; disconnect keeps native login. Busy execution refuses changes, metadata holds admission, failed storage restores the setting, shutdown starts no new reads and failed shared synchronization blocks stale execution. A real saved background assignment starts exactly once after metadata completes. Browser and headless-service UI acceptance is also covered by remote-access and headless-server.",
+      "paths": [
+        "src/provider-connection.cjs",
+        "src/controller.cjs",
+        "src/agents.cjs",
+        "src/runner-commands.cjs",
+        "src/main.cjs",
+        "src/remote.cjs",
+        "ui/remote-api.js",
+        "tests/provider-connection.test.cjs",
+        "tests/runner-commands.test.cjs",
+        "tests/agents.test.cjs"
+      ],
+      "command": "node --test tests/provider-connection.test.cjs tests/runner-commands.test.cjs && node --test --test-name-pattern=\"provider metadata holds\" tests/agents.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 25,
+      "origin": {
+        "problem": "Browser users could not enable an already-signed-in native account on a headless runner.",
+        "fix": "Share noninteractive native connection and model metadata actions with explicit execution admission and host setup errors.",
+        "date": "2026-10-19"
+      }
+    },
+    {
+      "id": "remote-access",
+      "name": "Authenticated browser access and responsive phone chat",
+      "covers": "Private persisted keys and revocable signed sessions protect the shared runner command path. Host and Origin checks, explicit bearer headers, JSON bounds and an action allowlist keep credentials and desktop-only operations private. Browser requests remain independent, confirmations stay with their originating view, optional arguments and document bytes preserve their native types, and reconnect receives saved state. Authenticated download preparation returns one-use, expiring capabilities for immutable files or complete ZIP snapshots, with revocation, disconnect, Stop and Quit cleanup. An isolated Electron phone UI tests a held fake-model request, typing and Stop while the desktop is hidden, real PDF extraction, actual ZIP downloading with assets, download Stop, Unicode stream frames, cancel, dark/light appearance, enlarged Settings, logout, link reset and listener cleanup on Quit. A browser cleanup error must still stop the runner. It makes no provider model requests or login changes. The desktop seals the browser key with OS key protection and migrates a plaintext key; the headless server keeps its 0600 file. The browser view keeps its session through a network blip and shows runner refusals (for example an oversized history) instead of reconnecting forever.",
+      "paths": [
+        "src/remote.cjs",
+        "src/remote-settings.cjs",
+        "src/artifact-downloads.cjs",
+        "src/artifacts.cjs",
+        "src/main.cjs",
+        "src/runner-commands.cjs",
+        "src/preload.cjs",
+        "src/runner.cjs",
+        "src/confirmations.cjs",
+        "src/agents.cjs",
+        "src/documents.cjs",
+        "src/document-worker.cjs",
+        "src/image-input.cjs",
+        "package.json",
+        "package-lock.json",
+        "ui/remote-api.js",
+        "ui/app.js",
+        "ui/index.html",
+        "ui/style.css",
+        "ui/dialogs.js",
+        "tests/artifact-downloads.test.cjs",
+        "tests/runner-commands.test.cjs",
+        "tests/remote.test.cjs",
+        "tests/remote-live.cjs",
+        "tests/fixtures/documents.cjs"
+      ],
+      "command": "node --test tests/artifact-downloads.test.cjs tests/remote.test.cjs && node tests/remote-live.cjs",
+      "cost": "medium",
+      "timeoutSec": 85,
+      "origin": {
+        "problem": "Only the native window could control the runner, preventing authenticated browser and phone access.",
+        "fix": "Serve the existing chat behind private scoped browser sessions and reuse its command, state, confirmation and document paths.",
+        "date": "2026-10-19"
+      }
+    },
+    {
+      "id": "task-lessons",
+      "name": "Lessons from corrected or failing checks",
+      "covers": "A tracked task whose checks failed and were fixed by a correction, or still fail after one, saves a redacted, deduplicated lesson in the project wiki (lessons.json and lessons.md, 50 per project, batch copies keyed to their source). The next task in that project carries up to three relevant lessons, framed as quoted data, in its first worker message only; corrections, the visible message and worker instructions never carry them.",
+      "paths": [
+        "src/lessons.cjs",
+        "src/controller/task-gate.cjs",
+        "src/controller.cjs",
+        "src/tasks.cjs",
+        "src/log.cjs",
+        "tests/lessons.test.cjs",
+        "tests/core.test.cjs"
+      ],
+      "command": "node --test tests/lessons.test.cjs && node --test --test-name-pattern=\"becomes a lesson\" tests/core.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 60,
+      "origin": {
+        "problem": "Workers repeated the same check failures across tasks in a project; Harness learned only from tasks that passed.",
+        "fix": "Save evidence-backed lessons from corrected or failing checks and give relevant ones to the next task first message.",
+        "date": "2026-10-19"
       }
     }
   ]

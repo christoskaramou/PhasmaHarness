@@ -96,6 +96,8 @@ test('checks stay inside the workspace and within the timeout bounds', () => {
     const checks = validateChecks(workspace, [{ name: 'unit', argv: ['node', '-e', '0'], cwd: workspace, timeoutMs: 120000, readOnlySafe: true }]);
     assert.equal(checks[0].argv[0], 'node');
     assert.equal(checks[0].readOnlySafe, true);
+    assert.equal(validateChecks(workspace, [{ name: 'Compile', kind: 'build', argv: ['build'] }])[0].kind, 'build');
+    assert.throws(() => validateChecks(workspace, [{ name: 'Fake purpose', kind: 'everything', argv: ['true'] }]), /build, launch, gameplay or test/);
     assert.throws(() => validateChecks(workspace, [{ name: 'bad', argv: ['node'], cwd: outside, timeoutMs: 1000 }]), /inside the workspace/);
     assert.throws(() => validateChecks(workspace, [{ name: 'bad', argv: [], cwd: workspace, timeoutMs: 1000 }]), /argument list/);
     assert.throws(() => validateChecks(workspace, [{ name: 'bad', argv: ['node'], cwd: workspace, timeoutMs: 999 }]), /timeout/);

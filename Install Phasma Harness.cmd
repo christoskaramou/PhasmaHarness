@@ -53,6 +53,14 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'An older Node.js still takes priority on PATH. Restart Windows and run this installer again.' }
     }
     if (-not (Get-Command npm.cmd -ErrorAction SilentlyContinue)) { throw 'npm is missing. Repair the Node.js installation, then rerun this installer.' }
+    # npm ci deletes node_modules first; a running Harness locks its Electron files and would leave the app half-installed.
+    function Wait-HarnessClosed($electron) {
+        while (Get-CimInstance Win32_Process -Filter "Name='electron.exe'" | Where-Object { $_.ExecutablePath -ieq $electron }) {
+            Write-Host 'Phasma Harness is running. Quit it from its tray icon (Quit runner), then press Enter to continue.' -ForegroundColor Yellow
+            Read-Host | Out-Null
+        }
+    }
+    Wait-HarnessClosed (Join-Path $folder 'node_modules\electron\dist\electron.exe')
     Write-Host 'Installing locked app dependencies...'
     # Electron is a dev dependency; include it even with NODE_ENV=production.
     # Run its downloader explicitly instead of relying on npm lifecycle policy.

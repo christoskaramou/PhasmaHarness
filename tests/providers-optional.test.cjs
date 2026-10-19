@@ -403,8 +403,56 @@ test('provider installer runs the official command and reports failures', async 
   await assert.rejects(install('codex', { spawnProcess: fakeSpawn(1) }), /Codex CLI install failed \(exit 1\)\. permission denied/);
 });
 
-test('Codex installs the single pinned version', () => {
-  const { CODEX_VERSION } = require('../src/providers/install.cjs');
-  assert.match(CODEX_VERSION, /^\d+\.\d+\.\d+$/);
-  assert.equal(installer('codex').command, `npm install --global @openai/codex@${CODEX_VERSION}`);
+test('PowerShell 7 module paths are dropped, so Windows PowerShell installers keep their built-in cmdlets', () => {
+  const { cleanPowerShellModulePath } = require('../src/process-tree.cjs');
+  const inherited = [
+    'C:\\Users\\me\\Documents\\PowerShell\\Modules', 'C:\\Program Files\\PowerShell\\Modules', 'c:\\program files\\powershell\\7\\Modules',
+    'C:\\Program Files\\WindowsPowerShell\\Modules', 'C:\\WINDOWS\\system32\\WindowsPowerShell\\v1.0\\Modules',
+  ].join(';');
+  const env = { PSModulePath: inherited };
+  cleanPowerShellModulePath(env);
+  assert.equal(env.PSModulePath, 'C:\\Program Files\\WindowsPowerShell\\Modules;C:\\WINDOWS\\system32\\WindowsPowerShell\\v1.0\\Modules');
+  const onlySeven = { PSModulePath: 'c:\\program files\\powershell\\7\\Modules' };
+  cleanPowerShellModulePath(onlySeven);
+  assert.equal(Object.hasOwn(onlySeven, 'PSModulePath'), false, 'an emptied path lets Windows PowerShell use its default');
+
+  // The live symptom: Windows PowerShell below a PowerShell 7 parent could not find Get-FileHash.
+  if (process.platform !== 'win32')
+    return;
+  const probe = environment => require('node:child_process').spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    "if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) { 'found' } else { 'missing' }"], { env: environment, encoding: 'utf8', windowsHide: true }).stdout.trim();
+  const tainted = { ...process.env, PSModulePath: inherited };
+  assert.equal(probe(tainted), 'missing', 'the inherited PowerShell 7 path reproduces the failure');
+  cleanPowerShellModulePath(tainted);
+  assert.equal(probe(tainted), 'found');
+});
+
+test('CLIs install the newest release, and Update is offered only for an older installed version', async () => {
+  const { updates, newer, versionIn } = require('../src/providers/install.cjs');
+  assert.equal(installer('codex').command, 'npm install --global @openai/codex@latest');
+  assert.equal(installer('codex', true).command, 'npm install --global @openai/codex@latest', 'npm CLIs update with their installer');
+  assert.equal(installer('native:antigravity', true).command, 'agy update', 'agy installer skips an installed agy');
+  assert.match(installer('native:muse', true).command, /MUSE_SYNC_UPDATE/);
+
+  assert.equal(versionIn('Muse Code 1.4.10 (1.4.10-R6427.1)'), '1.4.10-R6427.1');
+  assert.equal(versionIn('codex-cli 0.163.0'), '0.163.0');
+  for (const [latest, installed, expected] of [
+    ['2.1.303', '2.1.302', true], ['2.1.302', '2.1.302', false], ['0.163.0', '0.170.0', false],
+    ['2026.10.16-e3cb207', '2026.10.01-e373342', true], ['1.4.10-R6428.1', '1.4.10-R6427.1', true],
+    ['0.2.1', '0.2.1-rc.2', true], ['0.2.1-rc.3', '0.2.1', false], ['0.2.1-rc.3', '0.2.1-rc.2', true], ['0.2.1-rc.2', '0.2.1-rc.3', false],
+  ]) assert.equal(newer(latest, installed), expected, `${latest} over ${installed}`);
+
+  // Installed versions come from each CLI's --version and the newest from its official source; a failed lookup offers nothing.
+  const versions = { claude: '2.1.302 (Claude Code)', 'cursor-agent': '2026.10.16-e3cb207', agy: '1.4.2' };
+  const run = (_file, args, _options, done) => {
+    const cli = args.at(-1).split(' ')[0];
+    versions[cli] ? done(null, versions[cli], '') : done(new Error('not found'));
+  };
+  const fetcher = async url => {
+    if (url.includes('antigravity'))
+      throw new Error('offline');
+    return new Response(url.includes('claude') ? '2.1.303\n' : "$version = '2026.10.16-e3cb207'");
+  };
+  assert.deepEqual(await updates(['claude-cli', 'cursor-cli', 'native:antigravity', 'codex'], { fetcher, run }),
+    { 'claude-cli': { installed: '2.1.302', latest: '2.1.303' } });
 });

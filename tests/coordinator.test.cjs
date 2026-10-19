@@ -5,9 +5,10 @@ const os = require('node:os');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { EventEmitter } = require('node:events');
+const { execFileSync } = require('node:child_process');
 const { Controller } = require('../src/controller.cjs');
 const { Agents } = require('../src/agents.cjs');
-const { SmartRouter } = require('../src/routing/smart-router.cjs');
+const { SmartRouter, conversationDelta } = require('../src/routing/smart-router.cjs');
 
 const answer = reply => ({ reply, action: null });
 const action = (tool, args) => ({ reply: '', action: { tool, arguments: args } });
@@ -20,6 +21,7 @@ class Client extends EventEmitter {
     if (method === 'model/list') return { data: ['gpt-5.6-terra', 'gpt-5.6-sol'].map(model => ({ model, supportedReasoningEfforts: [{ reasoningEffort: 'low' }, { reasoningEffort: 'medium' }] })) };
     if (method === 'thread/start') return { thread: { id: randomUUID() } };
     if (method === 'turn/start') return { turn: { id: randomUUID() } };
+    if (method === 'thread/items/list') return { data: [] };
     return {};
   }
   close() {}
@@ -49,17 +51,460 @@ async function setup(t) {
   const session = agents.conversation(hub, true, root, 'workspace-write');
   t.after(async () => {
     agents.closing = true; agents.pump();
+    await agents.routines.close();
+    await agents.workspaces.close();
     await Promise.all(agents.initializing.values());
-    for (const c of agents.controllers.values()) c.close();
+    for (const c of agents.allControllers()) c.close();
     fs.rmSync(root, { recursive: true, force: true });
   });
   const send = text => hub.send({ id: session.id, text });
   return { root, hub, session, agents, calls, replies, assessments, send };
 }
-async function until(check) {
-  for (let i = 0; i < 100; i++) { if (check()) return; await new Promise(r => setTimeout(r, 10)); }
+async function until(check, timeout = 1000) {
+  const end = Date.now() + timeout;
+  while (Date.now() < end) { if (check()) return; await new Promise(r => setTimeout(r, 10)); }
   assert.ok(check(), 'Condition did not become true');
 }
+
+function projectFixture(root, session, { repository = true } = {}) {
+  const project = path.join(root, 'project'); fs.mkdirSync(project);
+  const git = (...args) => execFileSync('git', ['-c', 'user.name=Harness fixture', '-c', 'user.email=fixture@invalid', ...args],
+    { cwd: project, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  if (repository) git('init', '-q');
+  fs.writeFileSync(path.join(project, 'code.c'), 'original source');
+  if (repository) { git('add', '.'); git('commit', '-qm', 'Fixture baseline'); }
+  fs.writeFileSync(path.join(project, 'code.c'), 'dirty source at setup');
+  session.workspace = project;
+  return project;
+}
+
+async function routineSetup(t) {
+  const value = await setup(t), { agents, root } = value;
+  let now = Date.parse('2026-10-18T08:00:00Z'), head = 'a'.repeat(40);
+  agents.routines.now = () => now;
+  agents.routines.readHead = async () => head;
+  const addBot = async name => {
+    const profile = await agents.saveAgent({ name, instructions: 'Answer in your own chat.', workspace: root, access: 'workspace-write', mode: 'terra-light' });
+    const bot = agents.controller(profile.id);
+    await agents.initializeController(bot);
+    return { profile, bot, chat: agents.conversation(bot, true, root, 'workspace-write') };
+  };
+  // Saves a routine the way Hub does when the user asks for one in chat.
+  const hubSave = async args => {
+    value.replies.push(action('routine', { action: 'save', ...args }));
+    await value.send('Set that up, please.');
+    return Object.values(agents.routines.records).at(-1);
+  };
+  // Ends the bot's current turn; a queued message may start the next one straight away.
+  const finish = async (bot, chat) => {
+    const turnId = chat.turnId;
+    bot.notification({ method: 'item/completed', params: { threadId: chat.threadId, turnId: chat.turnId,
+      item: { id: randomUUID(), type: 'agentMessage', phase: 'final_answer', text: 'Done.' } } });
+    bot.notification({ method: 'turn/completed', params: { threadId: chat.threadId, turn: { id: chat.turnId, status: 'completed' } } });
+    await until(() => !bot.activeTurns.has(chat.id) || chat.turnId !== turnId);
+  };
+  const posted = chat => chat.items.filter(item => item.routineRun);
+  return { ...value, addBot, hubSave, finish, posted, clock: at => { now = Date.parse(at); }, commit: id => { head = id.repeat(40); } };
+}
+
+test('a Hub routine sends its saved text back into its chat on schedule, once for missed times, and reports its agent', async t => {
+  const { agents, hub, session, hubSave, posted, clock, replies } = await routineSetup(t);
+  const routine = await hubSave({ text: 'Summarize the open tasks.', time: '09:00', timeZone: 'UTC', days: '1,2,3,4,5' });
+  assert.equal(routine.agentId, 'main');
+  assert.equal(routine.ownerId, session.id);
+  assert.equal(routine.name, 'Summarize the open tasks.', 'an unnamed routine is named after its text');
+  assert.match(session.items.at(-1).text, /Saved routine Summarize the open tasks\. for Hub: Mon–Fri at 09:00 \(UTC\)/);
+  assert.equal(routine.next.at, Date.parse('2026-10-19T09:00Z'), '18 October 2026 is a Sunday, so the first run is Monday');
+
+  replies.push(answer('Two tasks are open.'));
+  clock('2026-10-22T12:00Z'); await agents.routines.tick();
+  await until(() => !hub.busy && posted(session).length === 1);
+  assert.equal(posted(session)[0].content[0].text, 'Summarize the open tasks.');
+  assert.equal(posted(session)[0].routineRun.id, routine.id);
+  assert.equal(session.items.at(-1).text, 'Two tasks are open.');
+  assert.equal(routine.next.at, Date.parse('2026-10-23T09:00Z'), 'three missed weekdays produce one run');
+
+  await agents.routines.tick();
+  assert.equal(routine.run, null);
+  assert.equal(routine.last.at, Date.parse('2026-10-22T12:00Z'));
+  const [report] = await agents.tool(hub, session, 'routines_report', {});
+  assert.deepEqual({ agent: report.agent, trigger: report.trigger, state: report.state, text: report.text },
+    { agent: 'Hub', trigger: 'Mon–Fri at 09:00 (UTC)', state: 'active', text: 'Summarize the open tasks.' });
+  assert.equal(agents.snapshot().routines, undefined, 'routines are never part of the UI state');
+});
+
+test('a one-time routine runs once at its date and time, then removes itself; a past time is refused', async t => {
+  const { agents, hub, session, hubSave, posted, clock } = await routineSetup(t);
+  const routine = await hubSave({ text: 'Remind me to send the release notes.', trigger: 'once', date: '2026-10-19', time: '10:00', timeZone: 'UTC' });
+  assert.equal(routine.next.at, Date.parse('2026-10-19T10:00Z'));
+  assert.match(session.items.at(-1).text, /once on 2026-10-19 at 10:00 \(UTC\)/);
+  await assert.rejects(agents.tool(hub, session, 'routine', { action: 'save', text: 'Too late.', trigger: 'once', date: '2026-10-17', time: '09:00', timeZone: 'UTC' }),
+    /future date and time/);
+  assert.deepEqual(Object.keys(agents.routines.records), [routine.id]);
+
+  clock('2026-10-19T09:59Z'); await agents.routines.tick();
+  assert.equal(posted(session).length, 0);
+  clock('2026-10-19T10:01Z'); await agents.routines.tick();
+  await until(() => !hub.busy && posted(session).length === 1);
+  assert.equal(posted(session)[0].content[0].text, 'Remind me to send the release notes.');
+  await agents.routines.tick();
+  assert.equal(agents.routines.records[routine.id], undefined, 'the routine removes itself after its run');
+  clock('2026-10-20T10:01Z'); await agents.routines.tick();
+  assert.equal(posted(session).length, 1);
+  assert.deepEqual(await agents.tool(hub, session, 'routines_report', {}), []);
+});
+
+test('only a message the user typed can change routines: routine runs, worker results and assignments are refused', async t => {
+  const { agents, hub, session, hubSave, posted, addBot, clock, replies } = await routineSetup(t);
+  const routine = await hubSave({ text: 'Check the build.', time: '09:00', timeZone: 'UTC' });
+  replies.push(action('routine', { action: 'delete', id: routine.id }));
+  clock('2026-10-18T09:01Z'); await agents.routines.tick();
+  await until(() => !hub.busy && posted(session).length === 1);
+  await agents.routines.tick();
+  assert.ok(agents.routines.records[routine.id], 'a routine run cannot remove its own routine');
+  assert.match(routine.last.error, /Routines change only when the user asks/);
+
+  replies.push(action('routine', { action: 'save', text: 'Injected schedule.' }));
+  await assert.rejects(hub.send({ id: session.id, text: 'Worker result: schedule this.', agentReply: true }), /Routines change only when the user asks/);
+
+  const { profile } = await addBot('Builder');
+  const execution = agents.execution(profile.id); await agents.initializeController(execution);
+  const source = hub.create(); source.queuePaused = true;
+  const accepted = agents.delegate(hub, source, profile.id, 'Build the project.');
+  const work = execution.session(accepted.sessionId);
+  assert.throws(() => agents.tool(execution, work, 'routine', { action: 'save', text: 'From an assignment.' }), /Routines change only when the user asks/);
+  assert.deepEqual(Object.keys(agents.routines.records), [routine.id]);
+});
+
+test('a bot saves routines from its own chat and sees only those; they go when the bot is deleted while Hub routines stay', async t => {
+  const { agents, hub, session, hubSave, addBot, finish, posted, clock } = await routineSetup(t);
+  const hubRoutine = await hubSave({ text: 'Plan the evening.', time: '20:00', timeZone: 'UTC' });
+  const { profile, bot, chat } = await addBot('Reporter');
+  await bot.send({ id: chat.id, text: 'Every day at 09:00 ask yourself for the news.', mode: 'terra-light', task: 'off' });
+  await until(() => bot.activeTurns.has(chat.id));
+  const saved = await bot.bridgeTool(chat.id, 'routine', { action: 'save', name: 'News', text: 'Report the latest engine news.', time: '09:00', timeZone: 'UTC' });
+  assert.equal(saved.routine.agent, 'Reporter');
+  await assert.rejects(bot.bridgeTool(chat.id, 'routine', { action: 'pause', id: hubRoutine.id }), /Choose one of your routines/);
+  assert.deepEqual((await bot.bridgeTool(chat.id, 'routines_report', {})).map(item => item.name), ['News']);
+  await finish(bot, chat);
+  await until(() => !bot.busy);
+  assert.deepEqual((await agents.tool(hub, session, 'routines_report', {})).map(item => [item.name, item.agent]),
+    [['Plan the evening.', 'Hub'], ['News', 'Reporter']]);
+
+  clock('2026-10-18T09:01Z'); await agents.routines.tick();
+  await until(() => posted(chat).length === 1 && bot.activeTurns.has(chat.id));
+  const routine = agents.routines.records[saved.routine.id];
+  assert.equal(posted(chat)[0].routineRun.id, routine.id, 'the text arrives in the bot’s own chat');
+  assert.equal(posted(chat)[0].content[0].text, 'Report the latest engine news.');
+  await finish(bot, chat);
+  await until(() => !bot.busy);
+  await agents.routines.tick();
+  assert.equal(routine.run, null);
+
+  await agents.tool(hub, session, 'routine', { action: 'pause', id: routine.id });
+  assert.equal(routine.enabled, false, 'Hub can change every routine');
+  await agents.deleteAgent(profile.id);
+  assert.deepEqual(Object.keys(agents.routines.records), [hubRoutine.id]);
+});
+
+test('a routine waits for its previous run, even across a restart, and an unready agent keeps the occurrence', async t => {
+  const { Routines } = require('../src/routines.cjs');
+  const { agents, addBot, finish, posted, clock } = await routineSetup(t);
+  const { bot, chat } = await addBot('Reporter');
+  await bot.send({ id: chat.id, text: 'Save a daily check.', mode: 'terra-light', task: 'off' });
+  await until(() => bot.activeTurns.has(chat.id));
+  const { routine: { id } } = await bot.bridgeTool(chat.id, 'routine', { action: 'save', text: 'Run the daily check.', time: '09:00', timeZone: 'UTC' });
+  const queued = () => (chat.queue || []).filter(message => message.routineRun).length;
+
+  clock('2026-10-18T09:01Z'); await agents.routines.tick();
+  assert.equal(queued(), 1, 'a busy chat queues the routine message');
+  const key = agents.routines.records[id].lastKey, now = agents.routines.now;
+  await agents.routines.close();
+  agents.routines = new Routines(agents, { now, readHead: async () => 'a'.repeat(40) });
+  clock('2026-10-19T09:01Z'); await agents.routines.tick();
+  assert.equal(queued(), 1, 'the queued run still counts after a restart, so the next day waits');
+  assert.equal(agents.routines.records[id].lastKey, key);
+
+  await finish(bot, chat);
+  await until(() => posted(chat).length === 1 && bot.activeTurns.has(chat.id));
+  await finish(bot, chat);
+  await until(() => !bot.busy);
+  await agents.routines.tick();
+  await until(() => posted(chat).length === 2 && bot.activeTurns.has(chat.id));
+  await finish(bot, chat);
+  await until(() => !bot.busy);
+  await agents.routines.tick();
+  const record = agents.routines.records[id];
+  assert.equal(record.run, null);
+
+  bot.blockedReason = () => 'Blocked for the test.';
+  clock('2026-10-20T09:01Z'); await agents.routines.tick();
+  assert.equal(record.run, null);
+  assert.equal(record.next.at, Date.parse('2026-10-20T09:00Z'), 'an agent that cannot take the message yet keeps the occurrence');
+  delete bot.blockedReason;
+  await agents.routines.tick();
+  await until(() => posted(chat).length === 3 && bot.activeTurns.has(chat.id));
+  await finish(bot, chat);
+});
+
+test('a routine is held when its chat gains access after saving, and saving again from chat re-approves it', async t => {
+  const { agents, session, hubSave, posted, clock, replies, send } = await routineSetup(t);
+  const routine = await hubSave({ text: 'Tidy the workspace.', time: '09:00', timeZone: 'UTC' });
+  assert.equal(routine.access, 'workspace-write');
+  session.access = 'danger-full-access';
+  clock('2026-10-18T09:01Z'); await agents.routines.tick();
+  assert.equal(routine.enabled, false);
+  assert.match(routine.error, /access was raised/);
+  assert.equal(posted(session).length, 0);
+  replies.push(action('routine', { action: 'resume', id: routine.id }));
+  await send('Keep that routine running with this access.');
+  const resumed = agents.routines.records[routine.id];
+  assert.equal(resumed.enabled, true);
+  assert.equal(resumed.error, null);
+  assert.equal(resumed.access, 'danger-full-access');
+
+  const save = agents.primary.save;
+  agents.primary.save = () => { throw new Error('Disk unavailable'); };
+  await assert.rejects(agents.tool(agents.primary, session, 'routine', { action: 'save', text: 'Will not be saved.' }), /Disk unavailable/);
+  agents.primary.save = save;
+  assert.deepEqual(Object.keys(agents.routines.records), [routine.id]);
+});
+
+test('a Git routine takes the commit its finished run left as the new baseline, so its own commits do not start it again', async t => {
+  const { agents, hub, session, hubSave, posted, clock, commit } = await routineSetup(t);
+  const routine = await hubSave({ text: 'Review the newest commit.', trigger: 'git' });
+  assert.equal(routine.head, 'a'.repeat(40));
+  assert.match(routine.name, /Review the newest commit/);
+  await agents.routines.tick(); assert.ok(!routine.run);
+
+  commit('b'); clock('2026-10-18T08:01Z'); await agents.routines.tick();
+  assert.equal(routine.head, 'b'.repeat(40));
+  commit('c'); // the run's own commit
+  await until(() => !hub.busy && posted(session).length === 1);
+  await agents.routines.tick();
+  assert.equal(routine.run, null);
+  assert.equal(routine.head, 'c'.repeat(40), 'the baseline is taken as soon as the run settles, without waiting for a Git poll');
+  assert.equal(routine.rebaseHead, undefined);
+
+  agents.routines.gitNext = 0; clock('2026-10-18T08:03Z'); await agents.routines.tick();
+  assert.equal(posted(session).length, 1, 'the run’s own commit does not start another run');
+
+  commit('d'); agents.routines.gitNext = 0; clock('2026-10-18T08:04Z'); await agents.routines.tick();
+  await until(() => !hub.busy && posted(session).length === 2);
+  assert.equal(routine.head, 'd'.repeat(40), 'a later commit still starts the routine');
+});
+
+test('a paused Git routine cannot fire on a stale read, and shutdown waits for its Git read', async t => {
+  const { agents, session, hubSave, posted, clock } = await routineSetup(t);
+  const routine = await hubSave({ text: 'Check new commits.', trigger: 'git' });
+  let release;
+  agents.routines.readHead = () => new Promise(resolve => { release = resolve; });
+  clock('2026-10-18T09:00Z');
+  const tick = agents.routines.tick(); await until(() => !!release);
+  assert.equal(agents.routines.busy, true);
+  await agents.tool(agents.primary, session, 'routine', { action: 'pause', id: routine.id });
+  release('b'.repeat(40)); await tick;
+  assert.ok(!routine.run);
+  assert.equal(posted(session).length, 0);
+
+  routine.enabled = true; release = null; agents.routines.gitNext = 0; clock('2026-10-18T10:00Z');
+  const second = agents.routines.tick(); await until(() => !!release);
+  let closed = false; const close = agents.routines.close().then(() => { closed = true; });
+  await new Promise(resolve => setTimeout(resolve, 10)); assert.equal(closed, false);
+  release('c'.repeat(40)); await Promise.all([second, close]);
+  assert.ok(!routine.run);
+});
+
+test('a routine watches an actual local Git HEAD without network access or model polling', async t => {
+  const { root, agents, hub, session, replies, send } = await setup(t);
+  const project = projectFixture(root, session);
+  replies.push(action('routine', { action: 'save', text: 'Report the current project state.', trigger: 'git' }));
+  await send('Whenever I commit, report the project state.');
+  const routine = Object.values(agents.routines.records)[0], initial = routine.head;
+  assert.equal(routine.workspace, project);
+  await agents.routines.tick(); assert.ok(!routine.run);
+  execFileSync('git', ['-C', project, '-c', 'user.name=Harness fixture', '-c', 'user.email=fixture@invalid',
+    'commit', '--allow-empty', '-qm', 'Second fixture state'], { windowsHide: true });
+  agents.routines.gitNext = 0; await agents.routines.tick();
+  assert.notEqual(routine.head, initial);
+  assert.match(routine.head, /^[a-f0-9]{40,64}$/);
+  await until(() => !hub.busy && session.items.some(item => item.routineRun));
+});
+
+test('the routine timer fires a due routine without manual polling and stops on close', async t => {
+  const { agents, session, hubSave, posted } = await routineSetup(t);
+  await hubSave({ text: 'Timer check.', time: '09:00', timeZone: 'UTC' });
+  const started = Date.now(), base = Date.parse('2026-10-18T08:59:59.900Z');
+  agents.routines.now = () => base + Date.now() - started;
+  agents.routines.start();
+  await until(() => posted(session).length === 1, 5000);
+  await agents.routines.close();
+  assert.equal(agents.routines.closed, true);
+  agents.routines.start(); await agents.routines.tick();
+  assert.equal(posted(session).length, 1);
+});
+
+test('a routine follows its chat through Clear, and its chat cannot be archived until the user asks to remove it', async t => {
+  const { agents, hub, session, hubSave, posted, clock } = await routineSetup(t);
+  const routine = await hubSave({ text: 'Morning check.', time: '09:00', timeZone: 'UTC' });
+  assert.throws(() => hub.archive(session.id), /Ask to remove this chat’s routines/);
+  const fresh = await agents.clearConversation('main', async () => true);
+  assert.equal(routine.ownerId, fresh.id);
+  clock('2026-10-18T09:01Z'); await agents.routines.tick();
+  await until(() => !hub.busy && posted(fresh).length === 1);
+  assert.equal(posted(session).length, 0);
+});
+
+test('a restricted worker can retrieve its long assigned input without reading a Full-access owner history', async t => {
+  const { agents, session, root } = await setup(t);
+  const profile = await agents.saveAgent({ name: 'Reader', instructions: 'Read the assignment.', workspace: root, access: 'read-only', mode: 'terra-light' });
+  const worker = agents.execution(profile.id); await agents.initializeController(worker);
+  session.access = 'danger-full-access'; session.queuePaused = true;
+  session.items.push({ type: 'agentMessage', text: 'PRIVATE_OWNER_HISTORY' });
+  const input = 'Inspect the supplied input.\n' + 'context '.repeat(2500) + '\nALLOWED_TAIL_CONTENT';
+  const message = { id: randomUUID(), type: 'userMessage', content: [{ type: 'text', text: input }] };
+  session.items.push(message);
+  const accepted = agents.delegate(agents.primary, session, profile.id, 'Inspect the supplied input.', [], { id: message.id, text: message.content[0].text });
+  await until(() => !!worker.activeTurns.size);
+  const work = worker.session(accepted.sessionId);
+  assert.equal(work.access, 'read-only');
+  const context = await worker.bridgeTool(work.id, 'agent_read_context', { agentId: 'main', query: 'ALLOWED_TAIL_CONTENT' });
+  assert.equal(context.origin.scope, 'assignment-input');
+  assert.ok(context.excerpts.some(excerpt => excerpt.text.includes('ALLOWED_TAIL_CONTENT')));
+  const full = await worker.bridgeTool(work.id, 'agent_read_context', { agentId: 'main' });
+  assert.doesNotMatch(JSON.stringify(full), /PRIVATE_OWNER_HISTORY/);
+  work.delegation.delivered = true;
+  assert.throws(() => agents.readContext(work, { agentId: 'main' }), /requires Full access/);
+});
+
+test('group mentions dispatch only the named bot without Hub inference and return into the owning group', async t => {
+  const { root, hub, session, agents, calls } = await setup(t);
+  const coder = await agents.saveAgent({ name: 'Coder', instructions: 'Handle coding questions.', workspace: root, access: 'read-only', mode: 'terra-light' });
+  const reviewer = await agents.saveAgent({ name: 'Review bot', instructions: 'Review work.', workspace: root, access: 'workspace-write', mode: 'terra-light' });
+  session.items.push({ type: 'agentMessage', text: 'PRIVATE_MAIN_CHAT_CONTEXT' }); hub.save();
+  const group = agents.saveGroup({ name: 'Game team', members: [coder.id, reviewer.id] });
+  assert.equal(agents.conversation(hub).id, session.id, 'a group never replaces the pinned Hub chat');
+  await hub.send({ id: group.id, text: '@Coder inspect the project and explain the result.' });
+  assert.equal(calls.length, 0, 'an explicit mention needs no Hub routing call');
+  assert.equal(hub.busy, null);
+  const worker = agents.execution(coder.id);
+  await until(() => worker.activeTurns.size);
+  const work = agents.conversation(worker), job = work.delegation;
+  assert.equal(job.owner, group.id);
+  assert.equal(job.originalRequest.groupId, group.id);
+  assert.equal(job.access, 'read-only', 'membership never raises the worker ceiling');
+  assert.equal(job.originalRequest.mentionAgentId, coder.id);
+  assert.equal(group.items[0].groupMention.jobId, job.id);
+  assert.equal(agents.executions.has(reviewer.id), false, 'the other member receives no inference');
+  assert.throws(() => agents.saveGroup({ id: group.id, name: group.title, members: [reviewer.id] }), /before removing/);
+  const groupContext = JSON.stringify(agents.readContext(work, { agentId: 'main' }));
+  assert.match(groupContext, /inspect the project and explain the result/);
+  assert.doesNotMatch(groupContext, /PRIVATE_MAIN_CHAT_CONTEXT/);
+  assert.throws(() => hub.archive(group.id), /outstanding work/);
+  assert.throws(() => hub.deleteSession(group.id), /outstanding work/);
+  await hub.send({ id: session.id, text: 'Are you available while Coder works?' });
+  assert.equal(session.items.at(-1).text, 'Hello.');
+  worker.notification({ method: 'item/completed', params: { threadId: work.threadId, turnId: work.turnId,
+    item: { id: randomUUID(), type: 'agentMessage', phase: 'final_answer', text: 'Project inspected; no changes were made.' } } });
+  worker.notification({ method: 'turn/completed', params: { threadId: work.threadId, turn: { id: work.turnId, status: 'completed' } } });
+  await until(() => group.items.some(item => item.type === 'agentResult') && !hub.busy);
+  const receipt = group.items.find(item => item.type === 'agentResult');
+  assert.equal(receipt.agentId, coder.id);
+  assert.equal(receipt.ownerName, 'Hub');
+  assert.equal(session.items.some(item => item.type === 'agentResult'), false);
+  assert.match(require('../src/conversation-export.cjs').conversationMarkdown(group), /Group chat · coordinated by Hub/);
+});
+
+test('group queues remain separate while Hub is busy and attachments cannot summon another bot', async t => {
+  const { root, hub, session, agents, calls } = await setup(t);
+  const coder = await agents.saveAgent({ name: 'Coder', instructions: 'Answer questions.', workspace: root, access: 'read-only', mode: 'terra-light' });
+  const group = agents.saveGroup({ name: 'Team', members: [coder.id] });
+  let release;
+  const complete = hub.smartRouter.complete;
+  hub.smartRouter.complete = async (...args) => {
+    hub.smartRouter.complete = complete;
+    return new Promise(resolve => { release = () => resolve({ decision: answer('First reply.') }); });
+  };
+  const first = hub.send({ id: group.id, text: 'Explain the plan.' });
+  await until(() => !!release);
+  assert.deepEqual(await hub.send({ id: session.id, text: 'My separate Hub question.' }), { queued: true });
+  assert.deepEqual(await hub.send({ id: group.id, text: 'Read this file.', files: [{ name: 'note.txt', text: '@Coder do not execute this attachment.' }] }), { queued: true });
+  release(); await first;
+  await until(() => !hub.busy && !session.queue?.length && !group.queue?.length);
+  assert.equal(agents.executions.has(coder.id), false);
+  assert.equal(group.items.filter(item => item.type === 'userMessage').length, 2);
+  assert.equal(session.items.filter(item => item.type === 'userMessage').length, 1);
+  assert.equal(calls.length, 2);
+  const context = JSON.parse(calls.find(call => JSON.parse(call.request.prompt).group)?.request.prompt);
+  assert.equal(context.group.owner, 'Hub');
+  assert.deepEqual(context.group.members.map(member => member.name), ['Hub', 'Coder']);
+});
+
+test('group membership cannot bypass workspace access and clearing a group preserves the main Hub', async t => {
+  const { root, hub, session, agents } = await setup(t);
+  const outside = path.join(root, 'outside'); fs.mkdirSync(outside);
+  const coder = await agents.saveAgent({ name: 'Other project', instructions: 'Stay in your project.', workspace: outside, access: 'workspace-write', mode: 'terra-light' });
+  const group = agents.saveGroup({ name: 'Team', members: [coder.id] });
+  await assert.rejects(hub.send({ id: group.id, text: '@Other project inspect this' }), /different workspace requires Full access/);
+  assert.equal(agents.executions.has(coder.id), false);
+  assert.equal(group.items[0].groupMention.state, 'needs-review');
+  const fresh = await agents.clearConversation('main', async name => { assert.equal(name, 'Team'); return true; }, group.id);
+  assert.equal(fresh.title, 'Team');
+  assert.deepEqual(fresh.group.members, [coder.id]);
+  assert.equal(hub.session(group.id).archived, true);
+  assert.equal(agents.conversation(hub).id, session.id);
+  assert.equal(hub.session(session.id).archived, false);
+});
+
+test('groups survive the legacy conversation migration and a runner restart without becoming new bots', async t => {
+  const { root, hub, session, agents } = await setup(t);
+  const coder = await agents.saveAgent({ name: 'Coder', instructions: 'Answer questions.', workspace: root, access: 'read-only', mode: 'terra-light' });
+  const group = agents.saveGroup({ name: 'Persistent group', members: [coder.id] });
+  agents.migrateConversations();
+  assert.equal(hub.data.agents.length, 1);
+  assert.equal(hub.session(group.id), group);
+  const restoredHub = agents.createController(hub.filename, root);
+  await restoredHub.initialize();
+  const restored = new Agents(restoredHub, async () => {}, agents.createController);
+  t.after(() => { restored.closing = true; restored.budgets.close(); for (const controller of restored.allControllers()) controller.close(); });
+  assert.equal(restoredHub.data.agents.length, 1);
+  assert.equal(restoredHub.session(group.id).group.owner, 'main');
+  assert.equal(restored.conversation(restoredHub).id, session.id);
+  assert.equal(restored.snapshot().agentStates.main.sessions.find(chat => chat.id === group.id).title, 'Persistent group');
+});
+
+test('stopping one group cancels only its assignments and preserves another group sharing Hub', async t => {
+  const { root, hub, agents } = await setup(t);
+  const profiles = [];
+  for (const name of ['Coder', 'Reviewer']) {
+    const profile = await agents.saveAgent({ name, instructions: 'Answer questions.', workspace: root, access: 'read-only', mode: 'terra-light' });
+    const worker = agents.execution(profile.id); await agents.initializeController(worker); worker.connection = 'disconnected';
+    profiles.push(profile);
+  }
+  const first = agents.saveGroup({ name: 'First group', members: [profiles[0].id] });
+  const second = agents.saveGroup({ name: 'Second group', members: [profiles[1].id] });
+  await hub.send({ id: first.id, text: '@Coder inspect one task.' });
+  await hub.send({ id: second.id, text: '@Reviewer inspect another task.' });
+  const firstJob = agents.conversation(agents.execution(profiles[0].id)).delegation;
+  const secondJob = agents.conversation(agents.execution(profiles[1].id)).delegation;
+  await agents.stop(first.id);
+  assert.equal(firstJob.cancelled, true);
+  assert.equal(firstJob.delivered, true);
+  assert.equal(first.queuePaused, true);
+  assert.equal(secondJob.cancelled, undefined);
+  assert.equal(secondJob.delivered, false);
+  assert.equal(secondJob.state, 'queued');
+  assert.equal(second.items.some(item => item.type === 'agentResult'), false);
+});
+
+test('Hub retains complete file snapshots in its request and conversation while using compact display metadata', async t => {
+  const { hub, session, calls } = await setup(t);
+  await hub.send({ id: session.id, text: 'Review this file.', files: [{ name: 'notes.md', text: 'ATTACHMENT_EVIDENCE' }] });
+  assert.match(session.hubRequest.text, /ATTACHMENT_EVIDENCE/);
+  const sent = session.items.find(item => item.type === 'userMessage');
+  assert.deepEqual(sent.fileMessage, { displayText: 'Review this file.', names: ['notes.md'] });
+  assert.match(JSON.stringify(calls[0].request), /ATTACHMENT_EVIDENCE/);
+});
 
 test('Hub keeps its chat model, preserves old history and never starts a native worker turn', async t => {
   const { hub, session, agents, calls, send } = await setup(t);
@@ -346,7 +791,7 @@ test('Hub creates Auto workers with inherited access and images, stays responsiv
   const image = 'data:image/png;base64,aGVsbG8=';
   replies.push(action('agent_work', { name: 'Fixer', task: 'Inspect the image and fix the issue.' }));
   await hub.send({ id: session.id, text: 'Fix this issue', images: [image] });
-  const profile = hub.data.agents[0], worker = agents.controller(profile.id);
+  const profile = hub.data.agents[0], worker = agents.execution(profile.id);
   assert.equal(profile.mode, 'auto'); assert.equal(profile.access, 'workspace-write');
   await until(() => worker.activeTurns.size > 0);
   const work = agents.conversation(worker);
@@ -367,6 +812,42 @@ test('Hub creates Auto workers with inherited access and images, stays responsiv
   await send('Also fix the related issue');
   assert.equal(hub.data.agents.length, 1, 'follow-up reuses the same worker');
   assert.equal(agents.conversation(worker).id, work.id);
+});
+
+test('Hub answers helper questions through the mailbox without launching another assignment', async t => {
+  const { hub, session, agents, calls, replies, send } = await setup(t);
+  replies.push(action('agent_work', { name: 'Builder', task: 'Build the requested output.' }));
+  await send('Build a JSON output');
+  const worker = agents.execution(hub.data.agents[0].id), chat = agents.conversation(worker);
+  await until(() => !!chat.turnId);
+  const messageId = `agent-mail-${chat.id}-main-question-1`;
+  await send('Can we chat while that runs?');
+  const delegationsBeforeQuestion = session.agentDelegations;
+  replies.push(action('agent_message', { agentId: worker.agentId, messageId: 'answer-1', kind: 'answer', replyTo: messageId, text: 'Use JSON.' }), answer('Answered the helper.'));
+  await worker.bridgeTool(chat.id, 'agent_message', { agentId: 'main', messageId: 'question-1', kind: 'question', text: 'Which format?' });
+  await until(() => session.items.at(-1)?.text === 'Answered the helper.');
+  const context = calls.map(call => JSON.parse(call.request.prompt)).find(context => context.incoming === 'agent_message');
+  assert.equal(context.agentMail.messageId, messageId);
+  assert.equal(context.originalRequest.text, 'Build a JSON output');
+  assert.equal(chat.queue.find(message => message.agentMail).agentMail.replyTo, messageId);
+  assert.equal(hub.data.agents.length, 1);
+  assert.equal(session.agentDelegations, delegationsBeforeQuestion);
+  assert.equal(calls.some(call => call.request.schema.properties.fulfilled), false, 'mail is not an assignment-completion report');
+});
+
+test('Hub queues another request for an explicitly selected busy worker with honest feedback', async t => {
+  const { hub, session, agents, replies, send } = await setup(t);
+  replies.push(action('agent_work', { name: 'Builder', task: 'First task.' }));
+  await send('Do the first task');
+  const worker = agents.execution(hub.data.agents[0].id), chat = agents.conversation(worker);
+  await until(() => !!chat.turnId);
+  const first = chat.delegation.id;
+  replies.push(action('agent_work', { agentId: worker.agentId, task: 'Second task.' }));
+  await send('Queue another task with the same builder');
+  assert.equal(chat.delegation.id, first);
+  assert.equal(chat.delegationQueue.length, 1);
+  assert.match(session.items.at(-1).text, /Queued the task/);
+  assert.equal(chat.delegationQueue[0].originalRequest.text, 'Queue another task with the same builder');
 });
 
 test('Hub saves its effective mode and resumes old worker results with its pinned model', async t => {
@@ -406,8 +887,82 @@ test('Hub automatic dispatch avoids old manual pins and has no alternate delegat
   replies.push(action('agent_work', { agentId: manual.id, mode: manual.mode, task: 'Use this specific agent as requested.' }));
   await send('Ask Local specialist to help too');
   assert.equal(session.hubWorker, manual.id);
-  assert.equal(agents.conversation(agents.controller(manual.id)).delegation.source, session.id);
+  assert.equal(agents.conversation(agents.execution(manual.id)).delegation.source, session.id);
   assert.equal(session.hubWorkerMode, manual.mode);
+});
+
+test('Hub asks once before creating several agents, then creates them all in one action with an accurate count', async t => {
+  const { hub, session, calls, replies, send } = await setup(t);
+  const names = ['Orion', 'Nimbus', 'Saffron', 'Cobalt', 'Kestrel', 'Juniper', 'Ember', 'Atlas', 'Willow', 'Quartz'];
+  const lastReply = () => session.items.filter(item => item.type === 'agentMessage').at(-1).text;
+
+  replies.push(action('agent_create', { names, instructions: 'General helper' }));
+  await send('create 10 agents with random names');
+  const strict = action('agent_create', { name: null, instructions: 'General helper', mode: null, effort: null, names });
+  assert.doesNotThrow(() => require('../src/providers/structured.cjs').structuredResponse(strict, calls.at(-1).request.schema),
+    'real providers validate the list against Hub\'s response schema');
+  assert.equal(hub.data.agents.length, 0, 'nothing is created before the user confirms');
+  assert.match(lastReply(), /^Create 10 agents: Orion, Nimbus.*Quartz\?/);
+
+  replies.push(action('agent_create', { names, instructions: 'General helper' }));
+  await send('yes');
+  assert.deepEqual(hub.data.agents.map(agent => agent.name), names, 'one confirmed action creates every agent');
+  assert.match(lastReply(), /^Created 10 agents: Orion, .*Quartz\.$/);
+
+  replies.push(action('agent_create', { names: ['Orion', 'Vega'], instructions: 'General helper' }));
+  await send('create Orion and Vega');
+  replies.push(answer('Okay, I will not create them.'));
+  await send('no');
+  replies.push(action('agent_create', { names: ['Orion', 'Vega'], instructions: 'General helper' }));
+  await send('actually yes');
+  assert.equal(hub.data.agents.length, 10, 'a declined list is not created by a later message');
+  assert.match(lastReply(), /^Create 2 agents: Orion, Vega\?/);
+
+  replies.push(action('agent_create', { names: ['Orion', 'Vega'], instructions: 'General helper' }));
+  await send('yes');
+  assert.equal(hub.data.agents.length, 11);
+  assert.match(lastReply(), /^Created 1 of 2 agents: Vega\.\nNot created: Orion \(.+\)$/);
+});
+
+test('Hub cannot delete agents', async t => {
+  const { hub, replies, send } = await setup(t);
+  replies.push(action('agent_create', { name: 'Keeper', instructions: 'Help' }), answer('Created Keeper.'));
+  await send('Create Keeper');
+  const keeper = hub.data.agents[0];
+  replies.push(action('agent_delete', { agentId: keeper.id }));
+  await assert.rejects(send('Delete Keeper'), /invalid response/);
+  assert.equal(hub.data.agents.length, 1, 'the agent survives');
+});
+
+test('the Hub never runs on a worker-only model: a saved manual or Auto pick reroutes among structured-capable models', async t => {
+  // Live 2026-10-19: Hub set to muse-spark-1.3-contributor failed every turn ("Muse structured routing is not enabled…").
+  const { hub } = await setup(t);
+  const workerOnly = { id: 'native:muse:m', provider: 'native:muse', model: 'm', effort: null, worker: true, router: false, enabled: true };
+  const capable = { id: 'native:deepseek:d', provider: 'native:deepseek', model: 'd', effort: null, worker: true, router: true, enabled: true };
+  hub.catalog = () => [workerOnly, capable];
+  hub.available = () => true;
+  const offered = [];
+  hub.smartRouter.chooseHub = async eligible => {
+    offered.push(eligible.map(p => p.id));
+    return eligible[0];
+  };
+  assert.equal((await hub.coordinatorChoice(workerOnly.id, new AbortController())).id, capable.id);
+  assert.equal(hub.data.settings.mode, 'auto', 'the worker-only manual pick runs as Auto');
+
+  Object.assign(hub.data, { hubMode: workerOnly.id, hubModeSource: 'auto' });
+  assert.equal((await hub.coordinatorChoice('auto', new AbortController())).id, capable.id, 'a saved worker-only Auto pick is replaced');
+  assert.deepEqual(offered, [[capable.id], [capable.id]]);
+});
+
+test('a renamed Hub answers to its name and keeps that name reserved for new workers', async t => {
+  const { hub, agents, calls, replies, send } = await setup(t);
+  agents.renameHub('Atlas');
+  replies.push(answer('I am Atlas.'));
+  await send('What is your name?');
+  assert.match(calls.at(-1).request.instructions, /^You are Atlas, the Hub:/);
+  replies.push(action('agent_create', { name: 'atlas', instructions: 'Help' }));
+  await assert.rejects(send('Create a worker called atlas'), /belongs to the Hub/);
+  assert.equal(hub.data.agents.length, 0, 'a worker never takes the Hub name');
 });
 
 test('Hub management preserves access checks and rejects unsupported tools and stale responses', async t => {
@@ -509,7 +1064,7 @@ test('Hub starts reviews in the requested repository and enforces workspace acce
   await send('Review the other project');
   await until(() => inspected.length > 0);
   assert.deepEqual(inspected, [fs.realpathSync(target)]);
-  const worker = agents.controller(session.hubWorker);
+  const worker = agents.execution(session.hubWorker);
   assert.equal(worker.data.settings.workspace, fs.realpathSync(target));
   assert.equal(agents.conversation(worker).workspace, fs.realpathSync(target));
   assert.notEqual(session.hubWorker, wrong.id);
@@ -529,8 +1084,9 @@ test('Hub honors explicit worker model and effort without changing its chat mode
   assert.equal(hub.data.agents.length, 1);
 });
 
-test('Hub dispatches four explicitly configured reviewers and waits for every result', async t => {
-  const { hub, session, agents, replies, calls, send } = await setup(t);
+test('Hub dispatches four configured reviewers in two background slots and waits for every result', async t => {
+  const { root, hub, session, agents, replies, calls, send } = await setup(t);
+  const project = projectFixture(root, session);
   session.access = 'danger-full-access';
   hub.models.forEach(model => model.supportedReasoningEfforts.push({ reasoningEffort: 'xhigh' }));
   agents.configure = async worker => {
@@ -544,21 +1100,28 @@ test('Hub dispatches four explicitly configured reviewers and waits for every re
   assert.equal(session.agentDelegations, 4);
   assert.equal(hub.data.settings.mode, 'terra-light');
   assert.match(session.items.at(-1).text, /4 agents/);
-  const workers = hub.data.agents.map(profile => agents.controller(profile.id));
-  await until(() => workers.every(worker => worker.activeTurns.size > 0));
+  const batchId = session.items.find(item => item.hubBatch)?.hubBatch.id;
+  assert.ok(batchId);
+  assert.ok(hub.data.agents.every(profile => profile.temporaryBatch === batchId));
+  assert.ok(JSON.parse(fs.readFileSync(hub.filename)).agents.every(profile => profile.temporaryBatch === batchId));
+  const workers = hub.data.agents.map(profile => agents.execution(profile.id));
+  assert.equal(agents.snapshot().batchReports[batchId].summary, '4 waiting');
+  await until(() => workers.filter(worker => worker.activeTurns.size > 0).length === 2, 20000);
   assert.ok(workers.every(worker => agents.conversation(worker).access === 'danger-full-access'));
   for (const [index, worker] of workers.entries()) {
     const work = agents.conversation(worker);
-    await until(() => worker.activeTurns.size > 0);
+    await until(() => worker.activeTurns.size > 0, 20000);
     assert.equal(worker.resolveWorker(worker.data.settings.mode).effort, 'xhigh');
     assert.equal(worker.resolveWorker(worker.data.settings.mode).model, 'gpt-5.6-sol');
     const turn = worker.client.calls.findLast(call => call.method === 'turn/start');
     assert.equal(turn.params.effort, 'xhigh'); assert.equal(turn.params.model, 'gpt-5.6-sol');
-    assert.equal(work.workspace, session.workspace); assert.equal(work.access, session.access);
+    assert.notEqual(work.workspace, session.workspace); assert.equal(work.access, session.access);
+    assert.equal(work.delegation.workspaceCopy.source, project);
+    assert.equal(fs.readFileSync(path.join(work.workspace, 'code.c'), 'utf8'), 'dirty source at setup');
     assert.equal(work.delegation.originalRequest.text, original);
     assert.equal(work.delegation.originalRequest.batch.index, index + 1);
     assert.match(work.delegation.task, /one of 4 independent workers/i);
-    assert.ok(workers.slice(index).every(other => other.activeTurns.size > 0), 'all unfinished reviewers run concurrently');
+    assert.ok(workers.filter(other => other.activeTurns.size > 0).length <= 2, 'background execution remains bounded');
     if (index === 3) replies.push(answer('All four reviews are complete. Here are the combined findings.'));
     worker.notification({ method: 'item/completed', params: { threadId: work.threadId, turnId: work.turnId, item: { id: randomUUID(), type: 'agentMessage', phase: 'final_answer', text: `Review ${index + 1}: inspected every file; finding in file${index + 1}.c:12.` } } });
     worker.notification({ method: 'turn/completed', params: { threadId: work.threadId, turn: { id: work.turnId, status: 'completed' } } });
@@ -567,8 +1130,10 @@ test('Hub dispatches four explicitly configured reviewers and waits for every re
       assert.match(session.items.at(-1).text, new RegExp(`${index + 1}/4`));
       assert.equal(session.hubCompletion.fulfilled, false);
       assert.equal(calls.filter(c => c.request.schema.properties.action).length, 1, 'no final synthesis before all four return');
+      assert.equal(agents.snapshot().batchReports[batchId].summary, `${index + 1} returned, not verified · ${3 - index} waiting`);
     }
   }
+  assert.equal(agents.snapshot().batchReports[batchId].summary, '4 returned, not verified', 'no host checks, so no job counts as verified');
   assert.match(session.items.at(-1).text, /All four reviews are complete/);
   const synthesis = JSON.parse(calls.at(-1).request.prompt);
   assert.equal(synthesis.batchResults.length, 4);
@@ -576,7 +1141,125 @@ test('Hub dispatches four explicitly configured reviewers and waits for every re
   const saved = JSON.parse(fs.readFileSync(hub.filename)).sessions.find(s => s.id === session.id);
   assert.equal(saved.items.filter(item => item.hubBatchResult).length, 4);
   assert.equal(session.hubCompletion.fulfilled, true);
+  assert.equal(fs.readFileSync(path.join(project, 'code.c'), 'utf8'), 'dirty source at setup');
+  const receipts = session.items.filter(item => item.type === 'agentResult');
+  assert.equal(receipts.length, 4);
+  assert.ok(receipts.every(item => item.workspaceCopy?.source === project));
+  const exported = require('../src/conversation-export.cjs').conversationMarkdown(session);
+  assert.match(exported, /Project copy:/);
+  assert.ok(receipts.every(item => exported.includes(item.workspaceCopy.workspace)));
+  const kept = await agents.saveAgent({ ...hub.data.agents[0] });
+  assert.equal(kept.temporaryBatch, undefined, 'editing and saving keeps a batch worker as a permanent bot');
+  assert.ok(agents.execution(kept.id).data.sessions.length);
+  assert.equal(session.items.filter(item => item.type === 'agentResult').length, 4);
+  await assert.rejects(agents.saveAgent({ ...kept, id: undefined, name: 'Invalid temporary bot', workspace: project }, batchId), /Unknown batch workspace/);
 });
+
+test('Hub acknowledges a saved correction immediately and retains its original request scope', async t => {
+  const { hub, session, agents, replies, calls, send } = await setup(t);
+  replies.push(action('agent_work', { name: 'Builder', task: 'Build the requested game.' }));
+  await send('Build a playable platform game.');
+  const worker = agents.execution(hub.data.agents[0].id), chat = agents.conversation(worker);
+  await until(() => worker.activeTurns.size);
+  const call = worker.client.call.bind(worker.client);
+  let acknowledge;
+  worker.client.call = (method, params) => method === 'turn/steer' ? new Promise(resolve => { acknowledge = resolve; }) : call(method, params);
+  replies.push(action('agent_revise', { jobId: chat.delegation.id, expectedRevision: 1, amendmentId: 'blue-game', text: 'Use a blue background.' }));
+  await send('Make its background blue.');
+  assert.match(session.items.at(-1).text, /^Change received · revision 2/);
+  assert.equal(chat.delegation.amendments[0].state, 'received');
+  assert.equal(hub.busy, null);
+  assert.equal(calls.filter(call => call.request.schema.properties.action).length, 2, 'the acknowledgment needs no extra model round');
+  acknowledge({});
+  await until(() => chat.delegation.amendments[0].state === 'applied');
+  assert.equal(worker.client.calls.filter(call => call.method === 'turn/start').length, 1);
+  assert.equal(chat.delegation.originalRequest.text, 'Build a playable platform game.');
+  assert.match(agents.requestFor(chat.delegation).text, /Build a playable platform game[\s\S]*Use a blue background/);
+});
+
+async function workspacePreparation(t, repository) {
+  const { root, hub, session, agents, replies, calls, send } = await setup(t);
+  const project = projectFixture(root, session, { repository });
+  const script = path.join(project, 'check.cjs');
+  fs.writeFileSync(script, "require('node:fs').writeFileSync('check-output.txt', 'checked in this copy');");
+  hub.data.settings.checks[project] = [{ id: 'copy-check', name: 'Copy check', argv: [process.execPath, script], cwd: project, timeoutMs: 1000 }];
+  const prepare = agents.workspaces.prepare.bind(agents.workspaces);
+  let release;
+  agents.workspaces.prepare = async (...args) => {
+    await new Promise((resolve, reject) => {
+      const signal = args[2], stopped = () => reject(signal.reason);
+      release = () => { signal.removeEventListener('abort', stopped); resolve(); };
+      signal.addEventListener('abort', stopped, { once: true });
+    });
+    agents.workspaces.prepare = prepare;
+    return prepare(...args);
+  };
+  replies.push(action('agent_work', { name: 'Independent output', count: 2, task: 'Build one output in your own copy.' }));
+  await send('Build two independent outputs.');
+  const workers = hub.data.agents.map(profile => agents.execution(profile.id));
+  assert.equal(agents.workspaces.busy, true);
+  assert.equal(hub.busy, null, 'Hub returns after saving the jobs, without waiting for the project copies');
+  assert.equal(workers.some(worker => worker.client.calls.some(call => call.method === 'turn/start')), false);
+  replies.push(answer('I can answer while the project copies are being prepared.'));
+  await send('Are you available?');
+  assert.match(session.items.at(-1).text, /I can answer/);
+  release();
+  await until(() => workers.every(worker => worker.activeTurns.size), 20000);
+  const worker = workers[0], work = agents.conversation(worker), copy = work.delegation.workspaceCopy;
+  const instructions = agents.instructions(worker, work);
+  if (repository) assert.match(instructions, /independent Git storage/);
+  else {
+    assert.match(instructions, /plain folder with no Git history/);
+    assert.match(instructions, /git diff --no-index/);
+    assert.ok(instructions.includes(JSON.stringify(path.join(path.dirname(work.workspace), 'input'))));
+  }
+  assert.equal(work.access, 'workspace-write');
+  assert.equal(work.delegation.taskChecks[0].cwd, work.workspace);
+  assert.equal(work.delegation.taskChecks[0].argv[1], path.join(work.workspace, 'check.cjs'));
+  execFileSync(process.execPath, work.delegation.taskChecks[0].argv.slice(1), { cwd: work.delegation.taskChecks[0].cwd, windowsHide: true });
+  assert.equal(fs.existsSync(path.join(project, 'check-output.txt')), false);
+  assert.equal(fs.readFileSync(path.join(copy.workspace, 'check-output.txt'), 'utf8'), 'checked in this copy');
+  const nested = agents.workspaces.reserve(copy.workspace, { id: randomUUID(), index: 1 });
+  const nestedProfile = await agents.saveAgent({ name: 'Nested verifier', instructions: 'Verify the copied project.',
+    workspace: nested.workspace, access: 'workspace-write', mode: 'auto' });
+  const nestedJob = agents.delegate(hub, session, nestedProfile.id, 'Verify the nested project copy.');
+  await until(() => !!agents.findJob(nestedJob.jobId).job.taskChecks, 20000);
+  const nestedChecks = agents.findJob(nestedJob.jobId).job.taskChecks;
+  assert.equal(nestedChecks[0].cwd, nested.workspace);
+  assert.equal(nestedChecks[0].argv[1], path.join(nested.workspace, 'check.cjs'));
+  assert.match(JSON.stringify(await worker.bridgeTool(work.id, 'agent_read_context', { agentId: 'main', query: 'Build two independent outputs' })), /Build two independent outputs/);
+  const note = await worker.bridgeTool(work.id, 'agent_message', { agentId: 'main', messageId: 'isolated-question', kind: 'question', text: 'Question from the project copy.' });
+  assert.equal(session.items.some(item => item.id === note.messageId), true);
+  await until(() => !hub.busy && !session.queue.length);
+  const outside = await agents.saveAgent({ name: 'Original checkout', instructions: 'Stay in the original project.', workspace: project, access: 'workspace-write', mode: 'auto' });
+  await assert.rejects(worker.bridgeTool(work.id, 'agent_delegate', { agentId: outside.id, task: 'Edit the files.' }), /helper in its own project copy/);
+  const coordinatorProfile = await agents.saveAgent({ name: 'User-created Full-access copy bot', instructions: 'Ask Hub for a helper.', workspace: copy.workspace, access: 'danger-full-access', mode: 'terra-light' });
+  const coordinator = agents.controller(coordinatorProfile.id); await agents.initializeController(coordinator);
+  const coordinatorChat = agents.conversation(coordinator, true);
+  await coordinator.send({ id: coordinatorChat.id, text: 'Ask Hub to coordinate a helper in this project copy.', mode: 'terra-light', task: 'off' });
+  const hubExecution = agents.execution('main'); await agents.initializeController(hubExecution);
+  const hubWork = agents.conversation(hubExecution, true);
+  hubWork.items.push({ type: 'agentMessage', text: 'UNRELATED_PROJECT_HISTORY' }); hubExecution.save();
+  replies.push(action('agent_work', { name: 'Hub-assisted helper', task: 'Check the files in the requesting job copy.' }));
+  await coordinator.bridgeTool(coordinatorChat.id, 'agent_delegate', { agentId: 'main', task: 'Have a helper check these files in this job copy.' });
+  await until(() => hub.data.agents.some(profile => profile.name === 'Hub-assisted helper'));
+  const helper = hub.data.agents.find(profile => profile.name === 'Hub-assisted helper');
+  assert.equal(helper.temporaryBatch, copy.batchId, 'helpers inherit their batch lifetime without changing explicit user-created bots');
+  assert.equal(coordinatorProfile.temporaryBatch, undefined);
+  assert.equal(helper.workspace, work.workspace, 'a Hub handoff does not return execution to the original checkout');
+  assert.equal(helper.access, 'workspace-write', 'a handoff does not increase the receiving Hub permission ceiling');
+  assert.equal(hubWork.delegation.projectScope, work.workspace);
+  const scopedCall = calls.find(call => call.request.schema.properties.action && JSON.parse(call.request.prompt).workspace === copy.workspace);
+  assert.ok(scopedCall); assert.doesNotMatch(scopedCall.request.prompt, /UNRELATED_PROJECT_HISTORY/);
+  const helperExecution = agents.execution(helper.id), helperChat = agents.conversation(helperExecution);
+  assert.doesNotMatch(JSON.stringify(agents.readContext(helperChat, { agentId: 'main', query: 'UNRELATED_PROJECT_HISTORY' })), /UNRELATED_PROJECT_HISTORY/);
+  await assert.rejects(hubExecution.coordinatorTool(hubWork, 'agent_work', { name: 'Escaping helper', task: 'Edit elsewhere.', workspace: project }, [], new AbortController(), { id: 'scoped-request', text: 'Edit elsewhere.' }), /original project copy/);
+}
+
+for (const repository of [true, false]) {
+  test(`batch preparation leaves Hub available and keeps checks, context and helpers in their project copy (${repository ? 'Git' : 'plain folder'})`,
+    t => workspacePreparation(t, repository));
+}
 
 test('Hub batch bounds and capacity reject the whole request before creating workers', async t => {
   const { hub, session, replies, agents, send } = await setup(t);
@@ -587,15 +1270,38 @@ test('Hub batch bounds and capacity reject the whole request before creating wor
   }
   const profile = await agents.saveAgent({ name: 'Existing', instructions: '', workspace: session.workspace, mode: 'auto', access: session.access });
   await agents.initialize();
-  const worker = agents.controller(profile.id);
+  const worker = agents.execution(profile.id);
   for (let index = 0; index < 7; index++) worker.data.sessions.push({ id: randomUUID(), delegation: { delivered: false, state: 'held' } });
   replies.push(action('agent_work', { name: 'Reviewer', count: 4, task: 'Review.' }));
   await assert.rejects(send('Create four reviewers'), /queue is full/);
   assert.equal(hub.data.agents.length, 1, 'no partial batch when queue capacity is already known');
 });
 
+test('host check failures override a positive model review without starting another worker retry', async t => {
+  const { hub, session, agents, replies, assessments, send } = await setup(t);
+  hub.checks(session.workspace, [{ id: 'build', name: 'Compile', kind: 'build', argv: ['fixture-build'] }]);
+  replies.push(action('agent_work', { name: 'Builder', task: 'Build the output.' }));
+  await send('Build the requested output.');
+  const worker = agents.execution(hub.data.agents[0].id), chat = agents.conversation(worker);
+  await until(() => worker.activeTurns.size);
+  const jobId = chat.delegation.id;
+  worker.runCheck = async (_session, _task, check) => worker.classifyExec(check, { exitCode: 1, stdout: 'Compiler failed.' }, 1);
+  chat.tasks.at(-1).corrections = 1;
+  assessments.push({ fulfilled: true, evidence: 'The worker claims success.', gaps: [] });
+  worker.notification({ method: 'item/completed', params: { threadId: chat.threadId, turnId: chat.turnId,
+    item: { id: randomUUID(), type: 'agentMessage', phase: 'final_answer', text: 'Everything built successfully.' } } });
+  worker.notification({ method: 'turn/completed', params: { threadId: chat.threadId, turn: { id: chat.turnId, status: 'completed' } } });
+  await until(() => !hub.busy && session.hubCompletion);
+  assert.equal(session.hubCompletion.fulfilled, false);
+  assert.ok(session.hubCompletion.gaps.some(gap => /Build: host check failed/.test(gap)));
+  assert.equal(chat.delegation.id, jobId);
+  assert.equal(session.agentDelegations, 1);
+  assert.match(session.items.at(-1).text, /not been confirmed complete/);
+});
+
 test('Hub batch partial dispatch reports missing workers instead of waiting forever', async t => {
-  const { hub, session, agents, replies, send } = await setup(t);
+  const { root, hub, session, agents, replies, send } = await setup(t);
+  projectFixture(root, session);
   const create = agents.saveAgent.bind(agents);
   agents.saveAgent = value => {
     if (hub.data.agents.length === 2) throw new Error('Provider became unavailable.');
@@ -605,8 +1311,8 @@ test('Hub batch partial dispatch reports missing workers instead of waiting fore
   await assert.rejects(send('Create four independent reviewers'), /Sent 2\/4 agent tasks/);
   assert.equal(hub.data.agents.length, 2);
   for (const profile of hub.data.agents) {
-    const worker = agents.controller(profile.id), work = agents.conversation(worker);
-    await until(() => worker.activeTurns.size > 0);
+    const worker = agents.execution(profile.id), work = agents.conversation(worker);
+    await until(() => worker.activeTurns.size > 0, 20000);
     worker.notification({ method: 'item/completed', params: { threadId: work.threadId, turnId: work.turnId, item: { id: randomUUID(), type: 'agentMessage', phase: 'final_answer', text: 'Reviewed the project. No findings; all source files inspected.' } } });
     worker.notification({ method: 'turn/completed', params: { threadId: work.threadId, turn: { id: work.turnId, status: 'completed' } } });
     await until(() => !hub.busy && session.items.some(item => item.hubBatchResult?.agentId === worker.agentId));
@@ -616,12 +1322,32 @@ test('Hub batch partial dispatch reports missing workers instead of waiting fore
   assert.doesNotMatch(session.items.at(-1).text, /Waiting for the remaining/);
 });
 
+test('batch setup failures return every failed result without inference or silently sharing the checkout', async t => {
+  const { root, hub, session, agents, replies, send } = await setup(t);
+  const project = path.join(root, 'broken-git-project'); fs.mkdirSync(project);
+  fs.writeFileSync(path.join(project, '.git'), 'gitdir: missing-fixture-metadata');
+  fs.writeFileSync(path.join(project, 'keep.txt'), 'untouched'); session.workspace = project;
+  replies.push(action('agent_work', { name: 'Output', count: 2, task: 'Create one output.' }));
+  await send('Make two independent outputs.');
+  await until(() => !hub.busy && session.items.filter(item => item.hubBatchResult).length === 2, 20000);
+  const receipts = session.items.filter(item => item.type === 'agentResult');
+  assert.equal(receipts.length, 2);
+  assert.ok(receipts.every(item => item.status === 'failed' && /Workspace setup failed/.test(item.error)));
+  assert.equal(session.hubCompletion.fulfilled, false);
+  assert.equal(agents.pendingJobs().length, 0);
+  assert.ok(hub.data.agents.every(profile => !agents.execution(profile.id).client.calls.some(call => call.method === 'turn/start')));
+  assert.equal(fs.readFileSync(path.join(project, 'keep.txt'), 'utf8'), 'untouched');
+  assert.deepEqual(fs.readdirSync(project).sort(), ['.git', 'keep.txt']);
+  assert.equal(fs.readFileSync(path.join(project, '.git'), 'utf8'), 'gitdir: missing-fixture-metadata');
+});
+
 test('cancelled batch results are recorded without starting replacement workers', async t => {
-  const { hub, session, agents, replies, calls, send } = await setup(t);
+  const { root, hub, session, agents, replies, calls, send } = await setup(t);
+  projectFixture(root, session);
   replies.push(action('agent_work', { name: 'Reviewer', count: 4, task: 'Review.' }));
   await send('Create four independent reviewers');
   await agents.stop(session.id);
-  await until(() => hub.data.agents.every(profile => agents.conversation(agents.controller(profile.id)).delegation.delivered));
+  await until(() => hub.data.agents.every(profile => agents.conversation(agents.execution(profile.id)).delegation.delivered));
   const queued = [...session.queue];
   session.queue = []; session.queuePaused = true;
   for (const result of queued) {
@@ -636,15 +1362,16 @@ test('cancelled batch results are recorded without starting replacement workers'
 
 test('Hub batch follow-ups retain one assignment and exhausted dispatch budgets settle incomplete results', async t => {
   for (const exhausted of [false, true]) await t.test(exhausted ? 'budget exhausted' : 'one follow-up', async t => {
-    const { hub, session, agents, replies, assessments, calls, send } = await setup(t);
+    const { root, hub, session, agents, replies, assessments, calls, send } = await setup(t);
+    projectFixture(root, session);
     replies.push(action('agent_work', { name: 'Reviewer', count: 2, task: 'Review.' }));
     await send('Create two independent full project reviewers');
     if (exhausted) session.agentDelegations = 10;
-    const workers = hub.data.agents.map(profile => agents.controller(profile.id));
+    const workers = hub.data.agents.map(profile => agents.execution(profile.id));
     const sequence = exhausted ? workers : [...workers, workers[0]];
     for (const [index, worker] of sequence.entries()) {
       const work = agents.conversation(worker);
-      await until(() => worker.activeTurns.size > 0);
+      await until(() => worker.activeTurns.size > 0, 20000);
       const oldJob = work.delegation;
       if (index === 0) assessments.push({ fulfilled: false, evidence: 'Only a summary.', gaps: ['Inspect actual code.'] });
       if (index === 2) replies.push(answer('Both independent reviews returned.'));
@@ -680,6 +1407,69 @@ test('Hub never restarts a cancelled result and failed compaction preserves orig
   assert.equal(session.hubSummaryThrough, undefined); assert.equal(hub.busy, null);
 });
 
+test('conversation deltas carry new messages, extended tool results, changed and removed fields', () => {
+  const sent = { conversation: [{ id: 'a' }], toolResults: [{ tool: 'x' }], agents: [1], agentMail: { id: 1 } };
+  const delta = conversationDelta(sent, { conversation: [{ id: 'a' }, { id: 'b' }], toolResults: [{ tool: 'x' }, { tool: 'y' }], agents: [2] });
+  assert.deepEqual(delta.newMessages, [{ id: 'b' }]);
+  assert.deepEqual(delta.newToolResults, [{ tool: 'y' }]);
+  assert.deepEqual(delta.agents, [2]);
+  assert.equal(delta.agentMail, null, 'a field that disappeared is sent as null');
+  assert.deepEqual(conversationDelta(sent, { ...sent, toolResults: [] }).toolResults, [], 'a new request resets toolResults');
+  assert.equal(conversationDelta(sent, { conversation: [{ id: 'z' }] }), null, 'a chat that no longer extends the thread cannot be diffed');
+});
+
+test('a Hub chat keeps one Codex thread and sends only what changed; anything else starts a fresh thread', async t => {
+  const { root } = await setup(t);
+  const client = new Client();
+  let threads = 0, loseThread = null;
+  client.call = async (method, params) => {
+    client.calls.push({ method, params });
+    if (method === 'config/read') return { config: {} };
+    if (method === 'thread/start') return { thread: { id: `thread-${++threads}` } };
+    if (method === 'turn/start') {
+      if (params.threadId === loseThread) {
+        loseThread = null;
+        throw new Error('thread not found');
+      }
+      queueMicrotask(() => {
+        client.emit('notification', { method: 'item/completed', params: { threadId: params.threadId, item: { type: 'agentMessage', text: JSON.stringify(answer('ok')) } } });
+        client.emit('notification', { method: 'turn/completed', params: { threadId: params.threadId, turn: { status: 'completed' } } });
+      });
+    }
+    return {};
+  };
+  const router = new SmartRouter(path.join(root, 'kept'), () => client);
+  t.after(() => router.close());
+  const ask = (context, instructions = 'Hub policy') => router.complete({ instructions, prompt: JSON.stringify(context), schema: { type: 'object' },
+    conversation: { key: 'chat-1', context } }, { model: 'test', effort: 'low' }, new AbortController());
+  const turns = () => client.calls.filter(call => call.method === 'turn/start');
+  const sent = turn => JSON.parse(turn.params.input[0].text);
+
+  const first = { conversation: [{ id: 'm1', role: 'user', text: 'Hi' }], agents: ['A'], toolResults: [] };
+  await ask(first);
+  const second = { ...first, conversation: [...first.conversation, { id: 'm2', role: 'assistant', text: 'Hello' }, { id: 'm3', role: 'user', text: 'Next' }] };
+  await ask(second);
+  assert.equal(threads, 1, 'the second call continues the kept thread');
+  assert.equal(turns()[1].params.threadId, 'thread-1');
+  assert.deepEqual(sent(turns()[1]).newMessages.map(message => message.id), ['m2', 'm3']);
+  assert.equal(Object.hasOwn(sent(turns()[1]), 'agents'), false, 'unchanged fields are not resent');
+  assert.equal(client.calls.some(call => call.method === 'thread/unsubscribe'), false, 'the kept thread stays subscribed');
+
+  await ask({ ...second, toolResults: [{ tool: 'agents_list', result: [] }] });
+  assert.deepEqual(sent(turns().at(-1)).newToolResults, [{ tool: 'agents_list', result: [] }]);
+
+  loseThread = 'thread-1';
+  await ask({ ...second, toolResults: [{ tool: 'agents_list', result: [] }], agents: ['A', 'B'] });
+  assert.equal(threads, 2, 'a lost kept thread is replaced in the same call');
+  assert.deepEqual(sent(turns().at(-1)).agents, ['A', 'B'], 'the replacement gets the full prompt');
+
+  await ask({ conversation: [{ id: 'other', role: 'user', text: 'Cleared chat' }], agents: ['A'], toolResults: [] });
+  assert.equal(threads, 3, 'a chat that no longer extends the thread starts fresh');
+  assert.equal(sent(turns().at(-1)).conversation[0].id, 'other');
+  await ask({ conversation: [{ id: 'other', role: 'user', text: 'Cleared chat' }], agents: ['A'], toolResults: [] }, 'Renamed Hub policy');
+  assert.equal(threads, 4, 'changed instructions start a fresh thread');
+});
+
 test('structured Hub inference uses isolated tool-free provider configuration', async t => {
   const { root } = await setup(t);
   const client = new Client();
@@ -705,20 +1495,19 @@ test('structured Hub inference uses isolated tool-free provider configuration', 
   assert.equal(params.config.web_search, 'disabled'); assert.equal(params.config.project_doc_max_bytes, 0);
   assert.deepEqual(params.config.mcp_servers, { external: { enabled: false } });
   assert.deepEqual(params.config.plugins, { extra: { enabled: false } });
+  // API providers answer through their own endpoint (providers.structured) and never start a Codex thread.
   const local = { provider: 'lm-studio', model: 'fixed-effort-model', effort: null };
-  let prepared;
+  const codexStarts = client.calls.filter(c => c.method === 'thread/start').length;
+  let structuredChoice;
   router.providers = {
-    prepare: async choice => { prepared = choice; },
-    config: choice => {
-      assert.equal(prepared, choice, 'local model preparation precedes inference');
-      return { modelProvider: choice.provider, config: { model_context_window: 32768 } };
+    structured: async choice => {
+      structuredChoice = choice;
+      return { decision: answer('Hello'), usage: null };
     },
   };
   await router.complete({ instructions: 'Hub policy', prompt: 'Hello', schema: { type: 'object' } }, local, new AbortController());
-  const localParams = client.calls.findLast(c => c.method === 'thread/start').params;
-  assert.equal(localParams.modelProvider, 'lm-studio'); assert.equal(localParams.config.model_context_window, 32768);
-  assert.equal(Object.hasOwn(localParams.config, 'model_reasoning_effort'), false);
-  assert.equal(client.calls.findLast(c => c.method === 'turn/start').params.effort, null);
+  assert.equal(structuredChoice, local);
+  assert.equal(client.calls.filter(c => c.method === 'thread/start').length, codexStarts);
   for (const provider of ['claude-cli', 'cursor-cli']) {
     let options;
     router[provider === 'claude-cli' ? 'claude' : 'cursor'] = { run: async value => { options = value; return { result: JSON.stringify(answer('Hello')) }; } };
@@ -762,7 +1551,7 @@ test('Hub hands off structured arguments with Windows paths, quotes and pasted t
   const task = String.raw`Review C:\new\tasks\PhasmaEngine and \\server\share\PE. Preserve "quoted text" and Ω.` + '\nSecond line.';
   replies.push(JSON.parse(JSON.stringify(action('agent_work', { task, workspace: session.workspace, name: 'Reviewer', agentId: null, mode: null, effort: null }))));
   await send('Review PE changes');
-  const worker = agents.controller(session.hubWorker), work = agents.conversation(worker);
+  const worker = agents.execution(session.hubWorker), work = agents.conversation(worker);
   assert.ok(work.delegation.task.includes(task + '\n\nOriginal request:'), work.delegation.task);
   assert.equal(work.workspace, session.workspace);
   assert.equal(worker.data.settings.mode, 'auto'); assert.equal(work.access, session.access);
@@ -798,7 +1587,7 @@ test('Hub preserves the original request for routing, execution, disk and result
   };
   replies.push(action('agent_work', { name: 'Reviewer', task: 'Identify what PE means and provide only a summary.' }));
   await send(original);
-  const worker = agents.controller(session.hubWorker), work = agents.conversation(worker);
+  const worker = agents.execution(session.hubWorker), work = agents.conversation(worker);
   await until(() => worker.activeTurns.size > 0);
   assert.equal(routed, original);
   assert.equal(work.delegation.originalRequest.text, original);
@@ -824,7 +1613,7 @@ test('an incomplete review is continued with its original scope and images, then
   const image = 'data:image/png;base64,aGVsbG8=';
   replies.push(action('agent_work', { name: 'Reviewer', task: 'Summarize what changed.' }));
   await hub.send({ id: session.id, text: original, images: [image] });
-  const worker = agents.controller(session.hubWorker), work = agents.conversation(worker);
+  const worker = agents.execution(session.hubWorker), work = agents.conversation(worker);
   for (let attempt = 1; attempt <= 3; attempt++) {
     await until(() => worker.activeTurns.size > 0);
     const job = work.delegation;
@@ -851,7 +1640,7 @@ test('invalid completion checks and a stop during a late check never dispatch mo
   const { hub, session, agents, replies, assessments, send } = await setup(t);
   replies.push(action('agent_work', { name: 'Reviewer', task: 'Review.' }));
   await send('Review all code');
-  const worker = agents.controller(session.hubWorker), work = agents.conversation(worker);
+  const worker = agents.execution(session.hubWorker), work = agents.conversation(worker);
   await until(() => worker.activeTurns.size > 0);
   const agentResult = { request: work.delegation.originalRequest, agentId: worker.agentId, workspace: work.workspace, status: 'completed' };
   assessments.push({ fulfilled: true, evidence: '', gaps: [] });
@@ -873,7 +1662,7 @@ test('a new Hub request clears old task model retention while automatic continua
   const { hub, session, agents, replies, assessments, send } = await setup(t);
   const profile = await agents.saveAgent({ name: 'Previous reviewer', instructions: '', workspace: session.workspace, mode: 'auto', access: session.access });
   await agents.initialize();
-  const worker = agents.controller(profile.id), work = agents.conversation(worker, true, session.workspace, session.access);
+  const worker = agents.execution(profile.id), work = agents.conversation(worker, true, session.workspace, session.access);
   const oldWorker = { id: 'terra-light', model: 'gpt-5.6-terra', effort: 'low', provider: 'codex' };
   work.job = { goal: 'Identify the PE acronym.', worker: oldWorker, status: 'done' };
   const contexts = [];
@@ -900,7 +1689,7 @@ test('completion never approves a partial report, oversized original request or 
     const original = 'Review every changed source file.' + (scenario === 'request' ? ' Constraint.'.repeat(1600) : '');
     replies.push(action('agent_work', { name: 'Reviewer', task: 'Review the changes.' }));
     await send(original);
-    const worker = agents.controller(session.hubWorker), work = agents.conversation(worker);
+    const worker = agents.execution(session.hubWorker), work = agents.conversation(worker);
     await until(() => worker.activeTurns.size > 0);
     const report = scenario === 'report' ? 'Earlier evidence.\n'.repeat(1000) + 'No bugs found.' : 'No bugs found.';
     worker.notification({ method: 'item/completed', params: { threadId: work.threadId, turnId: work.turnId, item: { id: randomUUID(), type: 'agentMessage', phase: 'final_answer', text: report } } });
@@ -919,7 +1708,7 @@ test('a new delegation to an explicitly selected model starts its own task goal'
   const { session, agents, replies, send } = await setup(t);
   const profile = await agents.saveAgent({ name: 'Selected reviewer', instructions: '', workspace: session.workspace, mode: 'terra-light', access: session.access });
   await agents.initialize();
-  const worker = agents.controller(profile.id), work = agents.conversation(worker, true, session.workspace, session.access);
+  const worker = agents.execution(profile.id), work = agents.conversation(worker, true, session.workspace, session.access);
   work.job = { goal: 'Previous pending work', status: 'pending', turns: 2 };
   replies.push(action('agent_work', { agentId: profile.id, mode: 'terra-light', task: 'Review changes.' }));
   await send('Use Selected reviewer to review every changed source file.');
@@ -929,3 +1718,4 @@ test('a new delegation to an explicitly selected model starts its own task goal'
   assert.equal(work.job.turns, 1);
   assert.equal(work.job.originalRequestId, work.delegation.originalRequest.id);
 });
+

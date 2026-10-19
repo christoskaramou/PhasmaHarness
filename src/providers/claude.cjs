@@ -1,11 +1,13 @@
 const { WORKER_INSTRUCTIONS } = require('../worker-instructions.cjs');
 const { CLAUDE_MODEL_WINDOWS } = require('./limits.cjs');
 const { stripTaskStatus } = require('../routing/task-state.cjs');
+const { imageData } = require('../image-input.cjs');
 const { spawn } = require('node:child_process');
 const { spawnOwned, stopTree } = require('../process-tree.cjs');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const { createHash } = require('node:crypto');
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 // Ask mode keeps a small tool set (smaller prompts, no subagents); anything beyond reading inside the workspace asks.
@@ -20,7 +22,9 @@ function executable() {
 }
 
 class ClaudeCLI {
-  constructor(launch = spawn) { this.launch = launch; this.children = new Set(); this.models = []; this.status = { installed: false, loggedIn: false }; }
+  constructor(launch = spawn, cleanup = stopTree) {
+    this.launch = launch; this.cleanup = cleanup; this.children = new Set(); this.models = []; this.status = { installed: null, loggedIn: false };
+  }
   start(args, cwd) {
     // Authentication stays inside the published CLI, including user-configured auth methods.
     const child = spawnOwned(this.launch, executable(), args, { cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -29,12 +33,14 @@ class ClaudeCLI {
     return child;
   }
   async refresh() {
+    this.authVerified = false;
     try {
       const result = await this.command(['auth', 'status']);
       const status = JSON.parse(result);
       this.status = { installed: true, loggedIn: status.loggedIn === true, authMethod: status.authMethod || null,
         email: status.loggedIn === true && typeof status.email === 'string' ? status.email : null,
         subscriptionType: status.loggedIn === true && typeof status.subscriptionType === 'string' ? status.subscriptionType : null };
+      this.authVerified = this.status.loggedIn;
     } catch (error) { this.status = { installed: error.code !== 'ENOENT', loggedIn: false, error: error.code === 'ENOENT' ? 'Claude Code is not installed. Install it from Settings → Providers.' : 'Could not read Claude Code login status.' }; }
     if (this.status.loggedIn) {
       this.models = [];
@@ -43,10 +49,78 @@ class ClaudeCLI {
     } else this.models = [];
     return this.status;
   }
+  accountKey() {
+    return this.status.loggedIn ? createHash('sha256').update(JSON.stringify([
+      this.status.authMethod || null, this.status.email || null, this.status.subscriptionType || null,
+    ])).digest('hex') : null;
+  }
+  metadataHost() {
+    return this.start(['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--no-session-persistence',
+      '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--tools', '', '--settings', '{"disableAllHooks":true}'], os.tmpdir());
+  }
+  async readUsage() {
+    if (this.usageCleanupHost) {
+      let remaining;
+      try { remaining = await this.cleanup(this.usageCleanupHost); } catch { remaining = [-1]; }
+      if (!Array.isArray(remaining) || remaining.length)
+        throw Object.assign(new Error('Claude usage lookup cleanup is unconfirmed.'), { code: 'CLEANUP_UNCERTAIN' });
+      this.usageCleanupHost = null;
+    }
+    return new Promise((resolve, reject) => {
+      const child = this.metadataHost();
+      let buffer = '', settled = false, initialized = false;
+      const finish = (error, value) => {
+        if (settled) return;
+        settled = true; clearTimeout(timer);
+        try { child.stdin.end(); } catch { /* Cleanup still owns this child. */ }
+        Promise.resolve().then(() => this.cleanup(child)).then(remaining => {
+          if (!Array.isArray(remaining) || remaining.length) {
+            this.usageCleanupHost = child;
+            reject(Object.assign(new Error('Claude usage lookup cleanup is unconfirmed.'), { code: 'CLEANUP_UNCERTAIN' }));
+          }
+          else if (error) reject(error);
+          else resolve(value);
+        }, () => {
+          this.usageCleanupHost = child;
+          reject(Object.assign(new Error('Claude usage lookup cleanup is unconfirmed.'), { code: 'CLEANUP_UNCERTAIN' }));
+        });
+      };
+      const timer = setTimeout(() => finish(new Error('Claude usage lookup timed out.')), 10000);
+      child.once('error', () => finish(new Error('Claude usage lookup could not start.')));
+      child.once('close', () => finish(new Error('Claude usage lookup ended without a report.')));
+      child.stdin.on('error', () => {});
+      child.stderr.on('data', () => {});
+      child.stdout.on('data', data => {
+        buffer += data;
+        if (buffer.length > 1024 * 1024) { finish(new Error('Claude usage report exceeded its size limit.')); return; }
+        let newline;
+        while (!settled && (newline = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, newline).trim(); buffer = buffer.slice(newline + 1);
+          if (!line) continue;
+          let event;
+          try { event = JSON.parse(line); }
+          catch { finish(new Error('Claude usage lookup returned an invalid event.')); return; }
+          if (event.type !== 'control_response') continue;
+          const response = event.response;
+          if (response?.request_id === 'quota-init' && !initialized) {
+            if (response.subtype === 'error') { finish(new Error('Claude usage initialization is unavailable.')); return; }
+            initialized = true;
+            child.stdin.write(JSON.stringify({ type: 'control_request', request_id: 'quota-read',
+              request: { subtype: 'get_usage', skip_behaviors: true } }) + '\n');
+          } else if (response?.request_id === 'quota-read' && initialized) {
+            if (response.subtype !== 'success' || !response.response || typeof response.response !== 'object')
+              finish(new Error('This Claude Code version did not provide a usage report.'));
+            else finish(null, response.response);
+          }
+        }
+      });
+      child.stdin.write(JSON.stringify({ type: 'control_request', request_id: 'quota-init',
+        request: { subtype: 'initialize', hooks: {} } }) + '\n');
+    });
+  }
   discover() {
     return new Promise((resolve, reject) => {
-      const child = this.start(['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--no-session-persistence',
-        '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--tools', '', '--settings', '{"disableAllHooks":true}'], os.tmpdir());
+      const child = this.metadataHost();
       let buffer = '', settled = false;
       const finish = (error, models) => {
         if (settled) return;
@@ -211,7 +285,10 @@ class ClaudeCLI {
           if (ask && event.type === 'control_cancel_request') { pending.get(event.request_id)?.abort(); continue; }
           if (event.type === 'result') { result = event; if (ask) child.stdin.end(); }
           // Plan usage limits: the rate-limit event carries the window and its reset; a blocked reply is marked "rate_limit".
-          if (event.type === 'rate_limit_event' && event.rate_limit_info) limitInfo = event.rate_limit_info;
+          if (event.type === 'rate_limit_event' && event.rate_limit_info) {
+            limitInfo = event.rate_limit_info;
+            this.onUsageChange?.();
+          }
           if (event.type === 'assistant' && event.error === 'rate_limit') rateLimited = true;
           onEvent(event);
         }
@@ -235,12 +312,15 @@ class ClaudeCLI {
         }
         else done(resolve, result);
       });
-      const message = JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: prompt }, ...images.map(url => ({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: url.split(',')[1] } }))] } }) + '\n';
+      const message = JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: prompt }, ...images.map(url => imageData(url)).map(({ mime, data }) => ({ type: 'image', source: { type: 'base64', media_type: mime, data } }))] } }) + '\n';
       // Approval answers travel over stdin, so it stays open until the result arrives.
       if (ask) child.stdin.write(message); else child.stdin.end(message);
     });
   }
-  close() { for (const child of this.children) stopTree(child); }
+  close() {
+    for (const child of this.children) stopTree(child);
+    if (this.usageCleanupHost && !this.children.has(this.usageCleanupHost)) stopTree(this.usageCleanupHost);
+  }
 }
 
 function handoff(items) {

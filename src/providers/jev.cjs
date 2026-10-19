@@ -107,7 +107,7 @@ class JevClient {
       this.resetHealth();
       return result;
     } catch (error) {
-      if (error.name !== 'AbortError') { const now = Date.now(); this.health = { since: this.health.since || now, error: error.message, at: now }; }
+      if (error.name !== 'AbortError' && error.code !== 'JOB_BUDGET_HOLD') { const now = Date.now(); this.health = { since: this.health.since || now, error: error.message, at: now }; }
       throw error;
     }
   }
@@ -115,31 +115,40 @@ class JevClient {
     if (!this.enabled) throw new Error('Jev is disabled. Enable it in Providers.');
     const key = this.keyStore.read();
     const started = Date.now();
-    const deadline = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(timeoutMs)]);
+    const owned = new AbortController();
+    const deadline = AbortSignal.any([...(signal ? [signal] : []), owned.signal, AbortSignal.timeout(timeoutMs)]);
     let payload;
+    const account = this.accountRequest?.({ provider: 'typesafe', model: MODEL }, () => owned.abort());
+    let accounted;
     try {
-      const response = await this.fetch('https://api.typesafe.ai/v1/systemone', {
-        method: 'POST', redirect: 'error', signal: deadline,
-        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: MODEL, state, questions }),
-      });
-      if (!response.ok) throw Object.assign(new Error('Jev request failed.'), { status: response.status });
-      const body = await response.text();
-      if (body.length > 65536) throw Object.assign(new Error('Response too large.'), { code: 'JEV_RESPONSE_TOO_LARGE' });
-      try { payload = JSON.parse(body); }
-      catch { throw Object.assign(new Error('Invalid JSON.'), { code: 'JEV_INVALID_JSON' }); }
-    } catch (error) {
-      if (signal?.aborted) throw Object.assign(new Error('Routing stopped.'), { name: 'AbortError' });
-      if (deadline.aborted) throw new Error(`Jev timed out after ${timeoutMs / 1000} seconds.`);
-      // Never surface response bodies, request headers or transport errors that could echo the key.
-      if ([401, 403].includes(error.status)) throw new Error('Jev rejected the API key. Check it in Settings.');
-      if ([429, 529].includes(error.status)) throw new Error('Jev is rate-limited or overloaded. Try again later.');
-      if (error.status) throw new Error(`Jev request failed (HTTP ${error.status}).`);
-      const code = error.cause?.code || error.code;
-      const safeCodes = ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET', 'CERT_HAS_EXPIRED', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'JEV_INVALID_JSON', 'JEV_RESPONSE_TOO_LARGE'];
-      throw new Error(`Jev request failed${safeCodes.includes(code) ? ` (${code})` : ' (transport error)'}. No worker was selected.`);
+      try {
+        const response = await this.fetch('https://api.typesafe.ai/v1/systemone', {
+          method: 'POST', redirect: 'error', signal: deadline,
+          headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: MODEL, state, questions }),
+        });
+        if (!response.ok) throw Object.assign(new Error('Jev request failed.'), { status: response.status });
+        const body = await response.text();
+        if (body.length > 65536) throw Object.assign(new Error('Response too large.'), { code: 'JEV_RESPONSE_TOO_LARGE' });
+        try { payload = JSON.parse(body); }
+        catch { throw Object.assign(new Error('Invalid JSON.'), { code: 'JEV_INVALID_JSON' }); }
+      } catch (error) {
+        if (owned.signal.aborted) throw Object.assign(new Error('Job budget paused.'), { name: 'AbortError' });
+        if (signal?.aborted) throw Object.assign(new Error('Routing stopped.'), { name: 'AbortError' });
+        if (deadline.aborted) throw new Error(`Jev timed out after ${timeoutMs / 1000} seconds.`);
+        // Never surface response bodies, request headers or transport errors that could echo the key.
+        if ([401, 403].includes(error.status)) throw new Error('Jev rejected the API key. Check it in Settings.');
+        if ([429, 529].includes(error.status)) throw new Error('Jev is rate-limited or overloaded. Try again later.');
+        if (error.status) throw new Error(`Jev request failed (HTTP ${error.status}).`);
+        const code = error.cause?.code || error.code;
+        const safeCodes = ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET', 'CERT_HAS_EXPIRED', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'JEV_INVALID_JSON', 'JEV_RESPONSE_TOO_LARGE'];
+        throw new Error(`Jev request failed${safeCodes.includes(code) ? ` (${code})` : ' (transport error)'}. No worker was selected.`);
+      }
+      accounted = choices(payload, questions);
+      return { ...accounted, durationMs: Date.now() - started };
+    } finally {
+      account?.({ usage: payload?.usage || accounted?.usage, uncertain: !payload });
     }
-    return { ...choices(payload, questions), durationMs: Date.now() - started };
   }
   async classify(context, signal, quick = false, catalog) {
     const workers = Array.isArray(catalog) && catalog.length ? catalog : PRESETS;

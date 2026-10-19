@@ -28,7 +28,8 @@ function setup(t, options = {}) {
     return child;
   };
   let busy = false;
-  const updater = new Updater({ current: '0.1.0', fetch, directory, installable: options.installable ?? true, busy: () => options.busy?.() ?? busy, quit: () => log.quit++, spawn });
+  const updater = new Updater({ current: '0.1.0', fetch, directory, installable: options.installable ?? true, busy: () => options.busy?.() ?? busy,
+    pause: options.pause, quit: () => { log.quit++; options.quit?.(); }, spawn, launch: options.launch });
   updater.on('state', state => log.states.push(state.status));
   return { updater, log, directory, setBusy: value => { busy = value; } };
 }
@@ -49,6 +50,60 @@ test('the installed app downloads, verifies, runs the installer silently and qui
   assert.equal(log.quit, 1);
   assert.deepEqual([...new Set(log.states)], ['available', 'downloading', 'installing']);
   assert.equal(updater.state.progress, 100);
+});
+
+test('install admission closes before the installer starts and reopens after a failed start', async t => {
+  let paused = false, resumed = 0;
+  const { updater, log } = setup(t, { spawnFails: true, pause: () => {
+    paused = true;
+    assert.equal(log.spawned.length, 0);
+    return () => { paused = false; resumed++; };
+  } });
+  await updater.check();
+  updater.on('state', state => { if (state.status === 'installing') assert.equal(paused, true); });
+  await assert.rejects(updater.install(), /blocked/);
+  assert.equal(resumed, 1);
+  assert.equal(paused, false);
+  assert.equal(log.quit, 0);
+});
+
+test('a quit error after installer launch keeps admission closed', async t => {
+  let paused = false;
+  const { updater, log } = setup(t, { pause: () => {
+    paused = true;
+    return () => { paused = false; };
+  }, quit: () => { throw new Error('Quit failed'); } });
+  await updater.check();
+  await assert.rejects(updater.install(), /Quit failed/);
+  assert.equal(log.spawned.length, 1);
+  assert.equal(paused, true);
+});
+
+test('contained runners hand verified installers to the outside monitor before quitting', async t => {
+  let handedOff = 0;
+  const { updater, log } = setup(t, { launch: async file => {
+    assert.ok(fs.readFileSync(file).equals(DATA), 'only the verified download is handed off');
+    handedOff++;
+  } });
+  await updater.check();
+  await updater.install();
+  assert.equal(handedOff, 1);
+  assert.equal(log.spawned.length, 0, 'the installer must not start inside the old runner job');
+  assert.equal(log.quit, 1);
+});
+
+test('uncertain installer handoffs keep admission paused; a confirmed refusal permits retry', async t => {
+  for (const uncertain of [false, true]) {
+    let paused = false;
+    const { updater, log } = setup(t, {
+      pause: () => { paused = true; return () => { paused = false; }; },
+      launch: async () => { throw Object.assign(new Error('Installer handoff was not confirmed.'), { launchUncertain: uncertain }); },
+    });
+    await updater.check();
+    await assert.rejects(updater.install(), /handoff was not confirmed/);
+    assert.equal(paused, uncertain);
+    assert.equal(log.quit, 0);
+  }
 });
 
 test('a failed installer start keeps the app running; a turn that starts during the download postpones the install', async t => {

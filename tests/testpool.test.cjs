@@ -308,10 +308,12 @@ test('a failed setup blocks its tests and is reported as the failure', async t =
 
 test('the time budget stops starting new tests', async t => {
   const dir = repo(t, { 'src/x.cpp': '1\n' });
-  catalog(dir, { settings: { budgetSec: 0 }, tests: [testEntry('a', { paths: ['src/**'], command: `${NODE} -e "setTimeout(() => {}, 50)"` }), testEntry('b', { paths: ['src/**'] })] });
+  catalog(dir, { settings: { budgetSec: 1 }, tests: [testEntry('a', { paths: ['src/**'] }), testEntry('b', { paths: ['src/**'] })] });
   baseline(dir);
   touch(dir, 'src/x.cpp', '2\n');
-  const r = await pool.check(dir, { jevKey: null });
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const r = await pool.check(dir, { jevKey: null, log: message => { if (message === 'a: pass') now += 2000; } });
   assert.deepEqual(r.outcome.results.map(x => [x.id, x.status]), [['a', 'pass'], ['b', 'not-run']]);
 });
 

@@ -4,6 +4,7 @@
 const { randomUUID } = require('node:crypto');
 const { validateModel, validateProvider } = require('../providers/providers.cjs');
 const { EFFORTS: CLAUDE_EFFORTS } = require('../providers/claude.cjs');
+const { NATIVE_CLI_INFO } = require('../providers/native-cli.cjs');
 const { codexWindowReset } = require('../providers/limits.cjs');
 const { PRESETS, ROUTER_PRESETS } = require('../routing/router.cjs');
 const { capCatalog } = require('../routing/effort-cap.cjs');
@@ -70,6 +71,27 @@ module.exports = {
     });
   },
 
+  cliInstalled(id) {
+    if (id === 'codex')
+      return this.codex.installed === true;
+    if (id === 'claude-cli')
+      return this.claude.status.installed === true;
+    if (id === 'cursor-cli')
+      return this.cursor.status.installed === true;
+
+    return this.nativeCLIs.get(id)?.status.installed === true;
+  },
+
+  // Installed CLIs with a newer official release. The desktop app sets cliUpdateCheck; without it (tests, headless) nothing runs.
+  async refreshCliUpdates() {
+    if (!this.cliUpdateCheck)
+      return;
+
+    const ids = Object.keys(require('../providers/install.cjs').INSTALLERS).filter(id => this.cliInstalled(id));
+    this.cliUpdates = await this.cliUpdateCheck(ids).catch(() => ({}));
+    this.changed();
+  },
+
   async refreshAccount() {
     let account = null, models = [];
     if (this.codex.connected) {
@@ -109,7 +131,7 @@ module.exports = {
   // and Cursor outside the Harness, so they are never signed out from here.
   setProviderEnabled(id, enabled) {
     if (this.busy) throw new Error('Stop the current turn before changing providers.');
-    const key = { codex: 'chatgptEnabled', 'claude-cli': 'claudeEnabled', 'cursor-cli': 'cursorEnabled' }[id];
+    const key = { codex: 'chatgptEnabled', 'claude-cli': 'claudeEnabled', 'cursor-cli': 'cursorEnabled' }[id] || NATIVE_CLI_INFO[id]?.setting;
     if (!key || typeof enabled !== 'boolean') throw new Error('Unknown provider.');
     this.data.settings[key] = enabled;
   },
@@ -122,7 +144,17 @@ module.exports = {
   },
 
   catalog() {
-    return [...this.codexWorkers(), ...this.claudeWorkers(), ...this.providerWorkers()].sort((a, b) => a.rank - b.rank || a.id.localeCompare(b.id));
+    return [...this.codexWorkers(), ...this.claudeWorkers(), ...this.nativeWorkers(), ...this.providerWorkers()].sort((a, b) => a.rank - b.rank || a.id.localeCompare(b.id));
+  },
+
+  nativeWorkers() {
+    const disabled = new Set(this.data.settings.disabledModels || []);
+    return [...this.nativeCLIs].flatMap(([id, backend]) => backend.models.flatMap(model =>
+      (model.efforts?.length ? model.efforts : [null]).map(effort => ({ ...model, baseId: model.id,
+        id: effort ? `${model.id}:${effort}` : model.id, effort,
+        label: effort ? `${model.label} · ${effort}` : model.label,
+        enabled: !!this.data.settings[NATIVE_CLI_INFO[id].setting] && !disabled.has(model.id),
+      }))));
   },
 
   // Enabled provider models. A Cursor model whose reasoning levels Cursor reports becomes one worker per level
@@ -252,12 +284,11 @@ module.exports = {
   },
 
   available(p) {
+    if (this.nativeCLIs.has(p.provider)) return p.enabled !== false && !!this.data.settings[NATIVE_CLI_INFO[p.provider].setting] && this.nativeCLIs.get(p.provider).status.loggedIn;
     if (p.provider === 'cursor-cli') return p.enabled !== false && this.data.settings.cursorEnabled !== false && this.cursor.status.loggedIn;
     if (p.provider === 'claude-cli') return p.enabled !== false && !!this.data.settings.claudeEnabled && this.claude.status.loggedIn;
-    if (p.provider && p.provider !== 'codex') {
-      // API providers run through the Codex app-server.
-      return p.enabled !== false && this.codex.connected && !!this.data.settings.providers?.some(v => v.id === p.provider && v.enabled);
-    }
+    // API providers run in Harness's own agent loop and need no Codex.
+    if (p.provider && p.provider !== 'codex') return p.enabled !== false && !!this.data.settings.providers?.some(v => v.id === p.provider && v.enabled);
     const live = this.models.some(m => m.model === p.model && (!p.effort || m.supportedReasoningEfforts.some(e => e.reasoningEffort === p.effort)));
     if (!live || p.enabled === false) return false;
     if (!this.account) return false;
@@ -304,6 +335,28 @@ module.exports = {
     const family = entry?.family ? ` ${entry.family[0].toUpperCase()}${entry.family.slice(1)}` : '';
     const name = (PROVIDER_NAMES[provider] || this.data.settings.providers?.find(p => p.id === provider)?.name || provider) + family;
     const until = entry?.known ? ` until ${new Date(entry.until).toLocaleString()}` : '';
+    const route = session.routes.find(route => route.messageId === messageId);
+    const direct = this.agents && (session.tasks || []).find(task => task.foreground &&
+      (task.messageId === messageId || task.budgetId === route?.budget?.budgetId));
+    if (direct) {
+      direct.budgetPaused = true; direct.resumeJobId ||= randomUUID();
+      if (!direct.inputImages) direct.inputImages = (session.items.find(item => (item.clientId || item.id) === direct.messageId)?.content || [])
+        .filter(part => part.type === 'image').map(part => part.url);
+      const budget = this.agents.budgets.forJob(direct);
+      if (budget?.state === 'active') this.agents.budgets.pause(budget, `${name} reached its usage limit${until}. Review the original task before continuing.`);
+      session.queuePaused = true; session.error = `${name} reached its usage limit${until}. The tracked task is paused for review.`;
+      this.lastSends.delete(session.id); this.save(); this.changed(); return;
+    }
+    if ((session.delegation && !session.delegation.delivered) || last?.agentReply) {
+      session.queuePaused = true;
+      session.error = `${name} reached its usage limit${until}. Background work is paused for review.`;
+      if (session.delegation && !session.delegation.delivered) {
+        session.delegation.state = 'interrupted';
+        session.delegation.error = session.error;
+      }
+      this.lastSends.delete(session.id);
+      this.save(); this.changed(); return;
+    }
     const retry = last && last.clientId === messageId && !last.failover && !session.queuePaused &&
       this.catalog().some(p => p.worker && this.available(p) && !this.limits.limited(p.provider || 'codex', p.model));
     this.lastSends.delete(session.id);
@@ -311,7 +364,8 @@ module.exports = {
       session.error = `${name} reached its usage limit${until}. ${outcome.error || ''}`.trim();
       this.save(); this.changed(); return;
     }
-    (session.queue ||= []).unshift({ id: randomUUID(), text: last.text, images: last.images, mode: 'auto', task: last.task, failover: true });
+    (session.queue ||= []).unshift({ id: randomUUID(), text: last.text, images: last.images, mode: 'auto', task: last.task, failover: true,
+      ...(last.fileMessage ? { fileMessage: last.fileMessage } : {}) });
     session.error = null;
     session.notice = `${name} reached its usage limit${until}; sending your message again with another provider.`;
     session.noticeExpiresAt = Date.now() + 10000;
@@ -334,7 +388,8 @@ module.exports = {
     const used = { id: selected.id, provider: selected.provider || 'codex', model: selected.model, effort: selected.effort || null, source: selected.source === 'manual' ? 'manual' : 'router' };
     const abort = new AbortController();
     this.jevComparing = abort;
-    this.smartRouter.shadowJev(text, context, AbortSignal.any([abort.signal, AbortSignal.timeout(30000)]))
+    const compare = () => this.smartRouter.shadowJev(text, context, AbortSignal.any([abort.signal, AbortSignal.timeout(30000)]));
+    (this.agents ? this.agents.budgets.scoped(session, compare) : compare())
       .then(jev => this.jevCompare.record({ at: Date.now(), used, jev }),
         error => { if (!abort.signal.aborted) this.jevCompare.record({ at: Date.now(), used, error: String(error?.message || error).slice(0, 160) }); })
       .finally(() => { if (this.jevComparing === abort) this.jevComparing = null; if (!abort.signal.aborted) this.changed(); });
@@ -393,7 +448,8 @@ module.exports = {
 
   routerChoices() {
     return this.catalog().filter(p => p.router && p.enabled !== false &&
-      (['codex', 'claude-cli', 'cursor-cli'].includes(p.provider) || this.data.settings.providers?.some(v => v.id === p.provider && v.enabled)));
+      (['codex', 'claude-cli', 'cursor-cli'].includes(p.provider) || this.nativeCLIs.has(p.provider) ||
+        this.data.settings.providers?.some(v => v.id === p.provider && v.enabled)));
   },
 
   providerSettings(value) {
@@ -448,7 +504,7 @@ module.exports = {
       if (m.provider === 'codex' && String(m.id).startsWith('codex:')) {
         return this.providerSettings({ action: 'toggleCodexModel', model: m.model, enabled: value.enabled });
       }
-      if (m.provider === 'claude-cli' || ROUTER_PRESETS.some(p => p.id === m.id)) {
+      if (m.provider === 'claude-cli' || this.nativeCLIs.has(m.provider) || ROUTER_PRESETS.some(p => p.id === m.id)) {
         // Claude models are enabled as a whole (all their efforts), like Codex.
         const key = m.baseId || m.id;
         this.data.settings.disabledModels = [...new Set([...(this.data.settings.disabledModels || []).filter(id => id !== key), ...(!value.enabled ? [key] : [])])];

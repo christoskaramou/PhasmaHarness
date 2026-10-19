@@ -4,7 +4,7 @@ function invalidResponse() {
 
 // Only the schema vocabulary used by Harness; reject unsupported validation keywords instead of ignoring them.
 function matches(value, schema) {
-  const supported = ['type', 'properties', 'required', 'additionalProperties', 'anyOf', 'enum', 'items', 'minLength', 'maxLength', 'minimum', 'maximum', 'description'];
+  const supported = ['type', 'properties', 'required', 'additionalProperties', 'anyOf', 'enum', 'items', 'minLength', 'maxLength', 'minimum', 'maximum', 'description', 'pattern'];
   if (Object.keys(schema).some(key => !supported.includes(key))) throw new Error('Unsupported structured response schema.');
   if (schema.anyOf && !schema.anyOf.some(option => matches(value, option))) return false;
   if (schema.enum && !schema.enum.includes(value)) return false;
@@ -18,6 +18,7 @@ function matches(value, schema) {
   if (schema.type === 'number') return typeof value === 'number' && Number.isFinite(value) && !(value < schema.minimum || value > schema.maximum);
   if (schema.type && typeof value !== schema.type) return false;
   if (typeof value === 'string' && (value.length < schema.minLength || value.length > schema.maxLength)) return false;
+  if (typeof value === 'string' && schema.pattern && !new RegExp(schema.pattern).test(value)) return false;
   return true;
 }
 

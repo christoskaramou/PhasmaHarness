@@ -2,8 +2,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { Providers } = require('../src/providers/providers.cjs');
-const { once } = require('node:events');
-const { Writable } = require('node:stream');
 
 const choice = { provider: 'local', model: 'gemma' };
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -20,7 +18,7 @@ function setup(handler) {
   providers.configured = () => false;
   return { providers, calls, provider };
 }
-function lm({ context = 8192, max = 131072, fail = false, response, chat } = {}) {
+function lm({ context = 8192, max = 131072, fail = false, chat } = {}) {
   let instance = context ? { id: 'gemma', config: { context_length: context, flash_attention: true } } : null;
   const fixture = setup((endpoint, body) => {
     if (endpoint === '/api/v1/models') return json({ models: [{ key: 'gemma', type: 'llm', max_context_length: max, loaded_instances: instance ? [instance] : [] }] });
@@ -30,7 +28,6 @@ function lm({ context = 8192, max = 131072, fail = false, response, chat } = {})
       instance = { id: 'gemma-runtime', config: { context_length: body.context_length } };
       return json({ status: 'loaded', instance_id: instance.id });
     }
-    if (endpoint === '/v1/responses') return response ? response(body) : new Response('data: {"type":"response.completed"}\n\n', { headers: { 'content-type': 'text/event-stream' } });
     if (endpoint === '/v1/chat/completions' && chat) return chat(body);
   });
   return { ...fixture, evict: () => { instance = null; } };
@@ -44,8 +41,6 @@ test('LM Studio reloads 8k to 32k, preserves settings, uses the returned instanc
   const result = await providers.prepare(choice);
   assert.equal(result.contextLength, 32768); assert.equal(result.runtimeModel, 'gemma-runtime');
   assert.equal(calls.find(c => c.endpoint === '/api/v1/models/load').body.flash_attention, true);
-  assert.equal(providers.config(choice).config.model_context_window, 32768);
-  assert.equal(providers.config(choice).config.model_auto_compact_token_limit, 24576);
   await providers.prepare(choice);
   assert.equal(calls.filter(c => c.endpoint === '/api/v1/models/load').length, 1);
   await providers.local.unload(choice);
@@ -72,6 +67,18 @@ test('local structured inference uses the schema-enabled chat endpoint and prepa
   assert.equal(request.stream, false); assert.equal(request.max_tokens, 4096);
   assert.equal(request.tools, undefined); assert.equal(request.reasoning_effort, undefined);
   assert.equal(calls.some(c => c.endpoint === '/v1/responses'), false);
+});
+
+test('local structured usage preserves missing counters as unknown and accepts an explicit zero report', async () => {
+  for (const usage of [undefined, {}, { prompt_tokens: 32 }, { prompt_tokens: -1, completion_tokens: 1 }]) {
+    const { providers } = lm({ chat: () => json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(hubReply) } }], usage }) });
+    const result = await providers.structured(choice, hubRequest, new AbortController().signal);
+    assert.equal(result.usage, null);
+  }
+  const { providers } = lm({ chat: () => json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(hubReply) } }],
+    usage: { prompt_tokens: 0, completion_tokens: 0 } }) });
+  const result = await providers.structured(choice, hubRequest, new AbortController().signal);
+  assert.deepEqual(result.usage, { inputTokens: 0, outputTokens: 0, cachedInputTokens: null });
 });
 
 test('local structured responses reject plain text and incomplete output without leaking model text', async () => {
@@ -116,7 +123,7 @@ test('structured inference retains the provider lock and discards replies after 
   assert.equal(fixture.providers.local.locks.size, 0);
 });
 
-test('structured inference uses each managed server format and leaves hosted providers unchanged', async () => {
+test('structured inference uses each managed server format and JSON mode for hosted providers', async () => {
   for (const kind of ['ollama', 'llama.cpp']) {
     const { providers, calls } = setup(endpoint => endpoint === '/v1/chat/completions' ? completion() : null);
     const state = { supported: true, kind, runtimeModel: 'managed-local', contextLength: 32768 };
@@ -126,9 +133,10 @@ test('structured inference uses each managed server format and leaves hosted pro
     assert.equal(request.model, 'managed-local');
     assert.deepEqual(kind === 'llama.cpp' ? request.response_format.schema : request.response_format.json_schema.schema, hubSchema);
   }
-  const { providers, calls } = setup(() => null);
-  assert.equal(await providers.structured(choice, hubRequest, new AbortController().signal), null);
-  assert.equal(calls.some(c => c.endpoint === '/v1/chat/completions'), false);
+  // Hosted APIs (DeepSeek and others) are called directly instead of falling back to Codex.
+  const hosted = setup(endpoint => endpoint === '/v1/chat/completions' ? completion() : null);
+  await hosted.providers.structured(choice, hubRequest, new AbortController().signal);
+  assert.deepEqual(hosted.calls.find(c => c.endpoint === '/v1/chat/completions').body.response_format, { type: 'json_object' });
 });
 
 test('larger loaded contexts are retained, small model limits are respected, eviction triggers reload', async () => {
@@ -168,7 +176,6 @@ test('failed load is reported without private server data and is never marked lo
 test('hosted and unsupported endpoints receive no management writes or context overrides', async () => {
   const { providers, calls } = setup(() => json({}, 404));
   assert.equal((await providers.prepare(choice)).supported, false);
-  assert.equal(providers.config(choice).config.model_context_window, undefined);
   assert.equal(calls.length, 3);
   await providers.prepare(choice); assert.equal(calls.length, 3, 'unsupported detection is cached');
   assert.equal(calls.some(c => c.body), false);
@@ -206,51 +213,29 @@ test('llama.cpp router loads/unloads and reports its real server context without
   assert.equal(calls.some(c => c.endpoint.startsWith('/props?')), false, 'status must not auto-load');
   const state = await providers.prepare(choice);
   assert.equal(state.canResize, false); assert.equal(state.contextLength, 8192);
-  assert.equal(providers.config(choice).config.model_context_window, 8192);
   await providers.local.unload(choice); assert.equal(loaded, false);
 });
 
-async function forward(providers, body) {
-  const { Readable } = require('node:stream');
-  const req = Readable.from([Buffer.from(JSON.stringify({ model: 'gemma', ...body }))]);
-  req.url = `/${providers.token}/local/v1/responses`; req.method = 'POST'; req.headers = {};
-  let output = '';
-  const res = new Writable({ write(chunk, _encoding, callback) { output += chunk; callback(); } });
-  res.writeHead = function (status) { this.status = status; this.headersSent = true; return this; };
-  const finished = once(res, 'finish');
-  await providers.forward(req, res); await finished;
-  return { status: res.status, output };
+async function request(providers, messages) {
+  const signal = new AbortController().signal;
+  const local = await providers.local.inspect(choice, signal);
+  return providers.modelRequest(choice, { model: 'gemma', messages }, local, signal, 'chat/completions');
 }
 
-test('Responses proxy loads before forwarding and strips portable state as before', async () => {
-  const { providers, calls } = lm({ context: null });
-  const res = await forward(providers, { input: [{ type: 'reasoning' }, { type: 'message', content: [{ type: 'input_text', text: 'hey' }] }], previous_response_id: 'old' });
-  assert.equal(res.status, 200);
-  const forwarded = calls.find(c => c.endpoint === '/v1/responses').body;
-  assert.equal(forwarded.model, 'gemma-runtime'); assert.equal(forwarded.input.length, 1);
-  assert.equal(forwarded.previous_response_id, undefined); assert.equal(forwarded.max_output_tokens, 4096);
+test('base64 image bytes do not drive model allocation', async () => {
+  const { providers, calls } = lm({ context: 32768, chat: () => completion() });
+  const image = { type: 'image_url', image_url: { url: 'data:image/png;base64,' + 'a'.repeat(500000) } };
+  assert.equal((await request(providers, [{ role: 'user', content: [image] }])).status, 200);
+  assert.equal(calls.some(c => c.endpoint === '/api/v1/models/load'), false);
 });
 
-test('large prompts grow context, while base64 image bytes do not drive model allocation', async () => {
-  const large = lm({ context: 32768 });
-  assert.equal((await forward(large.providers, { input: 'a'.repeat(150000) })).status, 200);
-  assert.equal(large.calls.find(c => c.endpoint === '/api/v1/models/load').body.context_length, 65536);
-  const image = lm({ context: 32768 });
-  await forward(image.providers, { input: [{ type: 'message', content: [{ type: 'input_image', image_url: 'data:image/png;base64,' + 'a'.repeat(500000) }] }] });
-  assert.equal(image.calls.some(c => c.endpoint === '/api/v1/models/load'), false);
-});
-
-test('HTTP context overflow retries once at a larger context and model limits give an actionable error', async () => {
-  let attempts = 0;
+test('a model at its context limit gets one request and an actionable error', async () => {
   const overflowing = () => json({ error: { message: 'request (50000 tokens) exceeds the available context size (32768 tokens)' } }, 400);
-  const fixture = lm({ context: 32768, response: () => ++attempts === 1 ? overflowing() : new Response('done') });
-  assert.equal((await forward(fixture.providers, { input: 'hey' })).status, 200);
-  assert.equal(attempts, 2);
-  assert.equal(fixture.calls.find(c => c.endpoint === '/api/v1/models/load').body.context_length, 65536);
-  const limited = lm({ context: 32768, max: 32768, response: overflowing });
-  const result = await forward(limited.providers, { input: 'hey' });
-  assert.equal(result.status, 400); assert.match(result.output, /Compact the conversation/);
-  assert.equal(limited.calls.filter(c => c.endpoint === '/v1/responses').length, 1);
+  const { providers, calls } = lm({ context: 32768, max: 32768, chat: overflowing });
+  const response = await request(providers, [{ role: 'user', content: 'hey' }]);
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error.message, /Compact the conversation/);
+  assert.equal(calls.filter(c => c.endpoint === '/v1/chat/completions').length, 1);
 });
 
 test('Ollama cloud-backed models never create a local context preset or change the request model', async () => {
@@ -258,10 +243,11 @@ test('Ollama cloud-backed models never create a local context preset or change t
     if (endpoint === '/api/version') return json({ version: '0.13.3' });
     if (endpoint === '/api/tags') return json({ models: [{ name: 'gemma:latest', digest: 'cloud-alias' }] });
     if (endpoint === '/api/show') return json({ remote_host: 'https://ollama.com', remote_model: 'gemma:cloud' });
-    if (endpoint === '/v1/responses') return new Response('done');
+    if (endpoint === '/v1/chat/completions') return completion();
   });
   assert.equal((await providers.prepare(choice)).supported, false);
-  assert.equal((await forward(providers, { input: 'hello' })).status, 200);
-  assert.equal(calls.find(c => c.endpoint === '/v1/responses').body.model, 'gemma');
+  assert.equal((await request(providers, [{ role: 'user', content: 'hello' }])).status, 200);
+  assert.equal(calls.find(c => c.endpoint === '/v1/chat/completions').body.model, 'gemma');
   assert.equal(calls.some(c => ['/api/create', '/api/generate'].includes(c.endpoint)), false);
 });
+

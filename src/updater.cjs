@@ -8,9 +8,9 @@ const path = require('node:path');
 const { checkForUpdate, downloadInstaller, startInstaller, compareVersions } = require('./updates.cjs');
 
 class Updater extends EventEmitter {
-  constructor({ current, fetch, directory, installable, busy = () => false, quit = () => {}, spawn } = {}) {
+  constructor({ current, fetch, directory, installable, busy = () => false, pause = () => () => {}, quit = () => {}, spawn, launch } = {}) {
     super();
-    Object.assign(this, { current, fetch, directory, installable: !!installable, busy, quit, spawn });
+    Object.assign(this, { current, fetch, directory, installable: !!installable, busy, pause, quit, spawn, launch });
     this.release = null; this.installing = null;
     this.state = { status: 'idle', current, installable: false };
   }
@@ -33,6 +33,7 @@ class Updater extends EventEmitter {
     if (this.busy()) return Promise.reject(new Error('Finish or stop the current turn first; updating restarts the app.'));
     const release = this.release;
     this.installing = (async () => {
+      let resume, launched = false;
       try {
         let shown = -1;
         this.set({ status: 'downloading', progress: 0, error: null });
@@ -42,10 +43,14 @@ class Updater extends EventEmitter {
         } });
         // A turn that started during the download keeps running; the verified installer is reused next time.
         if (this.busy()) throw new Error('A turn started during the download. Choose Update and restart again when it finishes.');
+        resume = this.pause();
         this.set({ status: 'installing', progress: 100 });
-        await startInstaller(file, this.spawn);
+        if (this.launch) await this.launch(file);
+        else await startInstaller(file, this.spawn);
+        launched = true;
         this.quit();
       } catch (error) {
+        if (!launched && !error.launchUncertain) resume?.();
         this.set({ status: 'error', error: error.message });
         throw error;
       } finally { this.installing = null; }

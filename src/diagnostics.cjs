@@ -1,6 +1,7 @@
 // Plain-text diagnostics for bug reports: versions, provider state, settings that affect behavior, active limits
 // and recent log lines. No prompts, replies, file contents, keys, emails or session titles.
 const { redact } = require('./log.cjs');
+const { NATIVE_CLI_INFO } = require('./providers/native-cli.cjs');
 
 function yesNo(value) { return value ? 'yes' : 'no'; }
 
@@ -16,6 +17,7 @@ function buildDiagnostics({ controller, app = {}, cli = {}, logLines = [] }) {
     `Codex CLI ${cli.codex || '?'} · running: ${yesNo(controller.codex?.connected)} · ChatGPT signed in: ${yesNo(controller.codex?.signedIn)} · used here: ${yesNo(!!controller.account)}${controller.account?.plan ? ` (${controller.account.plan})` : ''} · models enabled: ${enabled('codex')}`,
     `Claude Code ${cli.claude || '?'} · signed in: ${yesNo(controller.claude.status?.loggedIn)} · used here: ${yesNo(s.claudeEnabled)} · models: ${controller.claude.models?.length || 0}${controller.claude.status?.modelsError ? ` · discovery error: ${controller.claude.status.modelsError}` : ''}`,
     `Cursor CLI ${cli.cursor || '?'} · signed in: ${yesNo(controller.cursor.status?.loggedIn)} · used here: ${yesNo(s.cursorEnabled !== false)} · models enabled: ${enabled('cursor-cli')}`,
+    ...[...(controller.nativeCLIs || [])].map(([id, backend]) => `${NATIVE_CLI_INFO[id].label} ${backend.status.version || '?'} · installed: ${yesNo(backend.status.installed)} · ready: ${yesNo(backend.status.loggedIn)} · used here: ${yesNo(s[NATIVE_CLI_INFO[id].setting])} · models enabled: ${enabled(id)}`),
     ...(s.providers || []).map(p => `API provider ${p.id} · ${hostOf(p.baseUrl)} · enabled: ${yesNo(p.enabled !== false)} · models enabled: ${enabled(p.id)}`),
     '',
     `Routing: ${s.routing} · router: ${s.routerPreset} · effective router: ${controller.effectiveRouter?.()?.id || 'none'} · manual selection: ${s.mode}`,

@@ -36,7 +36,8 @@ function parseChecklist(text) {
 }
 
 // Paths never read as evidence: VCS internals, environment files, credentials, secrets and keys.
-const PRIVATE_PATH = /(^|[\\/])(\.git|\.env(?:\..*)?|auth\.json|credentials[^\\/]*|secrets?[^\\/]*|id_rsa|id_ed25519)([\\/]|$)|\.(pem|key|pfx|p12)$/i;
+// Also the one list for artifact publishing and ZIP downloads, which can leave the machine.
+const PRIVATE_PATH = /(^|[\\/])(\.git|\.ssh|\.aws|\.kube|\.env(?:\..*)?|auth\.json|\.credentials\.json|credentials[^\\/]*|secrets?[^\\/]*|\.npmrc|\.netrc|_netrc|\.git-credentials|\.docker[\\/]config\.json|service-account[^\\/]*\.json|msal_token_cache[^\\/]*|id_(?:rsa|dsa|ecdsa|ed25519)[^\\/]*|[^\\/]*(?:secret|credential)[^\\/]*\.(?:json|txt))([\\/]|$)|\.(pem|key|pfx|p12|keystore)$/i;
 
 function resolveCitations(workspace, text) {
   // ponytail: inspect up to 20 explicit file:line references and 64 KiB per file; other formats remain unassessed.
@@ -192,6 +193,7 @@ function validateChecks(workspace, list) {
   return list.map(check => {
     if (!check || typeof check !== 'object' || typeof check.name !== 'string' || !check.name.trim() || check.name.length > 80) throw new Error('Check name is required.');
     if (!Array.isArray(check.argv) || !check.argv.length || check.argv.some(part => typeof part !== 'string' || !part)) throw new Error('Check command must be a non-empty argument list.');
+    if (check.kind !== undefined && !['build', 'launch', 'gameplay', 'test'].includes(check.kind)) throw new Error('Choose a build, launch, gameplay or test check.');
     const cwd = fs.realpathSync(check.cwd || root);
     const relative = path.relative(root, cwd);
     if (!relative && cwd !== root || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) throw new Error('Check directory must stay inside the workspace.');
@@ -200,6 +202,7 @@ function validateChecks(workspace, list) {
     return {
       id: typeof check.id === 'string' && /^[\w-]{1,80}$/.test(check.id) ? check.id : randomUUID(),
       name: check.name.trim(), argv: [...check.argv], cwd, timeoutMs, readOnlySafe: check.readOnlySafe === true,
+      ...(check.kind ? { kind: check.kind } : {}),
     };
   });
 }

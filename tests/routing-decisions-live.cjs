@@ -64,7 +64,6 @@ async function main() {
   const output = path.join(directory, 'results.json');
   try {
     controller.providers = new Providers(path.join(home, 'provider-keys'), safeStorage, () => controller.data.settings.providers || [], (...args) => net.fetch(...args));
-    await controller.providers.start();
     controller.smartRouter.providers = controller.providers;
     await controller.initialize();
     if (controller.cursor.status.loggedIn) await controller.discoverCursor();
@@ -90,7 +89,7 @@ async function main() {
     process.exitCode = report.samples.some(s => s.error || !s.difficultyMatch || !s.effortMatch) ? 1 : 0;
   } finally {
     for (const router of routers) router.close();
-    controller.close(); controller.providers?.close();
+    controller.close();
   }
 }
 

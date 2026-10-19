@@ -29,6 +29,7 @@ const scan = { // replaceable in tests
   }),
   taskkill: args => spawn('taskkill.exe', args, { windowsHide: true, stdio: 'ignore' }),
   taskkillSync: args => spawnSync('taskkill.exe', args, { windowsHide: true, timeout: 15000, stdio: 'ignore' }),
+  procTable,
 };
 const TABLE = ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; ${LIST}; '${END}'`];
 const TABLE_OPTIONS = { encoding: 'utf8', timeout: 15000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 };
@@ -48,6 +49,26 @@ function tableFrom(result) {
   if (!rows.length) throw new Error('Process list unavailable.');
   return rows;
 }
+
+// Linux: the same rows from /proc, plus the process name. Start times count from the boot second (USER_HZ is 100), so
+// they stay the same across restarts but can be up to a second early against the wall clock.
+function procTable() {
+  const boot = Number(/^btime (\d+)$/m.exec(fs.readFileSync('/proc/stat', 'utf8'))[1]) * 1000;
+  const rows = [];
+  for (const name of fs.readdirSync('/proc')) {
+    if (!/^\d+$/.test(name)) continue;
+    try {
+      const stat = fs.readFileSync(`/proc/${name}/stat`, 'utf8');
+      const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+      if (fields[0] === 'Z') continue; // exited, only waiting to be reaped
+      rows.push({ pid: Number(name), ppid: Number(fields[1]), startedMs: boot + Number(fields[19]) * 10, name: stat.slice(stat.indexOf('(') + 1, stat.lastIndexOf(')')) });
+    } catch { /* exited, or another user's process */ }
+  }
+  return rows;
+}
+// Windows reads ancestry for every target; Linux only for one without an owner tag (found by ancestry instead).
+const tableFor = target => (process.platform === 'win32' ? windowsTable() : target.tags.length ? null : scan.procTable());
+const tableForAsync = target => (process.platform === 'win32' ? windowsTableAsync() : tableFor(target));
 
 // `known` maps pid -> { startedMs, exact, endedMs? }. Observed processes must match their creation time exactly; only a
 // root, recorded from the wall clock just before spawn and not yet observed, gets a narrow window. endedMs is when the
@@ -182,10 +203,12 @@ function spawnOwned(launch, file, args, options = {}) {
 }
 
 // Cleanup of worker processes. A target names what to stop: `roots()` gives root records { pid, startedMs, endedMs? }
-// (re-read on every scan), `tags` the Linux owner tags, `known` the Windows tree recorded so far (it grows). A running
-// Linux root (`spare`) gets until `graceUntil` to exit on its own signal before it is killed too.
+// (re-read on every scan), `tags` the Linux owner tags, `known` the tree recorded so far (Windows, or Linux without tags;
+// it grows), `adopt(table)` optionally adds to it on each scan. A running Linux root (`spare`) gets until `graceUntil`
+// to exit on its own signal before it is killed too.
 function aliveIn(target, table) {
-  if (process.platform === 'win32') {
+  if (table) {
+    target.adopt?.(table);
     linkDescendants(table, withRoots(target.known, target.roots()), Date.now());
     return table.filter(row => alive(target.known.get(row.pid), row)).map(row => row.pid);
   }
@@ -200,7 +223,7 @@ const exited = proc => new Promise(resolve => { proc.once('exit', resolve); proc
 // Blocking: kills the target's live processes and re-checks until none remain or the deadline passes.
 // Returns { stopped, remaining }; a failed scan counts as unconfirmed (-1).
 function stopTarget(target, deadline) {
-  const scanNow = () => aliveIn(target, process.platform === 'win32' ? windowsTable() : null);
+  const scanNow = () => aliveIn(target, tableFor(target));
   let found;
   try { found = scanNow(); } catch { return { stopped: 0, remaining: [-1] }; }
   const stopped = found.length;
@@ -218,7 +241,7 @@ function stopTarget(target, deadline) {
 async function sweepTarget(target, deadline) {
   for (;;) {
     let found;
-    try { found = aliveIn(target, process.platform === 'win32' ? await windowsTableAsync() : null); } catch { return [-1]; }
+    try { found = aliveIn(target, await tableForAsync(target)); } catch { return [-1]; }
     if (!found.length || Date.now() >= deadline) return found;
     const pids = killable(target, found);
     if (process.platform === 'win32') for (const args of taskkillArgs(pids)) await exited(scan.taskkill(args));
@@ -231,21 +254,26 @@ const workerTarget = key => ({ roots: () => (owned.has(key) ? [owned.get(key)] :
 const runTarget = known => ({ roots: () => owned.values(), tags: [`${OWNER}=${RUN}/`], known });
 
 // A cleanup that could not be confirmed, in a form that survives a restart: the roots and the recorded tree
-// (Windows) and the owner tag (Linux).
+// (Windows) and the owner tag (Linux), or the anchor of what a worker started during a stopped turn.
 function cleanupRecord(id, target) {
   const entry = (pid, e) => ({ pid, startedMs: e.startedMs, exact: e.exact === true, ...(e.endedMs !== undefined && { endedMs: e.endedMs }) });
   return {
     id, tags: target.tags,
     roots: [...target.roots()].map(root => ({ pid: root.pid, startedMs: root.startedMs, ...(root.endedMs !== undefined && { endedMs: root.endedMs }) })),
     children: [...target.known].slice(-500).map(([pid, e]) => entry(pid, e)),
+    ...(target.anchor && { anchor: { ...target.anchor } }),
   };
 }
 function recordTarget(record) {
   const roots = (record.roots || []).filter(root => Number.isInteger(root?.pid));
-  return {
+  const target = {
     roots: () => roots, tags: (record.tags || []).filter(tag => typeof tag === 'string' && tag.startsWith(`${OWNER}=`)),
     known: new Map((record.children || []).map(c => [c.pid, { startedMs: c.startedMs, exact: c.exact === true, ...(c.endedMs !== undefined && { endedMs: c.endedMs }) }])),
   };
+  const anchor = record.anchor;
+  if (Number.isInteger(anchor?.pid) && [anchor.startedMs, anchor.sinceMs, anchor.untilMs].every(Number.isFinite))
+    Object.assign(target, { anchor, adopt: table => adoptStartedSince(table, anchor, target.known) });
+  return target;
 }
 // Retrying a recorded cleanup: blocking (at start-up) or not (while the app runs). A record is confirmed clean when
 // nothing remains; `record` is its grown version (descendants found by this retry included), to keep for the next.
@@ -293,6 +321,48 @@ function stopTree(child) {
   return sweep;
 }
 
+// Adds to `known` what the running worker anchor.pid (or, on Linux, the native `codex` its npm launcher started) started
+// between anchor.sinceMs and anchor.untilMs (open while unset). The worker's own row gives the table's clock offset
+// (Linux counts from the boot second).
+function adoptStartedSince(table, anchor, known) {
+  const own = table.find(row => row.pid === anchor.pid && same({ startedMs: anchor.startedMs, exact: false }, row.startedMs));
+  if (!own) return; // exited: what it started is recorded already, or ended with it
+  const offset = Math.max(0, anchor.startedMs - own.startedMs);
+  const before = row => row.startedMs + offset < anchor.sinceMs - 50;
+  const during = row => !before(row) && (anchor.untilMs === undefined || row.startedMs + offset <= anchor.untilMs + 50);
+  const servers = new Set([anchor.pid, ...table.filter(row => row.ppid === anchor.pid && row.name === 'codex' && before(row)).map(row => row.pid)]);
+  for (const row of table) {
+    const seen = known.get(row.pid);
+    if (servers.has(row.ppid) && !servers.has(row.pid) && during(row) && !(seen && same(seen, row.startedMs))) known.set(row.pid, { startedMs: row.startedMs, exact: true });
+  }
+}
+
+// Stops what a running worker started from `sinceMs` until `interrupt` settles (a stopped Codex turn's commands) and
+// everything those started, but never the worker itself or what it started earlier or later (its MCP helpers).
+// `interrupt` runs at once; the tree is recorded, then `terminate` asks the worker to end them, then whatever is left is
+// killed and checked again. Returns { interrupted: interrupt()'s promise, remaining } and reports through `cleanup` like
+// stopTree. A saved record keeps the worker only as its anchor, so a retry finds the same processes but never stops it.
+function stopStartedSince(child, sinceMs, id, interrupt, terminate) {
+  const root = owned.get(child?.ownerKey);
+  if (!root || root.endedMs !== undefined || !Number.isFinite(sinceMs) || sweeps.has(id)) {
+    const interrupted = interrupt();
+    return { interrupted: interrupted.then(terminate), remaining: sweeps.get(id) || interrupted.then(() => [], () => []) };
+  }
+  const anchor = { pid: root.pid, startedMs: root.startedMs, sinceMs };
+  const target = { roots: () => [], tags: [], known: new Map(), anchor, adopt: table => adoptStartedSince(table, anchor, target.known) };
+  cleanup.emit('pending', id);
+  const interrupted = interrupt();
+  const sweep = Promise.resolve().then(() => tableForAsync(target)).then(target.adopt, () => {})
+    .then(() => interrupted.catch(() => {})).then(() => { anchor.untilMs = Date.now(); return terminate(); }).catch(() => {})
+    .then(() => sweepTarget(target, Date.now() + 5000)).catch(() => [-1]).then(remaining => {
+      sweeps.delete(id);
+      cleanup.emit('done', { id, remaining, record: remaining.length ? cleanupRecord(id, target) : null });
+      return remaining;
+    });
+  sweeps.set(id, sweep);
+  return { interrupted, remaining: sweep };
+}
+
 // Adds recorded roots to `known` (Windows). The newest process with a pid wins; an ended root keeps its exit time.
 function withRoots(known, roots = owned.values()) {
   for (const root of roots) {
@@ -328,5 +398,19 @@ function stopOwned({ known = new Map(), deadline = Date.now() + 5000 } = {}) {
   return { ...result, record: result.remaining.length ? cleanupRecord(`run:${RUN}`, target) : null };
 }
 
-module.exports = { TAG, OWNER, Watch, leftovers, stopLeftovers, linkDescendants, parseRows, windowsTable, scan,
-  spawnOwned, stopTree, snapshotOwned, settleOwned, stopOwned, stopRecord, sweepRecord, cleanup, owned };
+// PowerShell 7 puts its own module folders (...\PowerShell\..., never ...\WindowsPowerShell\...) in PSModulePath and passes them to
+// every descendant. Windows PowerShell started below Harness then loads PowerShell 7 modules and loses built-ins such as
+// Get-FileHash (the Claude installer failed this way). pwsh drops these entries itself only when it starts powershell.exe.
+function cleanPowerShellModulePath(env = process.env) {
+  if (!env.PSModulePath)
+    return;
+
+  const kept = env.PSModulePath.split(';').filter(entry => !/\\PowerShell\\/i.test(entry)).join(';');
+  if (kept)
+    env.PSModulePath = kept;
+  else
+    delete env.PSModulePath;
+}
+
+module.exports = { cleanPowerShellModulePath, TAG, OWNER, Watch, leftovers, stopLeftovers, linkDescendants, parseRows, windowsTable, scan,
+  spawnOwned, stopTree, stopStartedSince, snapshotOwned, settleOwned, stopOwned, stopRecord, sweepRecord, cleanup, owned };

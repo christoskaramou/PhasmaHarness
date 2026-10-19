@@ -13,7 +13,6 @@ class LocalModels {
     this.kinds = new Map(); this.states = new Map(); this.locks = new Map();
   }
   key(choice) { return `${this.providers.provider(choice.provider).baseUrl}|${choice.model}`; }
-  cached(choice) { return choice?.provider && !['codex', 'claude-cli', 'cursor-cli'].includes(choice.provider) ? this.states.get(this.key(choice)) : null; }
   async request(p, endpoint, body, signal, optional = false) {
     const root = p.baseUrl.replace(/\/v1$/, '');
     let response;

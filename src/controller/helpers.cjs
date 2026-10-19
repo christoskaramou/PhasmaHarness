@@ -34,7 +34,7 @@ module.exports = {
 
   async bridgeTool(sessionId, tool, args, signal) {
     const session = this.session(sessionId);
-    if (this.busy !== session.id || this.stopping.has(session.id) || !this.activeTurns.has(session.id)) {
+    if (this.busy !== session.id || this.stopping.has(session.id) || !this.activeTurns.has(session.id) || !this.assignmentCurrent(session)) {
       throw new Error('Helper MCP call rejected: no active turn for this session.');
     }
     if (signal?.aborted || this.cliAbort?.signal.aborted) throw new Error('Helper call stopped.');
@@ -104,7 +104,7 @@ module.exports = {
 
   async helperToolCall(message) {
     const p = message.params, session = this.data.sessions.find(s => s.threadId === p?.threadId);
-    const active = () => session?.helperTools && this.busy === session.id && !this.stopping.has(session.id) && this.activeTurns.get(session.id) === p.turnId;
+    const active = () => session?.helperTools && this.busy === session.id && !this.stopping.has(session.id) && this.assignmentCurrent(session) && this.activeTurns.get(session.id) === p.turnId;
     if (!active() || p.namespace || ![...HELPER_TOOLS, ...(this.agents ? AGENT_TOOLS : [])].some(tool => tool.name === p.tool) || this.helperRequests.has(message.id) ||
       !p.arguments || typeof p.arguments !== 'object' || Array.isArray(p.arguments)) {
       this.client.rejectRequest(message.id, 'Unsupported or inactive tool-helper call.'); return;

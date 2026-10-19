@@ -91,7 +91,7 @@ app.whenReady().then(async () => {
   } finally {
     clearTimeout(deadline); agents.closing = true;
     await Promise.all(agents.initializing.values());
-    for (const controller of agents.controllers.values()) controller.close();
+    for (const controller of agents.allControllers()) controller.close();
     client.close(true); server.closeAllConnections(); server.close();
     window?.destroy();
   }

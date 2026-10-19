@@ -53,6 +53,88 @@ test('limits expire at their reset, or after a default wait when none was report
   assert.deepEqual(Object.keys(limits.active()), ['cursor-cli']);
 });
 
+test('background quota reserve uses valid saved reports, respects resets and never invents unknown allowance', () => {
+  let now = 1000;
+  const quotas = {}, limits = new ProviderLimits({}, () => now, quotas);
+  assert.equal(limits.backgroundGuard('codex'), null);
+  limits.setUsage('codex', { primary: { usedPercent: 92, resetsAt: 10 }, credits: { unlimited: true } });
+  assert.equal(limits.backgroundGuard('codex').usedPercent, 92);
+  assert.equal(limits.backgroundGuard('codex').until, 10000);
+  assert.equal(limits.backgroundGuard('codex', 95), null);
+  limits.setUsage('codex', { primary: { usedPercent: '0' }, secondary: { usedPercent: -1 } });
+  assert.equal(limits.backgroundGuard('codex').usedPercent, 92, 'malformed updates do not erase a valid reserve');
+  const restored = new ProviderLimits({}, () => now, JSON.parse(JSON.stringify(quotas)));
+  assert.equal(restored.backgroundGuard('codex').usedPercent, 92);
+  assert.equal(restored.backgroundGuard('native:muse'), null);
+  now = 10000;
+  assert.equal(restored.backgroundGuard('codex'), null);
+  limits.setUsage('codex', { secondary: { usedPercent: 95 } });
+  now += UNKNOWN_RESET_MS * 2;
+  assert.equal(limits.backgroundGuard('codex').until, null, 'no reset time is guessed');
+  limits.setUsage('codex', { secondary: { usedPercent: 12 } });
+  assert.equal(limits.backgroundGuard('codex'), null);
+  limits.setUsage('codex', { secondary: { usedPercent: 105 } });
+  assert.equal(limits.backgroundGuard('codex').usedPercent, 105, 'a report beyond 100% is not discarded');
+});
+
+test('Claude allowance reserves distinguish overall and model windows, persist only known data and bind it to native account metadata', () => {
+  let now = Date.parse('2026-10-18T09:00:00Z');
+  const quotas = {}, limits = new ProviderLimits({}, () => now, quotas);
+  const report = { rate_limits_available: true, subscription_type: 'max', behaviors: { private: 'do not persist' },
+    session: { private: 'do not persist' }, rate_limits: {
+      five_hour: { utilization: 20, resets_at: '2026-10-18T10:00:00Z' },
+      seven_day: { utilization: 40, resets_at: '2026-10-25T09:00:00Z' },
+      seven_day_opus: { utilization: 95, resets_at: '2026-10-25T09:00:00Z' },
+      seven_day_sonnet: { utilization: '90', resets_at: null },
+    } };
+  limits.setUsage('claude-cli', report, 'account-one');
+  assert.equal(limits.backgroundGuard('claude-cli', 90, 'claude-sonnet-5', 'account-one'), null);
+  assert.equal(limits.backgroundGuard('claude-cli', 90, 'claude-opus-5', 'account-two'), null);
+  assert.equal(limits.backgroundGuard('claude-cli', 90, 'claude-opus-5', 'account-one').usedPercent, 95);
+  assert.equal(quotas['claude-cli'].seven_day_sonnet, undefined);
+  assert.doesNotMatch(JSON.stringify(limits.usage), /do not persist/);
+  limits.setUsage('claude-cli', { rate_limits_available: false }, 'account-one');
+  assert.equal(limits.usage['claude-cli'].available, false);
+  assert.equal(limits.backgroundGuard('claude-cli', 90, 'claude-opus-5', 'account-one').usedPercent, 95);
+  const restored = new ProviderLimits({}, () => now, JSON.parse(JSON.stringify(quotas)));
+  assert.equal(restored.backgroundGuard('claude-cli', 90, 'claude-opus-5', 'account-one').usedPercent, 95);
+  now = Date.parse('2026-10-25T09:00:00Z');
+  assert.equal(restored.backgroundGuard('claude-cli', 90, 'claude-opus-5', 'account-one'), null);
+});
+
+test('Claude CLI/SDK and opaque model allowance windows remain explicit, with unknown scopes protected conservatively', () => {
+  const limits = new ProviderLimits();
+  limits.setUsage('claude-cli', { rate_limits_available: true, rate_limits: {
+    seven_day_oauth_apps: { utilization: 91, resets_at: 'not an ISO date' },
+  } }, 'account');
+  assert.equal(limits.backgroundGuard('claude-cli', 90, 'claude-sonnet-5', 'account').until, null);
+  limits.setUsage('claude-cli', { rate_limits_available: true, rate_limits: {
+    seven_day_oauth_apps: { utilization: 12 },
+    model_scoped: [{ display_name: 'Fable', utilization: 94 }, { display_name: 'Opus', utilization: 96 }],
+  } }, 'account');
+  assert.match(limits.backgroundGuard('claude-cli', 90, 'claude-sonnet-5', 'account').reason, /Fable.*model scope is unavailable/);
+  assert.match(limits.backgroundGuard('claude-cli', 90, 'claude-opus-5', 'account').reason, /Opus/);
+  limits.setUsage('claude-cli', { rate_limits_available: true, rate_limits: {
+    model_scoped: [{ display_name: 'Opus', utilization: 96 }, { display_name: 'Fable', utilization: 'unknown' }],
+  } }, 'account');
+  assert.match(limits.backgroundGuard('claude-cli', 90, 'claude-sonnet-5', 'account').reason, /Fable/);
+  limits.setUsage('claude-cli', { rate_limits_available: true, rate_limits: {
+    model_scoped: [{ display_name: 'Opus', utilization: 96 }],
+  } }, 'other-account');
+  assert.match(limits.backgroundGuard('claude-cli', 90, 'claude-sonnet-5', 'account').reason, /Fable/);
+  limits.setUsage('claude-cli', { rate_limits_available: true, rate_limits: {
+    model_scoped: [{ display_name: 'Opus', utilization: 96 }],
+  } }, 'account');
+  assert.equal(limits.backgroundGuard('claude-cli', 90, 'claude-sonnet-5', 'account'), null);
+  assert.match(limits.backgroundGuard('claude-cli', 90, 'claude-opus-5', 'account').reason, /Opus/);
+  limits.setUsage('claude-cli', { rate_limits_available: true, rate_limits: { model_scoped: [] } }, 'account');
+  assert.equal(limits.backgroundGuard('claude-cli', 90, 'claude-sonnet-5', 'account'), null);
+  limits.setUsage('claude-cli', { rate_limits_available: true, rate_limits: {
+    model_scoped: [{ display_name: 'Opus' + ' '.repeat(100) + 'unmapped', utilization: 96 }],
+  } }, 'account');
+  assert.match(limits.backgroundGuard('claude-cli', 90, 'claude-sonnet-5', 'account').reason, /model scope is unavailable/);
+});
+
 test('Cursor turns ending with its plan-limit line fail with a limit', async () => {
   const cursor = new CursorCLI();
   let onUpdate;

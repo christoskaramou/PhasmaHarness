@@ -6,13 +6,13 @@ class JevKey {
   get configured() { return fs.existsSync(this.filename); }
   read() {
     if (!this.configured) throw new Error(`Add your ${this.label} API key in Settings first.`);
-    if (!this.encryption.isEncryptionAvailable()) throw new Error('Windows key protection is unavailable.');
+    if (!this.encryption.isEncryptionAvailable()) throw new Error('OS key protection is unavailable on this host.');
     try { return this.encryption.decryptString(fs.readFileSync(this.filename)); }
     catch { throw new Error(`The saved ${this.label} key could not be decrypted. Enter it again in Settings.`); }
   }
   save(key) {
     if (typeof key !== 'string' || !key.trim() || key.length > 4096 || /[\r\n]/.test(key.trim())) throw new Error(`Enter a valid ${this.label} API key.`);
-    if (!this.encryption.isEncryptionAvailable()) throw new Error('Windows key protection is unavailable.');
+    if (!this.encryption.isEncryptionAvailable()) throw new Error('OS key protection is unavailable on this host.');
     const encrypted = this.encryption.encryptString(key.trim());
     fs.mkdirSync(path.dirname(this.filename), { recursive: true });
     fs.writeFileSync(this.filename + '.tmp', encrypted, { mode: 0o600 });

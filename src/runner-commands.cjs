@@ -1,0 +1,116 @@
+function assertRunnerOpen(agents, name) {
+  if (agents.closing && !['bootstrap', 'runnerInfo', 'stop', 'voiceStop', 'stopArtifactRun', 'stopDownloads', 'diagnostics', 'updateStatus'].includes(name))
+    throw new Error('The runner is stopping or updating. Reopen Harness when it finishes.');
+}
+
+function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolder, stopDownloads }) {
+  const { controller, agents, wikiStore, documents, updater } = runner;
+  const preparing = new Set();
+  handle('bootstrap', () => agents.snapshot());
+  handle('providerConnection', (id, action) => require('./provider-connection.cjs').providerConnection(runner, id, action));
+  handle('renewModels', () => require('./provider-connection.cjs').renewModels(runner));
+  handle('providerModels', async id => {
+    if (controller.nativeCLIs.has(id)) {
+      const backend = controller.nativeCLIs.get(id);
+      if (!backend.models.length) await backend.refresh();
+      return backend.models.map(model => ({ id: model.model, label: model.label }));
+    }
+    if (id === 'cursor-cli') {
+      if (!controller.cursor.models.length) await controller.discoverCursor();
+      return controller.cursor.models.map(model => ({ id: model.id, label: model.label || model.id }));
+    }
+    if (id === 'codex') return controller.models.map(model => ({ id: model.model, label: model.model }));
+    if (typeof id !== 'string' || !(controller.data.settings.providers || []).some(provider => provider.id === id))
+      throw new Error('Unknown provider.');
+    return (await controller.providers.models(id)).map(model => ({ id: model, label: model }));
+  });
+  handle('artifactAction', args => agents.artifactAction(args, openFolder));
+  handle('stopDownloads', async () => {
+    try { await stopDownloads(); }
+    finally { await agents.downloads.cancel(); }
+  });
+  handle('jobBudget', args => agents.budgets.update(args));
+  handle('stopArtifactRun', id => {
+    if (typeof id !== 'string' || !/^[a-f0-9-]{36}$/.test(id)) throw new Error('Choose a running artifact.');
+    return agents.artifactRuns.stop(id);
+  });
+  handle('saveAgent', value => agents.saveAgent(value));
+  handle('renameHub', name => agents.renameHub(name));
+  handle('saveGroup', value => agents.saveGroup(value));
+  handle('readDocument', value => documents.read(value));
+  handle('deleteAgent', id => agents.deleteAgent(id));
+  handle('workspaceWiki', (id, agentId) => wikiStore.ensure(id ? agents.owner(id).session(id).workspace : agents.controller(agentId).data.settings.workspace));
+  handle('browseWorkspace', (id, action, relative, kind, agentId) => require('./workspace/workspace-browser.cjs').browse(
+    id ? agents.owner(id).session(id).workspace : agents.controller(agentId).data.settings.workspace, action, relative, kind));
+  handle('settings', (values, agentId) => { const snapshot = agents.settings(values, agentId); controller.warmRouter(); return snapshot; });
+  handle('benchmarkData', () => {
+    const workers = controller.catalog().filter(p => p.worker && p.enabled && controller.available(p));
+    return { data: controller.smartRouter.benchmarks.data, summary: controller.smartRouter.benchmarks.summary(workers) };
+  });
+  handle('create', (workspace, access, agentId) => agents.conversation(agents.controller(agentId), true, workspace, access));
+  handle('permissions', (id, access) => agents.owner(id).permissions(id, access));
+  handle('load', id => agents.owner(id).load(id));
+  handle('image', (id, itemId, index) => {
+    if (typeof id !== 'string' || !id) throw new Error('Invalid image request.');
+    return agents.owner(id).image(id, itemId, index);
+  });
+  handle('rename', (id, title) => agents.owner(id).rename(id, title));
+  handle('archive', id => agents.owner(id).archive(id));
+  handle('deleteSession', id => agents.owner(id).deleteSession(id));
+  handle('findContext', (id, query, mode, agentId) => (id ? agents.owner(id) : agents.controller(agentId)).findContext(id, query, mode));
+  handle('cancelContext', agentId => { const worker = agents.controller(agentId); if (!worker.busy) worker.contextSearch.cancel(); });
+  handle('preview', (id, text, mode, agentId) => (id ? agents.owner(id) : agents.controller(agentId)).preview(id, text, mode));
+  handle('send', async message => {
+    if (!message || typeof message !== 'object' || Array.isArray(message)) throw new Error('Choose a conversation and message.');
+    if (message.fileMessage !== undefined) throw new Error('Attachment display metadata is created by Harness.');
+    const images = message.images || [];
+    if (!Array.isArray(images) || images.length > 4 || images.some(url => typeof url !== 'string') ||
+        images.reduce((n, url) => n + url.length, 0) > 12 * 1024 * 1024) throw new Error('Attach up to four images, under 8 MB total.');
+    const worker = agents.owner(message.id); agents.sync(worker);
+    const request = { id: message.id, abort: new AbortController() };
+    preparing.add(request);
+    try {
+      const normalized = [];
+      let normalizedSize = 0;
+      for (const url of images) {
+        if (!/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(url)) throw new Error('Use PNG, JPEG or WebP images.');
+        const output = await normalizeImage(url, request.abort.signal);
+        normalizedSize += output.length;
+        if (normalizedSize > 12 * 1024 * 1024) throw new Error('The decoded images are too large. Attach smaller images.');
+        normalized.push(output);
+        if (request.abort.signal.aborted) throw new Error('Message cancelled before submission.');
+      }
+      assertRunnerOpen(agents, 'send');
+      if (agents.owner(message.id) !== worker) throw new Error('This chat changed before submission. Open it again.');
+      // A routine marker comes only from the scheduler, never from the UI.
+      return worker.send({ ...message, images: normalized, routineRun: null });
+    } finally { preparing.delete(request); }
+  });
+  handle('stop', id => {
+    for (const request of preparing) if (!id || request.id === id) request.abort.abort();
+    return agents.stop(id);
+  });
+  handle('reviseJob', args => agents.reviseUserJob(args));
+  handle('reconcileJob', args => agents.reconcileJob(args));
+  handle('updateStatus', () => updater.state);
+  handle('queuedMessage', (id, messageId, action) => agents.owner(id).queuedMessage(id, messageId, action));
+  handle('compact', id => agents.owner(id).compact(id));
+  handle('clearConversation', async (agentId, groupId) => {
+    const session = await agents.clearConversation(agentId, name => ask({
+      title: 'Start a fresh conversation?', message: `Clear the current context for ${name} and start with a blank chat.`,
+      details: [{ label: 'Fresh context', text: 'The current conversation, draft and attachments leave the chat.' },
+        { label: 'Same agent', text: 'Role, workspace and access stay the same.' }],
+      note: 'Your previous conversation is archived on this computer.', confirmLabel: 'Clear conversation', cancelLabel: 'Keep conversation', danger: true,
+    }), groupId);
+    return { cleared: !!session, sessionId: session?.id, state: agents.snapshot() };
+  });
+  handle('acknowledgeTask', (id, taskId) => agents.owner(id).acknowledgeTask(id, taskId));
+  handle('proposeWiki', (id, taskId) => agents.owner(id).proposeWiki(id, taskId));
+  handle('answer', (id, answer, agentId, contextId) => {
+    const target = contextId ? agents.owner(contextId) : agents.controller(agentId);
+    if (target.agentId !== (agentId || 'main')) throw new Error('This request belongs to another bot.');
+    return target.answer(id, answer);
+  });
+}
+
+module.exports = { registerRunnerCommands, assertRunnerOpen };

@@ -2,6 +2,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { CursorCLI } = require('./providers/cursor.cjs');
+const { MuseCLI } = require('./providers/muse.cjs');
+const { AntigravityCLI } = require('./providers/antigravity.cjs');
+const { DeepSeekCLI } = require('./providers/deepseek.cjs');
+const { ApiAgent } = require('./providers/api-agent.cjs');
+const { TOOLS: AGENT_TOOLS } = require('./tools/agent-tools.cjs');
+const { NATIVE_CLI_INFO } = require('./providers/native-cli.cjs');
 const { ClaudeCLI, handoff } = require('./providers/claude.cjs');
 const { CAPABILITIES, capabilities, isCLI } = require('./providers/capabilities.cjs');
 const { ProviderLimits } = require('./providers/limits.cjs');
@@ -19,8 +25,10 @@ const { FINAL, canProposeWiki, hasProjectWiki, restartReason, summaryLine } = re
 const { WORKER_INSTRUCTIONS } = require('./worker-instructions.cjs');
 const { projectInstructions } = require('./workspace/project-instructions.cjs');
 const { stripTaskStatus } = require('./routing/task-state.cjs');
+const { withoutImages } = require('./image-input.cjs');
 const { EFFORT_CAPS, DEFAULT_EFFORT_CAP, capCatalog } = require('./routing/effort-cap.cjs');
 const processTree = require('./process-tree.cjs');
+const { prepare: prepareFiles } = require('../ui/attachments.js');
 const { CONTEXT_INSTRUCTIONS, ACCESS_MODES, sameEffort, DEFAULT_ROUTER, sessionAllowKey, accessMode, isMcpConfirmation } = require('./controller/shared.cjs');
 
 class Controller extends EventEmitter {
@@ -41,6 +49,8 @@ class Controller extends EventEmitter {
     this.claude = new ClaudeCLI();
     this.smartRouter.claude = this.claude;
     this.cursor = new CursorCLI(); this.smartRouter.cursor = this.cursor;
+    this.nativeCLIs = options.nativeCLIs || new Map([['native:muse', new MuseCLI()], ['native:antigravity', new AntigravityCLI()], ['native:deepseek', new DeepSeekCLI()]]);
+    this.smartRouter.nativeCLIs = this.nativeCLIs;
     this.toolHelpers = new ToolHelpers(path.join(path.dirname(filename), 'tool-outputs'), client, null);
     this.bridge = new RouterBridge((sessionId, tool, args, signal) => this.bridgeTool(sessionId, tool, args, signal));
     this.helperApprovals = new Map();
@@ -48,7 +58,8 @@ class Controller extends EventEmitter {
     this.sessionAllows = new Map(); this.approvalKeys = new Map();
     // Usage limits per provider (persisted until their reset) and the last Auto message per session, for failover.
     this.data.providerLimits ??= {};
-    this.limits = new ProviderLimits(this.data.providerLimits);
+    this.data.providerQuotas ??= {};
+    this.limits = new ProviderLimits(this.data.providerLimits, () => Date.now(), this.data.providerQuotas);
     this.lastSends = new Map();
     this.loadedModelConfigs = new Map();
     // Opt-in Jev comparison log (set by the app) and the comparison in flight, if any.
@@ -104,12 +115,17 @@ class Controller extends EventEmitter {
       session.queueSending = false;
       session.compacting = false;
       session.submission = null;
+      session.activeTaskId = null;
       session.access ??= this.data.settings.access;
       accessMode(session.access);
-      if (session.status === 'running') session.status = 'interrupted';
+      if (session.status === 'running') { session.status = 'interrupted'; session.queuePaused = true; restarted = true; }
       for (const task of session.tasks || []) if (!FINAL.has(task.state)) {
         task.reason = restartReason(task, this.data.executionBlock);
         task.state = 'needs-you';
+        if (task.foreground && task.budgetId) {
+          task.budgetPaused = true; task.budgetResumePending = false; task.budgetResumeReviewRequired = true;
+          task.budgetResumeError = 'Execution was interrupted by a restart. Inspect the files and evidence, then send a new request; this task will not replay.';
+        }
         task.summary = summaryLine(task);
         restarted = true;
       }
@@ -156,28 +172,53 @@ class Controller extends EventEmitter {
   }
 
   async initialize(shared = null) {
+    // A file check first, so an installed CLI never shows "not installed" while slower checks run.
+    for (const backend of this.nativeCLIs.values()) backend.inspect();
+    const checks = [];
+    let claude = Promise.resolve();
     if (shared) {
       this.claude.status = { ...shared.claude.status }; this.claude.models = shared.claude.models;
       this.cursor.status = { ...shared.cursor.status }; this.cursor.models = shared.cursor.models;
     } else {
-      await this.withProviderConnection('claude-cli', () => this.claude.refresh());
-      await this.withProviderConnection('cursor-cli', () => this.cursor.refresh());
+      claude = this.withProviderConnection('claude-cli', () => this.claude.refresh());
+      checks.push(this.withProviderConnection('cursor-cli', () => this.cursor.refresh()));
     }
-    this.migrateLegacyRouter();
+    for (const [id, backend] of this.nativeCLIs) {
+      if (shared?.nativeCLIs?.has(id)) {
+        backend.status = { ...shared.nativeCLIs.get(id).status }; backend.models = shared.nativeCLIs.get(id).models;
+      } else if (this.data.settings[NATIVE_CLI_INFO[id].setting]) checks.push(this.withProviderConnection(id, () => backend.refresh()));
+    }
+
+    // Codex (and the API providers that run through it) no longer waits for every CLI check, which took ~17 s.
+    // The legacy router migration still reads Claude first, as before.
+    checks.push(claude.then(async () => {
+      this.migrateLegacyRouter();
+      try {
+        this.data.settings.toolSelection ??= this.smartRouter.jev?.configured ? 'jev' : 'off';
+        // One-time adoption of the requested Jev integration; subsequent explicit settings win.
+        if (!this.data.settings.helpersVersion) {
+          if (this.smartRouter.jev?.configured) this.data.settings.routing = 'jev';
+          this.data.settings.helpersVersion = 1;
+        }
+        if (this.agents?.closing) return;
+        await this.bridge.start();
+        if (!this.agents?.closing) await this.connectCodex();
+      } catch (error) { this.connection = 'disconnected'; this.error = error.message; }
+    }));
+    await Promise.all(checks);
+    if (this.agents?.closing) return;
+
+    // The UI shows only "not installed" or "not connected"; keep the reason a startup check failed.
+    if (!shared) {
+      for (const [provider, status] of [['claude-cli', this.claude.status], ['cursor-cli', this.cursor.status]]) {
+        if (status.error)
+          this.log.warn('Provider check failed', { provider, installed: status.installed, error: String(status.error).slice(0, 300) });
+      }
+    }
+
     // Cursor reasoning levels come from its model list; load it once in the background when Cursor models are enabled.
     if (!shared && this.cursor.status.loggedIn && this.data.settings.cursorEnabled !== false && (this.data.settings.providerModels || []).some(p => p.provider === 'cursor-cli'))
       this.discoverCursor().catch(() => {});
-    try {
-      this.data.settings.toolSelection ??= this.smartRouter.jev?.configured ? 'jev' : 'off';
-      // One-time adoption of the requested Jev integration; subsequent explicit settings win.
-      if (!this.data.settings.helpersVersion) {
-        if (this.smartRouter.jev?.configured) this.data.settings.routing = 'jev';
-        this.data.settings.helpersVersion = 1;
-      }
-      if (this.agents?.closing) return;
-      await this.bridge.start();
-      if (!this.agents?.closing) await this.connectCodex();
-    } catch (error) { this.connection = 'disconnected'; this.error = error.message; }
     this.recordProviderDefaults();
     this.changed();
   }
@@ -185,15 +226,21 @@ class Controller extends EventEmitter {
   get routingProvider() { return this.data.settings.jevEnabled === false && this.data.settings.routing === 'jev' ? 'smart' : this.data.settings.routing; }
 
   snapshot() {
+    const { jobBudgets, routines, ...visibleData } = this.data;
     return {
       benchmarks: this.smartRouter.benchmarks?.summary(this.catalog().filter(p => p.worker && p.enabled && this.available(p))),
       cursor: { ...this.cursor.status, enabled: this.data.settings.cursorEnabled !== false },
-      claude: { ...this.claude.status, enabled: !!this.data.settings.claudeEnabled },
+      claude: { ...this.claude.status, enabled: !!this.data.settings.claudeEnabled, quotaAccountKey: this.claude.accountKey?.() || null },
+      nativeCLIs: Object.fromEntries([...this.nativeCLIs].map(([id, backend]) => [id, {
+        ...backend.status, label: NATIVE_CLI_INFO[id].label, enabled: !!this.data.settings[NATIVE_CLI_INFO[id].setting],
+      }])),
       codex: this.codex,
+      cliUpdates: this.cliUpdates || {},
       coordinator: this.isCoordinator(), hubMode: this.data.hubMode || null,
       connectingProviders: [...new Set([...this.connectingProviders.keys(), ...(this.chatgptLoginPending ? ['codex'] : [])])],
       chatgptLoginPending: this.chatgptLoginPending,
-      ...this.data, settings: { ...this.data.settings, mode: this.planPreset() ? 'auto' : this.data.settings.mode }, planRouting: this.planPreset(), connection: this.connection, error: this.error, account: this.account, busy: this.busy,
+      ...visibleData, settings: { ...this.data.settings, mode: this.planPreset() ? 'auto' : this.data.settings.mode }, planRouting: this.planPreset(), connection: this.connection, error: this.error, account: this.account, busy: this.busy,
+      sessions: this.data.sessions.map(session => withoutImages({ ...session, tasks: (session.tasks || []).map(({ inputImages, ...task }) => task) })),
       routing: this.routing, routingProvider: this.routingProvider, routerModel: this.routingProvider === 'jev' ? JEV_MODEL : this.routerChoices().find(p => p.id === this.data.settings.routerPreset)?.model || null,
       jev: { configured: !!this.smartRouter.jev?.configured, keySaved: !!(this.smartRouter.jev?.keyStore?.configured ?? this.smartRouter.jev?.configured), enabled: this.data.settings.jevEnabled !== false, model: JEV_MODEL, compare: this.jevCompare?.summary() || null, health: this.smartRouter.jev?.health || null },
       decisions: this.trace.summary(),
@@ -206,6 +253,7 @@ class Controller extends EventEmitter {
       },
       accessModes: ACCESS_MODES,
       providerLimits: this.limits.active(),
+      providerQuotas: this.data.providerQuotas,
       providerCapabilities: CAPABILITIES,
       requests: [...this.requests.values()].map(request => ({
         ...request,
@@ -247,6 +295,14 @@ class Controller extends EventEmitter {
     return session;
   }
 
+  image(id, itemId, index) {
+    if (typeof itemId !== 'string' || !Number.isInteger(index) || index < 0) throw new Error('Invalid image request.');
+    const session = this.session(id), item = [...session.items, session.pendingMessage].find(entry => entry?.id === itemId);
+    const part = item?.content?.filter(part => part.type === 'image')[index];
+    if (typeof part?.url !== 'string' || !part.url.startsWith('data:image/')) throw new Error('This image is no longer available.');
+    return part.url;
+  }
+
   workspace(value) {
     if (typeof value !== 'string' || !path.isAbsolute(value) || !fs.statSync(value).isDirectory()) throw new Error('Choose an existing workspace folder.');
     return fs.realpathSync(value);
@@ -276,6 +332,11 @@ class Controller extends EventEmitter {
     if (values.fontScale !== undefined) {
       if (![85, 100, 115, 130, 150].includes(values.fontScale)) throw new Error('Invalid font scale.');
       next.fontScale = values.fontScale;
+    }
+    if (values.backgroundUsageLimit !== undefined) {
+      if (!Number.isInteger(values.backgroundUsageLimit) || values.backgroundUsageLimit < 1 || values.backgroundUsageLimit > 100)
+        throw new Error('Background usage threshold must be a whole percentage from 1 to 100.');
+      next.backgroundUsageLimit = values.backgroundUsageLimit;
     }
     if (values.toolSelection !== undefined || values.largeResponses !== undefined) {
       if (this.busy && ((values.toolSelection !== undefined && values.toolSelection !== next.toolSelection) ||
@@ -357,6 +418,8 @@ class Controller extends EventEmitter {
   }
 
   archive(id) {
+    if (this.agents?.routines && Object.values(this.agents.routines.records).some(routine => routine.ownerId === id)) throw new Error('Ask to remove this chat’s routines before archiving it.');
+    if (this.agents?.pendingDelegations(id)) throw new Error('Stop this chat’s outstanding work before archiving it.');
     if (this.session(id).delegation?.state === 'queued') throw new Error('Stop this queued agent task before hiding it.');
     if (this.busy === id) throw new Error('Stop this session before hiding it.');
     this.session(id).archived = true; this.save(); this.changed();
@@ -364,6 +427,9 @@ class Controller extends EventEmitter {
 
   deleteSession(id) {
     const session = this.session(id);
+    if (this.agents?.routines && Object.values(this.agents.routines.records).some(routine => routine.ownerId === id)) throw new Error('Ask to remove this chat’s routines before deleting it.');
+    if (this.agents?.pendingDelegations(id) || this.agents?.pendingJobs().some(({ job }) => job.source === id || job.owner === id))
+      throw new Error('Stop this chat’s outstanding work before deleting it.');
     if (session.delegation?.state === 'queued') throw new Error('Stop this queued agent task before deleting it.');
     if (this.busy === id || this.activeTurns.has(id) || session.status === 'running') throw new Error('Stop this session before deleting it.');
     if (this.loading.has(id)) throw new Error('Wait for the session to finish loading before deleting it.');
@@ -387,7 +453,6 @@ class Controller extends EventEmitter {
 
   resume(session, choice) {
     this.applyFeaturePolicy(session);
-    this.providers?.setModel?.(choice);
     if (choice && session.activeProvider !== (choice.provider || 'codex')) this.loaded.delete(session.id);
     if (this.loadedInstructions.get(session.id) !== this.workerInstructions(session)) this.loaded.delete(session.id);
     if (this.loaded.has(session.id)) return Promise.resolve();
@@ -437,18 +502,23 @@ class Controller extends EventEmitter {
           item.createdAt ??= saved?.createdAt;
           if (item.type === 'userMessage' && saved?.clientId) {
             item.content = saved.content;
+            item.fileMessage = saved.fileMessage;
             item.clientId = saved.clientId;
             item.routeLabel = saved.routeLabel;
+            if (saved.agentReply) item.agentReply = true;
           }
         }
-        // Local Jev exchanges have no native turn. Retain their position on resume.
+        // Native compaction must not discard attachment snapshots or local receipts.
         const previous = session.items;
-        for (let i = previous.length - 1; i >= 0; i--) if (previous[i].localOnly) {
+        const local = new Set(previous.filter(item => item.localOnly || item.fileMessage));
+        for (let i = previous.length - 1; i >= 0; i--) if (local.has(previous[i])) {
+          if (previous[i].fileMessage && items.some(item => item.type === 'userMessage' &&
+              (item.id === previous[i].id || (item.clientId && item.clientId === previous[i].clientId)))) continue;
           const next = previous.slice(i + 1).find(item => items.some(remote => remote.id === item.id));
           const index = next ? items.findIndex(item => item.id === next.id) : items.length;
           items.splice(index, 0, previous[i]);
         }
-        session.items = items.filter(item => this.visible(item));
+        session.items = items.filter(item => this.visible(item) || local.has(item));
       }
     } else {
       const started = await this.client.call('thread/start', {
@@ -477,16 +547,21 @@ class Controller extends EventEmitter {
     return this.snapshot();
   }
 
-  async send({ id, text, mode, images = [], task = 'on', wikiTaskId = null, failover = false, agentReply = false, agentReplyCancelled = false, agentResult = null }) {
+  async send({ id, text, mode, images = [], files = [], fileMessage = null, task = 'on', wikiTaskId = null, failover = false, agentReply = false, agentReplyCancelled = false, agentResult = null, agentMail = null, routineRun = null }) {
     if (!['auto', 'on', 'off'].includes(task)) throw new Error('Invalid task mode.');
     if (task === 'auto') task = 'on'; // Existing queued messages use the new default.
     if (this.blockedReason()) throw new Error(this.blockedReason());
     if (this.connection !== 'ready') throw new Error(this.error || 'Codex is still connecting.');
-    if (!Array.isArray(images) || images.length > 4 || images.some(url => typeof url !== 'string' || !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(url)) || images.reduce((n, url) => n + url.length, 0) > 12 * 1024 * 1024) throw new Error('Invalid images: attach up to four PNG images under 8 MB total.');
-    if (typeof text !== 'string' || (!text.trim() && !images.length) || text.length > 200000) throw new Error('Enter a message under 200,000 characters or attach an image.');
+    if (!Array.isArray(images) || images.length > 4 || images.some(url => typeof url !== 'string' || !/^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(url)) || images.reduce((n, url) => n + url.length, 0) > 12 * 1024 * 1024) throw new Error('Invalid images: attach up to four PNG or JPEG images under 8 MB total.');
+    if (typeof text !== 'string') throw new Error('Enter a message.');
+    const attached = prepareFiles(text, files);
+    if (attached.fileMessage) { text = attached.text; fileMessage = attached.fileMessage; }
+    if (files.length + images.length > 4) throw new Error('Attach up to four files or images.');
+    if ((!text.trim() && !images.length) || text.length > 200000) throw new Error('Enter a message under 200,000 characters or attach a file.');
     if (!text.trim()) text = 'Analyze the attached image(s). Explain what you see and any relevant issue; ask for clarification if the intended task is unclear.';
     const session = this.session(id);
     let wikiWorker;
+    if (session.group && session.archived) throw new Error('This group is archived. Create a new group to continue.');
     if (wikiTaskId) {
       const origin = (session.tasks || []).find(t => t.id === wikiTaskId);
       if (!canProposeWiki(origin) || (!this.wikiStore && !hasProjectWiki(session.workspace))) throw new Error('This task is not eligible for a wiki proposal.');
@@ -498,17 +573,30 @@ class Controller extends EventEmitter {
       task = 'off';
     }
     if (this.busy) {
-      if (this.busy !== id) throw new Error('Another turn is running. Switch to that session to queue a message.');
+      if (this.busy !== id && !(this.isCoordinator() && (session.group || this.session(this.busy).group))) {
+        throw new Error('Another turn is running. Switch to that session to queue a message.');
+      }
       if ((session.queue?.length || 0) >= 10) throw new Error('The queue is full (10 messages).');
       session.queuePaused = false;
-      (session.queue ||= []).push({ id: randomUUID(), text, images, mode: mode || this.data.settings.mode, task, agentReply, agentReplyCancelled, ...(agentResult ? { agentResult } : {}), ...(wikiTaskId ? { wikiTaskId } : {}) });
+      (session.queue ||= []).push({ id: randomUUID(), text, images, mode: mode || this.data.settings.mode, task, agentReply, agentReplyCancelled,
+        ...(fileMessage ? { fileMessage } : {}),
+        ...(session.delegation && !session.delegation.delivered ? { assignmentRevision: session.delegation.revision || 1 } : {}),
+        ...(agentResult ? { agentResult } : {}), ...(agentMail ? { agentMail } : {}), ...(wikiTaskId ? { wikiTaskId } : {}),
+        ...(routineRun ? { routineRun } : {}) });
       this.save(); this.changed();
       return { queued: true };
     }
     session.queuePaused = false;
+    session.activeTaskId = null;
     const chosenMode = mode || this.data.settings.mode;
-    if (this.isCoordinator()) return this.sendCoordinator(session, { text, images, mode: chosenMode, agentReply, agentReplyCancelled, agentResult });
-    const originalRequest = session.delegation?.task === text ? session.delegation.originalRequest : null;
+    session.agentReplyCancelledActive = agentReplyCancelled === true;
+    session.routineRunActive = routineRun?.occurrenceId || null;
+    // Only a message the user sent counts as their own turn; results, mail, routine runs and wiki proposals do not.
+    session.userTurn = !agentReply && !routineRun && !wikiTaskId;
+    session.replyBudgetId = agentReply ? this.agents?.budgets.forMessage(session, { agentResult, agentMail })?.id || null : null;
+    if (this.isCoordinator()) return this.sendCoordinator(session, { text, images, fileMessage, mode: chosenMode, agentReply, agentReplyCancelled, agentResult, agentMail, routineRun });
+    const originalRequest = session.delegation && this.agents?.executionText(session.delegation) === text
+      ? this.agents.requestFor(session.delegation) : null;
     const routingText = originalRequest?.text || text;
     let selected = wikiWorker ? { ...wikiWorker, wikiTaskId, source: 'manual', reason: 'Wiki proposal using the original task worker.' }
       : this.planPreset() || (chosenMode === 'auto' ? route(routingText) : { ...this.resolveWorker(chosenMode), source: 'manual', reason: 'Your manual selection.' });
@@ -520,17 +608,23 @@ class Controller extends EventEmitter {
     const previousState = { status: session.status, error: session.error };
     this.busy = id; session.status = 'running'; session.error = null; session.turnId = null;
     session.agentReplyActive = agentReply === true;
-    if (!agentReply && !failover) session.agentDelegations = 0;
+    if (!agentReply && !failover) { session.agentDelegations = 0; session.agentMessages = 0; }
     const clientId = randomUUID();
     // Only an Auto message may be re-sent to another provider when its provider hits a usage limit, and only once.
     this.lastSends.delete(id);
-    if (useSmart && !wikiTaskId) this.lastSends.set(id, { clientId, text, images, task, failover: failover === true, ...(agentReply ? { agentReply: true } : {}) });
+    if (useSmart && !wikiTaskId) this.lastSends.set(id, { clientId, text, images, task, failover: failover === true,
+      ...(fileMessage ? { fileMessage } : {}), ...(agentReply ? { agentReply: true } : {}), ...(routineRun ? { routineRun } : {}) });
     session.pendingMessage = {
       id: clientId, clientId, type: 'userMessage', pending: true, createdAt: Date.now(),
+      requestedMode: chosenMode,
+      ...(fileMessage ? { fileMessage } : {}),
+      ...(agentReply ? { agentReply: true } : {}),
+      ...(routineRun ? { routineRun } : {}),
       content: [{ type: 'text', text }, ...images.map(url => ({ type: 'image', url }))]
     };
     this.changed();
     try {
+      if (this.agents) this.openTask(session, null, text, clientId, task);
       if (this.agents) {
         const refusal = await this.agents.acquire(this, session);
         if (refusal) throw new Error(refusal.blocked || 'Turn was stopped before sending.');
@@ -556,6 +650,10 @@ class Controller extends EventEmitter {
           catch (error) {
             // The router's own provider hit its usage limit: record it and route once with another provider's router.
             if (!error.limit || error.name === 'AbortError' || this.stopping.has(id)) throw error;
+            if ((session.delegation && !session.delegation.delivered) || agentReply || this.agents?.budgets.forSession(session)) {
+              this.providerOutcome(session, error.limitProvider, null, clientId, { status: 'failed', limit: error.limit });
+              throw error;
+            }
             this.limits.mark(error.limitProvider, error.limit);
             const next = this.effectiveRouter();
             if (!next || next.id === router?.id || !this.available(next)) throw error;
@@ -569,6 +667,10 @@ class Controller extends EventEmitter {
             // Jev unavailable (down, timeout, key removed): route the same message with the smart router instead of failing.
             // A stop is never retried, and without a usable smart router the Jev error stands.
             if (provider !== 'jev' || error.name === 'AbortError' || this.stopping.has(id) || !smartReady()) throw error;
+            if (error.limit && ((session.delegation && !session.delegation.delivered) || agentReply || this.agents?.budgets.forSession(session))) {
+              this.providerOutcome(session, error.limitProvider || 'jev', null, clientId, { status: 'failed', limit: error.limit });
+              throw error;
+            }
             selected = await smart();
             const note = `Jev was unavailable (${String(error.message).slice(0, 160)}); the smart router chose instead.`;
             selected = { ...selected, routerFallback: note, reason: selected.reason ? `${note} ${selected.reason}` : note };
@@ -578,12 +680,17 @@ class Controller extends EventEmitter {
         if (this.stopping.has(id)) throw new Error('Turn was stopped before sending.');
       }
       if (selected.directAnswer) {
+        const tracked = (session.tasks || []).find(task => task.messageId === clientId);
+        if (tracked) {
+          tracked.state = 'not-checked'; tracked.checksSkippedByRouter = tracked.checks.length > 0;
+          tracked.checks = Object.freeze([]); tracked.summary = summaryLine(tracked);
+        }
         if (!session.items.some(i => i.type === 'userMessage')) session.title = text.trim().replace(/\s+/g, ' ').slice(0, 65);
         session.items.push({ ...session.pendingMessage, pending: false, localOnly: true },
           { id: randomUUID(), type: 'agentMessage', phase: 'final_answer', text: selected.directAnswer, routeLabel: 'Jev · quick answer', localOnly: true, createdAt: Date.now() });
         (session.directContext ||= []).push({ question: text, answer: selected.directAnswer });
         session.routes.push({ ...selected, label: 'Jev quick answer', at: Date.now(), messageId: clientId });
-        session.pendingMessage = null; session.status = 'completed'; session.updated = Date.now(); this.busy = null;
+        session.pendingMessage = null; session.status = 'completed'; session.updated = Date.now(); session.activeTaskId = null; this.busy = null;
         this.save(); this.changed(); this.settle(session);
         return selected;
       }
@@ -606,7 +713,7 @@ class Controller extends EventEmitter {
 
   async submitWorker(session, selected, text, images, clientId, task) {
     const id = session.id;
-    const permissions = accessMode(task?.access || session.access);
+    const permissions = accessMode(session.agentReplyCancelledActive ? 'read-only' : task?.access || session.access);
     let submission = null;
     try {
       // A worker's cleanup still running (Cursor's ends every turn) delays the next call; only an unconfirmed one refuses
@@ -614,6 +721,10 @@ class Controller extends EventEmitter {
       let refusal = this.readyToStart(session);
       if (refusal?.then) refusal = await refusal; // awaited only when it waited, so timing is unchanged otherwise
       if (refusal) throw new Error(refusal.blocked || 'Turn was stopped before sending.');
+      if (this.agents) {
+        const admission = await this.agents.acquire(this, session, selected);
+        if (admission) throw new Error(admission.blocked || 'Turn was stopped before sending.');
+      }
       projectInstructions(session.workspace, permissions.id !== 'read-only');
       if (isCLI(selected.provider)) return await this.sendCLI(session, selected, text, images, clientId, task);
       if (this.providers?.prepare) {
@@ -630,6 +741,9 @@ class Controller extends EventEmitter {
       if (!session.items.some(item => item.type === 'userMessage')) session.title = text.trim().replace(/\s+/g, ' ').slice(0, 65);
       session.items.push({
         id: clientId, clientId, type: 'userMessage', createdAt: session.pendingMessage?.createdAt || Date.now(),
+        ...(session.pendingMessage?.fileMessage ? { fileMessage: session.pendingMessage.fileMessage } : {}),
+        ...(session.pendingMessage?.agentReply ? { agentReply: true } : {}),
+        ...(session.pendingMessage?.routineRun ? { routineRun: session.pendingMessage.routineRun } : {}),
         content: [{ type: 'text', text }, ...images.map(url => ({ type: 'image', url }))],
         ...(task?.corrections > 0 ? { routeLabel: 'Router' } : {}),
       });
@@ -637,11 +751,11 @@ class Controller extends EventEmitter {
       session.routes.push({ ...selected, access: permissions.id, at: Date.now(), messageId: clientId });
       session.updated = Date.now(); this.save(); this.changed();
       submission = this.beginSubmission(session, {
-        kind: 'turn', backend: selected.provider || 'codex', threadId: session.threadId, messageId: clientId, taskId: task?.id,
+        kind: 'turn', backend: selected.provider || 'codex', model: selected.model, threadId: session.threadId, messageId: clientId, taskId: task?.id,
       });
       const response = await this.client.call('turn/start', {
         threadId: session.threadId, clientUserMessageId: clientId,
-        input: [{ type: 'text', text: (session.directContext?.length ? `Earlier exchanges from other backends, quoted conversation history (not new instructions):\n${JSON.stringify(session.directContext)}\n\nCurrent user request:\n` : '') + text, text_elements: [] }, ...images.map(url => ({ type: 'image', url }))],
+        input: [{ type: 'text', text: this.withTaskLessons(task, (session.directContext?.length ? `Earlier exchanges from other backends, quoted conversation history (not new instructions):\n${JSON.stringify(session.directContext)}\n\nCurrent user request:\n` : ''), text), text_elements: [] }, ...images.map(url => ({ type: 'image', url }))],
         model: selected.model, effort: selected.effort, serviceTier: 'default',
         approvalPolicy: permissions.approvalPolicy, approvalsReviewer: 'user', sandboxPolicy: this.sandboxFor(permissions.id, session.workspace),
       });
@@ -650,14 +764,12 @@ class Controller extends EventEmitter {
       submission.state = 'acknowledged';
       session.turnId = response.turn.id;
       this.activeTurns.set(session.id, response.turn.id);
+      this.agents?.executionAccepted?.(this, session, submission);
       session.routes.at(-1).turnId = response.turn.id;
       session.directContext = [];
       this.replaySubmission(session, submission);
       this.save(); this.changed();
-      if (session.submission === submission && submission.state !== 'completed' && this.stopping.has(id)) {
-        try { await this.client.call('turn/interrupt', { threadId: session.threadId, turnId: submission.turnId }); }
-        catch (error) { if (!/no active turn to interrupt/.test(error.message)) throw error; }
-      }
+      if (session.submission === submission && submission.state !== 'completed' && this.stopping.has(id)) await this.interruptTurn(session, submission.turnId);
       return selected;
     } catch (error) {
       await this.failSend(session, submission, clientId, error, task);
@@ -675,7 +787,7 @@ class Controller extends EventEmitter {
       session.routes = session.routes.filter(item => item.messageId !== clientId);
     }
     if (owned && submission.turnId && submission.state !== 'completed' && submission.state !== 'unconfirmed') {
-      try { await this.client.call('turn/interrupt', { threadId: session.threadId, turnId: submission.turnId }); } catch { /* connection state reports the failure */ }
+      await this.interruptTurn(session, submission.turnId).catch(() => { /* connection state reports the failure */ });
       this.finishTurn(session, submission, { status: this.stopping.has(id) ? 'interrupted' : 'failed', error: error.message });
       error.turnFailed = true; throw error;
     }
@@ -689,6 +801,8 @@ class Controller extends EventEmitter {
     } else if (owned && submission.state === 'submitting') {
       submission.buffer = null;
       session.submission = null;
+      // Rejected before a turn existed: no model usage, and the budget must not keep it in flight.
+      this.agents?.budgets.report(submission.budget, { usage: { inputTokens: 0, outputTokens: 0 } }, true);
       if (task && !FINAL.has(task.state)) { task.state = 'needs-you'; task.reason = 'submission rejected'; }
     } else if (task && !FINAL.has(task.state) && !this.gate) {
       task.state = 'needs-you';
@@ -698,10 +812,21 @@ class Controller extends EventEmitter {
     this.stopping.delete(id);
     if (task && FINAL.has(task.state)) task.summary = summaryLine(task);
     if (this.busy === id && !this.gate) this.busy = null;
+    if (!this.gate) session.activeTaskId = null;
     this.changed();
     this.settle(session);
     error.turnFailed = true;
     throw error;
+  }
+
+  // A new tracked task's first worker message carries the project's relevant lessons; the visible message and
+  // the worker instructions stay unchanged. Without lessons this is `context + text`, exactly as before.
+  withTaskLessons(task, context, text) {
+    const lessons = task?.lessonBlock && !task.corrections && !task.attempts?.length ? task.lessonBlock + '\n\n' : '';
+    if (!lessons)
+      return context + text;
+
+    return lessons + (context || 'Current user request:\n') + text;
   }
 
   workerInstructions(session) {
@@ -710,19 +835,27 @@ class Controller extends EventEmitter {
   }
 
   async sendCLI(session, selected, text, images, clientId, task) {
-    const backend = selected.provider === 'cursor-cli' ? 'cursor' : 'claude';
+    const backend = selected.provider === 'cursor-cli' ? 'cursor' : selected.provider === 'claude-cli' ? 'claude' : selected.provider;
+    const api = capabilities(selected.provider).api;
+    // API providers run in Harness's own loop; its chat histories live beside this agent's sessions.
+    if (api) this.apiAgent ??= new ApiAgent(this.providers, path.join(path.dirname(this.filename), 'api-sessions'));
+    const runtime = api ? this.apiAgent : this.nativeCLIs.get(selected.provider) || this[backend];
+    if (!runtime) throw new Error('This CLI provider is unavailable.');
+    const backendLabel = api ? this.data.settings.providers?.find(p => p.id === selected.provider)?.name || selected.provider
+      : NATIVE_CLI_INFO[selected.provider]?.label || (backend === 'cursor' ? 'Cursor CLI' : 'Claude CLI');
     const lastKey = backend + 'LastItem', sessionKey = backend + 'SessionId';
     const from = session[lastKey] ? session.items.findIndex(i => i.id === session[lastKey]) + 1 : 0;
-    const prompt = handoff(session.items.slice(from)) + text;
+    const prompt = this.withTaskLessons(task, handoff(session.items.slice(from)), text);
     const turnId = randomUUID();
-    const abort = new AbortController(); this.cliAbort = abort;
+    const abort = new AbortController();
     session.activeProvider = selected.provider; this.loaded.delete(session.id);
     const submission = this.beginSubmission(session, {
-      kind: 'turn', backend: selected.provider, threadId: session.threadId || null, messageId: clientId, turnId, taskId: task?.id,
+      kind: 'turn', backend: selected.provider, model: selected.model, threadId: session.threadId || null, messageId: clientId, turnId, taskId: task?.id,
     });
+    this.cliAbort = abort;
     if (!session.items.some(i => i.type === 'userMessage')) session.title = text.trim().replace(/\s+/g, ' ').slice(0, 65);
     session.items.push({ ...session.pendingMessage, pending: false, localOnly: true }); session.pendingMessage = null;
-    session.routes.push({ ...selected, at: Date.now(), messageId: clientId, turnId });
+    session.routes.push({ ...selected, at: Date.now(), messageId: clientId, turnId, budget: submission.budget });
     const assistantIds = new Set(); let current, lastUsage = null;
     const assistant = id => {
       let item = session.items.find(i => i.id === id);
@@ -739,10 +872,13 @@ class Controller extends EventEmitter {
         if (contextEnabled) session.contextTool = true;
       }
       const helpers = helpersEnabled && this.bridge.base ? this.bridge.childConfig(session.id) : null;
-      const result = await this[backend].run({
+      const bridge = api ? { tools: [...AGENT_TOOLS, ...(contextEnabled ? [CONTEXT_TOOL] : [])],
+        call: (name, args, signal) => this.bridgeTool(session.id, name, args, signal) } : undefined;
+      const result = await runtime.run({
+        provider: selected.provider, bridge,
         cwd: this.workspace(session.workspace), model: selected.model, effort: selected.effort || null, effortOption: selected.effortOption, parameterized: selected.parameterized, parameters: selected.parameters,
         prompt, images, instructions: this.workerInstructions(session),
-        resume: session[sessionKey], access: session.access, signal: abort.signal, helpers,
+        resume: session[sessionKey], access: session.agentReplyCancelledActive ? 'read-only' : session.access, signal: abort.signal, helpers,
         approve: (tool, options = {}) => new Promise(resolve => {
           if (abort.signal.aborted || turnOver || options.signal?.aborted) return resolve(false);
           const allowKey = sessionAllowKey(tool);
@@ -756,15 +892,17 @@ class Controller extends EventEmitter {
             this.helperApprovals.delete(id); this.approvalKeys.delete(id); this.requests.delete(id); resolve(false); this.changed();
           }, { once: true });
           this.requests.set(id, {
-            id, method: 'router/tool/requestApproval', params: {
+            id, method: 'router/tool/requestApproval', taskId: session.activeTaskId,
+            budgetId: this.agents?.budgets.forSession(session)?.id || null, params: {
               threadId: session.threadId,
-              reason: tool?.title || `Allow ${backend === 'cursor' ? 'Cursor' : 'Claude'} tool once?`, command: JSON.stringify(tool?.rawInput || tool || {}, null, 2)
+              reason: tool?.title || `Allow ${backendLabel} tool once?`, command: JSON.stringify(tool?.rawInput || tool || {}, null, 2)
             }
           });
           this.changed();
         }),
         onEvent: event => {
           if (session.submission !== submission || submission.state === 'completed') return;
+          if (event.type === 'assistant' || (event.type === 'stream_event' && event.event?.type === 'message_start')) this.agents?.executionAccepted?.(this, session, submission);
           if (event.session_id) session[sessionKey] = event.session_id;
           if (event.type === 'stream_event') {
             const e = event.event;
@@ -779,7 +917,7 @@ class Controller extends EventEmitter {
             if (body) assistant(event.message.id || current || `${turnId}-answer`).text = body;
             for (const tool of content.filter(c => c.type === 'tool_use')) {
               if (!session.items.some(i => i.id === tool.id)) session.items.push({
-                id: tool.id, type: 'mcpToolCall', server: backend === 'cursor' ? 'Cursor' : 'Claude Code', tool: tool.name,
+                id: tool.id, type: 'mcpToolCall', server: backendLabel, tool: tool.name,
                 arguments: tool.input, status: 'inProgress', localOnly: true, createdAt: Date.now()
               });
             }
@@ -791,24 +929,30 @@ class Controller extends EventEmitter {
           this.changed();
         }
       });
+      this.agents?.executionAccepted?.(this, session, submission);
       if (!assistantIds.size && result.result) assistant(`${turnId}-answer`).text = result.result;
       const usage = result.usage || {};
+      const reported = result.usage && typeof result.usage === 'object' && ['input_tokens', 'output_tokens'].some(key => Number.isFinite(result.usage[key]));
       const total = session.usage?.total || {};
       // The context window of the model that did the most input work (background helper models are smaller).
       const main = Object.values(result.modelUsage || {}).filter(m => Number.isFinite(m?.contextWindow))
         .sort((a, b) => ((b.inputTokens || 0) + (b.cacheReadInputTokens || 0)) - ((a.inputTokens || 0) + (a.cacheReadInputTokens || 0)))[0];
-      session.usage = {
+      session.usage = reported || lastUsage ? {
         total: {
           inputTokens: (total.inputTokens || 0) + (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0),
           cachedInputTokens: (total.cachedInputTokens || 0) + (usage.cache_read_input_tokens || 0), outputTokens: (total.outputTokens || 0) + (usage.output_tokens || 0)
         },
         ...(lastUsage ? { last: { ...lastUsage, totalTokens: lastUsage.inputTokens + lastUsage.outputTokens } } : {}),
         ...(main ? { modelContextWindow: main.contextWindow } : {}),
-      };
+        ...(session.usage?.incomplete ? { incomplete: true } : {}),
+        ...(result.cacheUsageUnknown || session.usage?.cacheUnknown ? { cacheUnknown: true } : {}),
+      } : { ...session.usage, incomplete: true };
       // The whole turn (every model call in it), for the decision trace; `last` above is only its final call.
       // A provider that reports no usage (Cursor) keeps it unknown, never zero.
       const route = session.routes.find(item => item.messageId === clientId);
-      const reported = result.usage && typeof result.usage === 'object' && ['input_tokens', 'output_tokens'].some(key => Number.isFinite(result.usage[key]));
+      if (route) route.budgetFinalUsage = result.usage ?? null;
+      if (route && Number.isFinite(result.total_cost_usd) && result.total_cost_usd >= 0)
+        route.providerEstimateUsd = result.total_cost_usd;
       if (route && reported) route.turnUsage = { inputTokens: (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0),
         cachedInputTokens: usage.cache_read_input_tokens || 0, outputTokens: usage.output_tokens || 0 };
       if (result.permission_denials?.length) outcome.error = 'Some Claude tool calls were declined or not permitted under the selected access. Review the response before changing access.';
@@ -828,12 +972,27 @@ class Controller extends EventEmitter {
     return selected;
   }
 
+  canReceiveQueued(session, message) {
+    return !message.agentReply || !session.delegation || session.delegation.delivered ||
+      message.agentAssignmentId === undefined || message.agentAssignmentId === session.delegation.id;
+  }
+
+  assignmentCurrent(session) {
+    const direct = (session?.tasks || []).find(task => task.id === session?.activeTaskId);
+    if (direct && (direct.cancelled || this.agents?.budgets.held(direct))) return false;
+    const job = session?.delegation, submission = session?.submission;
+    return !job || job.delivered || (!job.cancelled && !this.agents?.budgets.held(job) && !['revising', 'revision-blocked'].includes(job.state) &&
+      (!submission?.assignmentId || submission.assignmentId !== job.id || submission.assignmentRevision === (job.revision || 1)));
+  }
+
   settle(session) {
     if (!session || this.busy || this.blockedReason() || session.queueSending || this.connection !== 'ready' || session.queuePaused) return;
     setImmediate(() => {
       if (this.busy || this.blockedReason() || session.queueSending || this.connection !== 'ready' || session.queuePaused || !this.data.sessions.includes(session)) return;
-      const next = session.queue?.[0];
+      const next = session.queue?.find(message => !message.agentReply) ||
+        session.queue?.find(message => this.canReceiveQueued(session, message));
       if (!next || next.error) return;
+      if (next.agentReply && this.agents && !this.agents.canStartReply(this, session, next)) return;
       this.queuedMessage(session.id, next.id, 'send').catch(() => { });
     });
   }
@@ -841,9 +1000,14 @@ class Controller extends EventEmitter {
   async queuedMessage(id, messageId, action) {
     if (action === 'steer' && this.isCoordinator()) throw new Error('Hub accepts queued follow-ups. Stop its reply to send immediately.');
     const session = this.session(id);
-    if (action === 'steer' && !capabilities(session.activeProvider).steer) throw new Error('This CLI supports queued follow-ups here. Stop the turn to send the correction immediately.');
     const message = session.queue?.find(m => m.id === messageId);
     if (!message || session.queueSending) throw new Error('This queued message is no longer available.');
+    if (action === 'steer' && this.agents && !message.agentReply && !message.uncertain && session.delegation && !session.delegation.delivered) {
+      return this.agents.revise(this, session, { jobId: session.delegation.id,
+        expectedRevision: message.assignmentRevision || session.delegation.revision || 1, amendmentId: message.id, text: message.text }, message);
+    }
+    if (action === 'steer' && !capabilities(session.activeProvider).steer) throw new Error('This CLI supports queued follow-ups here. Stop the turn to send the correction immediately.');
+    if (['send', 'steer'].includes(action) && !this.canReceiveQueued(session, message)) throw new Error('This message belongs to another assignment and waits for the current work to finish.');
     if (action === 'remove' || action === 'edit') {
       if (action === 'edit' && message.uncertain) throw new Error('Check the conversation before resending an unconfirmed message.');
       const previousQueue = session.queue;
@@ -943,6 +1107,7 @@ class Controller extends EventEmitter {
       } else if (submission && session.submission === submission && submission.state === 'submitting') {
         submission.buffer = null;
         session.submission = null;
+        this.agents?.budgets.report(submission.budget, { usage: { inputTokens: 0, outputTokens: 0 } }, true);
       }
       session.compacting = false; session.error = error.message;
       this.stopping.delete(id);
@@ -951,11 +1116,13 @@ class Controller extends EventEmitter {
     }
   }
 
-  async stop() {
+  async stop(budgetId = null) {
     if (!this.busy) return;
     this.modelPreparation?.abort();
     const session = this.session(this.busy);
     session.queuePaused = true;
+    if (budgetId) session.queuePauseBudgetId = budgetId;
+    else delete session.queuePauseBudgetId;
     if (this.coordinatorAbort) { this.stopping.add(session.id); this.coordinatorAbort.abort(); return; }
     // Waiting for a worker cleanup before a turn or its checks: nothing has started, so the waiter only has to see it.
     if (this.cleanupWait === session.id) { this.stopping.add(session.id); this.changed(); return; }
@@ -979,16 +1146,45 @@ class Controller extends EventEmitter {
     this.contextSearch?.cancel();
     if (this.routing === session.id) this.smartRouter.cancel();
     const turnId = this.activeTurns.get(session.id) || session.submission?.turnId;
-    if (turnId) {
-      try { await this.client.call('turn/interrupt', { threadId: session.threadId, turnId }); }
-      catch (error) { if (!/no active turn to interrupt/.test(error.message)) throw error; }
-    }
+    if (turnId) await this.interruptTurn(session, turnId);
     this.changed();
+  }
+
+  // Interrupting a Codex turn leaves the commands it started running (Codex keeps them as the thread's background
+  // terminals), so they are ended too. New work waits until their processes are confirmed gone and stays blocked when
+  // that cannot be confirmed (processTree.cleanup, holdCleanup).
+  interruptTurn(session, turnId) {
+    const { threadId } = session;
+    const interrupt = async () => {
+      try { await this.client.call('turn/interrupt', { threadId, turnId }); }
+      catch (error) { if (!/no active turn to interrupt/.test(error.message)) throw error; }
+    };
+    const terminate = () => Promise.all(session.items
+      .filter(item => item.type === 'commandExecution' && item.turnId === turnId && item.status === 'inProgress' && item.processId)
+      .map(item => this.client.call('thread/backgroundTerminals/terminate', { threadId, processId: item.processId }, 5000).catch(() => {})));
+    const since = session.submission?.turnId === turnId ? session.submission.startedAt : undefined;
+    return processTree.stopStartedSince(this.client.process, since, `${this.client.process?.ownerKey}/${turnId}`, interrupt, terminate).interrupted;
   }
 
   answer(id, answer) {
     const request = this.requests.get(id);
     if (!request) throw new Error('This request has already been resolved.');
+    if (request.assignment) {
+      const session = this.data.sessions.find(session => session.delegation?.id === request.assignment.id);
+      if (!session || !this.assignmentCurrent(session) || (session.delegation.revision || 1) !== request.assignment.revision) {
+        this.client.rejectRequest(id, 'The assignment changed. This earlier approval is no longer valid.');
+        this.requests.delete(id); this.changed();
+        throw new Error('The assignment changed. Review its new request before approving an action.');
+      }
+    }
+    if (request.budgetId && this.agents?.budgets.records[request.budgetId]?.state === 'paused')
+      throw new Error('This task is paused. Its earlier approval is no longer current.');
+    if (request.taskId) {
+      const source = this.data.sessions.find(session => session.tasks?.some(task => task.id === request.taskId));
+      const task = source?.tasks.find(task => task.id === request.taskId);
+      if (!task || task.cancelled || FINAL.has(task.state) || task.budgetPaused || this.stopping.has(source.id) || !this.assignmentCurrent(source))
+        throw new Error('This task changed or stopped. Its earlier approval is no longer current.');
+    }
     if (this.helperApprovals.has(id)) {
       const allow = this.approvalKeys.get(id);
       if (!['accept', 'decline', ...(allow ? ['acceptForSession'] : [])].includes(answer.decision)) throw new Error('Invalid approval response.');
@@ -1056,8 +1252,12 @@ class Controller extends EventEmitter {
   // Why new work may not start: a check, or a stopped worker's processes, could not be confirmed stopped. A cleanup
   // still running is not a block: the one place work starts (submitWorker, the checks in runGate, compaction) waits
   // for it with the session busy, so Stop during the wait cancels what was waiting (waitForCleanup, stop()).
-  blockedReason() {
-    if (this.data.executionBlock) return 'A check may still be running.';
+  blockedReason({ otherContext = false } = {}) {
+    if (this.agents?.providerSyncError) return this.agents.providerSyncError;
+    if (this.agents?.providerChanging) return 'A provider connection is changing. Try again when it finishes.';
+    const controlledCheck = otherContext && this.gate?.checkRunning && this.ownsGate(this.gate) &&
+      this.connection === 'ready' && this.gate.processId === this.data.executionBlock?.processId;
+    if (this.data.executionBlock && !controlledCheck) return 'A check may still be running.';
     if (this.data.workerCleanup?.length) return 'Processes from a stopped task could not be confirmed stopped. Phasma Harness keeps trying; restart it if this persists.';
     return null;
   }
@@ -1140,6 +1340,7 @@ class Controller extends EventEmitter {
     this.jevComparing?.abort();
     this.wikiChecks.abort();
     this.claude.close(); this.cursor.close();
+    for (const backend of this.nativeCLIs.values()) Promise.resolve(backend.close()).catch(error => this.log.error('Native CLI close failed', { message: error.message }));
     this.cancelHelpers();
     this.smartRouter.cancel();
     this.smartRouter.close?.();

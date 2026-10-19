@@ -1,0 +1,740 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PhasmaHarness UI preview</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      --background: light-dark(#ffffff, #191919);
+      --sidebar: light-dark(#f8f8f8, #111111);
+      --text: light-dark(#202020, #ededed);
+      --muted: light-dark(#666666, #aaaaaa);
+      --subtle: light-dark(#f0f0f0, #242424);
+      --hover: light-dark(#e8e8e8, #2c2c2c);
+      --border: light-dark(#dedede, #383838);
+      --button: light-dark(#202020, #ededed);
+      --on-button: light-dark(#ffffff, #202020);
+      --focus: light-dark(#333333, #dddddd);
+      --status: light-dark(#34734b, #98c6a4);
+      --danger: light-dark(#954339, #e7a599);
+      background: var(--background);
+      color: var(--text);
+    }
+
+    :root:has(#dark:checked) {
+      color-scheme: dark;
+    }
+
+    :root:has(#light:checked) {
+      color-scheme: light;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+    }
+
+    button, textarea, input {
+      font: inherit;
+    }
+
+    button, summary, label {
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    button {
+      color: inherit;
+    }
+
+    a {
+      color: var(--muted);
+      text-underline-offset: 3px;
+    }
+
+    :focus-visible {
+      outline: 2px solid var(--focus);
+      outline-offset: 4px;
+    }
+
+    .app {
+      height: 100dvh;
+      min-height: 440px;
+      display: grid;
+      grid-template-columns: 232px minmax(0, 1fr);
+    }
+
+    .sidebar {
+      background: var(--sidebar);
+      padding: 25px 16px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 30px;
+    }
+
+    .brand {
+      font-size: 14px;
+      font-weight: 650;
+      letter-spacing: -.5px;
+    }
+
+    .sidebar-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding-left: 8px;
+    }
+
+    .sidebar-tools {
+      display: flex;
+      gap: 4px;
+    }
+
+    .nav-action {
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      background: none;
+      border: 0;
+      padding: 6px;
+      border-radius: 8px;
+      color: var(--muted);
+    }
+
+    .nav-action svg {
+      width: 16px;
+      height: 16px;
+      flex-shrink: 0;
+    }
+
+    .hub-area {
+      padding: 2px 0 24px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .hub-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      width: 124px;
+      margin: auto;
+      padding: 18px 8px 14px;
+      border-radius: 14px;
+      background: var(--subtle);
+    }
+
+    .hub-mark {
+      display: grid;
+      place-items: center;
+      width: 46px;
+      height: 46px;
+      border-radius: 15px;
+      background: var(--button);
+      color: var(--on-button);
+      font-size: 23px;
+      font-weight: 600;
+    }
+
+    .hub-name {
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .hub-caption {
+      margin-top: -6px;
+      color: var(--muted);
+      font-size: 10px;
+    }
+
+    .section-label {
+      color: var(--muted);
+      font-size: 11px;
+      margin: 0 12px 10px;
+    }
+
+    .bot {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      padding: 12px;
+      font-size: 13px;
+      border-radius: 8px;
+      min-width: 0;
+    }
+
+    .bot-copy {
+      min-width: 0;
+      flex: 1;
+    }
+
+    .bot-name {
+      display: block;
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .bot-preview {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      margin-top: 4px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .bot-mark {
+      border: 1px solid var(--border);
+      width: 27px;
+      height: 27px;
+      border-radius: 9px;
+      display: grid;
+      place-items: center;
+      font-size: 10px;
+      color: var(--muted);
+      flex-shrink: 0;
+    }
+
+    .working-dot {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--status);
+      margin-left: auto;
+    }
+
+    .sidebar-bottom {
+      margin-top: auto;
+      color: var(--muted);
+      font-size: 12px;
+      position: relative;
+    }
+
+    .settings > summary {
+      padding: 11px 12px;
+      list-style: none;
+      cursor: pointer;
+    }
+
+    .settings > summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .settings[open] > summary {
+      color: var(--text);
+    }
+
+    .settings-panel {
+      position: absolute;
+      bottom: 70px;
+      left: 0;
+      width: 240px;
+      z-index: 2;
+      background: var(--background);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      box-shadow: 0 8px 30px #00000018;
+    }
+
+    fieldset {
+      border: 0;
+      padding: 0;
+      margin: 0;
+    }
+
+    legend {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 12px;
+    }
+
+    .appearance-options {
+      display: flex;
+      gap: 4px;
+      padding: 4px;
+      border-radius: 8px;
+      background: var(--subtle);
+    }
+
+    .appearance-options label {
+      position: relative;
+      flex: 1;
+      cursor: pointer;
+      text-align: center;
+      padding: 9px 0;
+      font-size: 11px;
+      border-radius: 5px;
+      color: var(--muted);
+    }
+
+    .appearance-options label:has(input:checked) {
+      background: var(--background);
+      color: var(--text);
+      box-shadow: 0 1px 3px #00000012;
+    }
+
+    .appearance-options label:has(input:focus-visible) {
+      outline: 2px solid var(--focus);
+      outline-offset: 2px;
+    }
+
+    .appearance-options input {
+      position: absolute;
+      opacity: 0;
+      width: 1px;
+      height: 1px;
+    }
+
+    .settings-panel p {
+      font-size: 11px;
+      line-height: 1.6;
+      margin: 11px 0 0;
+    }
+
+    .theme-name {
+      display: none;
+    }
+
+    :root:has(#dark:checked) .theme-dark,
+    :root:has(#light:checked) .theme-light,
+    :root:has(#system:checked) .theme-system {
+      display: inline;
+    }
+
+    .preview-note {
+      padding: 8px 12px 0;
+      font-size: 10px;
+      line-height: 1.6;
+    }
+
+    .main {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      min-width: 0;
+    }
+
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 24px 32px;
+      flex-shrink: 0;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .header-note {
+      font-size: 11px;
+      font-weight: 400;
+      color: var(--muted);
+    }
+
+    .thread {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+    }
+
+    .messages {
+      max-width: 740px;
+      margin: auto;
+      padding: 40px 32px 24px;
+    }
+
+    .message {
+      font-size: 14px;
+      line-height: 1.8;
+      margin-bottom: 32px;
+    }
+
+    .message p {
+      margin: 0;
+    }
+
+    .user {
+      margin-left: auto;
+      max-width: 85%;
+      width: fit-content;
+      padding: 12px 18px;
+      border-radius: 18px;
+      background: var(--subtle);
+    }
+
+    .speaker {
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .activity {
+      margin-top: 18px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .activity summary {
+      cursor: pointer;
+      width: fit-content;
+    }
+
+    .activity-body {
+      margin: 12px 0 0 14px;
+      padding-left: 14px;
+      border-left: 1px solid var(--border);
+      line-height: 2;
+    }
+
+    .activity-body strong {
+      font-weight: 500;
+      color: var(--text);
+    }
+
+    .stop {
+      background: none;
+      border: 0;
+      padding: 0;
+      font-size: 11px;
+      color: var(--danger);
+    }
+
+    .receipt {
+      text-align: right;
+      color: var(--muted);
+      font-size: 11px;
+      margin: -23px 0 32px;
+    }
+
+    .result {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-top: 18px;
+      border: 1px solid var(--border);
+      padding: 14px;
+      border-radius: 12px;
+    }
+
+    .game-art {
+      width: 78px;
+      height: 78px;
+      flex-shrink: 0;
+      border-radius: 8px;
+      background: #243b33;
+    }
+
+    .result-title {
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .result-note {
+      font-size: 11px;
+      color: var(--muted);
+      margin: 3px 0 10px;
+      line-height: 1.6;
+    }
+
+    .result-action {
+      font-size: 11px;
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 5px 11px;
+      margin-right: 5px;
+    }
+
+    .composer-area {
+      flex-shrink: 0;
+      width: min(100%, 740px);
+      padding: 16px 32px 18px;
+      margin: 0 auto;
+    }
+
+    .composer {
+      background: var(--subtle);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 17px 18px 12px;
+    }
+
+    .composer:focus-within {
+      outline: 1px solid var(--muted);
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 38px;
+      border: 0;
+      outline: none;
+      resize: vertical;
+      background: transparent;
+      color: var(--text);
+      font-size: 14px;
+    }
+
+    textarea::placeholder {
+      color: var(--muted);
+      opacity: 1;
+    }
+
+    .composer-tools {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 8px;
+    }
+
+    .attach {
+      border: 0;
+      padding: 0;
+      background: none;
+      font-size: 23px;
+      color: var(--muted);
+    }
+
+    .send {
+      width: 30px;
+      height: 30px;
+      border: 0;
+      border-radius: 50%;
+      background: var(--button);
+      color: var(--on-button);
+      font-size: 18px;
+    }
+
+    .composer-note {
+      font-size: 10px;
+      text-align: center;
+      color: var(--muted);
+      margin: 10px 0 0;
+    }
+
+    @media (max-width: 700px) {
+      .app {
+        grid-template-columns: 70px minmax(0, 1fr);
+      }
+
+      .sidebar {
+        padding: 24px 10px 14px;
+      }
+
+      .brand {
+        padding: 0;
+        text-align: center;
+      }
+
+      .brand-full, .section-label, .bot-copy, .hub-caption,
+      .working-dot, .preview-note, .settings-current {
+        display: none;
+      }
+
+      .sidebar-header {
+        flex-direction: column;
+        padding: 0;
+        gap: 16px;
+      }
+
+      .sidebar-tools {
+        flex-direction: column;
+      }
+
+      .hub-area {
+        padding: 0 0 20px;
+      }
+
+      .hub-card {
+        width: 50px;
+        padding: 8px 0;
+        gap: 8px;
+      }
+
+      .hub-mark {
+        width: 30px;
+        height: 30px;
+        border-radius: 10px;
+        font-size: 16px;
+      }
+
+      .hub-name {
+        font-size: 10px;
+      }
+
+      .brand-short {
+        display: inline !important;
+      }
+
+      .bot {
+        justify-content: center;
+        padding: 12px 0;
+      }
+
+      .settings > summary {
+        padding: 10px 0;
+        text-align: center;
+        font-size: 10px;
+      }
+
+      .settings-panel {
+        left: 0;
+        bottom: 45px;
+      }
+
+      .header {
+        padding: 22px 20px;
+      }
+
+      .header-note {
+        display: none;
+      }
+
+      .messages {
+        padding: 24px 20px;
+      }
+
+      .composer-area {
+        padding: 12px 16px 16px;
+      }
+
+      .game-art {
+        width: 58px;
+        height: 58px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" aria-label="Your bots">
+      <div class="sidebar-header">
+        <div class="brand">
+          <span class="brand-full">PhasmaHarness</span>
+          <span class="brand-short" style="display:none">P</span>
+        </div>
+        <div class="sidebar-tools">
+          <button class="nav-action" disabled aria-label="Search chats · preview only">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+              <circle cx="10" cy="10" r="6"/>
+              <path d="m15 15 5 5"/>
+            </svg>
+          </button>
+          <button class="nav-action" disabled aria-label="New chat · preview only">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+              <path d="M12 4v16M4 12h16"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <nav class="hub-area" aria-label="Hub main conversation">
+        <div class="hub-card" aria-current="page" title="Hub · your main chat">
+          <span class="hub-mark" aria-hidden="true">H</span>
+          <span class="hub-name">Hub</span>
+          <span class="hub-caption">Your main chat</span>
+        </div>
+      </nav>
+      <nav aria-label="Other bot conversations">
+        <p class="section-label">Other bots</p>
+        <div class="bot" title="Builder · working">
+          <span class="bot-mark" aria-hidden="true">B</span>
+          <span class="bot-copy">
+            <span class="bot-name">Builder</span>
+            <span class="bot-preview">Adding cooperative controls</span>
+          </span>
+          <span class="working-dot" role="img" aria-label="Working"></span>
+        </div>
+        <div class="bot" title="Reviewer · working">
+          <span class="bot-mark" aria-hidden="true">R</span>
+          <span class="bot-copy">
+            <span class="bot-name">Reviewer</span>
+            <span class="bot-preview">Game one starts cleanly</span>
+          </span>
+          <span class="working-dot" role="img" aria-label="Working"></span>
+        </div>
+      </nav>
+      <div class="sidebar-bottom">
+        <details class="settings">
+          <summary>Settings<span class="settings-current"> · <span class="theme-name theme-dark">Dark</span><span class="theme-name theme-light">Light</span><span class="theme-name theme-system">System</span></span></summary>
+          <div class="settings-panel">
+            <fieldset>
+              <legend>Appearance</legend>
+              <div class="appearance-options">
+                <label><input id="dark" name="appearance" type="radio" value="dark">Dark</label>
+                <label><input id="light" name="appearance" type="radio" value="light">Light</label>
+                <label><input id="system" name="appearance" type="radio" value="system" checked>System</label>
+              </div>
+            </fieldset>
+            <p>System follows your device’s appearance.</p>
+          </div>
+        </details>
+        <div class="preview-note">Design preview · <a href="design.md">Design</a> · <a href="implementation-plan.md">Plan</a></div>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="header">
+        <span>Hub</span>
+        <span class="header-note">Available while your bots work</span>
+      </header>
+      <div class="thread" role="region" aria-label="Conversation" tabindex="0">
+        <div class="messages">
+          <div class="message user"><p>Make three small Phasma games tonight. Leave me something playable.</p></div>
+          <div class="message">
+            <div class="speaker">Hub</div>
+            <p>I’ll build them in parallel and bring the results here. You can keep talking while I work.</p>
+            <details class="activity">
+              <summary>2 working · 1 ready</summary>
+              <div class="activity-body">
+                <div><strong>Owner: Hub</strong> · results return to this chat.</div>
+                <div>Builder sent game one to Reviewer and continued with game two.</div>
+                <div>Reviewer accepted the handoff. No forwarding needed.</div>
+                <button class="stop" disabled title="Preview only">Stop batch · preview</button>
+              </div>
+            </details>
+          </div>
+          <div class="message user"><p>Make the second game cooperative.</p></div>
+          <div class="receipt">Received · Builder will apply the change</div>
+          <div class="message">
+            <div class="speaker">Hub</div>
+            <p>The change is with Builder. Your first game is ready to try.</p>
+            <article class="result" aria-label="Orbit garden result preview">
+              <svg class="game-art" viewBox="0 0 100 100" role="img" aria-label="Illustrative orbit game preview">
+                <circle cx="50" cy="50" r="32" fill="none" stroke="#8fa48b"/>
+                <ellipse cx="50" cy="50" rx="43" ry="15" fill="none" stroke="#668777" transform="rotate(-25 50 50)"/>
+                <circle cx="50" cy="50" r="13" fill="#c7d6a6"/>
+                <circle cx="79" cy="35" r="5" fill="#ebc39e"/>
+              </svg>
+              <div>
+                <div class="result-title">Orbit garden</div>
+                <div class="result-note">Build & launch passed · Gameplay not verified</div>
+                <button class="result-action" disabled title="Preview only">Play ↗</button>
+                <button class="result-action" disabled title="Preview only">Open files</button>
+              </div>
+            </article>
+          </div>
+        </div>
+      </div>
+      <div class="composer-area">
+        <div class="composer">
+          <textarea aria-label="Message Hub draft" placeholder="Message Hub…"></textarea>
+          <div class="composer-tools">
+            <button class="attach" disabled aria-label="Attach file · preview only">＋</button>
+            <button class="send" disabled aria-label="Send message · preview only">↑</button>
+          </div>
+        </div>
+        <p class="composer-note">Preview only · Appearance and handoff details work. Messages are not sent.</p>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

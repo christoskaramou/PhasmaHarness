@@ -70,7 +70,7 @@ function providerCaps(provider) {
 const api = { ...window.router,
   settings: values => window.router.settings(values, selectedAgent),
   create: (workspace, access) => window.router.create(workspace, access, selectedAgent),
-  stop: () => state?.busy || selectedId ? window.router.stop(state?.busy || selectedId) : Promise.resolve(),
+  stop: (id = selectedId) => id ? window.router.stop(id) : Promise.resolve(),
   answer: (id, answer) => window.router.answer(id, answer, selectedAgent),
   cancelContext: () => window.router.cancelContext(selectedAgent),
   workspaceWiki: id => window.router.workspaceWiki(id, selectedAgent),
@@ -102,12 +102,13 @@ const PROVIDER_PLUG_ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill
 // Manual selection: pick a model, then one of the efforts it supports. A worker ID is claude-cli:<model>:<effort>,
 // codex:<model>:<effort>, …; variants of one model share provider + model.
 const EFFORT_ORDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
-const PROVIDER_ORDER = ['codex', 'claude-cli', 'cursor-cli'];
-const PROVIDER_TITLES = { codex: 'Codex / ChatGPT', 'claude-cli': 'Claude', 'cursor-cli': 'Cursor' };
-const providerTitle = id => PROVIDER_TITLES[id] || state?.settings?.providers?.find(p => p.id === id)?.name || id;
+const PROVIDER_ORDER = ['codex', 'claude-cli', 'cursor-cli', 'native:muse', 'native:antigravity', 'native:deepseek'];
+const PROVIDER_TITLES = { codex: 'Codex CLI / ChatGPT', 'claude-cli': 'Claude CLI', 'cursor-cli': 'Cursor CLI' };
+const providerTitle = id => PROVIDER_TITLES[id] || state?.nativeCLIs?.[id]?.label || state?.settings?.providers?.find(p => p.id === id)?.name || id;
 function presetGroups() {
   const groups = new Map();
-  for (const p of (state?.presets || []).filter(p => p.available)) {
+  // The Hub can only run on models that answer structured replies; worker-only ones (Muse, Antigravity) are not offered.
+  for (const p of (state?.presets || []).filter(p => p.available && !(state.coordinator && providerCaps(p.provider || 'codex').structured === false))) {
     const provider = p.provider || 'codex';
     const key = `${provider}|${p.model}`;
     const group = groups.get(key) || { key, provider, variants: [] };
@@ -155,6 +156,8 @@ function renderLocalModel() {
   controls.hidden = !localModelKey || (!localModelPending && !localModelAction && !localModelState?.supported && !localModelState?.error);
   const loaded = localModelState?.loaded;
   button.textContent = localModelAction ? 'Working…' : localModelState?.error ? 'Retry status' : localModelPending && !localModelState ? 'Checking…' : loaded ? '● Loaded' : '○ Load';
+  if (localModelAction || (localModelPending && !localModelState))
+    button.prepend(spinner());
   button.classList.toggle('loaded', !!loaded);
   button.title = localModelState?.error || (loaded ? `Loaded${localModelState.contextLength ? ` · ${localModelState.contextLength.toLocaleString()} context` : ''}${localModelState.canResize === false ? ' · Context is set on the server' : ''}` : 'Load this model. Sending a message also loads it automatically.');
   button.setAttribute('aria-label', loaded ? button.title : button.textContent);
@@ -204,6 +207,11 @@ function capHint(cap) {
 const measure = document.createElement('canvas').getContext('2d');
 function fitSelect(select) {
   if (select.hidden || !select.selectedOptions.length) return;
+  // Selects in the Options panel fill its width; only the composer bar's selects shrink to their text.
+  if (select.closest('.chat-options-panel')) {
+    select.style.width = '';
+    return;
+  }
   const style = getComputedStyle(select);
   measure.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
   const extra = ['paddingLeft', 'paddingRight', 'borderLeftWidth', 'borderRightWidth'].reduce((sum, key) => sum + (parseFloat(style[key]) || 0), 0);
@@ -221,10 +229,30 @@ function showEffortCap() {
 
 // Usage and limits as each provider reports them (Settings → Providers).
 const clock = ms => new Date(ms).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+
+function spinner() {
+  const node = element('span', 'models-spinner');
+  node.setAttribute('aria-hidden', 'true');
+  return node;
+}
+
+// A provider row shows the spinner and this label while an action on it runs (connect, install, keys, removal).
+const providerActions = new Map();
+async function withProviderAction(id, label, run) {
+  providerActions.set(id, label);
+  renderProviderConnections();
+  try {
+    return await run();
+  } finally {
+    providerActions.delete(id);
+    renderProviderConnections();
+  }
+}
+
 function renderProviderConnections() {
   if (!state) return;
-  const snapshots = fleetState?.agentStates ? Object.values(fleetState.agentStates) : [state];
-  const connecting = new Set([...snapshots.flatMap(s => s.connectingProviders || []), ...(fleetState?.connectingProviders || []), ...modelFetches.keys()]);
+  const snapshots = fleetState?.agentStates ? [...Object.values(fleetState.agentStates), ...Object.values(fleetState.executionStates || {})] : [state];
+  const connecting = new Set([...snapshots.flatMap(s => s.connectingProviders || []), ...(fleetState?.connectingProviders || []), ...modelFetches.keys(), ...providerActions.keys()]);
   if (testingJev) connecting.add('jev');
   const active = connecting.size > 0 || snapshots.some(s => s.connection === 'connecting');
   const indicator = $('#provider-connection');
@@ -241,12 +269,15 @@ function renderProviderConnections() {
     let status = row.querySelector('.provider-connecting');
     if (!status) {
       status = element('span', 'provider-connecting'); status.setAttribute('role', 'status');
-      const spinner = element('span', 'models-spinner'); spinner.setAttribute('aria-hidden', 'true');
-      status.append(spinner, element('span'));
+      status.append(spinner(), element('span'));
       row.querySelector('.provider-account-text').append(status);
     }
     status.hidden = !pending;
-    status.lastChild.textContent = !pending ? '' : id === 'codex' && fleetState?.chatgptLoginPending ? 'Waiting for sign-in…' : 'Connecting…';
+    status.lastChild.textContent = !pending ? '' : providerActions.get(id) || (id === 'codex' && fleetState?.chatgptLoginPending ? 'Waiting for sign-in…' : 'Connecting…');
+    // A check in progress has not found the CLI missing yet; Install shows only once it reports so.
+    const install = row.querySelector('.provider-install');
+    if (install)
+      install.hidden = pending;
     if (pending || wasPending) row.querySelector('.provider-plug').disabled = pending || !!(state.anyAgentBusy || state.busy) || row.dataset.installed === 'false';
   }
 }
@@ -271,10 +302,11 @@ function renderApiProviders() {
     plug.innerHTML = PROVIDER_PLUG_ICON;
     plug.onclick = event => {
       event.preventDefault(); event.stopPropagation(); plug.disabled = true;
-      apiProviderAction(() => api.providerSettings({ action: 'provider', provider: { id: p.id, name: p.name, baseUrl: p.baseUrl, enabled: !p.enabled } })).finally(() => { plug.disabled = busy; });
+      apiProviderAction(() => api.providerSettings({ action: 'provider', provider: { id: p.id, name: p.name, baseUrl: p.baseUrl, enabled: !p.enabled } }),
+        p.id, p.enabled ? 'Disabling…' : 'Enabling…').finally(() => { plug.disabled = busy; });
     };
     const text = element('span', 'provider-account-text');
-    text.append(element('strong', '', p.name), element('span', 'provider-detail', ` · ${!p.enabled ? 'Disabled' : state.codex?.connected ? 'Enabled' : 'Needs Codex'}`));
+    text.append(element('strong', '', p.name), element('span', 'provider-detail', ` · ${p.enabled ? 'Enabled' : 'Disabled'}`));
     summary.append(plug, text);
     const options = element('div', 'provider-options');
     const endpoint = element('p', 'provider-endpoint', p.baseUrl);
@@ -285,13 +317,13 @@ function renderApiProviders() {
     keyLabel.append(keyInput);
     const key = element('button', '', p.configured ? 'Clear key' : 'Save key'); key.type = 'button'; key.disabled = busy;
     key.onclick = () => {
-      if (p.configured) return apiProviderAction(() => api.providerKey(p.id, null));
-      if (keyInput.value) apiProviderAction(() => api.providerKey(p.id, keyInput.value));
+      if (p.configured) return apiProviderAction(() => api.providerKey(p.id, null), p.id, 'Clearing key…');
+      if (keyInput.value) apiProviderAction(() => api.providerKey(p.id, keyInput.value), p.id, 'Saving key…');
     };
     const remove = element('button', 'provider-remove', 'Remove'); remove.type = 'button'; remove.disabled = busy;
     remove.onclick = async () => {
       if (await confirmAction({ title: `Remove ${p.name}?`, message: 'This removes the provider, its saved API key and its models from Harness.', confirmLabel: 'Remove provider', danger: true }))
-        apiProviderAction(() => api.providerSettings({ action: 'removeProvider', id: p.id }));
+        apiProviderAction(() => api.providerSettings({ action: 'removeProvider', id: p.id }), p.id, 'Removing…');
     };
     const actions = element('div', 'jev-actions');
     actions.append(key, remove);
@@ -301,9 +333,9 @@ function renderApiProviders() {
   }));
   renderProviderConnections();
 }
-async function apiProviderAction(run) {
+async function apiProviderAction(run, id = null, label = null) {
   try {
-    applyState(await run());
+    applyState(await (id ? withProviderAction(id, label, run) : run()));
     for (const id of [...discoveredModels.keys()]) if (!['codex', 'claude-cli', 'cursor-cli'].includes(id)) discoveredModels.delete(id);
     renderProviders(); $('#provider-status').textContent = '';
   }
@@ -385,13 +417,19 @@ let noticeTimer;
 let bannerShown = { text: '', at: 0 };
 const drafts = new Map();
 const imageDrafts = new Map();
+const fileDrafts = new Map();
 let readingImages = false;
 function draftKey(id = selectedId) { return id || (selectedAgent === 'main' ? 'new' : `new:${selectedAgent}`); }
 function attachedImages() { return imageDrafts.get(draftKey()) || []; }
+function attachedFiles() { return fileDrafts.get(draftKey()) || []; }
 function renderImages() {
-  const tray = $('#image-previews');
+  const tray = $('#image-previews'), images = attachedImages(), files = attachedFiles();
+  // render() runs on every state update; rebuilding an unchanged tray would take focus from its remove buttons.
+  if (images === tray.shownImages && files === tray.shownFiles) return;
+  tray.shownImages = images;
+  tray.shownFiles = files;
   tray.replaceChildren();
-  attachedImages().forEach((url, i) => {
+  images.forEach((url, i) => {
     const card = element('div', 'image-preview');
     const image = element('img'); image.src = url; image.alt = `Attached image ${i + 1}`;
     const remove = element('button', 'image-remove');
@@ -401,24 +439,55 @@ function renderImages() {
     remove.onclick = () => { imageDrafts.set(draftKey(), attachedImages().filter((_, n) => n !== i)); renderImages(); updatePreview(); };
     card.append(image, remove); tray.append(card);
   });
+  files.forEach((file, i) => {
+    const card = element('div', 'file-preview');
+    const label = element('span', '', file.name + (file.format ? ' · text' : ''));
+    label.title = file.format ? `${file.name} · Extracted text only; layout, images and annotations are excluded.` : file.name;
+    const remove = element('button', 'file-remove', '×');
+    remove.type = 'button'; remove.setAttribute('aria-label', `Remove ${file.name}`);
+    remove.onclick = () => { fileDrafts.set(draftKey(), attachedFiles().filter((_, n) => n !== i)); renderImages(); updatePreview(); };
+    card.append(label, remove); tray.append(card);
+  });
 }
-$('#prompt').addEventListener('paste', async event => {
-  const files = [...(event.clipboardData?.items || [])].filter(item => item.kind === 'file' && item.type.startsWith('image/')).map(item => item.getAsFile());
-  if (!files.length) return;
-  event.preventDefault();
+async function readAttachments(files) {
   if (readingImages || submitting) return;
   const key = draftKey();
   readingImages = true; updatePreview();
   try {
-    if (files.some(file => !file || !['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) || files.reduce((n, file) => n + file.size, 0) > 8 * 1024 * 1024) throw new Error('Paste PNG, JPEG or WebP images under 8 MB total.');
-    const urls = await Promise.all(files.map(file => new Promise((resolve, reject) => {
-      const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(new Error('Could not read pasted image.')); reader.readAsDataURL(file);
-    })));
-    const next = [...(imageDrafts.get(key) || []), ...urls];
-    if (next.length > 4 || next.reduce((n, url) => n + url.length, 0) > 12 * 1024 * 1024) throw new Error('Attach up to four images under 8 MB total.');
-    imageDrafts.set(key, next);
+    const images = [...(imageDrafts.get(key) || [])], textFiles = [...(fileDrafts.get(key) || [])];
+    if (files.length + images.length + textFiles.length > 4) throw new Error('Attach up to four files or images.');
+    for (const file of files) {
+      if (file.type.startsWith('image/')) {
+        if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > 8 * 1024 * 1024)
+          throw new Error('Use PNG, JPEG or WebP images under 8 MB total.');
+        images.push(await new Promise((resolve, reject) => {
+          const reader = new FileReader(); reader.onload = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error('Could not read image.')); reader.readAsDataURL(file);
+        }));
+      } else if (/\.(pdf|docx)$/i.test(file.name)) {
+        if (file.size > HarnessDocuments.MAX_SOURCE) throw new Error('Use a PDF or DOCX document under 10 MB.');
+        textFiles.push(await HarnessDocuments.read(file.name, await file.arrayBuffer()));
+      } else {
+        if (file.size > HarnessFiles.MAX_BYTES) throw new Error('Text attachments must be under 64 KB total.');
+        textFiles.push(HarnessFiles.read(file.name, await file.arrayBuffer()));
+      }
+    }
+    HarnessFiles.validate(textFiles);
+    if (images.reduce((n, url) => n + url.length, 0) > 12 * 1024 * 1024) throw new Error('Attach images under 8 MB total.');
+    imageDrafts.set(key, images); fileDrafts.set(key, textFiles);
   } catch (error) { notify(error); }
   finally { readingImages = false; renderImages(); updatePreview(); }
+}
+$('#attach-files').onclick = () => $('#file-input').click();
+$('#file-input').onchange = event => {
+  const files = [...event.target.files]; event.target.value = '';
+  readAttachments(files);
+};
+$('#prompt').addEventListener('paste', event => {
+  const files = [...(event.clipboardData?.items || [])].filter(item => item.kind === 'file').map(item => item.getAsFile()).filter(Boolean);
+  if (!files.length) return;
+  event.preventDefault();
+  readAttachments(files);
 });
 const messageNodes = new Map();
 let renderedSession = null;
@@ -453,30 +522,57 @@ function element(tag, className, text) {
   return node;
 }
 
+// State snapshots omit inline images; each shown image is fetched once and cached.
+const imageCache = new Map();
+function showImage(image, url, sessionId, itemId, index) {
+  const valid = value => /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value || '');
+  const key = `${sessionId}\n${itemId}\n${index}`;
+  if (valid(url)) {
+    image.src = url;
+    return;
+  }
+  if (!imageCache.has(key)) {
+    imageCache.set(key, api.image(sessionId, itemId, index).catch(() => {
+      imageCache.delete(key);
+      return null;
+    }));
+  }
+  imageCache.get(key).then(source => {
+    if (valid(source)) image.src = source;
+    else image.alt = 'Image unavailable';
+  });
+}
+
 function applyState(next) {
   const loginFinished = fleetState?.chatgptLoginPending && !next.chatgptLoginPending;
   fleetState = next;
   const removed = next.agentStates && !next.agentStates[selectedAgent];
   if (removed) { selectedAgent = 'main'; selectedId = null; $('#prompt').value = ''; }
   state = next.agentStates ? { ...next.agentStates[selectedAgent], agents: next.agents, anyAgentBusy: next.anyAgentBusy } : next;
-  if (next.agentStates && selectedId !== state.conversationId) {
+  const selectedGroup = selectedAgent === 'main' && state.sessions.find(session => session.id === selectedId && session.group && !session.archived);
+  const conversationId = selectedGroup?.id || state.conversationId;
+  if (next.agentStates && selectedId !== conversationId) {
     const previousKey = draftKey();
+    if (!removed && selectedId) drafts.set(selectedId, $('#prompt').value);
     if (!removed && !selectedId && state.conversationId) {
       drafts.set(state.conversationId, $('#prompt').value);
       if (imageDrafts.has(previousKey)) imageDrafts.set(state.conversationId, imageDrafts.get(previousKey));
-      drafts.delete(previousKey); imageDrafts.delete(previousKey);
+      if (fileDrafts.has(previousKey)) fileDrafts.set(state.conversationId, fileDrafts.get(previousKey));
+      drafts.delete(previousKey); imageDrafts.delete(previousKey); fileDrafts.delete(previousKey);
     }
-    selectedId = state.conversationId || null;
+    selectedId = conversationId || null;
     $('#prompt').value = drafts.get(draftKey()) || '';
   }
-  render(); renderUpdate();
+  render(); renderUpdate(); renderJobDetails();
+  if ($('#settings-dialog').open) renderQuotaSettings();
   if (loginFinished && $('#settings-dialog').open) renderProviders();
 }
 
-async function selectAgent(id) {
+async function selectAgent(id, groupId = null) {
   if (submitting || readingImages || changingPermissions) throw new Error('Wait for the current input operation before switching agents.');
+  window.HarnessDictation?.stopForNavigation();
   drafts.set(draftKey(), $('#prompt').value);
-  selectedAgent = id; selectedId = fleetState.agentStates?.[id]?.conversationId || null; draftAccess = null; shownRequest = null;
+  selectedAgent = id; selectedId = groupId || fleetState.agentStates?.[id]?.conversationId || null; draftAccess = null; shownRequest = null;
   sentHistory = null; sentHistoryIndex = -1;
   $('#prompt').value = drafts.get(draftKey()) || '';
   applyState(fleetState);
@@ -487,6 +583,76 @@ async function selectAgent(id) {
 
 $('#agents-overview').onclick = () => $('#agents-dialog').showModal();
 $('#agents-add').onclick = () => editAgent();
+$('#groups-add').onclick = () => editGroup();
+$('#group-edit').onclick = () => editGroup(current());
+function editGroup(session) {
+  const dialog = $('#group-dialog'); dialog.dataset.sessionId = session?.id || '';
+  $('#group-heading').textContent = session ? 'Edit group' : 'New group';
+  $('#group-name').value = session?.title || '';
+  $('#group-save').textContent = session ? 'Save changes' : 'Create group';
+  $('#group-archive').hidden = !session;
+  $('#group-members').replaceChildren(element('legend', '', 'Members'), element('p', 'muted', `${state.agents?.find(agent => agent.id === 'main')?.name || 'Hub'} · coordinator`));
+  for (const bot of (fleetState?.agents || []).filter(bot => bot.id !== 'main')) {
+    const label = element('label', 'group-member');
+    const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.value = bot.id;
+    checkbox.checked = !!session?.group?.members.includes(bot.id);
+    label.append(checkbox, document.createTextNode(bot.name)); $('#group-members').append(label);
+  }
+  if (!(fleetState?.agents || []).some(bot => bot.id !== 'main')) {
+    $('#group-members').append(element('p', 'muted', 'Create a bot first, then add it to a group.'));
+  }
+  $('#group-error').textContent = ''; dialog.showModal(); $('#group-name').focus();
+}
+$('#group-form').onsubmit = async event => {
+  event.preventDefault(); $('#group-save').disabled = true;
+  try {
+    const session = await api.saveGroup({ id: $('#group-dialog').dataset.sessionId || undefined,
+      name: $('#group-name').value, members: [...$('#group-members').querySelectorAll('input:checked')].map(input => input.value) });
+    $('#group-dialog').close(); $('#agents-dialog').close();
+    applyState(await api.bootstrap()); await selectAgent('main', session.id);
+  } catch (error) { $('#group-error').textContent = error.message; }
+  finally { $('#group-save').disabled = false; }
+};
+$('#group-archive').onclick = async () => {
+  $('#group-archive').disabled = true;
+  try {
+    await api.archive($('#group-dialog').dataset.sessionId); $('#group-dialog').close();
+    applyState(await api.bootstrap());
+  } catch (error) { $('#group-error').textContent = error.message; }
+  finally { $('#group-archive').disabled = false; }
+};
+let groupRenderKey = '';
+function renderGroups() {
+  const sessions = fleetState?.agentStates?.main?.sessions || state.sessions;
+  const groups = sessions.filter(session => session.group && !session.archived);
+  $('#group-section').hidden = !groups.length;
+  const members = (current()?.group?.members || []).map(id => fleetState?.agents.find(bot => bot.id === id)).filter(Boolean);
+  const key = JSON.stringify([groups.map(group => [group.id, group.title, group.group.members]), selectedAgent, selectedId,
+    members.map(bot => [bot.id, bot.name]), submitting, readingImages, changingPermissions]);
+  if (key === groupRenderKey) return;
+  groupRenderKey = key;
+  $('#group-list').replaceChildren(...groups.map(group => {
+    const button = element('button', 'agent-nav group-nav'); button.type = 'button'; button.dataset.group = group.id;
+    button.setAttribute('aria-pressed', String(selectedAgent === 'main' && selectedId === group.id));
+    button.disabled = submitting || readingImages || changingPermissions;
+    const label = element('span', 'agent-nav-label');
+    label.append(element('strong', '', group.title), element('small', 'agent-nav-preview', `${group.group.members.length + 1} members · Hub coordinates`));
+    button.append(element('span', 'agent-avatar', '#'), label);
+    button.onclick = () => selectAgent('main', group.id).catch(notify);
+    return button;
+  }));
+  $('#group-mention').replaceChildren(new Option('@mention…', ''), new Option('@Hub', 'main'),
+    ...members.map(bot => new Option('@' + bot.name, bot.id)));
+}
+$('#group-mention').onchange = () => {
+  const select = $('#group-mention'), bot = fleetState?.agents.find(bot => bot.id === select.value);
+  if (!bot) return;
+  const prompt = $('#prompt'), members = [...(fleetState?.agents || [])].sort((a, b) => b.name.length - a.name.length);
+  let text = prompt.value.trimStart();
+  const previous = members.find(member => text.toLowerCase().startsWith('@' + member.name.toLowerCase() + ' '));
+  if (previous) text = text.slice(previous.name.length + 1).trimStart();
+  prompt.value = '@' + bot.name + ' ' + text; select.value = ''; prompt.focus(); updatePreview();
+};
 function editAgent(profile) {
   const worker = profile && fleetState?.agentStates?.[profile.id];
   const conversation = worker?.sessions.find(s => s.id === worker.conversationId);
@@ -503,6 +669,25 @@ function editAgent(profile) {
   $('#agent-access').value = conversation?.access || profile?.access || 'read-only';
   $('#agent-error').textContent = ''; dialog.showModal(); $('#agent-name').focus();
 }
+function renameHub(profile) {
+  $('#hub-name').value = profile.name;
+  $('#hub-error').textContent = '';
+  $('#hub-dialog').showModal();
+  $('#hub-name').select();
+}
+$('#hub-form').onsubmit = async event => {
+  event.preventDefault();
+  $('#hub-save').disabled = true;
+  try {
+    await api.renameHub($('#hub-name').value);
+    $('#hub-dialog').close();
+    applyState(await api.bootstrap());
+  } catch (error) {
+    $('#hub-error').textContent = String(error.message || error).replace(/^Error invoking remote method '[^']+': Error: /, '');
+  } finally {
+    $('#hub-save').disabled = false;
+  }
+};
 $('#agent-new').onclick = () => editAgent();
 $('#agent-browse').onclick = async () => { try { const folder = await api.chooseWorkspace(); if (folder) $('#agent-workspace').value = folder; } catch (error) { $('#agent-error').textContent = error.message; } };
 $('#agent-form').onsubmit = async event => {
@@ -519,12 +704,19 @@ async function agentAction(event) {
   const id = button.dataset.agent, profile = state.agents.find(a => a.id === id);
   try {
     if (button.dataset.action === 'edit') return editAgent(profile);
+    if (button.dataset.action === 'rename') return renameHub(profile);
     if (button.dataset.action === 'delete') {
       window.getSelection()?.removeAllRanges();
       $('#delete-dialog').dataset.agentId = id; $('#delete-title').textContent = profile.name;
       $('#delete-error').hidden = true; $('#delete-dialog').showModal(); return;
     }
-    if (button.dataset.action === 'stop') return await window.router.stop(profile.busy || fleetState.agentStates[id].sessions.find(s => s.delegation?.state === 'queued')?.id || fleetState.agentStates[id].waitingForAgents?.[0]);
+    if (button.dataset.action === 'stop') {
+      const contexts = [fleetState.agentStates[id], fleetState.executionStates?.[id]].filter(Boolean);
+      const queued = contexts.flatMap(worker => worker.sessions).find(chat => chat.delegation?.state === 'queued');
+      const target = profile.busy || queued?.delegation.id || contexts.flatMap(worker => worker.waitingForAgents || [])[0];
+      if (target) await window.router.stop(target);
+      return;
+    }
     $('#agents-dialog').close();
     await selectAgent(id);
   } catch (error) { notify(error); }
@@ -549,7 +741,7 @@ function agentContextMenu(event) {
   const actions = [...$('#agent-cards').querySelectorAll('button[data-agent]')].filter(button => button.dataset.agent === id);
   closeAgentMenu();
   agentMenuOpener = entry.matches('button') ? entry : entry.querySelector('button[data-agent]');
-  const labels = { open: 'Open', edit: 'Edit', stop: 'Stop', delete: 'Delete' };
+  const labels = { open: 'Open', rename: 'Rename', edit: 'Edit', stop: 'Stop', delete: 'Delete' };
   agentMenu.replaceChildren(...actions.map(action => {
     const item = element('button', 'agent-menu-item', labels[action.dataset.action]);
     item.type = 'button'; item.tabIndex = -1; item.setAttribute('role', 'menuitem');
@@ -593,21 +785,31 @@ let agentRenderKey = '';
 function renderAgents() {
   const agents = state.agents || [{ id: 'main', name: 'Hub' }];
   const switching = submitting || readingImages || changingPermissions;
+  const pendingWork = context => context && (context.busy || context.requests.length ||
+    context.sessions.some(chat => chat.queue?.length || (chat.delegation && !chat.delegation.delivered) ||
+      chat.delegationQueue?.some(job => !job.delivered) || chat.items.some(item => item.pendingReply)));
   const rows = agents.map(agent => {
     const worker = fleetState?.agentStates?.[agent.id] || state;
+    const background = fleetState?.executionStates?.[agent.id];
+    const backgroundPending = pendingWork(background);
+    const activity = backgroundPending ? background : worker;
     const conversation = worker.sessions.find(s => s.id === worker.conversationId);
-    const queued = worker.sessions.find(s => s.delegation?.state === 'queued');
-    const waiting = worker.sessions.find(s => worker.waitingForAgents?.includes(s.id));
-    const task = worker.sessions.find(s => s.id === worker.busy) || queued || waiting;
-    const status = worker.requests.length ? 'Needs input' : task?.waitingForAgent || queued || (!worker.busy && waiting) ? 'Waiting' : worker.busy ? 'Working' : worker.connection === 'connecting' ? 'Starting' : worker.connection === 'ready' ? 'Ready' : 'Connection needed';
-    return { ...agent, status, task: task?.title, waiting: task?.waitingForAgent, queued: !!queued || !!waiting,
+    const queued = activity.sessions.find(s => s.delegation?.state === 'queued' || s.delegationQueue?.some(job => !job.delivered));
+    const waiting = activity.sessions.find(s => activity.waitingForAgents?.includes(s.id));
+    const task = activity.sessions.find(s => s.id === activity.busy) || queued || waiting;
+    const status = activity.requests.length ? 'Needs input' : task?.quotaWaiting || task?.delegation?.quotaPause ? 'Paused' : task?.capacityWaiting ? 'Queued' : task?.waitingForAgent || (!activity.busy && (queued || waiting)) ? 'Waiting' : activity.busy ? 'Working' : activity.connection === 'connecting' ? 'Starting' : activity.connection === 'ready' ? 'Ready' : 'Connection needed';
+    const latest = conversation?.items.findLast(item => item.type === 'agentMessage' && item.phase !== 'commentary' && item.text);
+    const preview = (task?.title || latest?.text || '').slice(0, 100).replace(/\s+/g, ' ');
+    return { ...agent, status, preview, task: task?.title, waiting: task?.waitingForAgent, queued: !!queued || !!waiting,
+      batchIdle: !!agent.temporaryBatch && !backgroundPending && !pendingWork(worker),
       workspace: conversation?.workspace || agent.workspace || worker.settings.workspace, modeLabel: worker.presets.find(p => p.id === worker.settings.mode)?.label || 'Auto',
       accessLabel: worker.accessModes.find(a => a.id === (conversation?.access || worker.settings.access))?.label,
       error: !['ready', 'connecting'].includes(worker.connection) ? worker.error : null };
   });
   const active = agents.filter(a => a.busy).length;
-  $('#agent-roster-label').textContent = `YOUR AGENTS · ${agents.length - 1}`;
-  $('#agents-summary').textContent = `${agents.length} agents · ${active} working · Up to 3 simultaneous tasks`;
+  const sidebar = rows.filter(row => !row.batchIdle || row.id === selectedAgent);
+  $('#agent-roster-label').textContent = `Other bots · ${sidebar.length - 1}`;
+  $('#agents-summary').textContent = `${agents.length} agents · ${active} working`;
   const key = JSON.stringify([rows, selectedAgent, selectedId, switching, deletingAgent]);
   if (key === agentRenderKey) return;
   closeAgentMenu();
@@ -618,18 +820,25 @@ function renderAgents() {
     const node = element('button', '', label); node.type = 'button'; node.dataset.agent = agent.id; node.dataset.action = action; node.disabled = disabled; return node;
   };
   const badge = row => element('span', `agent-badge ${row.status.toLowerCase().replaceAll(' ', '-')}`, row.status);
-  const avatar = row => element('span', 'agent-avatar', row.name.slice(0, 2).toUpperCase());
+  const avatar = row => element('span', 'agent-avatar', row.name.slice(0, row.id === 'main' ? 1 : 2).toUpperCase());
   const nav = row => {
-    const node = button('', row, 'open', switching); node.className = 'agent-nav'; node.setAttribute('aria-pressed', String(row.id === selectedAgent));
+    const isHub = row.id === 'main';
+    const node = button('', row, 'open', switching);
+    node.className = isHub ? 'agent-nav agent-nav-hub' : 'agent-nav';
+    node.setAttribute('aria-pressed', String(row.id === selectedAgent && !current()?.group));
+    node.setAttribute('aria-label', `${row.name} · ${row.status}`);
     node.setAttribute('aria-haspopup', 'menu');
-    const label = element('span', 'agent-nav-label'); label.append(element('strong', '', row.name), element('small', '', row.status));
+    const label = element('span', 'agent-nav-label');
+    label.append(element('strong', '', row.name));
+    label.append(element('small', 'agent-nav-preview', isHub ? 'Your main chat' : row.preview || row.status));
     node.append(avatar(row), label, element('span', `agent-indicator ${row.status === 'Ready' ? 'ready' : row.status === 'Working' ? 'working' : ''}`));
-    node.title = row.error || row.waiting || row.task || row.workspace;
+    node.title = `${row.name} · ${row.status}\n${row.error || row.waiting || row.preview || row.workspace}`;
     return node;
   };
-  $('#main-agent-list').replaceChildren(...rows.filter(row => row.id === 'main').map(nav));
-  $('#agent-list').replaceChildren(...rows.filter(row => row.id !== 'main').map(nav));
-  if (rows.length === 1) $('#agent-list').append(element('p', 'muted', 'Create an agent for a new conversation.'));
+  $('#main-agent-list').replaceChildren(...sidebar.filter(row => row.id === 'main').map(nav));
+  $('#agent-list').replaceChildren(...sidebar.filter(row => row.id !== 'main').map(nav));
+  if (sidebar.length === 1) $('#agent-list').append(element('p', 'muted', rows.length > 1
+    ? 'Finished batch workers are in Overview.' : 'Create an agent for a new conversation.'));
   $('#agent-cards').replaceChildren(...rows.map(row => {
     const card = element('article', `agent-card${row.id === selectedAgent ? ' selected' : ''}`);
     const heading = element('div', 'agent-card-heading'); heading.append(avatar(row), element('h3', '', row.name), badge(row));
@@ -637,11 +846,15 @@ function renderAgents() {
     const details = element('div', 'agent-details');
     const folder = element('span', '', row.workspace?.split(/[\\/]/).filter(Boolean).at(-1) || 'No workspace'); folder.title = row.workspace;
     details.append(folder, element('span', '', `${row.modeLabel} · ${row.accessLabel}`));
-    const activity = element('p', `agent-activity${row.error ? ' agent-failure' : ''}`, row.error || row.waiting || row.task || (row.status === 'Starting' ? 'Connecting providers in the background…' : 'Ready for a new task'));
+    const activity = element('p', `agent-activity${row.error ? ' agent-failure' : ''}`, row.error || row.waiting || row.task ||
+      (row.batchIdle ? 'Batch worker · Edit and save to keep this bot.' : row.status === 'Starting' ? 'Connecting providers in the background…' : 'Ready for a new task'));
     activity.title = activity.textContent;
     const actions = element('div', 'agent-card-actions');
     actions.append(button('Open', row, 'open', switching));
-    if (row.id !== 'main') actions.append(button('Edit', row, 'edit', !!row.busy || row.queued), button('Delete', row, 'delete', !!row.busy || row.queued || deletingAgent));
+    if (row.id === 'main')
+      actions.append(button('Rename', row, 'rename'));
+    else
+      actions.append(button('Edit', row, 'edit', !!row.busy || row.queued), button('Delete', row, 'delete', !!row.busy || row.queued || deletingAgent));
     if (row.busy || row.queued) { const stop = button('Stop', row, 'stop'); stop.className = 'stop'; actions.append(stop); }
     card.append(heading, role, details, activity, actions); return card;
   }));
@@ -830,11 +1043,17 @@ function render() {
   $('#benchmark-summary').textContent = state.benchmarks ? `${state.benchmarks.records} benchmark records · ${state.benchmarks.matched}/${state.benchmarks.workers} models matched` : 'Routing benchmarks';
   const session = current();
   renderAgents();
+  renderGroups();
   $('#route-preview').hidden = !!state.coordinator;
   const ready = state.connection === 'ready';
-  $('#session-title').textContent = state.agents?.find(a => a.id === selectedAgent)?.name || 'Hub';
+  $('#session-title').textContent = session?.group ? session.title : state.agents?.find(a => a.id === selectedAgent)?.name || 'Hub';
+  $('#prompt').placeholder = `Message ${$('#session-title').textContent}…`;
+  $('#group-edit').hidden = !session?.group;
+  $('#group-owner').hidden = !session?.group;
+  $('#group-mention').hidden = !session?.group;
+  $('#group-mention').disabled = submitting || readingImages || changingPermissions;
   $('#session-path').textContent = session?.workspace || state.settings.workspace;
-  const compactable = state.coordinator ? !!session?.items.length : session?.activeProvider === 'claude-cli' ? !!session.claudeSessionId : session?.activeProvider !== 'cursor-cli' && !!session?.threadId;
+  const compactable = state.coordinator ? !!session?.items.length : providerCaps(session?.activeProvider).compact && (session?.activeProvider === 'claude-cli' ? !!session.claudeSessionId : !!session?.threadId);
   $('#context-meter').disabled = !compactable || !ready || !session?.items.some(item => item.type === 'userMessage') || !!state.busy || submitting;
   $('#clear-conversation').disabled = !session || !!state.busy || submitting || readingImages || changingPermissions || !!state.waitingForAgents?.length;
   $('#context-search').disabled = !!state.busy || !state.contextRoot;
@@ -846,7 +1065,6 @@ function render() {
   $('#permissions').title = permission.description;
   $('#permissions').disabled = changingPermissions || submitting || !!(session && state.busy === session.id);
   $('#permissions').classList.toggle('full-access', permission.id === 'danger-full-access');
-  $('#permissions-detail').textContent = state.coordinator ? 'Hub chats and delegates. This access level is inherited by its workers.' : permission.description;
   $('#browse-session').disabled = !selectedId;
   $('#quick-routing').title = state.coordinator ? 'Automatic model routing for workers. Hub keeps its chat model.' : 'Choose Smart or Jev routing';
   $('#quick-routing').value = state.routingProvider || state.settings.routing;
@@ -868,7 +1086,8 @@ function render() {
   $('#jev-remove').disabled = !jevKeySaved || jevBusy;
   $('#jev-save').disabled = jevBusy;
   clearTimeout(noticeTimer);
-  const sticky = state.error || (state.busy && state.busy !== selectedId ? 'Another session is working. You can browse here while it finishes.' : '');
+  const sticky = state.error || (state.busy && state.busy !== selectedId
+    ? state.coordinator ? 'Hub is replying in another chat. Your message can queue here.' : 'Another session is working. You can browse here while it finishes.' : '');
   const noticeExpiresAt = session?.noticeExpiresAt ?? (session?.notice?.startsWith('Context compacted.') ? 0 : Infinity);
   let flash = session?.error || (Date.now() < noticeExpiresAt ? session?.notice : '') || '';
   if (sticky || !flash) bannerShown = { text: '', at: 0 };
@@ -903,29 +1122,32 @@ function render() {
   $('#welcome').hidden = !!session?.items.length || !!session?.pendingMessage;
   renderSendButton();
   $('#message-queue').replaceChildren();
-  for (const message of session?.queue || []) {
+  for (const message of (session?.queue || []).filter(message => !message.agentReply)) {
+    const revise = session.delegation && !session.delegation.delivered && !session.delegation.cancelled;
     const row = element('div', 'queued-message');
     const text = element('span', '', `${message.error ? 'Paused' : 'Queued'}: ${message.text}${message.images.length ? ` (${message.images.length} images)` : ''}`);
     text.title = message.error || message.text;
     row.append(text);
-    for (const [action, label] of [[state.busy ? 'steer' : 'send', state.busy ? '↵ Steer' : 'Send now'], ['edit', '✎'], ['remove', '×']]) {
+    for (const [action, label] of [[state.busy || revise ? 'steer' : 'send', revise ? 'Apply now' : state.busy ? '↵ Steer' : 'Send now'], ['edit', '✎'], ['remove', '×']]) {
       const button = element('button', 'compact-action', label);
       button.type = 'button';
       button.classList.add(`queue-${action}`);
-      if (action === 'steer') button.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 5v7a3 3 0 0 1-3 3H5m4-4-4 4 4 4"/></svg><span>Steer</span>';
+      if (action === 'steer' && !revise) button.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 5v7a3 3 0 0 1-3 3H5m4-4-4 4 4 4"/></svg><span>Steer</span>';
       if (action === 'edit') button.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15Z"/></svg>';
       if (action === 'remove') button.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>';
       button.setAttribute('aria-label', action === 'remove' ? 'Remove queued message' : action === 'edit' ? 'Edit queued message' : label);
-      button.disabled = (action === 'steer' && (state.coordinator || !providerCaps(session.activeProvider).steer)) || !!session.queueSending || (action !== 'remove' && (message.uncertain || (action !== 'edit' && (!ready || (state.busy && (state.busy !== selectedId || !session.turnId || session.compacting))))));
+      button.disabled = (action === 'steer' && (state.coordinator || (revise && !['queued', 'running'].includes(session.delegation.state)) || (!revise && !providerCaps(session.activeProvider).steer))) || !!session.queueSending || (action !== 'remove' && (message.uncertain || (action !== 'edit' && (!ready || (state.busy && (state.busy !== selectedId || (!revise && (!session.turnId || session.compacting))))))));
       button.title = action === 'edit' ? 'Move back to the composer to edit and resend' : button.getAttribute('aria-label');
       button.onclick = async () => {
         try {
-          if (action === 'edit' && ($('#prompt').value.trim() || attachedImages().length || readingImages || submitting)) throw new Error('Send or clear your current draft before editing a queued message.');
+          if (action === 'edit' && ($('#prompt').value.trim() || attachedImages().length || attachedFiles().length || readingImages || submitting)) throw new Error('Send or clear your current draft before editing a queued message.');
           const edited = await api.queuedMessage(session.id, message.id, action);
           if (action === 'edit') {
-            drafts.set(session.id, edited.text); imageDrafts.set(session.id, edited.images);
+            const attachment = HarnessFiles.unpack(edited.text, edited.fileMessage);
+            drafts.set(session.id, attachment?.displayText || edited.text); imageDrafts.set(session.id, edited.images);
+            fileDrafts.set(session.id, attachment?.files || []);
             if (selectedId === session.id) {
-              $('#prompt').value = edited.text; showMode(edited.mode);
+              $('#prompt').value = attachment?.displayText || edited.text; showMode(edited.mode);
               renderImages(); updatePreview(); $('#prompt').focus();
             }
           }
@@ -935,7 +1157,7 @@ function render() {
     }
     $('#message-queue').append(row);
   }
-  $('#send').disabled = (!ready && !slashCommand($('#prompt').value)) || changingPermissions || submitting || readingImages || (!$('#prompt').value.trim() && !attachedImages().length);
+  $('#send').disabled = (!ready && !slashCommand($('#prompt').value)) || changingPermissions || submitting || readingImages || (!$('#prompt').value.trim() && !attachedImages().length && !attachedFiles().length);
   renderImages();
   $('#working').hidden = !state.busy || state.busy !== selectedId || !!session?.pendingMessage;
   const turnError = state.busy === selectedId ? '' : session?.error || '';
@@ -943,7 +1165,7 @@ function render() {
   $('#turn-error').hidden = !turnError;
   renderModelFetching();
   $('#working-text').textContent = session?.waitingForAgent || (session?.compacting ? 'Compacting conversation context…' : state.routing === selectedId && state.routing
-    ? `Choosing a model with ${routerName(state.routerModel)}…` : `${session?.routes.at(-1)?.label || 'Codex'} is working…`);
+    ? `Choosing a model with ${routerName(state.routerModel)}…` : `${session?.routes.at(-1)?.label || 'Codex CLI'} is working…`);
   const usage = session?.usage;
   const total = usage?.total;
   const { contextWindow, contextTokens, contextKnown } = contextUsage(session);
@@ -952,20 +1174,403 @@ function render() {
   $('#context-meter').style.setProperty('--context-used', `${contextPercent}%`);
   $('#context-meter').classList.toggle('unknown', !contextKnown);
   $('#context-meter').setAttribute('aria-label', `${contextLabel}. Compact context`);
-  $('#context-meter-tip').textContent = state.coordinator ? (session?.compacting ? 'Compacting Hub context…' : 'Hub summarizes older context automatically. Click to compact now; visible history is kept.') : !providerCaps(session?.activeProvider).usage ? 'Cursor manages context automatically and reports no token usage.' : contextLabel + (session?.compacting ? '\nCompacting context…' : '\nClick to compact context.');
+  $('#context-meter-tip').textContent = state.coordinator ? (session?.compacting ? 'Compacting Hub context…' : 'Hub summarizes older context automatically. Click to compact now; visible history is kept.') : !providerCaps(session?.activeProvider).usage ? `${providerTitle(session?.activeProvider)} does not report token usage here.` : contextLabel + (session?.compacting ? '\nCompacting context…' : providerCaps(session?.activeProvider).compact ? '\nClick to compact context.' : '');
   const compact = n => new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(n);
-  const hasBreakdown = Number.isFinite(total?.inputTokens) && Number.isFinite(total?.cachedInputTokens) && Number.isFinite(total?.outputTokens);
+  const hasBreakdown = !usage?.cacheUnknown && Number.isFinite(total?.inputTokens) && Number.isFinite(total?.cachedInputTokens) && Number.isFinite(total?.outputTokens);
   const providerHover = providerConnectionSummary();
-  $('#usage').textContent = !providerCaps(session?.activeProvider).usage ? 'Usage tracked by Cursor' : hasBreakdown
+  $('#usage').textContent = !providerCaps(session?.activeProvider).usage ? `Usage not reported by ${providerTitle(session?.activeProvider)}` : hasBreakdown
     ? `${compact(total.inputTokens)} input · ${total.inputTokens ? Math.round(total.cachedInputTokens / total.inputTokens * 100) : 0}% cached · ${compact(total.outputTokens)} output`
-    : total?.totalTokens !== undefined ? `${compact(total.totalTokens)} reported tokens` : 'Connected';
+    : Number.isFinite(total?.inputTokens) && Number.isFinite(total?.outputTokens)
+      ? `${compact(total.inputTokens)} reported input · ${compact(total.outputTokens)} output`
+      : total?.totalTokens !== undefined ? `${compact(total.totalTokens)} reported tokens` : 'Usage not reported yet';
+  if (usage?.incomplete && total) $('#usage').textContent += ' · partial';
   $('#usage').title = providerHover + (hasBreakdown
     ? `\n\nSession totals: ${total.inputTokens.toLocaleString()} input (${total.cachedInputTokens.toLocaleString()} cached, ${Math.max(0, total.inputTokens - total.cachedInputTokens).toLocaleString()} uncached), ${total.outputTokens.toLocaleString()} output. Reasoning is included in output. Latest request input: ${usage.last?.inputTokens?.toLocaleString() ?? 'unknown'}. These are token counts, not dollars or allowance usage.`
     : '\n\nHover lists providers. Token totals appear after the provider reports usage.');
   renderProviderConnections();
+  renderJobActivity(session);
   renderMessages(session);
   renderRequest();
   renderCommandPanel();
+}
+
+let jobActivityKey = '';
+function agentContexts() {
+  return [...Object.entries(fleetState?.agentStates || {}), ...Object.entries(fleetState?.executionStates || {})];
+}
+let viewedJob = null;
+let jobDraft = null;
+function jobRecord(id) {
+  for (const [agentId, worker] of agentContexts()) for (const chat of worker.sessions) {
+    const job = [chat.delegation, ...(chat.delegationQueue || [])].find(entry => entry?.id === id);
+    if (job) return { agentId, worker, chat, job };
+  }
+  for (const [agentId, worker] of agentContexts()) for (const chat of worker.sessions) {
+    const task = (chat.tasks || []).find(task => task.id === id && task.foreground && task.budgetId);
+    if (task) return { agentId, worker, chat, task,
+      job: { id: task.id, title: task.goal.replace(/\s+/g, ' ').slice(0, 65), owner: chat.id, source: chat.id,
+        access: task.access, budgetId: task.budgetId, state: task.budgetResumePending ? 'queued' : task.state,
+        delivered: !task.budgetPaused && !task.budgetResumePending && ['checks-passed', 'not-checked', 'blocked', 'needs-you', 'cancelled'].includes(task.state),
+        cancelled: !!task.cancelled, error: task.budgetResumeError, artifacts: task.artifacts } };
+  }
+  for (const [, worker] of agentContexts()) for (const chat of worker.sessions) {
+    const receipt = chat.items.find(item => item.localOnly && item.type === 'agentResult' && item.deliveryId === id);
+    if (receipt) return { agentId: receipt.agentId, worker, chat, receipt,
+      job: { id, title: receipt.title, revision: receipt.revision, delivered: true, owner: chat.id,
+        access: chat.access, artifacts: receipt.artifacts, budgetId: receipt.budgetId, workspaceCopy: receipt.workspaceCopy } };
+  }
+}
+function saveJobDraft() {
+  if (!viewedJob) return;
+  jobDraft = { id: viewedJob.id, text: $('#job-update-text').value,
+    budget: viewedJob.budgetDirty ? { version: viewedJob.budgetVersion, values: ['#job-budget-limit', '#job-budget-attempts', '#job-budget-tokens'].map(id => $(id).value) } : null };
+}
+function openJobDetails(id) {
+  const record = jobRecord(id);
+  if (!record) return notify(new Error('This assignment is no longer available. Its result remains in the owner chat.'));
+  saveJobDraft(); // the dialog's close event is queued, so a quick reopen can run before it
+  viewedJob = { id, revision: record.job.revision || 1, amendmentId: null };
+  $('#job-update-text').value = jobDraft?.id === id ? jobDraft.text : '';
+  if (jobDraft?.id === id && jobDraft.budget) {
+    Object.assign(viewedJob, { budgetDirty: true, budgetVersion: jobDraft.budget.version });
+    [$('#job-budget-limit').value, $('#job-budget-attempts').value, $('#job-budget-tokens').value] = jobDraft.budget.values;
+  }
+  $('#job-update-feedback').hidden = true;
+  $('#job-budget-feedback').hidden = true;
+  $('#job-budget').open = false;
+  renderJobDetails();
+  if (!$('#job-dialog').open) $('#job-dialog').show();
+  $('#job-dialog .close-dialog').focus();
+}
+function renderJobDetails() {
+  if (!viewedJob) return;
+  const record = jobRecord(viewedJob.id);
+  if (!record) { $('#job-dialog').close(); return; }
+  const { job, chat, agentId, worker, receipt, task } = record;
+  const budget = fleetState?.jobBudgets?.[job.budgetId];
+  const copy = job.workspaceCopy && (fleetState?.jobWorkspaces?.[job.workspaceCopy.workspace] || job.workspaceCopy);
+  const owner = agentContexts().find(([, worker]) => worker.sessions.some(session => session.id === (job.owner || job.source)))?.[0];
+  const name = id => state.agents?.find(agent => agent.id === id)?.name || 'Bot';
+  $('#job-details-heading').textContent = job.title || 'Assignment';
+  const status = job.cancelled ? (job.delivered ? 'Cancelled' : 'Stopping') : budget?.state === 'paused' && !job.delivered ? (budget.stopping ? 'Pausing…' : 'Paused') : task ? task.resumedAsJobId ? 'Continued in background' : task.budgetResumePending ? 'Queued to continue in background' : task.summary || 'Working' : job.delivered ? 'Result returned'
+    : job.quotaPause || chat.quotaWaiting ? 'Paused'
+    : worker.requests.length ? 'Needs input' : ({ queued: 'Queued', running: 'Working', revising: 'Updating' })[job.state] || 'Needs review';
+  const access = state.accessModes.find(mode => mode.id === job.access)?.label || 'Unknown access';
+  $('#job-copy-location').hidden = !copy;
+  $('#job-copy-location').textContent = copy ? `Project copy: ${copy.workspace}\nChanges remain here; no automatic merge.` : '';
+  const verification = fleetState?.jobVerification?.[job.id] || receipt?.verification;
+  const verificationKey = JSON.stringify(verification || null);
+  if ($('#job-verification').dataset.key !== verificationKey) {
+    $('#job-verification').dataset.key = verificationKey;
+    $('#job-verification').replaceChildren(renderVerification(verification));
+  }
+  const copyStatus = !job.delivered && copy?.state === 'preparing' ? 'Preparing workspace' : !job.delivered && copy?.state === 'failed' ? 'Needs review' : status;
+  $('#job-details-status').textContent = `${name(agentId)} · Owner: ${name(owner)} · ${copyStatus} · ${access} · Revision ${job.revision || 1}`;
+  const failure = job.revisionError || job.deliveryError || job.error || job.quotaPause?.reason || chat.quotaWaiting?.reason || (job === chat.delegation && chat.error);
+  $('#job-details-error').textContent = failure || '';
+  $('#job-details-error').hidden = !failure;
+  const recovery = !job.delivered && !job.cancelled && job.state === 'interrupted' && !job.recovery?.resumed ? job.recovery : null;
+  $('#job-recovery').hidden = !recovery;
+  if (recovery) {
+    const fresh = recovery.kind === 'not-started';
+    $('#job-recovery-text').textContent = fresh
+      ? 'Harness restarted before this assignment started. Start it now, or return it to its owner without running it.'
+      : 'Harness restarted while this assignment was running. It may have changed files or run commands, so it will not run again by itself. Check the evidence below, then return it to its owner as interrupted and ask again for a new run.';
+    $('#job-recovery-start').hidden = !fresh || job.recoveryVersion !== 1;
+    $('#job-recovery-start').disabled = $('#job-recovery-return').disabled = !!viewedJob.reconciling;
+  }
+  const published = $('#job-artifacts');
+  const artifactKey = JSON.stringify([chat.id, receipt?.id, job.artifacts]);
+  if (published.dataset.key !== artifactKey) {
+    published.dataset.key = artifactKey;
+    published.replaceChildren(renderArtifacts(job.artifacts, chat.id, receipt?.id));
+  }
+  published.hidden = !job.artifacts?.length;
+  const items = task ? chat.items.slice(task.startIndex || 0) : job === chat.delegation ? chat.items.slice(job.historyStartIndex ?? job.startIndex ?? 0)
+    : chat.items.filter(item => item.amendment?.jobId === job.id);
+  const evidence = items.flatMap(item => {
+    if (item.type === 'agentMessage') return [item.text || ''];
+    if (item.type === 'userMessage') return [(item.content || []).filter(part => part.type === 'text').map(part => part.text).join('\n')];
+    if (item.type === 'agentMail') return [`${item.fromName || 'Message'}: ${item.text || ''}`];
+    if (item.type === 'agentResult') return [`Result from ${item.agentName || 'bot'}: ${item.text || ''}`];
+    return [];
+  }).join('\n\n').slice(-16000);
+  const transcript = receipt ? receipt.text || '' : task ? `Original request${task.goal.length > 8000 ? ' (excerpt)' : ''}:\n${task.goal.slice(0, 8000)}\n\n${task.originalImageCount || 0} original image(s)\n\n${evidence.slice(-8000)}` : evidence;
+  if ($('#job-details-log').textContent !== transcript) $('#job-details-log').textContent = transcript || 'Waiting to start.';
+  $('#job-update-form').hidden = !!task;
+  $('#job-budget').hidden = !budget;
+  if (budget) {
+    const used = (budget.usedMs / 60000).toFixed(1), limit = budget.limitMs / 60000;
+    $('#job-budget-summary').textContent = `Budget · ${budget.state === 'paused' ? (budget.stopping ? 'Pausing… · ' : 'Paused · ') : ''}${used} / ${limit} min`;
+    $('#job-budget-status').textContent = [budget.reason, budget.estimated ? 'Elapsed time includes a restart estimate.' : '',
+      'Shared with helpers, job routing and follow-ups. Initial Hub chat is separate. Attempts count turns and routing requests; a CLI turn can include several internal calls. Queue and quota waits do not consume active time.'].filter(Boolean).join(' ');
+    const usage = budget.usage || {};
+    const tokens = usage.reportedTokens == null ? 'Not reported' : `${usage.reportedTokens.toLocaleString()}${usage.tokensComplete ? '' : ' (incomplete)'}`;
+    const cost = formatProviderEstimate(usage);
+    $('#job-budget-usage').textContent = `AI attempts: ${usage.attempts || 0} / ${budget.limitAttempts}. Reported tokens: ${tokens}. Provider estimate: ${cost}. Estimates are not invoices; calls can exceed a token limit before reporting usage.`;
+    if (!viewedJob.budgetDirty) {
+      viewedJob.budgetVersion = budget.version;
+      $('#job-budget-limit').value = limit;
+      $('#job-budget-attempts').value = budget.limitAttempts;
+      $('#job-budget-tokens').value = budget.limitTokens ?? '';
+    }
+    $('#job-budget-save').textContent = budget.state === 'paused' ? 'Resume' : 'Save limit';
+    $('#job-budget-save').disabled = !!viewedJob.budgetPending || !!budget.stopping;
+  }
+  const editable = !viewedJob.pending && !job.delivered && !job.cancelled && ['queued', 'running'].includes(job.state);
+  $('#job-update-send').disabled = !editable;
+  $('#job-update-text').disabled = !editable;
+  const change = job.amendments?.find(entry => entry.id === viewedJob.sentAmendmentId);
+  if (change) {
+    $('#job-update-feedback').textContent = change.state === 'applied' ? 'Applied to the assignment.' : 'Received. Waiting for provider acceptance.';
+    $('#job-update-feedback').hidden = false;
+  }
+}
+function conversationJobs(session) {
+  if (!session) return [];
+  const workers = agentContexts();
+  const owners = new Map(workers.flatMap(([agentId, worker]) => worker.sessions.map(chat => [chat.id, agentId])));
+  const groups = new Map(workers.flatMap(([, worker]) => worker.sessions.filter(chat => chat.group).map(chat => [chat.id, chat])));
+  const direct = workers.flatMap(([agentId, worker]) => worker.sessions.flatMap(chat => (chat.tasks || [])
+    .filter(task => task.foreground && task.budgetId && !task.cancelled && !task.resumedAsJobId &&
+      (!['checks-passed', 'not-checked', 'blocked', 'needs-you', 'cancelled'].includes(task.state) || task.budgetPaused || task.budgetResumePending) &&
+      (chat.id === session.id || (selectedAgent !== 'main' && agentId === selectedAgent)))
+    .map(task => {
+      const budget = fleetState?.jobBudgets?.[task.budgetId], name = state.agents?.find(agent => agent.id === agentId)?.name || 'Bot';
+      return { agentId, contextId: chat.id, id: task.id, jobId: task.id, directTask: true, title: task.goal.replace(/\s+/g, ' ').slice(0, 65),
+        name, ownerId: agentId, owner: name, error: task.budgetResumeError || (budget?.state === 'paused' ? budget.reason : null),
+        status: budget?.state === 'paused' ? budget.stopping ? 'Pausing…' : 'Paused' : task.budgetResumePending ? 'Queued' : 'Running' };
+    })));
+  return [...direct, ...workers.flatMap(([agentId, worker]) => worker.sessions.flatMap(chat =>
+    [chat.delegation, ...(chat.delegationQueue || [])]
+      .filter(job => job && !job.delivered && ((job.owner || job.source) === session.id || job.source === session.id ||
+        chat.id === session.id || (selectedAgent !== 'main' && (agentId === selectedAgent || owners.get(job.owner || job.source) === selectedAgent))))
+      .map(job => {
+        const queued = job !== chat.delegation;
+        const budget = fleetState?.jobBudgets?.[job.budgetId];
+        const copy = job.workspaceCopy && fleetState?.jobWorkspaces?.[job.workspaceCopy.workspace];
+        return { agentId, contextId: chat.id, id: queued ? job.id : chat.id, jobId: job.id, title: job.title || chat.title,
+          change: job.amendments?.at(-1), error: budget?.state === 'paused' ? budget.reason : job.revisionError || job.deliveryError || job.error || job.quotaPause?.reason || chat.quotaWaiting?.reason,
+          ownerId: owners.get(job.owner || job.source), ownerGroupId: groups.has(job.owner || job.source) ? job.owner || job.source : null,
+          owner: (state.agents?.find(agent => agent.id === owners.get(job.owner || job.source))?.name || 'Bot') +
+            (groups.has(job.owner || job.source) ? ' · ' + groups.get(job.owner || job.source).title : ''),
+          name: state.agents?.find(agent => agent.id === agentId)?.name || 'Bot',
+          status: job.cancelled ? 'Stopping…' : copy?.state === 'failed' ? 'Needs review' : copy?.state === 'preparing' ? 'Preparing workspace' : budget?.state === 'paused' ? (budget.stopping ? 'Pausing…' : 'Paused') : ['interrupted', 'delivery-pending', 'revision-blocked'].includes(job.state) ? 'Needs review'
+            : job.quotaPause || chat.quotaWaiting ? 'Paused'
+            : job.state === 'revising' ? 'Updating…' : queued || job.state === 'queued' || chat.capacityWaiting ? 'Queued'
+            : worker.requests.length ? 'Needs input' : chat.waitingForAgent || worker.waitingForAgents?.includes(chat.id) ? 'Waiting' : 'Running' };
+      })))];
+}
+
+function jobActivityRow(job) {
+  const row = element('div', 'job-row');
+  const text = element('div', 'job-description');
+  text.append(element('strong', '', `${job.name} · ${job.status}`), element('p', '', `Owner: ${job.owner} · ${job.title}`));
+  if (job.change) text.append(element('p', '', `Change ${job.change.state === 'applied' ? 'applied' : 'received'} · revision ${job.change.revision}`));
+  if (job.error) text.append(element('p', 'muted', job.error));
+  const open = element('button', 'compact-action', 'Details'); open.type = 'button';
+  open.onclick = () => openJobDetails(job.jobId);
+  row.append(text, open);
+  if (job.ownerId && (job.ownerId !== selectedAgent || (job.ownerGroupId && job.ownerGroupId !== selectedId))) {
+    const owner = element('button', 'compact-action', 'Open owner'); owner.type = 'button';
+    owner.onclick = () => selectAgent(job.ownerId, job.ownerGroupId).catch(notify);
+    row.append(owner);
+  }
+  if (job.status === 'Needs input') {
+    const review = element('button', 'compact-action', 'Review'); review.type = 'button';
+    review.onclick = () => { reviewingExecution = job.agentId; shownRequest = null; renderRequest(); };
+    row.append(review);
+  }
+  const stop = element('button', 'compact-action', job.status === 'Stopping…' ? 'Stopping…' : 'Stop');
+  stop.type = 'button'; stop.disabled = job.status === 'Stopping…';
+  stop.setAttribute('aria-label', `Stop task from ${job.name}`);
+  stop.onclick = async () => {
+    stop.disabled = true; stop.textContent = 'Stopping…';
+    try { await window.router.stop(job.id); }
+    catch (error) { stop.disabled = false; stop.textContent = 'Stop'; notify(error); }
+  };
+  row.append(stop); return row;
+}
+
+function renderJobActivity(session) {
+  const panel = $('#job-activity');
+  if (panel.dataset.session !== (session?.id || '')) {
+    panel.open = false;
+    panel.dataset.session = session?.id || '';
+  }
+  const jobs = conversationJobs(session);
+  const runs = fleetState?.artifactRuns || [];
+  const downloads = fleetState?.downloads || { active: 0 };
+  const queued = [...(session?.queue || []), ...(session?.items || []).flatMap(item => item.pendingReply ? [item.pendingReply] : [])];
+  const replies = queued.filter(message => message.agentReply && !message.agentMail).length;
+  const mail = queued.filter(message => message.agentMail).length;
+  const owner = state.agents?.find(agent => agent.id === selectedAgent)?.name || 'Hub';
+  const batch = Object.values(fleetState?.batchReports || {}).findLast(report => report.sessionId === session?.id);
+  const key = JSON.stringify([session?.id, jobs, runs, downloads, replies, mail, owner, batch?.id, batch?.summary]);
+  if (key === jobActivityKey) return;
+  jobActivityKey = key;
+  panel.hidden = !jobs.length && !runs.length && !downloads.active && !downloads.error && !replies && !mail && !batch;
+  const directCount = jobs.filter(job => job.directTask).length, backgroundCount = jobs.length - directCount;
+  $('#job-activity-summary').textContent = [directCount ? `${directCount} task${directCount === 1 ? '' : 's'}` : '',
+    backgroundCount ? `${backgroundCount} background task${backgroundCount === 1 ? '' : 's'}` : '',
+    replies ? `${replies} result${replies === 1 ? '' : 's'} waiting` : '', mail ? `${mail} message${mail === 1 ? '' : 's'} waiting` : '',
+    runs.length ? `${runs.length} running test${runs.length === 1 ? '' : 's'}` : '',
+    downloads.error ? 'Download cleanup needs attention' : downloads.active ? `${downloads.active} download${downloads.active === 1 ? '' : 's'}` : '',
+    batch ? `Batch report · ${batch.summary}` : '',
+    jobs.some(job => job.ownerId !== selectedAgent) ? 'Owners shown below' : `Owner: ${owner}`].filter(Boolean).join(' · ');
+  $('#job-activity-list').replaceChildren(...jobs.map(jobActivityRow));
+  if (batch) {
+    const report = element('button', 'compact-action', 'Batch report'); report.type = 'button';
+    report.onclick = () => {
+      const target = [...document.querySelectorAll('.batch-report')].find(node => node.dataset.batchId === batch.id);
+      if (target) { target.open = true; target.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
+    };
+    $('#job-activity-list').append(report);
+  }
+  for (const run of runs) {
+    const row = element('div', 'job-row artifact-run');
+    const description = element('div', 'job-description');
+    description.append(element('strong', '', `${run.label} · ${run.status === 'cleanup-blocked' ? 'Needs cleanup' : run.status === 'stopping' ? 'Stopping…' : 'Test running'}`),
+      element('p', '', run.error || run.path));
+    const stop = element('button', 'compact-action', run.status === 'cleanup-blocked' ? 'Retry Stop' : 'Stop');
+    stop.type = 'button'; stop.disabled = run.status === 'stopping';
+    stop.setAttribute('aria-label', `Stop test ${run.label}`);
+    stop.onclick = async () => {
+      stop.disabled = true;
+      try { await window.router.stopArtifactRun(run.id); }
+      catch (error) { stop.disabled = false; notify(error); }
+    };
+    row.append(description, stop); $('#job-activity-list').append(row);
+  }
+  if (downloads.active || downloads.error) {
+    const row = element('div', 'job-row');
+    row.append(element('p', '', downloads.error || 'Preparing or transferring artifact files.'));
+    const stop = element('button', 'compact-action', downloads.error ? 'Retry cleanup' : 'Stop downloads');
+    stop.type = 'button';
+    stop.onclick = async () => {
+      stop.disabled = true;
+      try { await window.router.stopDownloads(); }
+      catch (error) { notify(error); }
+      finally { stop.disabled = false; }
+    };
+    row.append(stop); $('#job-activity-list').append(row);
+  }
+  if (replies) $('#job-activity-list').append(element('p', 'muted', `Worker reports are saved below. ${owner} will review them when available.`));
+}
+
+function renderArtifacts(records, sessionId, receiptId) {
+  const list = element('div', 'artifact-list');
+  if (!records?.length) return list;
+  list.append(element('p', 'muted', 'Files available'));
+  for (const artifact of records) {
+    const row = element('div', 'artifact-row');
+    row.append(element('span', 'artifact-path', artifact.path));
+    const actions = window.router.remote ? [['download', artifact.kind === 'folder' ? 'Download ZIP' : 'Download file']]
+      : [['folder', 'Open folder']];
+    if (artifact.kind === 'program') actions.push(['run', window.router.remote ? 'Run on runner' : 'Run']);
+    for (const [action, label] of actions) {
+      const button = element('button', 'compact-action', label); button.type = 'button';
+      button.onclick = async () => {
+        button.disabled = true; button.textContent = action === 'run' ? 'Checking…' : action === 'download' ? 'Preparing…' : 'Opening…';
+        try {
+          await window.router.artifactAction({ action, sessionId,
+            receiptId: receiptId || `artifact-${artifact.scopeId}-${artifact.id}`,
+            artifactId: artifact.id, expectedVersion: artifact.version });
+        } catch (error) { notify(error); }
+        finally { button.disabled = false; button.textContent = label; }
+      };
+      row.append(button);
+    }
+    list.append(row);
+  }
+  return list;
+}
+
+function renderAgentResult(item, node, session) {
+  const opened = node.querySelector('details')?.open || false;
+  node.className = 'message job-result';
+  const status = { completed: 'Result received', failed: 'Failed', cancelled: 'Cancelled', interrupted: 'Interrupted' }[item.status] || 'Needs review';
+  const label = element('div', 'message-label', `${item.agentName} · ${item.superseded ? 'Earlier revision' : status}`);
+  const owner = element('p', 'job-result-owner', `Owner: ${item.ownerName} · Worker report`);
+  const title = element('p', 'job-result-title', item.title);
+  const preview = element('p', 'job-result-preview', (item.error || item.text || '').slice(0, 260));
+  const details = element('details', 'activity'); details.open = opened;
+  details.append(element('summary', '', 'Report and handoff'), element('pre', '', item.text));
+  for (const change of item.amendments || []) details.append(element('p', '',
+    `Revision ${change.revision} · ${change.state === 'applied' ? 'Applied' : 'Received'}: ${change.text}`));
+  if (item.truncated) details.append(element('p', '', 'Report shortened. Open the bot chat for the full result.'));
+  const open = element('button', 'compact-action', 'Open chat'); open.type = 'button';
+  open.disabled = !state.agents?.some(agent => agent.id === item.agentId);
+  open.onclick = () => selectAgent(item.agentId).catch(notify);
+  node.replaceChildren(label, owner, title, preview, details, renderArtifacts(item.artifacts, session.id, item.id), open);
+  if (Object.values(item.verification || {}).some(group => group.checks?.length) || item.artifacts?.some(artifact => artifact.kind === 'program'))
+    node.append(renderVerification(item.verification));
+  if (item.deliveryId) {
+    const assignment = element('button', 'compact-action', 'Details'); assignment.type = 'button';
+    assignment.onclick = () => openJobDetails(item.deliveryId); node.append(assignment);
+  }
+}
+
+function formatProviderEstimate(usage) {
+  const value = usage?.providerEstimateUsd;
+  if (!Number.isFinite(value) || value < 0) return 'Not reported';
+  return (value > 0 && value < 0.0001 ? '<$0.0001' : '$' + value.toFixed(4)) + (usage.costComplete ? '' : ' (incomplete)');
+}
+
+function renderVerification(evidence) {
+  const container = element('div', 'job-verification');
+  const states = { passed: 'Check passed', failed: 'Check failed', 'needs-review': 'Needs review', 'not-verified': 'Not verified' };
+  for (const [kind, label] of [['build', 'Build'], ['launch', 'Launch'], ['gameplay', 'Gameplay'], ['test', 'Tests']]) {
+    const group = evidence?.[kind];
+    const row = element('details', 'verification-check');
+    row.append(element('summary', '', `${label}: ${states[group?.status] || 'Not verified'}`));
+    if (!group?.checks?.length) row.append(element('p', 'muted', 'No host check evidence. A bot report or an available file is not a passed check.'));
+    for (const check of group?.checks || []) row.append(element('pre', '', `${check.name} · ${check.status}\n${JSON.stringify(check.argv)}\n${check.cwd}\nExit: ${check.exitCode ?? 'not run'}${check.detail ? '\n' + check.detail : ''}`));
+    container.append(row);
+  }
+  return container;
+}
+
+function renderBatchReport(report, opened = false) {
+  const details = element('details', 'batch-report'); details.open = opened;
+  details.dataset.batchId = report.id;
+  details.append(element('summary', '', `Batch report · ${report.requested} jobs: ${report.summary}`));
+  const labels = { returned: 'Returned', failed: 'Failed', interrupted: 'Interrupted', cancelled: 'Cancelled', stopping: 'Stopping', running: 'Running',
+    preparing: 'Preparing workspace', paused: 'Paused', pausing: 'Pausing', queued: 'Queued', updating: 'Updating', waiting: 'Waiting for helper',
+    'needs-input': 'Needs input', 'needs-review': 'Needs review', 'not-dispatched': 'Not dispatched' };
+  const table = element('table', 'batch-table'), head = element('tr');
+  const kinds = [['build', 'Build'], ['launch', 'Launch'], ['gameplay', 'Gameplay']];
+  if (report.entries.some(job => job.verification?.test?.checks?.length)) kinds.push(['test', 'Tests']);
+  for (const label of ['Job', 'Status', ...kinds.map(([, label]) => label), '']) {
+    const cell = element('th', '', label); cell.scope = 'col'; head.append(cell);
+  }
+  const thead = element('thead'); thead.append(head); table.append(thead);
+  const body = element('tbody');
+  const checks = { passed: 'Check passed', failed: 'Check failed', 'needs-review': 'Needs review', 'not-verified': 'Not verified' };
+  for (const job of report.entries) {
+    const row = element('tr', 'batch-entry'), name = element('td');
+    name.append(element('strong', '', `${job.index}. ${job.name}`));
+    if (job.owner) name.append(element('small', 'muted', `Owner: ${job.owner}`));
+    if (job.error || job.text) name.append(element('small', 'muted', (job.error || job.text).slice(0, 100)));
+    name.title = [job.workspace, job.error || job.text].filter(Boolean).join('\n');
+    row.append(name, element('td', '', labels[job.state] || 'Needs review'));
+    for (const [kind] of kinds) {
+      const cell = element('td', '', checks[job.verification?.[kind]?.status] || 'Not verified');
+      cell.dataset.kind = kind; row.append(cell);
+    }
+    const action = element('td');
+    if (job.jobId) {
+      const button = element('button', 'compact-action', 'Details'); button.type = 'button';
+      button.setAttribute('aria-label', `Details for job ${job.index}: ${job.name}`);
+      button.onclick = () => openJobDetails(job.jobId); action.append(button);
+    }
+    const usage = job.usage;
+    action.append(element('small', 'muted', `Estimate: ${formatProviderEstimate(usage)}`));
+    row.append(action); body.append(row);
+  }
+  table.append(body); details.append(table);
+  details.append(element('p', 'muted', 'Returned is not verified completion. Checks describe their execution time; later edits are not covered. Cost reports are provider estimates, not invoices.'));
+  return details;
 }
 
 function contextUsage(session) {
@@ -978,21 +1583,21 @@ function contextUsage(session) {
 function providerConnectionSummary() {
   if (!state) return '';
   const lines = [
-    `ChatGPT · ${state.account ? 'connected' : state.codex?.installed === false ? 'Codex CLI not installed' : 'not connected'}${state.account?.email ? ' · ' + state.account.email : ''}`,
-    `Claude · ${claudeInUse() ? claudeDetail(state.claude) : state.claude?.loggedIn ? KEPT_SIGNED_IN : state.claude?.installed === false ? 'not installed' : 'not connected'}`,
-    `Cursor · ${cursorInUse() ? (state.cursor.email || state.cursor.identity || 'connected') : state.cursor?.loggedIn ? KEPT_SIGNED_IN : state.cursor?.installed === false ? 'not installed' : 'not connected'}`,
+    `Codex CLI · ${state.account ? 'connected' : state.codex?.installed === false ? 'not installed' : 'not connected'}${state.account?.email ? ' · ' + state.account.email : ''}`,
+    `Claude CLI · ${claudeInUse() ? claudeDetail(state.claude) : state.claude?.loggedIn ? KEPT_SIGNED_IN : state.claude?.installed === false ? 'not installed' : 'not connected'}`,
+    `Cursor CLI · ${cursorInUse() ? (state.cursor.email || state.cursor.identity || 'connected') : state.cursor?.loggedIn ? KEPT_SIGNED_IN : state.cursor?.installed === false ? 'not installed' : 'not connected'}`,
   ];
   return lines.join('\n');
 }
 
 // Who wrote a reply: the provider of its turn's route (so older replies are labelled too). API providers run on the
 // Codex runtime; a reply without a turn (older data) was Codex's.
-const WRITERS = { codex: 'Codex', 'claude-cli': 'Claude', 'cursor-cli': 'Cursor' };
+const WRITERS = { codex: 'Codex CLI', 'claude-cli': 'Claude CLI', 'cursor-cli': 'Cursor CLI', 'native:muse': 'Muse Code CLI', 'native:antigravity': 'Antigravity CLI', 'native:deepseek': 'DeepSeek Harness CLI' };
 function writer(item, session) {
   if (item.type === 'plan') return 'Plan';
   if (item.routeLabel === 'Jev · quick answer') return 'Jev';
   const route = item.turnId ? (session.routes || []).find(r => r.turnId === item.turnId) : null;
-  return WRITERS[route?.provider || 'codex'] || 'Codex';
+  return WRITERS[route?.provider || 'codex'] || 'Codex CLI';
 }
 
 function renderMessages(session) {
@@ -1006,8 +1611,9 @@ function renderMessages(session) {
     ids.add(item.id);
     let entry = messageNodes.get(item.id);
     const selected = item.type === 'userMessage' ? session.routes.find(r => r.messageId === (item.clientId || item.id)) : null;
-    const who = item.type === 'userMessage' ? 'You' : writer(item, session);
-    const signature = JSON.stringify([item, selected, who]);
+    const who = item.type === 'userMessage' ? item.routineRun ? 'Routine · ' + item.routineRun.name : 'You' : writer(item, session);
+    const batch = item.hubBatch && fleetState?.batchReports?.[item.hubBatch.id];
+    const signature = JSON.stringify([item, selected, who, batch]);
     if (entry?.signature === signature) continue;
     if (!entry) {
       const node = document.createElement('div');
@@ -1015,7 +1621,32 @@ function renderMessages(session) {
     }
     entry.signature = signature;
     const node = entry.node;
-    if (item.type === 'userMessage' || item.type === 'agentMessage' || item.type === 'plan') {
+    const batchOpened = node.querySelector('.batch-report')?.open || false;
+    if (item.type === 'agentMail') {
+      node.className = 'message';
+      const details = element('details', 'activity'); details.open = node.querySelector('details')?.open || false;
+      details.append(element('summary', '', item.amendment ? `Assignment update from ${item.fromName} · ${item.amendment.state === 'applied' ? 'Applied' : 'Received'} · revision ${item.amendment.revision}`
+        : item.handoff ? `Result ownership handoff · ${item.handoff.state === 'committed' ? 'Recorded' : 'Offer saved'}`
+        : `${item.kind === 'answer' ? 'Answer' : item.kind === 'question' ? 'Question' : 'Message'} from ${item.fromName} · Received`),
+        element('pre', '', item.text), element('p', 'muted', `Message: ${item.id}${item.replyTo ? ' · Reply to: ' + item.replyTo : ''}`));
+      if (item.handoff?.ownerId && item.handoff.ownerId !== selectedAgent) {
+        const open = element('button', 'compact-action', 'Open receiving chat');
+        open.type = 'button';
+        open.onclick = () => selectAgent(item.handoff.ownerId).catch(notify);
+        details.append(open);
+      }
+      node.replaceChildren(details);
+    } else if (item.type === 'agentResult') renderAgentResult(item, node, session);
+    else if (item.type === 'agentArtifact' && item.localOnly) {
+      node.className = 'message';
+      node.replaceChildren(element('div', 'message-label', 'Artifact available'), renderArtifacts([item.artifact], session.id, item.id));
+    }
+    else if (item.agentReply) {
+      node.className = 'message';
+      const details = element('details', 'activity'); details.open = node.querySelector('details')?.open || false;
+      details.append(element('summary', '', 'Handoff details'), element('pre', '', (item.content || []).filter(part => part.type === 'text').map(part => part.text).join('\n')));
+      node.replaceChildren(details);
+    } else if (item.type === 'userMessage' || item.type === 'agentMessage' || item.type === 'plan') {
       const user = item.type === 'userMessage';
       node.className = `message ${user ? 'user' : item.phase === 'commentary' ? 'commentary' : 'assistant'}`;
       const label = element('div', 'message-label', who);
@@ -1023,7 +1654,9 @@ function renderMessages(session) {
       if (routeLabel && !user) label.append(element('span', 'model-label', routeLabel));
       const body = element('div', 'message-body');
       const reply = user ? null : taskLine(item.text || '');
-      const text = user ? item.content.filter(c => c.type === 'text').map(c => c.text).join('\n') : reply.text;
+      const sourceText = user ? item.content.filter(c => c.type === 'text').map(c => c.text).join('\n') : reply.text;
+      const attachment = user ? HarnessFiles.unpack(sourceText, item.fileMessage) : null;
+      const text = attachment?.displayText ?? sourceText;
       if (TASK_STATUS_LABELS[reply?.status] && item.phase !== 'commentary') label.append(element('span', 'task-status', TASK_STATUS_LABELS[reply.status]));
       const actions = element('div', 'message-actions');
       const timestamp = item.createdAt || selected?.at;
@@ -1038,7 +1671,7 @@ function renderMessages(session) {
         copy.innerHTML = icon;
         copy.type = 'button'; copy.title = 'Copy message text'; copy.setAttribute('aria-label', user ? 'Copy sent message' : 'Copy reply');
         copy.onclick = async () => {
-          try { await api.copyText(text); copy.textContent = '✓'; copy.title = 'Copied'; setTimeout(() => { copy.innerHTML = icon; copy.title = 'Copy message text'; }, 1500); }
+          try { await api.copyText(sourceText); copy.textContent = '✓'; copy.title = 'Copied'; setTimeout(() => { copy.innerHTML = icon; copy.title = 'Copy message text'; }, 1500); }
           catch (error) { notify(error); }
         };
         actions.append(copy);
@@ -1052,14 +1685,24 @@ function renderMessages(session) {
         catch { equation.textContent = 'Equation could not be displayed.'; }
       }
       if (user) {
+        for (const file of attachment?.files || []) {
+          const details = element('details', 'sent-file');
+          details.append(element('summary', '', file.name + (file.format ? ' · extracted text' : '')), element('pre', '', file.text));
+          body.append(details);
+        }
         const bubble = element('div', 'message-bubble');
         bubble.append(body);
         node.replaceChildren(label, bubble, actions);
+        if (batch) node.append(renderBatchReport(batch, batchOpened));
       } else node.replaceChildren(label, body, actions);
-      if (user) for (const part of item.content) {
-        if (part.type === 'image' && /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(part.url || '')) {
-          const image = element('img', 'message-image'); image.src = part.url; image.alt = 'Attached image'; body.append(image);
-        }
+      if (user) {
+        const images = item.content.filter(part => part.type === 'image');
+        images.forEach((part, index) => {
+          const image = element('img', 'message-image');
+          image.alt = 'Attached image';
+          body.append(image);
+          showImage(image, part.url, session.id, item.id, index);
+        });
       }
       entry.routeNode?.remove(); entry.routeNode = null;
       if (item.pending || selected) {
@@ -1107,6 +1750,8 @@ function renderMessages(session) {
 }
 
 async function selectSession(id) {
+  if (submitting || readingImages || changingPermissions) return;
+  window.HarnessDictation?.stopForNavigation();
   sentHistory = null; sentHistoryIndex = -1;
   drafts.set(draftKey(), $('#prompt').value);
   selectedId = id; $('#prompt').value = drafts.get(draftKey()) || '';
@@ -1116,13 +1761,19 @@ async function selectSession(id) {
 }
 
 function renderSendButton() {
-  const hasDraft = !!$('#prompt').value.trim() || attachedImages().length > 0;
-  $('#send').hidden = !!state?.busy && !hasDraft;
+  window.HarnessDictation?.render();
+  const hasDraft = !!$('#prompt').value.trim() || attachedImages().length > 0 || attachedFiles().length > 0;
+  const busyHere = !!selectedId && state?.busy === selectedId;
+  $('#attach-files').disabled = readingImages || submitting || changingPermissions;
+  $('#attach-files').textContent = readingImages ? '…' : '+';
+  $('#attach-files').title = readingImages ? 'Reading attachments…' : 'Attach text/code files, PDF, DOCX or images';
+  $('#attach-files').setAttribute('aria-busy', String(readingImages));
+  $('#send').hidden = busyHere && !hasDraft;
   $('#send').innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg>';
   $('#send').title = state?.busy ? 'Queue message' : 'Send message';
   $('#send').setAttribute('aria-label', $('#send').title);
   const checking = (current()?.tasks || []).some(task => task.state === 'checking' || task.state === 'correcting');
-  $('#stop').hidden = current()?.delegation?.state === 'queued' ? false : checking ? false : !state?.busy || hasDraft;
+  $('#stop').hidden = current()?.delegation?.state === 'queued' ? false : checking ? false : !busyHere || hasDraft;
 }
 
 async function updatePreview() {
@@ -1130,7 +1781,7 @@ async function updatePreview() {
   renderSlashMenu();
   const version = ++routeVersion;
   const prompt = $('#prompt').value;
-  $('#send').disabled = (state?.connection !== 'ready' && !slashCommand(prompt)) || changingPermissions || submitting || readingImages || (!prompt.trim() && !attachedImages().length);
+  $('#send').disabled = (state?.connection !== 'ready' && !slashCommand(prompt)) || changingPermissions || submitting || readingImages || (!prompt.trim() && !attachedImages().length && !attachedFiles().length);
   if (state?.coordinator) return;
   const command = slashCommand(prompt);
   if (command) {
@@ -1149,16 +1800,22 @@ async function updatePreview() {
   } catch (error) { notify(error); }
 }
 
+let reviewingExecution = null;
 function renderRequest() {
-  const request = state.requests[0];
+  const execution = reviewingExecution && fleetState?.executionStates?.[reviewingExecution];
+  if (reviewingExecution && !execution?.requests.length) reviewingExecution = null;
+  const request = reviewingExecution ? execution.requests[0] : state.requests[0];
   const dialog = $('#request-dialog');
   if (!request) { if (dialog.open) dialog.close(); shownRequest = null; return; }
-  if (shownRequest === request.id) return;
-  shownRequest = request.id;
+  const requestKey = `${reviewingExecution || selectedAgent}:${reviewingExecution ? execution.conversationId : selectedId}:${request.id}`;
+  if (shownRequest === requestKey) return;
+  shownRequest = requestKey;
   const content = $('#request-content'); content.replaceChildren();
-  const session = state.sessions.find(s => s.threadId === request.params.threadId);
+  const session = (reviewingExecution ? execution : state).sessions.find(s => s.threadId === request.params.threadId);
   content.append(element('div', 'request-context', session?.title || 'Current task'));
-  const finish = async answer => { try { await api.answer(request.id, answer); } catch (error) { notify(error); } };
+  const agentId = reviewingExecution || selectedAgent;
+  const contextId = reviewingExecution ? session?.id || execution.conversationId : undefined;
+  const finish = async answer => { try { await window.router.answer(request.id, answer, agentId, contextId); } catch (error) { notify(error); } };
   if (/requestUserInput/.test(request.method)) {
     content.append(element('h2', '', 'Codex has a question'));
     const fields = [];
@@ -1202,7 +1859,7 @@ function renderRequest() {
     if (!unsupported) { const allow = element('button', 'primary', 'Allow once'); allow.onclick = () => finish({ decision: 'accept' }); actions.append(allow); }
     content.append(actions);
   }
-  const stop = element('button', 'icon-button', 'Stop task'); stop.onclick = () => api.stop().catch(notify); content.append(stop);
+  const stop = element('button', 'icon-button', 'Stop task'); stop.onclick = () => api.stop(reviewingExecution ? session?.id || execution.conversationId : selectedId).catch(notify); content.append(stop);
   if (!dialog.open) dialog.showModal();
 }
 
@@ -1211,10 +1868,12 @@ function slashCommand(text) {
 }
 async function clearConversation() {
   const agentId = selectedAgent, key = draftKey();
-  const result = await api.clearConversation(agentId);
+  const groupId = current()?.group ? selectedId : undefined;
+  const result = await api.clearConversation(agentId, groupId);
   if (!result.cleared) return false;
-  drafts.delete(key); imageDrafts.delete(key);
+  drafts.delete(key); imageDrafts.delete(key); fileDrafts.delete(key);
   sentHistory = null; sentHistoryIndex = -1; draftAccess = null;
+  if (groupId) selectedId = result.sessionId;
   applyState(result.state); renderImages(); updatePreview();
 }
 const COMMANDS = {
@@ -1408,7 +2067,7 @@ async function runCommand(name, text) {
   try {
     if (!Object.hasOwn(COMMANDS, name)) throw new Error('Unknown command. Use /help for available commands.');
     if (text && text !== '/' && text.toLowerCase() !== '/' + name) throw new Error(`/${name} does not take arguments.`);
-    if (text && attachedImages().length) throw new Error('Remove attached images before running a slash command.');
+    if (text && (attachedImages().length || attachedFiles().length)) throw new Error('Remove attachments before running a slash command.');
     const result = await COMMANDS[name].run();
     if (result !== false && text && draftKey() === key && $('#prompt').value.trim() === text) {
       $('#prompt').value = ''; drafts.delete(key); updatePreview();
@@ -1426,11 +2085,20 @@ $('#commands-help').onclick = () => runCommand('help');
 $('#clear-conversation').onclick = () => runCommand('clear');
 $('#composer').addEventListener('submit', async event => {
   event.preventDefault();
+  if (submitting || readingImages || changingPermissions) return;
+  if (window.HarnessDictation?.active()) {
+    submitting = true; render();
+    try { await window.HarnessDictation.finish(); }
+    catch (error) { notify(error); return; }
+    finally { submitting = false; render(); }
+  }
   const text = $('#prompt').value.trim();
+  if (text.length > $('#prompt').maxLength) { notify(new Error('Your draft is over the message limit. Shorten it before sending.')); return; }
   const command = slashCommand(text);
   if (command) { await runCommand(command, text); return; }
   const images = attachedImages().slice();
-  if ((!text && !images.length) || readingImages || submitting || changingPermissions || state.connection !== 'ready') return;
+  const files = attachedFiles().slice();
+  if ((!text && !images.length && !files.length) || readingImages || submitting || changingPermissions || state.connection !== 'ready') return;
   submitting = true;
   $('#send').disabled = true;
   $('#permissions').disabled = true;
@@ -1442,27 +2110,32 @@ $('#composer').addEventListener('submit', async event => {
       draftAccess = null;
       drafts.delete(key);
       imageDrafts.delete(key);
+      fileDrafts.delete(key);
       if (!state.sessions.some(s => s.id === session.id)) state.sessions.unshift(session);
     }
     sentHistory = null; sentHistoryIndex = -1;
     drafts.set(selectedId, ''); $('#prompt').value = ''; updatePreview();
-    imageDrafts.delete(selectedId); renderImages();
+    imageDrafts.delete(selectedId); fileDrafts.delete(selectedId); renderImages();
     // Not awaited: a Claude or Cursor send resolves only when its turn ends, which kept the composer locked. The main
     // process marks the session busy before it yields, so the next message sent meanwhile is queued, not doubled.
     const id = selectedId;
-    api.send({ id, text, images, mode: currentMode(), task: 'on' }).catch(error => restoreDraft(id, text, images, error));
-  } catch (error) { restoreDraft(selectedId, text, images, error); }
+    api.send({ id, text, images, files, mode: currentMode(), task: 'on' }).catch(error => restoreDraft(id, text, images, error, files));
+  } catch (error) { restoreDraft(selectedId, text, images, error, files); }
   finally { submitting = false; render(); }
 });
 
 // A message that could not be sent goes back to its chat's composer, unless something new was typed there meanwhile.
-function restoreDraft(id, text, images, error) {
+function restoreDraft(id, text, images, error, files = []) {
   const key = draftKey(id);
   if (!(drafts.get(key) || '').trim()) {
     drafts.set(key, text);
     if (key === draftKey() && !$('#prompt').value) $('#prompt').value = text;
   }
   if (images.length && !imageDrafts.get(key)?.length) imageDrafts.set(key, images);
+  if (files.length) {
+    const existing = fileDrafts.get(key) || [];
+    fileDrafts.set(key, [...existing, ...files.filter(file => !existing.some(saved => saved.name === file.name && saved.text === file.text))]);
+  }
   if (key === draftKey()) { renderImages(); updatePreview(); }
   notify(error);
 }
@@ -1483,15 +2156,20 @@ $('#prompt').addEventListener('keydown', event => {
   }
   if (!event.isComposing && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && ['ArrowUp', 'ArrowDown'].includes(event.key)) {
     const prompt = $('#prompt');
-    if (event.key === 'ArrowUp' && !prompt.value && !attachedImages().length && !sentHistory) {
-      sentHistory = (current()?.items || []).filter(i => i.type === 'userMessage' && !i.pending)
-        .map(i => (i.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n')).filter(Boolean).reverse();
+    if (event.key === 'ArrowUp' && !prompt.value && !attachedImages().length && !attachedFiles().length && !sentHistory) {
+      sentHistory = (current()?.items || []).filter(i => i.type === 'userMessage' && !i.pending && !i.routineRun)
+        .map(i => {
+          const text = (i.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+          return { text, attachment: HarnessFiles.unpack(text, i.fileMessage) };
+        }).filter(entry => entry.text).reverse();
       sentHistoryIndex = -1;
     }
     if (sentHistory?.length) {
       event.preventDefault();
       sentHistoryIndex = Math.max(-1, Math.min(sentHistory.length - 1, sentHistoryIndex + (event.key === 'ArrowUp' ? 1 : -1)));
-      prompt.value = sentHistory[sentHistoryIndex] || '';
+      const entry = sentHistory[sentHistoryIndex];
+      prompt.value = entry?.attachment?.displayText ?? entry?.text ?? '';
+      fileDrafts.set(draftKey(), entry?.attachment?.files || []); renderImages();
       prompt.setSelectionRange(prompt.value.length, prompt.value.length);
       updatePreview();
       return;
@@ -1566,6 +2244,8 @@ $('#settings').onclick = async () => {
   $('#settings-jev-compare').value = state.settings.jevCompare === true ? 'on' : 'off';
   $('#settings-wiki-check').value = state.settings.wikiAssessment === true ? 'on' : 'off';
   $('#settings-font').value = String(state.settings.fontScale || 100);
+  $('#settings-background-usage').value = String(state.settings.backgroundUsageLimit || 90);
+  renderQuotaSettings();
   $('#settings-routing').onchange();
   $('#jev-key').value = '';
   $('#jev-result').textContent = '';
@@ -1575,6 +2255,81 @@ $('#settings').onclick = async () => {
   $('#settings-save-status').textContent = '';
   showAbout();
   $('#settings-dialog').showModal();
+  loadRunnerSettings();
+  loadRemoteSettings();
+};
+
+function renderQuotaSettings() {
+  const windows = Object.values(state.providerQuotas?.codex || {}).filter(window =>
+    Number.isFinite(window.usedPercent) && (!window.resetsAt || window.resetsAt > Date.now()));
+  const reported = windows.length ? `Last ChatGPT report: ${windows.map(window => window.usedPercent + '%').join(' / ')} used.` : 'ChatGPT allowance is unknown.';
+  const claude = Object.values(state.providerQuotas?.['claude-cli'] || {}).filter(window =>
+    state.claude?.quotaAccountKey && window.account === state.claude.quotaAccountKey && Number.isFinite(window.usedPercent) &&
+    (!window.resetsAt || window.resetsAt > Date.now()));
+  const native = claude.length ? `Last Claude Code report: ${claude.map(window => `${window.label}: ${window.usedPercent}%`).join(' / ')} used.` : 'Claude Code allowance is unknown.';
+  $('#background-usage-detail').textContent = `Pause new background turns at ${state.settings.backgroundUsageLimit || 90}% of a reported allowance. Active turns may finish. ${reported} ${native} Other providers’ quotas are unknown.`;
+}
+
+async function loadRunnerSettings() {
+  const control = $('#settings-runner-start');
+  control.disabled = true;
+  try {
+    const info = await api.runnerInfo();
+    control.value = info.autostart.enabled ? 'on' : 'off';
+    control.disabled = api.remote || !info.autostart.supported;
+    $('#runner-status').textContent = api.remote ? 'Connected to your runner. Closing this tab keeps jobs running.'
+      : `${info.status}. Closing the window keeps work running. Reopen Harness or quit the runner from its tray icon.`;
+  } catch { $('#runner-status').textContent = 'Runner status unavailable. Reopen Harness to reconnect.'; }
+}
+
+let remoteInfo = null;
+async function loadRemoteSettings() {
+  if (api.remote) return;
+  try {
+    remoteInfo = await api.remoteInfo();
+    $('#remote-status').textContent = remoteInfo.error || (remoteInfo.running ? `Running at ${remoteInfo.origin}` : 'Off. Jobs stay on this runner.');
+    $('#remote-port').value = remoteInfo.port || 8788;
+    $('#remote-origin').value = remoteInfo.origin?.startsWith('https:') ? remoteInfo.origin : '';
+    $('#remote-port').disabled = $('#remote-origin').disabled = !!remoteInfo.running;
+    $('#remote-toggle').textContent = remoteInfo.running ? 'Stop browser access' : 'Start browser access';
+    $('#remote-copy').hidden = $('#remote-disconnect-all').hidden = $('#remote-reset-link').hidden = !remoteInfo.running;
+  } catch (error) { $('#remote-status').textContent = error.message; }
+}
+$('#remote-toggle').onclick = async event => {
+  const button = event.currentTarget; button.disabled = true;
+  try {
+    if (remoteInfo?.running) await api.remoteStop();
+    else await api.remoteStart({ port: Number($('#remote-port').value), origin: $('#remote-origin').value.trim() || null });
+    await loadRemoteSettings();
+  } catch (error) { notify(error); }
+  finally { button.disabled = false; }
+};
+$('#remote-copy').onclick = async () => {
+  try {
+    const info = await api.remoteInfo();
+    if (!info.connectionURL) throw new Error('Start browser access first.');
+    await api.copyText(info.connectionURL); $('#remote-status').textContent = 'Connection link copied.';
+  } catch (error) { notify(error); }
+};
+$('#remote-disconnect-all').onclick = async () => {
+  try { await api.remoteDisconnectAll(); $('#remote-status').textContent = 'Browsers disconnected. Existing jobs keep running.'; }
+  catch (error) { notify(error); }
+};
+$('#remote-logout').onclick = () => api.disconnect?.().catch(notify);
+$('#remote-reset-link').onclick = async () => {
+  try { await api.remoteResetLink(); $('#remote-status').textContent = 'Link reset. Copy the new connection link to reconnect your browsers.'; }
+  catch (error) { notify(error); }
+};
+
+$('#settings-runner-start').onchange = async event => {
+  const control = event.target;
+  control.disabled = true;
+  try {
+    const saved = await api.runnerAutostart(control.value === 'on');
+    control.value = saved.enabled ? 'on' : 'off';
+    $('#settings-save-status').textContent = saved.needsApproval ? 'Approve the login item in system settings.' : 'Saved';
+  } catch (error) { notify(error); await loadRunnerSettings(); }
+  finally { control.disabled = false; }
 };
 // Versions, provider state and recent log lines (no prompts, replies or keys), for bug reports.
 $('#copy-diagnostics').onclick = async () => {
@@ -1756,7 +2511,7 @@ $('#jev-plug').onclick = async event => {
 };
 $('#jev-save').onclick = async () => {
   const key = $('#jev-key').value; $('#jev-key').value = '';
-  try { applyState(await api.jevSaveKey(key)); renderJevCompare(); renderWikiCheck(); $('#jev-result').textContent = state.jev.enabled === false ? 'Key saved. Use the plug to enable Jev.' : 'Key saved. Test the connection, then select Jev under General → Router.'; }
+  try { applyState(await withProviderAction('jev', 'Saving key…', () => api.jevSaveKey(key))); renderJevCompare(); renderWikiCheck(); $('#jev-result').textContent = state.jev.enabled === false ? 'Key saved. Use the plug to enable Jev.' : 'Key saved. Test the connection, then select Jev under General → Router.'; }
   catch (error) { notify(error); }
 };
 $('#jev-test').onclick = async () => {
@@ -1769,7 +2524,7 @@ $('#jev-test').onclick = async () => {
   finally { testingJev = false; render(); }
 };
 $('#jev-remove').onclick = async () => {
-  try { applyState(await api.jevRemoveKey()); $('#settings-routing').value = state.settings.routing; $('#settings-context').value = state.settings.contextRanking || 'local'; $('#settings-tools').value = state.settings.toolSelection || 'off'; $('#settings-jev-compare').value = 'off'; $('#settings-wiki-check').value = 'off'; $('#settings-routing').onchange(); $('#jev-result').textContent = 'Saved key removed.'; }
+  try { applyState(await withProviderAction('jev', 'Removing key…', () => api.jevRemoveKey())); $('#settings-routing').value = state.settings.routing; $('#settings-context').value = state.settings.contextRanking || 'local'; $('#settings-tools').value = state.settings.toolSelection || 'off'; $('#settings-jev-compare').value = 'off'; $('#settings-wiki-check').value = 'off'; $('#settings-routing').onchange(); $('#jev-result').textContent = 'Saved key removed.'; }
   catch (error) { notify(error); }
 };
 let settingsWrites = Promise.resolve();
@@ -1790,7 +2545,7 @@ async function saveSetting(control, key, value, agentId = selectedAgent) {
   } catch (error) {
     if (agentId === selectedAgent) {
       const saved = ((key === 'workspace' || key === 'access') ? current()?.[key] ?? state.settings[key] : state.settings[key])
-        ?? { fontScale: 100, effortCap: 'high', contextRanking: 'local', toolSelection: 'off', jevQuickAnswers: true, jevCompare: false, wikiAssessment: false }[key];
+        ?? { fontScale: 100, backgroundUsageLimit: 90, effortCap: 'high', contextRanking: 'local', toolSelection: 'off', jevQuickAnswers: true, jevCompare: false, wikiAssessment: false }[key];
       control.value = typeof value === 'boolean' ? (saved ? 'on' : 'off') : String(saved ?? '');
       control.onchange?.();
     }
@@ -1802,6 +2557,7 @@ async function saveSetting(control, key, value, agentId = selectedAgent) {
   }
 }
 const settingsFields = {
+  'settings-background-usage': 'backgroundUsageLimit',
   'settings-font': 'fontScale', 'settings-access': 'access', 'settings-routing': 'routing',
   'settings-router-preset': 'routerPreset', 'settings-effort-cap': 'effortCap',
   'settings-context': 'contextRanking', 'settings-tools': 'toolSelection',
@@ -1810,7 +2566,7 @@ const settingsFields = {
 $('#settings-form').addEventListener('change', event => {
   const control = event.target, key = settingsFields[control.id];
   if (!key) return;
-  const value = key === 'fontScale' ? Number(control.value)
+  const value = ['fontScale', 'backgroundUsageLimit'].includes(key) ? Number(control.value)
     : ['jevQuickAnswers', 'jevCompare', 'wikiAssessment'].includes(key) ? control.value === 'on' : control.value;
   saveSetting(control, key, value);
 });
@@ -1877,7 +2633,7 @@ $('#delete-form').onsubmit = async event => {
   try {
     applyState(await api.deleteAgent(id));
     dialog.close();
-    for (const key of [`new:${id}`, ...sessions.map(s => s.id)]) { drafts.delete(key); imageDrafts.delete(key); }
+    for (const key of [`new:${id}`, ...sessions.map(s => s.id)]) { drafts.delete(key); imageDrafts.delete(key); fileDrafts.delete(key); }
     updatePreview();
   } catch (error) { $('#delete-error').textContent = error.message; $('#delete-error').hidden = false; }
   finally { deletingAgent = false; $('#delete-confirm').disabled = false; render(); }
@@ -1887,15 +2643,88 @@ document.querySelectorAll('.close-dialog').forEach(button => { button.onclick = 
   const dialog = button.closest('dialog');
   if (dialog.id === 'settings-dialog') closeSettings(); else dialog.close();
 }; });
-$('#request-dialog').addEventListener('cancel', event => event.preventDefault());
+$('#request-dialog').addEventListener('cancel', event => {
+  if (!reviewingExecution) return event.preventDefault();
+  reviewingExecution = null; shownRequest = null;
+});
+$('#job-dialog').addEventListener('close', () => {
+  if ($('#job-dialog').open) return;
+  saveJobDraft();
+  viewedJob = null;
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && $('#job-dialog').open && !document.querySelector('dialog:modal')) {
+    event.preventDefault(); $('#job-dialog').close();
+  }
+});
+document.addEventListener('pointerdown', event => {
+  if ($('#job-dialog').open && !event.target.closest('dialog')) $('#job-dialog').close();
+});
+$('#job-update-text').addEventListener('input', () => { if (viewedJob) viewedJob.amendmentId = null; });
+for (const id of ['#job-budget-limit', '#job-budget-attempts', '#job-budget-tokens'])
+  $(id).oninput = () => { if (viewedJob) viewedJob.budgetDirty = true; };
+$('#job-budget-form').onsubmit = async event => {
+  event.preventDefault();
+  const selected = viewedJob, record = selected && jobRecord(selected.id);
+  const budget = fleetState?.jobBudgets?.[record?.job.budgetId];
+  if (!budget || selected.budgetPending) return;
+  selected.budgetPending = true; renderJobDetails();
+  const feedback = $('#job-budget-feedback');
+  try {
+    await window.router.jobBudget({ jobId: budget.id, expectedVersion: selected.budgetVersion,
+      limitMinutes: Number($('#job-budget-limit').value), limitAttempts: Number($('#job-budget-attempts').value),
+      limitTokens: $('#job-budget-tokens').value.trim() ? Number($('#job-budget-tokens').value) : null,
+      resume: budget.state === 'paused' });
+    selected.budgetDirty = false; feedback.textContent = budget.state === 'paused' ? 'Resume accepted.' : 'Time limit saved.';
+  } catch (error) { feedback.textContent = error.message; }
+  finally {
+    selected.budgetPending = false;
+    if (viewedJob === selected) { feedback.hidden = false; renderJobDetails(); }
+  }
+};
+for (const [id, action] of [['#job-recovery-start', 'start'], ['#job-recovery-return', 'return']]) $(id).onclick = async () => {
+  const selected = viewedJob;
+  if (!selected || selected.reconciling) return;
+  selected.reconciling = true; renderJobDetails();
+  try { await api.reconcileJob({ jobId: selected.id, action }); }
+  catch (error) { notify(error); }
+  finally { selected.reconciling = false; if (viewedJob === selected) renderJobDetails(); }
+};
+$('#job-update-form').onsubmit = async event => {
+  event.preventDefault();
+  if (!viewedJob || !$('#job-update-text').value.trim()) return;
+  const selected = viewedJob;
+  selected.amendmentId ||= crypto.randomUUID();
+  selected.pending = true; selected.sentAmendmentId = selected.amendmentId;
+  renderJobDetails();
+  try {
+    const result = await api.reviseJob({ jobId: selected.id, expectedRevision: selected.revision,
+      amendmentId: selected.amendmentId, text: $('#job-update-text').value });
+    if (viewedJob !== selected) { if (jobDraft?.id === selected.id) jobDraft = null; return; }
+    selected.revision = result.revision; selected.amendmentId = null;
+    $('#job-update-text').value = '';
+    $('#job-update-feedback').textContent = result.status === 'applied' ? 'Applied to the assignment.' : 'Received. Waiting for provider acceptance.';
+    $('#job-update-feedback').hidden = false;
+  } catch (error) { notify(error); }
+  finally { selected.pending = false; if (viewedJob === selected) renderJobDetails(); }
+};
 document.querySelectorAll('[data-prompt]').forEach(button => { button.onclick = () => { $('#prompt').value = button.dataset.prompt; $('#prompt').focus(); updatePreview(); }; });
+const chatOptions = $('#chat-options');
 document.addEventListener('click', event => {
+  if (chatOptions.open && !chatOptions.contains(event.target)) chatOptions.open = false;
   const link = event.target.closest('a');
   if (link) { event.preventDefault(); if (/^https?:\/\//i.test(link.href)) api.openLink(link.href).catch(notify); }
 });
 document.addEventListener('keydown', event => {
+  if (event.defaultPrevented) return;
+  if (event.key === 'Escape' && chatOptions.open && !document.querySelector('dialog[open]')) {
+    event.preventDefault();
+    chatOptions.open = false;
+    chatOptions.querySelector('summary').focus();
+    return;
+  }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'n' && !document.querySelector('dialog[open]')) { event.preventDefault(); editAgent(); }
-  if (event.key === 'Escape' && state?.busy && !document.querySelector('dialog[open]')) api.stop().catch(notify);
+  if (event.key === 'Escape' && state?.busy && state.busy === selectedId && !document.querySelector('dialog[open]')) api.stop(state.busy).catch(notify);
 });
 api.onState(applyState);
 api.bootstrap().then(applyState).catch(notify);
@@ -1927,9 +2756,9 @@ function renderProviders() {
     plug.onclick = async () => {
       $('#provider-status').textContent = connected ? `Disconnecting ${label}…` : `Connecting ${label}…`;
       try {
-        if (connected) applyState(await disconnect());
+        if (connected) applyState(await withProviderAction(id, 'Disconnecting…', disconnect));
         else {
-          const result = await connect();
+          const result = await withProviderAction(id, 'Connecting…', connect);
           if (result && result !== state) applyState(result);
         }
         $('#provider-status').textContent = '';
@@ -1942,15 +2771,20 @@ function renderProviders() {
     const limit = limitLine(id);
     if (limit) text.append(element('small', 'provider-usage limited', limit));
     row.append(plug, text);
-    if (installed === false) {
-      const install = element('button', 'provider-install', 'Install');
+    // Shown only when the CLI is missing, or installed with a newer official release.
+    // The Hub's controller checks for updates; a selected worker's state has none, so read the fleet state.
+    const update = installed && fleetState?.cliUpdates?.[id];
+    if (installed === false || update) {
+      const install = element('button', 'provider-install', update ? 'Update' : 'Install');
       install.type = 'button';
+      if (update)
+        install.title = `${update.installed} → ${update.latest}`;
       install.disabled = !!(state.anyAgentBusy || state.busy);
       install.onclick = async () => {
         install.disabled = true;
-        $('#provider-status').textContent = `Installing ${label}…`;
+        $('#provider-status').textContent = `${update ? 'Updating' : 'Installing'} ${label}…`;
         try {
-          applyState(await api.installProvider(id));
+          applyState(await withProviderAction(id, update ? 'Updating…' : 'Installing…', () => api.installProvider(id)));
           $('#provider-status').textContent = '';
           renderProviders();
         } catch (e) { $('#provider-status').textContent = e.message; install.disabled = false; }
@@ -1962,11 +2796,11 @@ function renderProviders() {
 
   addAccount({
     id: 'codex',
-    label: 'ChatGPT',
+    label: 'Codex CLI',
     connected: !!state.account,
     installed: state.codex?.installed,
     detail: state.account ? (chatgptDetail(state.account) || 'connected')
-      : state.codex?.installed === false ? 'Codex CLI not installed' : state.codex?.installed && !state.codex.connected ? 'Codex not running · restart the app'
+      : state.codex?.installed === false ? 'not installed' : state.codex?.installed && !state.codex.connected ? 'Codex not running · restart the app'
         : state.codex?.signedIn ? KEPT_SIGNED_IN : 'not connected',
     connect: async () => {
       const result = await api.connectChatGPT();
@@ -1977,7 +2811,7 @@ function renderProviders() {
   });
   addAccount({
     id: 'claude-cli',
-    label: 'Claude',
+    label: 'Claude CLI',
     connected: claudeInUse(),
     installed: state.claude?.installed,
     detail: claudeInUse() ? claudeDetail(state.claude) : state.claude?.loggedIn ? KEPT_SIGNED_IN : (state.claude?.installed === false ? 'not installed' : 'not connected'),
@@ -1986,7 +2820,7 @@ function renderProviders() {
   });
   addAccount({
     id: 'cursor-cli',
-    label: 'Cursor',
+    label: 'Cursor CLI',
     connected: cursorInUse(),
     installed: state.cursor?.installed,
     detail: cursorInUse()
@@ -1996,24 +2830,42 @@ function renderProviders() {
     disconnect: () => api.cursorLogout(),
   });
 
+  for (const [id, native] of Object.entries(state.nativeCLIs || {})) addAccount({
+    id, label: native.label, connected: !!native.loggedIn && native.enabled !== false, installed: native.installed,
+    detail: native.loggedIn ? native.enabled !== false ? `${native.account || 'Connected'}${native.version ? ' · ' + native.version : ''}` : KEPT_SIGNED_IN
+      : native.installed ? 'Installed · connect native sign-in' : 'not installed',
+    connect: () => api.nativeProviderAction(id, 'connect'), disconnect: () => api.nativeProviderAction(id, 'disconnect'),
+  });
   renderApiProviders();
   const catalog = state.providerCatalog || [];
   const groups = [
-    { id: 'codex', title: 'Codex / ChatGPT', models: catalog.filter(m => !m.provider || m.provider === 'codex'), gated: !state.account },
-    { id: 'claude-cli', title: 'Claude', models: catalog.filter(m => m.provider === 'claude-cli'), gated: !claudeInUse() },
-    { id: 'cursor-cli', title: 'Cursor', models: catalog.filter(m => m.provider === 'cursor-cli'), gated: !cursorInUse(), discover: true },
-    // API providers run through the Codex app-server; their models come from the endpoint's /models list.
-    ...(state.providers || []).map(p => ({ id: p.id, title: p.name, models: catalog.filter(m => m.provider === p.id), gated: !p.enabled || !state.codex?.connected, discover: true, api: true })),
+    { id: 'codex', title: 'Codex CLI / ChatGPT', models: catalog.filter(m => !m.provider || m.provider === 'codex'), gated: !state.account },
+    { id: 'claude-cli', title: 'Claude CLI', models: catalog.filter(m => m.provider === 'claude-cli'), gated: !claudeInUse() },
+    { id: 'cursor-cli', title: 'Cursor CLI', models: catalog.filter(m => m.provider === 'cursor-cli'), gated: !cursorInUse(), discover: true },
+    ...Object.entries(state.nativeCLIs || {}).map(([id, native]) => ({ id, title: native.label,
+      models: catalog.filter(model => model.provider === id), gated: !native.loggedIn || native.enabled === false })),
+    // API providers run in Harness's own agent loop; their models come from the endpoint's /models list.
+    ...(state.providers || []).map(p => ({ id: p.id, title: p.name, models: catalog.filter(m => m.provider === p.id), gated: !p.enabled, discover: true, api: true })),
   ];
 
   for (const group of groups) {
-    list.append(element('h4', 'provider-model-group', group.title));
+    // Each provider's models collapse under its name; the choice holds while the list re-renders.
+    const section = element('details', 'provider-model-section');
+    section.open = !collapsedModelGroups.has(group.id);
+    section.ontoggle = () => {
+      if (section.open)
+        collapsedModelGroups.delete(group.id);
+      else
+        collapsedModelGroups.add(group.id);
+    };
+    section.append(element('summary', 'provider-model-group', group.title));
+    list.append(section);
     if (group.gated) {
-      list.append(element('p', 'muted', 'Connect this provider to enable its models.'));
+      section.append(element('p', 'muted', 'Connect this provider to enable its models.'));
       continue;
     }
     if (group.id === 'claude-cli' && !group.models.length) {
-      list.append(element('p', 'muted', state.claude?.modelsError || 'No Claude models returned. Click Renew to retry.'));
+      section.append(element('p', 'muted', state.claude?.modelsError || 'No Claude models returned. Click Renew to retry.'));
     }
     if (group.discover) {
       const discovered = discoveredModels.get(group.id) || [];
@@ -2023,14 +2875,24 @@ function renderProviders() {
       const enabledByModel = new Map(group.models.map(m => [discoveredIds.has(baseName(m.model)) ? baseName(m.model) : m.model, m]));
       const ids = new Set([...discovered.map(d => d.id), ...enabledByModel.keys()]);
       // Always load Cursor's full model list, not only when nothing is enabled yet; enabled models show meanwhile.
-      if (!discoveredModels.has(group.id) && !modelFetches.has(group.id))
-        loadDiscoveredModels(group.id).then(() => renderProviders()).catch(e => { $('#provider-status').textContent = e.message; });
-      if (!discoveredModels.has(group.id)) list.append(element('p', 'muted', `Fetching ${group.title} models…`));
-      else if (!ids.size) list.append(element('p', 'muted', 'No models returned.'));
+      // A failed fetch shows its error in the group and waits for Renew instead of retrying on every redraw.
+      if (!discoveredModels.has(group.id) && !modelFetches.has(group.id) && !modelFetchErrors.has(group.id)) {
+        loadDiscoveredModels(group.id).then(() => renderProviders()).catch(e => {
+          modelFetchErrors.set(group.id, String(e.message || e).replace(/^Error invoking remote method '[^']+': Error: /, ''));
+          renderProviders();
+        });
+      }
+      if (modelFetchErrors.has(group.id)) section.append(element('p', 'turn-error', modelFetchErrors.get(group.id)));
+      else if (!discoveredModels.has(group.id)) {
+        const fetching = element('p', 'muted provider-loading');
+        fetching.append(spinner(), document.createTextNode(`Fetching ${group.title} models…`));
+        section.append(fetching);
+      }
+      else if (!ids.size) section.append(element('p', 'muted', 'No models returned.'));
       for (const modelId of [...ids].sort()) {
         const existing = enabledByModel.get(modelId);
         const labelText = discovered.find(d => d.id === modelId)?.label || existing?.modelLabel || existing?.label || modelId;
-        appendModelToggle(list, {
+        appendModelToggle(section, {
           checked: !!(existing && existing.enabled !== false),
           label: `${labelText} · ${group.title}`,
           onChange: async checked => {
@@ -2053,7 +2915,7 @@ function renderProviders() {
       }
       for (const row of byModel.values()) {
         const efforts = row.efforts.length ? row.efforts.join('/') : 'default';
-        appendModelToggle(list, {
+        appendModelToggle(section, {
           checked: row.enabled,
           label: `${row.model} · ${efforts}`,
           onChange: async checked => {
@@ -2074,7 +2936,7 @@ function renderProviders() {
         byModel.set(key, row);
       }
       for (const row of byModel.values()) {
-        appendModelToggle(list, {
+        appendModelToggle(section, {
           checked: row.enabled,
           label: `${row.model} · ${row.efforts.length ? row.efforts.join('/') : 'default'}`,
           onChange: async checked => {
@@ -2086,7 +2948,7 @@ function renderProviders() {
       continue;
     }
     for (const model of group.models) {
-      appendModelToggle(list, {
+      appendModelToggle(section, {
         checked: model.enabled !== false,
         label: `${model.label} · ${group.title}`,
         onChange: async checked => {
@@ -2101,8 +2963,10 @@ function renderProviders() {
   renderProviderConnections();
 }
 
+const collapsedModelGroups = new Set();
 const discoveredModels = new Map();
 const modelFetches = new Map();
+const modelFetchErrors = new Map();
 let renewingModels = false;
 function renderModelFetching() {
   const fetching = renewingModels || modelFetches.size > 0;
@@ -2115,6 +2979,7 @@ function loadDiscoveredModels(providerId) {
   if (modelFetches.has(providerId)) return modelFetches.get(providerId);
   const pending = Promise.resolve().then(() => api.providerModels(providerId)).then(models => {
     discoveredModels.set(providerId, models.map(m => typeof m === 'string' ? { id: m, label: m } : m));
+    modelFetchErrors.delete(providerId);
     return discoveredModels.get(providerId);
   }).finally(() => { modelFetches.delete(providerId); renderModelFetching(); });
   modelFetches.set(providerId, pending);
@@ -2129,6 +2994,7 @@ $('#renew-models').onclick = async () => {
   $('#provider-status').textContent = 'Refreshing models…';
   try {
     discoveredModels.delete('cursor-cli');
+    modelFetchErrors.clear();
     const next = await api.renewModels();
     applyState(next);
     if (cursorInUse()) await loadDiscoveredModels('cursor-cli');
@@ -2211,6 +3077,12 @@ function checkRow(check = {}) {
   command.className = 'check-command';
   command.placeholder = 'Command';
   command.value = (check.argv || []).map(part => /\s/.test(part) ? `"${part}"` : part).join(' ');
+  const kind = document.createElement('select');
+  kind.className = 'check-kind'; kind.setAttribute('aria-label', 'Check purpose');
+  for (const [value, text] of [['test', 'Test'], ['build', 'Build'], ['launch', 'Launch'], ['gameplay', 'Gameplay']]) {
+    const option = document.createElement('option'); option.value = value; option.textContent = text; kind.append(option);
+  }
+  kind.value = check.kind || 'test';
   const timeout = document.createElement('input');
   timeout.className = 'check-timeout';
   timeout.type = 'number';
@@ -2235,7 +3107,7 @@ function checkRow(check = {}) {
     return label;
   };
   readOnly.className = 'check-readonly-label';
-  row.append(field('Name', name, 'check-name-field'), field('Command', command, 'check-command-field'),
+  row.append(field('Name', name, 'check-name-field'), field('Verifies', kind, 'check-kind-field'), field('Command', command, 'check-command-field'),
     field('Timeout (s)', timeout, 'check-timeout-field'), readOnly, remove);
   return row;
 }
@@ -2268,6 +3140,7 @@ async function saveChecks() {
     cwd: workspace,
     timeoutMs: Number(row.querySelector('.check-timeout').value) * 1000,
     readOnlySafe: row.querySelector('.check-readonly').checked,
+    ...(row.querySelector('.check-kind').value !== 'test' ? { kind: row.querySelector('.check-kind').value } : {}),
   }));
   $('#checks-status').textContent = 'Saving…';
   try {

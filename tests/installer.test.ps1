@@ -37,4 +37,19 @@ if (($script:installArgs -join ' ') -notmatch '--id Git.Git --exact --source win
 Reset-Case; $script:installExit = 1; Expect-Failure 'Installation .* failed'
 Reset-Case; $script:worksAfter = $false; Expect-Failure 'missing, shadowed, or not working'
 Reset-Case; $script:wingetAvailable = $false; Expect-Failure 'App Installer'
-Write-Host 'PASS: installer syntax and five dependency-install scenarios (no system changes).'
+
+# A running Harness must be quit before npm ci deletes node_modules; other Electron apps are ignored.
+$wait = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Wait-HarnessClosed' }, $true)
+. ([scriptblock]::Create($wait.Extent.Text))
+$harness = 'C:\App\node_modules\electron\dist\electron.exe'
+function Get-CimInstance { [CmdletBinding()]param($ClassName, $Filter) $script:scans++; if ($script:running -gt 0) { [pscustomobject]@{ ExecutablePath = $harness.ToUpper() } }; [pscustomobject]@{ ExecutablePath = 'C:\Other\electron.exe' } }
+function Read-Host { $script:prompts++; $script:running-- }
+function Write-Host {}
+$script:scans = 0; $script:prompts = 0; $script:running = 0
+Wait-HarnessClosed $harness
+if ($script:prompts -ne 0 -or $script:scans -ne 1) { throw 'A closed Harness or another Electron app must not block installation.' }
+$script:scans = 0; $script:prompts = 0; $script:running = 2
+Wait-HarnessClosed $harness
+if ($script:prompts -ne 2 -or $script:scans -ne 3) { throw 'The installer must ask until Harness is quit, then continue.' }
+Remove-Item function:Write-Host
+Write-Host 'PASS: installer syntax, five dependency-install scenarios and the running-Harness guard (no system changes).'

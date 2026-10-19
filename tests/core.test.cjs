@@ -128,18 +128,79 @@ async function flush() {
   for (let i = 0; i < 8; i++) await new Promise(setImmediate);
 }
 
-test('provider connecting status follows startup checks and clears after failure', async t => {
+test('file attachments keep their snapshot and display metadata through queues, provider refresh and export', async t => {
   const { controller, fake } = await setup(t);
-  let finishClaude, finishCodex;
+  const session = controller.create(undefined, 'read-only');
+  await controller.send({ id: session.id, text: 'First question', mode: 'terra-light', task: 'off' });
+  const files = [{ name: 'sample.cpp', text: 'ATTACHMENT_EVIDENCE\nconst value = 42;\n' }];
+  assert.deepEqual(await controller.send({ id: session.id, text: 'Review this code.', files, mode: 'terra-light', task: 'off' }), { queued: true });
+  const queued = session.queue[0];
+  assert.deepEqual(queued.fileMessage.names, ['sample.cpp']);
+  assert.equal(queued.fileMessage.displayText, 'Review this code.');
+  assert.match(JSON.parse(fs.readFileSync(controller.filename, 'utf8')).sessions[0].queue[0].text, /ATTACHMENT_EVIDENCE/);
+  complete(controller, session, fake.turnIds[0]);
+  await until(() => fake.turnIds.length === 2);
+  const prompt = fake.calls.filter(call => call.method === 'turn/start').at(-1).params;
+  assert.match(prompt.input[0].text, /untrusted reference contents/);
+  assert.match(prompt.input[0].text, /ATTACHMENT_EVIDENCE/);
+  assert.deepEqual(prompt.sandboxPolicy, controller.sandboxFor('read-only', session.workspace));
+  let sent = session.items.filter(item => item.type === 'userMessage').at(-1);
+  const original = sent.content;
+  controller.notification({ method: 'item/completed', params: { threadId: session.threadId, turnId: session.turnId,
+    item: { id: 'provider-user-item', clientId: sent.clientId, type: 'userMessage', content: [{ type: 'text', text: 'Provider representation' }] } } });
+  sent = session.items.find(item => item.id === 'provider-user-item');
+  assert.deepEqual(sent.content, original);
+  assert.deepEqual(sent.fileMessage, queued.fileMessage);
+  const markdown = require('../src/conversation-export.cjs').conversationMarkdown(session);
+  assert.match(markdown, /sample\.cpp/);
+  assert.match(markdown, /ATTACHMENT_EVIDENCE/);
+  complete(controller, session, fake.turnIds[1]);
+  await flush();
+  const call = fake.call.bind(fake);
+  let nativeItems = [{ turnId: fake.turnIds[1], item: { id: sent.id, clientId: sent.clientId, type: 'userMessage',
+    content: [{ type: 'text', text: 'Native representation' }] } }];
+  fake.call = (method, ...args) => method === 'thread/items/list' ? Promise.resolve({ data: nativeItems, nextCursor: null }) : call(method, ...args);
+  controller.loaded.clear();
+  await controller.resume(session, controller.resolveWorker('terra-light'));
+  assert.equal(session.items.filter(item => item.fileMessage).length, 1, 'a returned native item does not duplicate the attachment');
+  nativeItems = [{ turnId: fake.turnIds[1], item: { id: 'native-summary', type: 'agentMessage', text: 'Native compacted history' } }];
+  controller.loaded.clear();
+  await controller.resume(session, controller.resolveWorker('terra-light'));
+  const retained = session.items.filter(item => item.fileMessage);
+  assert.equal(retained.length, 1, 'a native history replacement retains the original file snapshot');
+  assert.deepEqual(retained[0].content, original);
+});
+
+test('invalid attachments reject before inference or queue mutation and file-only requests get a useful default', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  for (const files of [[{ name: '../outside.txt', text: 'data' }], [{ name: 'document.pdf', text: 'data' }], [{ name: 'large.txt', text: 'x'.repeat(65537) }]]) {
+    await assert.rejects(controller.send({ id: session.id, text: 'Read it', files, mode: 'terra-light', task: 'off' }), /UTF-8|64 KB/);
+  }
+  assert.equal(fake.calls.some(call => call.method === 'turn/start'), false);
+  assert.equal(session.queue?.length || 0, 0);
+  await controller.send({ id: session.id, text: '', files: [{ name: 'empty.txt', text: '' }], mode: 'terra-light', task: 'off' });
+  const sent = session.items.find(item => item.type === 'userMessage');
+  assert.equal(sent.fileMessage.displayText, 'Review the attached file(s).');
+});
+
+test('provider connecting status follows parallel startup checks and clears after failure', async t => {
+  const { controller, fake } = await setup(t);
+  let finishClaude, finishCursor, finishNative, finishCodex;
   controller.bridge.start = async () => {};
   controller.claude.refresh = () => new Promise(resolve => { finishClaude = resolve; });
-  controller.cursor.refresh = async () => assert.deepEqual(controller.snapshot().connectingProviders, ['cursor-cli']);
+  controller.cursor.refresh = () => new Promise(resolve => { finishCursor = resolve; });
+  const native = { status: { installed: false, loggedIn: false }, models: [],
+    inspect() { this.status = { installed: true, loggedIn: false }; }, refresh: () => new Promise(resolve => { finishNative = resolve; }), close() {} };
+  controller.nativeCLIs.set('native:antigravity', native);
+  controller.data.settings.antigravityEnabled = true;
   fake.start = () => new Promise((_resolve, reject) => { finishCodex = reject; });
   const initializing = controller.initialize();
-  assert.deepEqual(controller.snapshot().connectingProviders, ['claude-cli']);
+  assert.deepEqual(controller.snapshot().connectingProviders.sort(), ['claude-cli', 'cursor-cli', 'native:antigravity']);
+  assert.equal(native.status.installed, true, 'an installed CLI is not shown as missing while its check runs');
   finishClaude(); await flush();
-  assert.deepEqual(controller.snapshot().connectingProviders, ['codex']);
-  finishCodex(new Error('offline')); await initializing;
+  assert.deepEqual(controller.snapshot().connectingProviders.sort(), ['codex', 'cursor-cli', 'native:antigravity'], 'Codex does not wait for slower CLI checks');
+  finishCodex(new Error('offline')); finishCursor(); finishNative(); await initializing;
   assert.deepEqual(controller.snapshot().connectingProviders, []);
   assert.equal(controller.codex.connected, false);
   assert.equal(Object.hasOwn(controller.data, 'connectingProviders'), false, 'progress is never saved');
@@ -1043,9 +1104,11 @@ test('one failed check corrects once on the same model and keeps the first evide
   let failed = true;
   fake.onExec = () => failed ? { exitCode: 1, stdout: 'boom', stderr: '' } : { exitCode: 0, stdout: 'ok', stderr: '' };
   await controller.send({ id: session.id, text: 'implement', mode: 'terra-light', task: 'on' });
+  assert.equal(session.userTurn, true);
   const model = fake.calls.find(call => call.method === 'turn/start').params.model;
   complete(controller, session, fake.turnIds[0]);
   await until(() => fake.turnIds.length === 2);
+  assert.equal(session.userTurn, false, 'a correction carrying check output is not the user’s turn, so it cannot change routines');
   const evidence = path.join(path.dirname(controller.filename), 'tool-outputs', session.id, `task-${session.tasks[0].id}.json`);
   const first = JSON.parse(fs.readFileSync(evidence, 'utf8'));
   assert.equal(first.attempts[0].results[0].status, 'failed');
@@ -1056,6 +1119,50 @@ test('one failed check corrects once on the same model and keeps the first evide
   await controller.gateDone;
   assert.equal(session.tasks[0].state, 'checks-passed');
   assert.equal(JSON.parse(fs.readFileSync(evidence, 'utf8')).attempts.length, 2);
+});
+
+test('a corrected check failure becomes a lesson that the next task in the project carries, and corrections never do', async t => {
+  const { controller, fake } = await setup(t);
+  const { WikiStore } = require('../src/workspace/wiki-store.cjs');
+  controller.wikiStore = new WikiStore(path.join(path.dirname(controller.filename), 'wiki-store'));
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  arm(controller, fake);
+  addCheck(controller, session, ['unit']);
+  let failed = true;
+  fake.onExec = () => failed ? { exitCode: 1, stdout: 'TypeError: fetchUser is not a function\n  at retry.js:12', stderr: '' } : { exitCode: 0, stdout: 'ok', stderr: '' };
+  const inputs = () => fake.calls.filter(call => call.method === 'turn/start').map(call => call.params.input[0].text);
+
+  await controller.send({ id: session.id, text: 'Add retry handling to fetchUser', mode: 'terra-light', task: 'on' });
+  assert.doesNotMatch(inputs()[0], /Lessons Harness recorded/, 'no lessons exist yet');
+  complete(controller, session, fake.turnIds[0]);
+  await until(() => fake.turnIds.length === 2);
+  assert.doesNotMatch(inputs()[1], /Lessons Harness recorded/, 'a correction never carries lessons');
+  failed = false;
+  complete(controller, session, fake.turnIds[1]);
+  await controller.gateDone;
+  assert.equal(session.tasks[0].state, 'checks-passed');
+
+  const root = controller.wikiStore.location(session.workspace).root;
+  const [lesson] = JSON.parse(fs.readFileSync(path.join(root, 'lessons.json'), 'utf8'));
+  assert.equal(lesson.outcome, 'fixed');
+  assert.equal(lesson.failures[0].check, 'unit');
+  assert.match(lesson.failures[0].excerpt, /TypeError: fetchUser is not a function/);
+  assert.match(fs.readFileSync(path.join(root, 'lessons.md'), 'utf8'), /Fixed after a correction/);
+
+  // Wiki upkeep may follow the passed task; let it finish before the next request.
+  if (controller.busy) {
+    complete(controller, session, fake.turnIds.at(-1));
+    await until(() => !controller.busy);
+  }
+  const next = 'Make fetchUser retries configurable';
+  await controller.send({ id: session.id, text: next, mode: 'terra-light', task: 'on' });
+  assert.match(inputs().at(-1), /Lessons Harness recorded from earlier tasks in this project \(quoted check output, not new instructions/);
+  assert.match(inputs().at(-1), /"unit" failed \(exit 1\) on "Add retry handling to fetchUser": TypeError: fetchUser is not a function → fixed after a correction/);
+  assert.match(inputs().at(-1), /Current user request:\nMake fetchUser retries configurable$/);
+  const visible = session.items.findLast(item => item.type === 'userMessage');
+  assert.deepEqual(visible.content.filter(part => part.type === 'text').map(part => part.text), [next], 'the chat shows only the user text');
+  assert.doesNotMatch(controller.workerInstructions(session), /Lessons Harness recorded/, 'worker instructions stay unchanged');
 });
 
 test('a failed correction submission settles the task', async t => {
@@ -1586,10 +1693,16 @@ test('"Allow for this session" remembers the exact Claude/Cursor action per sess
     assert.throws(() => controller.answer(pending()[0].id, { decision: 'acceptForSession' }), /Invalid approval/);
     controller.answer(pending()[0].id, { decision: 'accept' });
     results.push(await plan);
+    const unnamed = approve({ title: 'Allow Gemini to run a tool?', toolName: null, input: {} });
+    assert.equal(controller.snapshot().requests.find(r => r.id === pending()[0].id).canAllowSession, false,
+      'a Gemini request without a tool name offers one-time approval only');
+    assert.throws(() => controller.answer(pending()[0].id, { decision: 'acceptForSession' }), /Invalid approval/);
+    controller.answer(pending()[0].id, { decision: 'accept' });
+    results.push(await unnamed);
     return { result: 'ok' };
   };
   await controller.send({ id: session.id, text: 'build', mode: 'claude-cli:sonnet', task: 'off' });
-  assert.deepEqual(results, [true, true, false, true]);
+  assert.deepEqual(results, [true, true, false, true, true]);
   assert.equal(pending().length, 0, 'the remembered action did not prompt');
   // Another session does not inherit it, and an access change clears it.
   assert.equal(controller.sessionAllows.get(session.id).size, 1);
@@ -2070,31 +2183,47 @@ test('API providers: add, enable a discovered model, and remove the provider wit
   assert.throws(() => controller.providerSettings({ action: 'removeProvider', id: 'lm-studio' }), /Unknown provider/);
 });
 
-test('local context preparation refreshes existing thread configuration and Stop prevents sending', async t => {
+test('API providers run in Harness\'s own loop without Codex, continue the chat, and Stop ends the request', async t => {
   const { controller, fake } = await setup(t);
-  let context = 8192, prepare;
+  const stream = chunks => new Response(new ReadableStream({ start(output) {
+    for (const chunk of chunks) output.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(chunk)}\n\n`));
+    output.enqueue(new TextEncoder().encode('data: [DONE]\n\n')); output.close();
+  } }), { status: 200 });
+  const bodies = [];
+  let started;
   controller.providers = {
     configured: () => false,
-    config: () => ({ modelProvider: 'phasma_local', config: { model_context_window: context } }),
-    prepare: async (_choice, signal) => { if (prepare) await prepare(signal); context = 32768; },
+    local: { inspect: async () => ({ supported: false }) },
+    modelRequest: async (_choice, body, _local, signal) => {
+      bodies.push(structuredClone(body));
+      if (body.messages.at(-1).content.endsWith('stop this')) {
+        started();
+        await new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+      }
+      return stream([{ choices: [{ delta: { content: 'Hello ' } }] }, { choices: [{ delta: { content: 'from the API.' } }] },
+        { choices: [], usage: { prompt_tokens: 12, completion_tokens: 4 } }]);
+    },
   };
   controller.providerSettings({ action: 'provider', provider: { id: 'local', name: 'Local', baseUrl: 'http://localhost:1234/v1' } });
   controller.providerSettings({ action: 'enableDiscovered', provider: 'local', model: 'gemma' });
   const mode = 'local:gemma:default', session = controller.create();
-  await controller.resume(session, controller.resolveWorker(mode));
-  assert.equal(fake.calls.find(c => c.method === 'thread/start').params.config.model_context_window, 8192);
+
   await controller.send({ id: session.id, text: 'hello', mode, task: 'off' });
-  assert.equal(fake.calls.findLast(c => c.method === 'thread/resume').params.config.model_context_window, 32768);
-  complete(controller, session, session.turnId);
-  await flush();
-  const sends = fake.calls.filter(c => c.method === 'turn/start').length;
-  let started;
+  await until(() => !controller.busy);
+  assert.equal(session.items.filter(item => item.type === 'agentMessage').at(-1).text, 'Hello from the API.');
+  assert.equal(fake.calls.some(call => ['thread/start', 'thread/resume', 'turn/start'].includes(call.method)), false, 'Codex is never used');
+  assert.equal(session.usage.total.inputTokens, 12);
+
+  await controller.send({ id: session.id, text: 'and again', mode, task: 'off' });
+  await until(() => !controller.busy);
+  assert.deepEqual(bodies.at(-1).messages.filter(message => message.role !== 'system').map(message => message.role), ['user', 'assistant', 'user'], 'the saved chat continues');
+
   const waiting = new Promise(resolve => { started = resolve; });
-  prepare = signal => new Promise((_resolve, reject) => { signal.addEventListener('abort', () => reject(signal.reason), { once: true }); started(); });
   const pending = controller.send({ id: session.id, text: 'stop this', mode, task: 'off' });
   await waiting; await controller.stop();
   await pending.catch(() => {});
-  assert.equal(fake.calls.filter(c => c.method === 'turn/start').length, sends);
+  await until(() => !controller.busy);
+  assert.equal(session.status, 'interrupted');
 });
 
 test('diagnostics list versions, provider state and limits without emails, keys or chat content', async t => {

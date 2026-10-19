@@ -1,7 +1,7 @@
 // Live quit test for the real app (src/main.cjs). Run with Electron on Linux:
 //   xvfb-run -a npx electron --no-sandbox tests/quit-live.cjs
 // Fake Codex, Claude and Cursor programs under a temporary HOME each start a child and a detached child. With a task
-// "running" whose Stop fails, the window is closed and "Stop and close" chosen: the app must still quit within its time
+// "running" whose Stop fails, closing the window preserves it; explicit Quit must still finish within its time
 // limit, log the failed Stop, and leave nothing the workers started running. No provider login or inference.
 const fs = require('node:fs');
 const os = require('node:os');
@@ -63,14 +63,8 @@ app.whenReady().then(async () => {
   closedAt = Date.now();
   const window = BrowserWindow.getAllWindows()[0];
   window.close();
-  await window.webContents.executeJavaScript(`new Promise((resolve, reject) => {
-    let attempts = 0; const check = () => {
-      const button = document.querySelector('.confirmation-accept');
-      if (button) { button.click(); return resolve(); }
-      if (++attempts > 100) return reject(new Error('Close confirmation did not open'));
-      setTimeout(check, 20);
-    }; check();
-  })`);
+  if (window.isDestroyed() || window.isVisible() || controller.busy !== 'quit-live') return fail('Close did not preserve the background runner');
+  app.quit();
 });
 
 app.on('will-quit', () => {

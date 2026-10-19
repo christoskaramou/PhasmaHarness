@@ -1,9 +1,7 @@
 const path = require('node:path');
-const http = require('node:http');
-const { randomBytes } = require('node:crypto');
-const { once } = require('node:events');
 const { JevKey } = require('./jev-key.cjs');
 const { LocalModels } = require('./local-models.cjs');
+const { capabilities } = require('./capabilities.cjs');
 
 function validateProvider(value) {
   if (!value || !/^[a-z][a-z0-9-]{0,39}$/.test(value.id) || ['codex', 'claude-cli', 'cursor-cli'].includes(value.id)) throw new Error('Use a provider ID containing lowercase letters, numbers and hyphens.');
@@ -28,7 +26,6 @@ function validateModel(value, providers) {
 class Providers {
   constructor(directory, encryption, getProviders, fetcher = fetch) {
     this.directory = directory; this.encryption = encryption; this.getProviders = getProviders; this.fetch = fetcher;
-    this.token = randomBytes(32).toString('hex'); this.modelEfforts = new Map();
     this.local = new LocalModels(this);
   }
   key(id) {
@@ -43,39 +40,37 @@ class Providers {
   }
   async models(id) {
     const p = this.provider(id);
-    const response = await this.fetch(`${p.baseUrl}/models`, { headers: this.headers(id), redirect: 'error', signal: AbortSignal.timeout(15000) });
+    const response = await this.fetch(`${p.baseUrl}/models`, { headers: this.headers(id), redirect: 'error', signal: AbortSignal.timeout(15000) })
+      .catch(error => {
+        const local = ['localhost', '127.0.0.1', '[::1]'].includes(new URL(p.baseUrl).hostname);
+        const next = local ? 'Start it, then click Renew.' : 'Check the URL and your connection, then click Renew.';
+        throw new Error(`${p.name} is not reachable at ${p.baseUrl} (${error.message}). ${next}`);
+      });
     if (!response.ok) throw new Error(`Model discovery failed (HTTP ${response.status}). Check the endpoint and key.`);
     const body = await response.json();
     if (!Array.isArray(body.data)) throw new Error('This endpoint did not return a compatible model list. Enter a model ID manually.');
     return body.data.slice(0, 1000).map(m => m.id).filter(id => typeof id === 'string' && /^[\w./:@-]{1,160}$/.test(id) && !id.startsWith('phasma-harness/'));
   }
   headers(id) { return { 'Content-Type': 'application/json', ...(this.configured(id) ? { Authorization: `Bearer ${this.key(id).read()}` } : {}) }; }
-  async start() {
-    this.server = http.createServer((req, res) => this.forward(req, res));
-    this.server.listen(0, '127.0.0.1'); await once(this.server, 'listening');
-    this.base = `http://127.0.0.1:${this.server.address().port}/${this.token}`;
-  }
-  setModel(choice) { if (choice?.provider && choice.provider !== 'codex') this.modelEfforts.set(`${choice.provider}:${choice.model}`, choice.effort || null); }
   prepare(choice, signal) { return this.local.prepare(choice, signal); }
-  config(choice) {
-    this.setModel(choice);
-    if (!choice?.provider || choice.provider === 'codex') return { modelProvider: 'openai', config: {} };
-    const p = this.provider(choice.provider);
-    const context = this.local.cached(choice)?.contextLength;
-    return { modelProvider: `phasma_${p.id}`, config: { [`model_providers.phasma_${p.id}`]: {
-      name: p.name, base_url: `${this.base}/${p.id}/v1`, wire_api: 'responses', requires_openai_auth: false,
-      supports_websockets: false, request_max_retries: 0, stream_max_retries: 0,
-    }, ...(context ? { model_context_window: context, model_auto_compact_token_limit: Math.floor(context * 0.75) } : {}), web_search: 'disabled', model_supports_reasoning_summaries: false, 'features.code_mode.enabled': false, 'features.multi_agent': false, 'features.apps': false, 'features.plugins': false, 'features.remote_plugin': false } };
-  }
+  // Only Codex turns load Codex threads; API providers run in src/providers/api-agent.cjs.
+  config() { return { modelProvider: 'openai', config: {} }; }
   async structured(choice, { instructions, prompt, schema, images = [] }, signal) {
     signal.throwIfAborted();
+    // Codex and the CLI providers answer through their own runtimes; only API providers have an endpoint here.
+    if (!capabilities(choice.provider).api)
+      return null;
+
     const local = await this.local.inspect(choice, signal);
-    if (!local.supported) return null;
     const p = this.provider(choice.provider);
+    // Remote OpenAI-compatible APIs (DeepSeek and others) reliably accept JSON mode; the schema is in the prompt and
+    // structuredResponse validates the result. Local servers take the schema itself.
+    const format = !local.supported ? { type: 'json_object' } : local.kind === 'llama.cpp' ? { type: 'json_schema', schema }
+      : { type: 'json_schema', json_schema: { name: 'harness_response', strict: true, schema } };
     const body = { model: choice.model, stream: false,
       messages: [{ role: 'system', content: instructions + '\nReturn only JSON matching this schema: ' + JSON.stringify(schema) },
         { role: 'user', content: [{ type: 'text', text: prompt }, ...images.map(url => ({ type: 'image_url', image_url: { url } }))] }],
-      response_format: local.kind === 'llama.cpp' ? { type: 'json_schema', schema } : { type: 'json_schema', json_schema: { name: 'harness_response', strict: true, schema } },
+      response_format: format,
       ...(choice.effort ? { reasoning_effort: choice.effort } : {}) };
     return this.local.exclusive(choice, async () => {
       const response = await this.modelRequest(choice, body, local, signal, 'chat/completions');
@@ -85,24 +80,27 @@ class Providers {
       catch { signal.throwIfAborted(); throw new Error(`${p.name} returned an invalid structured response. No action was taken. Try another model.`); }
       signal.throwIfAborted();
       if (result.choices?.[0]?.finish_reason !== 'stop') throw new Error(`${p.name} returned an incomplete response. No action was taken. Shorten the request or try another model.`);
-      const usage = result.usage ? { inputTokens: result.usage.prompt_tokens || 0,
-        cachedInputTokens: result.usage.prompt_tokens_details?.cached_tokens || 0, outputTokens: result.usage.completion_tokens || 0 } : null;
+      const counts = [result.usage?.prompt_tokens, result.usage?.completion_tokens];
+      const cached = result.usage?.prompt_tokens_details?.cached_tokens;
+      const usage = counts.every(value => Number.isSafeInteger(value) && value >= 0) ? {
+        inputTokens: counts[0], outputTokens: counts[1],
+        cachedInputTokens: Number.isSafeInteger(cached) && cached >= 0 && cached <= counts[0] ? cached : null,
+      } : null;
       try { return { decision: require('./structured.cjs').structuredResponse(result.choices[0].message?.content, schema), usage }; }
       catch (error) { throw Object.assign(error, { usage }); }
     }, signal);
   }
-  async modelRequest(choice, body, local, signal, endpoint = 'responses') {
+  async modelRequest(choice, body, local, signal, endpoint) {
     const p = this.provider(choice.provider);
     let loaded;
     if (local.supported) {
-      // Image bytes are not text tokens; both inference APIs reserve context for the actual prompt and schema.
+      // Image bytes are not text tokens; context is reserved for the actual prompt and schema.
       const prompt = JSON.stringify(body, (key, value) => ['image_url', 'image', 'file_data'].includes(key) ? undefined : value);
       const minimum = Math.max(32768, 2 ** Math.ceil(Math.log2(Buffer.byteLength(prompt) / 3 + 4096)));
       loaded = await this.local.load(choice, signal, Math.min(minimum, 262144));
       signal.throwIfAborted();
       body.model = loaded.runtimeModel;
-      const limit = endpoint === 'responses' ? 'max_output_tokens' : 'max_tokens';
-      body[limit] = Math.min(body[limit] || 4096, 4096, Math.floor(loaded.contextLength / 4));
+      body.max_tokens = Math.min(body.max_tokens || 4096, 4096, Math.floor(loaded.contextLength / 4));
     }
     const send = () => this.fetch(`${p.baseUrl}/${endpoint}`, { method: 'POST', headers: this.headers(p.id), body: JSON.stringify(body), redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(600000)]) });
     let response = await send();
@@ -121,46 +119,6 @@ class Providers {
     }
     return response.ok ? response : new Response(JSON.stringify({ error: { message } }), { status: response.status, headers: { 'Content-Type': 'application/json' } });
   }
-  async forward(req, res) {
-    const abort = new AbortController();
-    res.on('close', () => abort.abort());
-    try {
-      const parts = (req.url || '').split('/');
-      if (parts[1] !== this.token || req.headers.origin || req.method !== 'POST' || parts.slice(3).join('/') !== 'v1/responses') { res.writeHead(403).end(); return; }
-      const p = this.provider(parts[2]);
-      const chunks = []; let size = 0;
-      for await (const chunk of req) { size += chunk.length; if (size > 32 * 1024 * 1024) throw new Error('Request too large'); chunks.push(chunk); }
-      const body = JSON.parse(Buffer.concat(chunks));
-      // Provider reasoning state and server IDs are not portable between model vendors.
-      if (Array.isArray(body.input)) body.input = body.input.filter(i => !['reasoning', 'item_reference'].includes(i.type)).map(i => {
-        const { id, namespace, ...item } = i;
-        if (namespace && item.name) item.name = `${namespace}__${item.name}`;
-        if (item.type === 'custom_tool_call') { item.type = 'function_call'; item.arguments = JSON.stringify({ input: item.input }); delete item.input; }
-        if (item.type === 'custom_tool_call_output') item.type = 'function_call_output';
-        return item;
-      });
-      if (Array.isArray(body.tools)) body.tools = body.tools.filter(t => t.type === 'function');
-      if (this.modelEfforts.get(`${p.id}:${body.model}`) === null) delete body.reasoning;
-      delete body.previous_response_id; delete body.service_tier; delete body.prompt_cache_key; delete body.include;
-      if (body.text) delete body.text.verbosity;
-      body.store = false;
-      const choice = { provider: p.id, model: body.model };
-      const local = await this.local.inspect(choice, abort.signal);
-      const forward = async () => {
-        const response = await this.modelRequest(choice, body, local, abort.signal);
-        if (!response.ok) { res.writeHead(response.status, { 'Content-Type': 'application/json' }).end(await response.text()); return; }
-        res.writeHead(200, { 'Content-Type': response.headers.get('content-type') || 'text/event-stream' });
-        for await (const chunk of response.body) { if (!res.write(Buffer.from(chunk))) await once(res, 'drain', { signal: abort.signal }); }
-        res.end();
-      };
-      if (local.supported) await this.local.exclusive(choice, forward, abort.signal);
-      else await forward();
-    } catch {
-      if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: 'Provider connection failed or returned an incompatible response.' } }));
-      else res.destroy();
-    }
-  }
-  close() { this.server?.closeAllConnections(); this.server?.close(); }
 }
 
 module.exports = { Providers, validateProvider, validateModel };

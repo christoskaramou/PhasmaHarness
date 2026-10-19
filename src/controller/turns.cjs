@@ -7,6 +7,7 @@ const { TOOL: CONTEXT_TOOL } = require('../workspace/context-search.cjs');
 const { FINAL } = require('../tasks.cjs');
 const { SUBMISSION_EVENT_LIMIT } = require('./shared.cjs');
 const { readTaskStatus, stripTaskStatus } = require('../routing/task-state.cjs');
+const { normalizedUsage } = require('../job-budgets.cjs');
 
 module.exports = {
   visible(item) {
@@ -18,7 +19,16 @@ module.exports = {
       token: randomUUID(), kind: fields.kind, backend: fields.backend, threadId: fields.threadId ?? null,
       messageId: fields.messageId ?? null, turnId: fields.turnId ?? null, taskId: fields.taskId ?? null,
       state: fields.turnId ? 'acknowledged' : 'submitting', buffer: fields.turnId ? null : [],
+      startedAt: Date.now(), // what the provider starts from here on belongs to this turn (see Controller.interruptTurn)
+      ...(session.delegation && !session.delegation.delivered ? {
+        assignmentId: session.delegation.id, assignmentRevision: session.delegation.executionRevision || session.delegation.revision || 1,
+      } : {}),
     };
+    submission.budget = this.agents?.budgets.beginRequest(this, session, {
+      id: submission.token, kind: fields.kind, provider: fields.backend, model: fields.model,
+    }) || null;
+    const route = session.routes.find(route => route.messageId === fields.messageId);
+    if (route && submission.budget) route.budget = submission.budget;
     session.submission = submission;
     if (submission.turnId) {
       session.turnId = submission.turnId;
@@ -110,6 +120,13 @@ module.exports = {
     session.compacting = false;
     session.status = outcome.status;
     session.error = outcome.error || null;
+    const budgetRoute = session.routes.find(route => route.messageId === submission.messageId);
+    const finalUsage = budgetRoute?.budgetUsageInvalid ? null
+      : budgetRoute && Object.hasOwn(budgetRoute, 'budgetFinalUsage') ? budgetRoute.budgetFinalUsage : budgetRoute?.turnUsage;
+    this.agents?.budgets.report(submission.budget, {
+      usage: finalUsage,
+      providerEstimateUsd: budgetRoute?.providerEstimateUsd, uncertain: outcome.status !== 'completed' || !!budgetRoute?.budgetUsageInvalid,
+    }, true);
     if (outcome.status === 'failed') this.log.warn('Turn failed', { session: session.id, provider: session.activeProvider || 'codex', kind: submission.kind, error: String(outcome.error || '').slice(0, 300) });
     const maintenanceRoute = session.routes.find(route => route.messageId === submission.messageId && route.wikiMaintenanceTaskId);
     if (maintenanceRoute) {
@@ -122,7 +139,10 @@ module.exports = {
         const before = this.wikiSnapshots.get(origin.id);
         this.wikiSnapshots.delete(origin.id);
         // Deferred, so the turn finishes and the session is free before the wiki is read again and compared.
-        if (before && outcome.status === 'completed') this.wikiCheckDone = new Promise(resolve => setImmediate(() => resolve(this.assessWiki(session, origin, before))));
+        if (before && outcome.status === 'completed') {
+          const assess = () => new Promise(resolve => setImmediate(() => resolve(this.assessWiki(session, origin, before))));
+          this.wikiCheckDone = this.agents ? this.agents.budgets.scoped(session, assess) : assess();
+        }
       }
     }
     if (submission.kind === 'turn' && !maintenanceRoute) this.updateJob(session, submission, outcome);
@@ -145,6 +165,8 @@ module.exports = {
       return;
     }
     if (this.busy === session.id) this.busy = null;
+    session.replyBudgetId = null;
+    session.activeTaskId = null;
     this.changed();
     this.settle(session);
   },
@@ -230,6 +252,9 @@ module.exports = {
           const keys = ['inputTokens', 'cachedInputTokens', 'outputTokens'];
           turn.usageBase ??= Object.fromEntries(keys.map(key => [key, (total[key] || 0) - (last[key] || 0)]));
           turn.turnUsage = Object.fromEntries(keys.map(key => [key, Math.max(0, (total[key] || 0) - turn.usageBase[key])]));
+          turn.budgetUsageInvalid = !normalizedUsage(total) || !normalizedUsage(last) ||
+            total.inputTokens < last.inputTokens || total.outputTokens < last.outputTokens;
+          if (!turn.budgetUsageInvalid) this.agents?.budgets.report(turn.budget, { usage: turn.turnUsage });
         }
       }
     }
@@ -261,7 +286,9 @@ module.exports = {
       if (index < 0) session.items.push(p.item);
       else session.items[index] = {
         ...session.items[index], ...p.item,
-        ...(p.item.type === 'userMessage' && session.items[index].clientId ? { content: session.items[index].content, routeLabel: session.items[index].routeLabel } : {})
+        ...(p.item.type === 'userMessage' && session.items[index].clientId ? {
+          content: session.items[index].content, routeLabel: session.items[index].routeLabel, fileMessage: session.items[index].fileMessage,
+        } : {})
       };
     }
     if (method === 'item/agentMessage/delta') {
@@ -288,6 +315,18 @@ module.exports = {
     if (!supported.includes(message.method)) {
       this.client.rejectRequest(message.id, `This client cannot handle ${message.method}.`);
       return;
+    }
+    const session = this.data.sessions.find(session => session.threadId === message.params?.threadId);
+    const earlier = message.params?.turnId && session?.tasks?.find(task => task.foreground && task.budgetId &&
+      task.attempts.some(attempt => attempt.turnId === message.params.turnId));
+    if (earlier && (FINAL.has(earlier.state) || earlier.budgetPaused || earlier.cancelled)) {
+      this.client.rejectRequest(message.id, 'This task changed or stopped. This action is no longer current.'); return;
+    }
+    if (session && !this.assignmentCurrent(session)) { this.client.rejectRequest(message.id, 'This task changed or stopped. This action is no longer current.'); return; }
+    if (session?.activeTaskId) message = { ...message, taskId: session.activeTaskId, budgetId: this.agents?.budgets.forSession(session)?.id || null };
+    if (session?.delegation && !session.delegation.delivered) {
+      if (!this.assignmentCurrent(session)) { this.client.rejectRequest(message.id, 'The assignment changed. This action is no longer current.'); return; }
+      message = { ...message, assignment: { id: session.delegation.id, revision: session.delegation.revision || 1 } };
     }
     this.requests.set(message.id, message); this.changed();
   },

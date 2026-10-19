@@ -2,6 +2,7 @@ const { WORKER_INSTRUCTIONS } = require('../worker-instructions.cjs');
 const { spawn } = require('node:child_process');
 const { spawnOwned, stopTree } = require('../process-tree.cjs');
 const { cursorLimitText } = require('./limits.cjs');
+const { imageData } = require('../image-input.cjs');
 const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
@@ -31,7 +32,7 @@ function parseStatus(output) {
 }
 
 class CursorCLI {
-  constructor(launch = launchCursor) { this.launch = launch; this.children = new Set(); this.status = { installed: false, loggedIn: false }; this.models = []; }
+  constructor(launch = launchCursor) { this.launch = launch; this.children = new Set(); this.status = { installed: null, loggedIn: false }; this.models = []; }
   start(args, cwd) {
     const child = this.launch(args, cwd); this.children.add(child);
     child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8'); child.stdin.on('error', () => {});
@@ -184,7 +185,7 @@ class CursorCLI {
       await rpc.call('session/set_mode', { sessionId, modeId: schema || access === 'read-only' ? 'ask' : 'agent' });
       prompting = true;
       const helperNote = (!schema && helpers?.instructions) ? '\n\nApp helper note (not Cursor system policy):' + helpers.instructions : '';
-      const result = await rpc.call('session/prompt', { sessionId, prompt: [{ type: 'text', text: (schema ? '' : 'Harness worker defaults (subject to user overrides):\n' + instructions + '\n\nCurrent request:\n') + prompt + helperNote + (schema ? '\nReturn only JSON matching this schema: ' + JSON.stringify(schema) : '') }, ...images.map(url => ({ type: 'image', mimeType: 'image/png', data: url.split(',')[1] }))] }, 0);
+      const result = await rpc.call('session/prompt', { sessionId, prompt: [{ type: 'text', text: (schema ? '' : 'Harness worker defaults (subject to user overrides):\n' + instructions + '\n\nCurrent request:\n') + prompt + helperNote + (schema ? '\nReturn only JSON matching this schema: ' + JSON.stringify(schema) : '') }, ...images.map(url => imageData(url)).map(({ mime, data }) => ({ type: 'image', mimeType: mime, data }))] }, 0);
       if (result.stopReason !== 'end_turn') throw new Error(`Cursor stopped: ${result.stopReason || 'unknown reason'}`);
       // Cursor reports usage and rate limits as a closing line of the reply, not as an error.
       const limit = cursorLimitText(output);

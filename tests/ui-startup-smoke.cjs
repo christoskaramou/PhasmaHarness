@@ -1,8 +1,9 @@
 // Run with Electron, not Node. No provider login or inference is performed.
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, nativeTheme } = require('electron');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { randomUUID } = require('node:crypto');
 const assert = require('node:assert/strict');
 const { Controller } = require('../src/controller.cjs');
 const { JevClient } = require('../src/providers/jev.cjs');
@@ -18,14 +19,34 @@ const deadline = setTimeout(() => { console.error(`UI smoke timed out during ${p
 app.whenReady().then(async () => {
   phase = 'renderer startup';
   const controller = new Controller(path.join(root, 'sessions.json'), root);
+  const documents = new (require('../src/documents.cjs').DocumentReader)();
+  ipcMain.handle('readDocument', (_event, value) => documents.read(value));
   ipcMain.handle('bootstrap', () => controller.snapshot());
   const browseCalls = [];
   ipcMain.handle('browseWorkspace', (_event, ...args) => { browseCalls.push(args); return { available: false, entries: [] }; });
   let previews = 0;
   ipcMain.handle('preview', () => { previews++; return { label: 'Auto', reason: 'Smoke test' }; });
+  const imageRequests = [];
+  ipcMain.handle('image', (_event, ...args) => { imageRequests.push(args); return 'data:image/jpeg;base64,/9j/4AAQ'; });
+  ipcMain.handle('setAppearance', () => {});
   const sent = [];
   let failSend = false;
   ipcMain.handle('create', (_event, workspace, access) => controller.create(workspace, access));
+  let voiceRequest = null, finishVoice = null;
+  ipcMain.handle('voiceInfo', () => ({ supported: true, languages: [{ id: 'offline', name: 'English' }] }));
+  ipcMain.handle('voiceStart', (_event, request) => {
+    voiceRequest = request;
+    window.webContents.send('voice', { ...request, type: 'state', state: 'listening' });
+    return { ...request, state: 'listening' };
+  });
+  ipcMain.handle('voiceStop', (_event, id) => new Promise(resolve => {
+    assert.equal(id, voiceRequest.id);
+    finishVoice = text => {
+      window.webContents.send('voice', { ...voiceRequest, type: 'text', state: 'stopping', sequence: 1, text });
+      window.webContents.send('voice', { ...voiceRequest, type: 'state', state: 'idle' });
+      resolve({ ...voiceRequest, state: 'idle' });
+    };
+  }));
   const savedChecks = [];
   ipcMain.handle('checks', (_event, workspace, list) => { savedChecks.push(list); return controller.checks(workspace, list); });
   ipcMain.handle('settings', (_event, values) => controller.settings(values));
@@ -44,6 +65,16 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle('providerKey', (_event, id, key) => { if (key) providerKeys.set(id, key); else providerKeys.delete(id); return controller.snapshot(); });
   ipcMain.handle('appInfo', () => ({ version: '0.1.0', packaged: true }));
+  let runnerStart = false;
+  ipcMain.handle('runnerInfo', () => ({ status: 'Runner ready', running: true, background: true,
+    autostart: { supported: true, enabled: runnerStart } }));
+  ipcMain.handle('runnerAutostart', (_event, enabled) => ({ supported: true, enabled: (runnerStart = enabled) }));
+  let browserAccess = { running: false, port: 8788, origin: null, connectionURL: null };
+  ipcMain.handle('remoteInfo', () => browserAccess);
+  ipcMain.handle('remoteStart', (_event, value) => (browserAccess = { running: true, ...value, origin: value.origin || 'http://127.0.0.1:8788', connectionURL: 'fixture-private-link' }));
+  ipcMain.handle('remoteStop', () => (browserAccess = { ...browserAccess, running: false, connectionURL: null }));
+  ipcMain.handle('remoteDisconnectAll', () => browserAccess);
+  ipcMain.handle('remoteResetLink', () => browserAccess);
   let updateResult = { current: '0.1.0', latest: '0.2.0', newer: true, url: 'https://github.com/x/y/releases/tag/v0.2.0', installer: 'Phasma-Harness-Setup-0.2.0.exe' };
   ipcMain.handle('checkUpdates', () => { if (updateResult instanceof Error) throw updateResult; return updateResult; });
   let installs = 0;
@@ -57,9 +88,11 @@ app.whenReady().then(async () => {
     if (holdSend) return new Promise(() => {});
     return { queued: true };
   });
-  let modelRequests = 0, failModels = false, finishFetch, nextModels = [], holdApiModels = false;
+  let modelRequests = 0, cursorModelRequests = 0, failModels = false, finishFetch, nextModels = [], holdApiModels = false;
   ipcMain.handle('providerModels', async (_event, id) => {
     modelRequests++;
+    if (id === 'cursor-cli')
+      cursorModelRequests++;
     if (id !== 'cursor-cli' && !holdApiModels) return [];
     await new Promise(resolve => { finishFetch = resolve; });
     if (failModels) throw new Error('Test model fetch failed');
@@ -80,6 +113,61 @@ app.whenReady().then(async () => {
   })()`);
   assert.equal(result.banner, '');
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#provider-connection').hidden"), false, 'startup shows connection progress');
+  const quietComposer = await window.webContents.executeJavaScript(`(() => {
+    const area = document.querySelector('.composer-area');
+    return {
+      endsAtComposer: area.lastElementChild.id === 'composer',
+      actionsHidden: ['clear-conversation', 'commands-help', 'context-meter', 'usage']
+        .every(id => !document.getElementById(id).checkVisibility()),
+      connectionInHeader: !!document.querySelector('header #provider-connection')
+    };
+  })()`);
+  assert.deepEqual(quietComposer, { endsAtComposer: true, actionsHidden: true, connectionInHeader: true },
+    'the composer has no persistent footer; advanced actions remain on demand');
+  const appearanceState = () => window.webContents.executeJavaScript(`({
+    mode: document.documentElement.dataset.appearance,
+    background: getComputedStyle(document.body).backgroundColor,
+    draft: document.querySelector('#prompt').value,
+    sidebar: !!document.querySelector('#agents-sidebar #settings'),
+    optionsClosed: !document.querySelector('#chat-options').open
+  })`);
+  const chooseAppearance = mode => window.webContents.executeJavaScript(`(() => {
+    const control = document.querySelector('#settings-appearance');
+    control.value = ${JSON.stringify(mode)};
+    control.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  const savedThemeSource = nativeTheme.themeSource;
+  const themeFrame = () => new Promise(resolve => setTimeout(resolve, 40));
+  const callsBeforeAppearance = { sent: sent.length, previews };
+  try {
+    assert.equal((await appearanceState()).mode, 'system');
+    await window.webContents.executeJavaScript('document.querySelector("#prompt").value = "Keep this draft"; true');
+    nativeTheme.themeSource = 'light';
+    await themeFrame();
+    assert.equal((await appearanceState()).background, 'rgb(255, 255, 255)');
+    nativeTheme.themeSource = 'dark';
+    await themeFrame();
+    assert.equal((await appearanceState()).background, 'rgb(25, 25, 25)', 'System follows live OS appearance changes');
+    await chooseAppearance('light');
+    assert.deepEqual(await appearanceState(), {
+      mode: 'light', background: 'rgb(255, 255, 255)', draft: 'Keep this draft', sidebar: true, optionsClosed: true,
+    });
+    nativeTheme.themeSource = 'light';
+    await chooseAppearance('dark');
+    await themeFrame();
+    assert.equal((await appearanceState()).background, 'rgb(25, 25, 25)', 'explicit Dark overrides a light OS');
+    assert.deepEqual({ sent: sent.length, previews }, callsBeforeAppearance, 'appearance does not call providers or routing');
+    await new Promise(resolve => {
+      window.webContents.once('did-finish-load', resolve);
+      window.reload();
+    });
+    assert.equal((await appearanceState()).mode, 'dark', 'appearance is restored on reload');
+    assert.equal(await window.webContents.executeJavaScript('document.querySelector("#settings-appearance").value'), 'dark');
+    await chooseAppearance('system');
+    assert.equal((await appearanceState()).background, 'rgb(255, 255, 255)');
+  } finally {
+    nativeTheme.themeSource = savedThemeSource;
+  }
   const initialWindowSize = window.getSize();
   const sidebarSize = () => window.webContents.executeJavaScript(`({ width: document.querySelector('#agents-sidebar').getBoundingClientRect().width,
     saved: localStorage.getItem('sidebarWidth'), now: document.querySelector('#sidebar-resizer').getAttribute('aria-valuenow'),
@@ -161,6 +249,32 @@ app.whenReady().then(async () => {
     for (let i = 0; ${wait} && i < 100 && submitting; i++) await new Promise(resolve => setTimeout(resolve, 20));
   })()`);
   const until = async (condition, what) => { for (let i = 0; i < 100 && !condition(); i++) await new Promise(r => setTimeout(r, 20)); assert.ok(condition(), what); };
+  phase = 'dictation checks';
+  await window.webContents.executeJavaScript('document.querySelector("#dictate").click(); true');
+  await until(() => voiceRequest, 'dictation binds to the original chat');
+  await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 20))');
+  const beforeVoice = sent.length;
+  await submit('typed before speaking', false);
+  await until(() => finishVoice, 'Send stops the microphone before reading its final words');
+  await window.webContents.executeJavaScript('document.querySelector("#composer").dispatchEvent(new Event("submit", { cancelable: true })); true');
+  assert.equal(sent.length, beforeVoice, 'dictation does not send before Stop completes');
+  finishVoice('final dictated words');
+  await until(() => sent.length === beforeVoice + 1, 'Send includes the final recognized words exactly once');
+  assert.equal(sent.at(-1).text, 'typed before speaking final dictated words');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#dictation-status").hidden'), true);
+  voiceRequest = null; finishVoice = null;
+  await window.webContents.executeJavaScript('document.querySelector("#dictate").click(); true');
+  await until(() => voiceRequest, 'a later dictation can start');
+  const voiceSource = voiceRequest.sessionId;
+  await window.webContents.executeJavaScript('selectSession(null)');
+  await until(() => finishVoice, 'switching chats stops dictation');
+  finishVoice('words for the original chat');
+  await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 20))');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), '');
+  assert.equal(await window.webContents.executeJavaScript('drafts.get(' + JSON.stringify(voiceSource) + ')'), 'words for the original chat');
+  await window.webContents.executeJavaScript('selectedId = ' + JSON.stringify(voiceSource) + '; drafts.delete(selectedId); document.querySelector("#prompt").value = ""; render(); updatePreview();');
+  console.log('Local dictation indicator, final-word Send, duplicate Send guard and original-chat draft preservation passed (fake audio)');
+  phase = 'composer checks';
   let before = sent.length;
   await submit('test message');
   await until(() => sent.length > before, 'the message reached the app');
@@ -185,6 +299,90 @@ app.whenReady().then(async () => {
   failSend = false;
   await window.webContents.executeJavaScript(`document.querySelector('#prompt').value = ''; document.querySelector('#prompt').dispatchEvent(new Event('input')); true`);
   console.log('Sending while a turn runs passed');
+  phase = 'file attachments';
+  const attachment = { name: '<reference>.cpp', text: 'const value = 42;\n<img src=x onerror="window.ATTACHMENT_RAN=1">' };
+  await window.webContents.executeJavaScript(`readAttachments([new File([${JSON.stringify(attachment.text)}], ${JSON.stringify(attachment.name)}, { type: 'text/plain' })])`);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector(".file-preview span").textContent'), attachment.name);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#send").disabled'), false, 'a file-only draft can be sent');
+  await window.webContents.executeJavaScript('readAttachments([new File(["not supported"], "document.pdf")])');
+  assert.deepEqual(await window.webContents.executeJavaScript('attachedFiles().map(file => file.name)'), [attachment.name], 'a rejected selection keeps the current attachments');
+  before = sent.length;
+  await submit('');
+  await until(() => sent.length === before + 1, 'file-only send reaches the app');
+  assert.deepEqual(sent.at(-1).files, [attachment]);
+  assert.equal(await window.webContents.executeJavaScript('attachedFiles().length'), 0);
+  failSend = true;
+  await window.webContents.executeJavaScript('readAttachments([new File(["retained snapshot"], "pending.txt")])');
+  await submit('Keep this file.');
+  await until(async () => await window.webContents.executeJavaScript('document.querySelector("#prompt").value === "Keep this file." && attachedFiles().length === 1'), 'failed file send restores the draft');
+  assert.equal(await window.webContents.executeJavaScript('attachedFiles()[0].text'), 'retained snapshot');
+  failSend = false;
+  await window.webContents.executeJavaScript(`fileDrafts.set(draftKey(), [{ name: 'new.txt', text: 'New draft file' }]);
+    document.querySelector('#prompt').value = 'New draft';
+    restoreDraft(selectedId, 'Old draft', [], new Error('Fixture failure'), [{ name: 'old.txt', text: 'Old draft file' }]); true`);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), 'New draft');
+  assert.deepEqual(await window.webContents.executeJavaScript('attachedFiles().map(file => file.name)'), ['new.txt', 'old.txt']);
+  const preparedFile = require('../ui/attachments.js').prepare('Review this snapshot.', [attachment]);
+  const fileMessage = { id: 'file-snapshot', type: 'userMessage', content: [{ type: 'text', text: preparedFile.text }], fileMessage: preparedFile.fileMessage };
+  await window.webContents.executeJavaScript(`fileDrafts.delete(draftKey()); document.querySelector('#prompt').value = '';
+    current().items.push(${JSON.stringify(fileMessage)}); render(); true`);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#messages .sent-file summary").textContent'), attachment.name);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#messages .sent-file pre").textContent'), attachment.text);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#messages .sent-file").open'), false);
+  assert.equal(await window.webContents.executeJavaScript('window.ATTACHMENT_RAN'), undefined);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelectorAll("#messages img").length'), 0);
+  await window.webContents.executeJavaScript('readAttachments([new File(["A pending file"], "pending.txt")])');
+  await window.webContents.executeJavaScript('document.querySelector("#toast").hidden = true; clearTimeout(toastTimer); true');
+  await new Promise(resolve => setTimeout(resolve, 100));
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/file-attachments.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript('fileDrafts.delete(draftKey()); renderImages(); true');
+  await window.webContents.executeJavaScript(`sentHistory = null; document.querySelector('#prompt').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true })); true`);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), 'Review this snapshot.');
+  assert.deepEqual(await window.webContents.executeJavaScript('attachedFiles()'), [attachment]);
+  await window.webContents.executeJavaScript(`current().items.pop(); fileDrafts.delete(draftKey()); drafts.delete(draftKey());
+    document.querySelector('#prompt').value = ''; sentHistory = null; render(); renderImages(); true`);
+  const focusKept = await window.webContents.executeJavaScript(`(() => {
+    fileDrafts.set(draftKey(), [{ name: 'focus.txt', text: 'Keep focus' }]); renderImages();
+    const remove = document.querySelector('#image-previews .file-remove'); remove.focus(); render();
+    const kept = document.activeElement === remove && remove.isConnected;
+    fileDrafts.delete(draftKey()); renderImages(); return kept;
+  })()`);
+  assert.equal(focusKept, true, 'a state update must not rebuild the attachment tray under the focused remove button');
+  await window.webContents.executeJavaScript(`current().items.push({ id: 'image-message', type: 'userMessage',
+    content: [{ type: 'text', text: 'See the image.' }, { type: 'image', url: null }] }); render(); true`);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#messages img.message-image").src'), 'data:image/jpeg;base64,/9j/4AAQ');
+  assert.deepEqual(imageRequests.at(-1).slice(1), ['image-message', 0]);
+  await window.webContents.executeJavaScript('current().items.pop(); render(); true');
+  console.log('Text/code file snapshots, binary rejection, safe collapsed display, recall and failed-send preservation passed');
+  phase = 'document attachments';
+  const documentFixtures = require('./fixtures/documents.cjs');
+  const documentResults = await window.webContents.executeJavaScript(`(async () => {
+    fileDrafts.delete(draftKey()); document.querySelector('#prompt').value = '';
+    await readAttachments([new File([new Uint8Array(${JSON.stringify([...documentFixtures.pdf()])})], 'brief.pdf'),
+      new File([new Uint8Array(${JSON.stringify([...documentFixtures.docx()])})], 'brief.docx')]);
+    return attachedFiles();
+  })()`);
+  assert.equal(documentResults.length, 2, await window.webContents.executeJavaScript('document.querySelector("#banner").textContent'));
+  assert.deepEqual(documentResults[0], { name: 'brief.pdf', format: 'pdf', text: 'Build three small games.' });
+  assert.equal(documentResults[1].format, 'docx');
+  assert.equal(documentResults[1].text, 'Καλημέρα & hello\nBuild three small games.');
+  assert.match(await window.webContents.executeJavaScript('document.querySelector(".file-preview").textContent'), /brief.pdf · text/);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector(".file-preview span").title'), /Extracted text only/);
+  const hostileXml = '<!DOCTYPE test [<!ENTITY injected "secret">]><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>';
+  await window.webContents.executeJavaScript('readAttachments([new File([new Uint8Array(' + JSON.stringify([...documentFixtures.docx(hostileXml)]) + ')], "unsafe.docx")])');
+  assert.deepEqual(await window.webContents.executeJavaScript('attachedFiles().map(file => file.name)'), ['brief.pdf', 'brief.docx']);
+  assert.equal(await window.webContents.executeJavaScript('(() => { try { HarnessDocuments.wordText([{ xml: "<invalid>" }]); return false; } catch { return true; } })()'), true);
+  assert.equal(await window.webContents.executeJavaScript(`(() => {
+    try { HarnessDocuments.wordText([{ xml: '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' + '<w:p/>'.repeat(20001) + '</w:document>' }]); return false; }
+    catch (error) { return /too much formatting/.test(error.message); }
+  })()`), true);
+  before = sent.length;
+  await submit('Read these documents.');
+  await until(() => sent.length === before + 1, 'extracted document text reaches the selected provider input');
+  assert.deepEqual(sent.at(-1).files, documentResults);
+  assert.equal(documents.busy, false);
+  console.log('Real local PDF and DOCX extraction, Unicode, text-only labeling, hostile XML rejection and document Send passed');
   await window.webContents.executeJavaScript(`renderMessages({ items: [
     { id: 'visible', type: 'agentMessage', text: 'Visible result' },
     { id: 'maintenance', type: 'userMessage', content: [{ type: 'text', text: 'Hidden maintenance' }] },
@@ -212,7 +410,7 @@ app.whenReady().then(async () => {
     { id: 'old', type: 'agentMessage', phase: 'final_answer', text: 'five' }
   ], routes: [{ turnId: 't-codex', provider: 'codex' }, { turnId: 't-claude', provider: 'claude-cli' }, { turnId: 't-cursor', provider: 'cursor-cli' }] });`);
   const writers = await window.webContents.executeJavaScript("[...document.querySelectorAll('.message-label')].map(e => e.firstChild.textContent)");
-  assert.deepEqual(writers, ['Codex', 'Claude', 'Cursor', 'Jev', 'Codex']);
+  assert.deepEqual(writers, ['Codex CLI', 'Claude CLI', 'Cursor CLI', 'Jev', 'Codex CLI']);
   console.log('Reply labels name their provider passed');
   await window.webContents.executeJavaScript(`renderMessages({ items: [
     { id: 'hub-auto', type: 'userMessage', content: [{ type: 'text', text: 'Hello' }] },
@@ -270,7 +468,7 @@ app.whenReady().then(async () => {
   assert.equal(picker.after, 'claude-cli:claude-opus-5-5:max');
   assert.equal(picker.models.filter(m => m === 'claude-opus-5-5').length, 1, 'one entry per model, not per effort');
   const sections = await window.webContents.executeJavaScript(`[...document.querySelectorAll('#preset optgroup')].map(g => [g.label, [...g.children].map(o => o.textContent)])`);
-  assert.deepEqual(sections.map(([label]) => label), ['Codex / ChatGPT', 'Claude'], 'models are listed under their provider, Codex first');
+  assert.deepEqual(sections.map(([label]) => label), ['Codex CLI / ChatGPT', 'Claude CLI'], 'models are listed under their provider, Codex first');
   assert.deepEqual(sections[0][1], ['gpt-6-sol']);
   assert.deepEqual(sections[1][1], ['claude-opus-5-5']);
   assert.equal(picker.autoHidden, true);
@@ -279,14 +477,27 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript("providerCaps('claude-cli').steer"), false);
   assert.equal(await window.webContents.executeJavaScript("providerCaps(undefined).steer"), true);
   console.log('Claude per-effort model rows and provider capabilities passed');
+  // The Hub's model menu leaves out worker-only models (Muse, Antigravity); a worker's menu keeps them.
+  assert.deepEqual(await window.webContents.executeJavaScript(`(() => {
+    const saved = [state.coordinator, state.presets];
+    state.presets = [...state.presets, { id: 'native:muse:m', provider: 'native:muse', model: 'm', label: 'm', available: true, router: false }];
+    const offered = coordinator => {
+      state.coordinator = coordinator;
+      return presetGroups().some(group => group.provider === 'native:muse');
+    };
+    const result = [offered(true), offered(false)];
+    [state.coordinator, state.presets] = saved;
+    return result;
+  })()`), [false, true]);
+  console.log('Hub model menu excludes worker-only models passed');
   // Disconnected in the Harness while the CLIs stay signed in: no models listed, detail says the CLI is still signed in.
   controller.account = null; controller.models = [];
   controller.codex = { installed: true, connected: true, signedIn: true };
   controller.data.settings.claudeEnabled = false;
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderProviders(); true');
   const providers = await window.webContents.executeJavaScript("document.querySelector('#panel-providers').textContent");
-  assert.match(providers, /ChatGPT · disconnected/);
-  assert.match(providers, /Claude · disconnected/);
+  assert.match(providers, /Codex CLI · disconnected/);
+  assert.match(providers, /Claude CLI · disconnected/);
   assert.doesNotMatch(await window.webContents.executeJavaScript("document.querySelector('#provider-model-list').textContent"), /claude-opus-5-5/, 'Claude models are hidden');
   assert.doesNotMatch(await window.webContents.executeJavaScript("document.querySelector('#provider-model-list').textContent"), /gpt-6-sol/);
   console.log('Disconnected providers hide models and keep CLI logins passed');
@@ -405,13 +616,84 @@ app.whenReady().then(async () => {
   while (!finishFetch) await new Promise(setImmediate);
   finishFetch();
   await new Promise(resolve => setTimeout(resolve, 200));
-  const cursorRows = await window.webContents.executeJavaScript(`[...document.querySelectorAll('#provider-model-list .provider-model-row')].map(r => r.textContent).filter(t => t.endsWith('· Cursor'))`);
-  assert.deepEqual(cursorRows, ['GPT-5.5 · Cursor', 'Grok 4.7 · Cursor', 'Kimi K3 · Cursor']);
+  const cursorRows = await window.webContents.executeJavaScript(`[...document.querySelectorAll('#provider-model-list .provider-model-row')].map(r => r.textContent).filter(t => t.endsWith('· Cursor CLI'))`);
+  assert.deepEqual(cursorRows, ['GPT-5.5 · Cursor CLI', 'Grok 4.7 · Cursor CLI', 'Kimi K3 · Cursor CLI']);
   console.log('Cursor settings list the full model list, one row per model, no efforts passed');
+  // A provider's model group collapses under its title and stays collapsed when the list re-renders.
+  const cursorGroup = `[...document.querySelectorAll('#provider-model-list .provider-model-section')].find(section => section.querySelector('summary').textContent === 'Cursor CLI')`;
+  assert.equal(await window.webContents.executeJavaScript(`${cursorGroup}.open`), true, 'groups start expanded');
+  await window.webContents.executeJavaScript(`${cursorGroup}.querySelector('summary').click(); new Promise(r => setTimeout(r, 50))`);
+  await window.webContents.executeJavaScript('renderProviders(); true');
+  assert.equal(await window.webContents.executeJavaScript(`${cursorGroup}.open`), false, 'collapsed group stays collapsed after re-render');
+  await window.webContents.executeJavaScript(`${cursorGroup}.querySelector('summary').click(); new Promise(r => setTimeout(r, 50))`);
+  console.log('Collapsible provider model groups passed');
+  deadline.refresh(); phase = 'provider settings';
+  // A failed model fetch shows its error in the group once, without "Fetching…" or a retry on every redraw.
+  failModels = true; finishFetch = null; cursorModelRequests = 0;
+  await window.webContents.executeJavaScript('discoveredModels.clear(); renderProviders(); true');
+  while (!finishFetch) await new Promise(setImmediate);
+  assert.match(await window.webContents.executeJavaScript(`[...document.querySelectorAll('#provider-model-list .provider-loading')]
+    .filter(line => line.querySelector('.models-spinner')).map(line => line.textContent).join('|')`), /Fetching Cursor CLI models…/, 'a model fetch in progress shows the spinner');
+  finishFetch();
+  await new Promise(resolve => setTimeout(resolve, 200));
+  await window.webContents.executeJavaScript('renderProviders(); renderProviders(); true');
+  const failedGroup = await window.webContents.executeJavaScript("document.querySelector('#provider-model-list').textContent");
+  assert.match(failedGroup, /Test model fetch failed/);
+  assert.doesNotMatch(failedGroup, /Fetching Cursor CLI models|Error invoking remote method/);
+  assert.equal(cursorModelRequests, 1, 'a failed fetch is not retried on redraw');
+  await window.webContents.executeJavaScript("discoveredModels.set('cursor-cli', []); modelFetchErrors.clear(); true");
+  failModels = false;
+  console.log('Failed model fetch shows its error once and waits for Renew passed');
+  // An installed CLI with a newer release shows Update with both versions; current CLIs show no button.
+  controller.cliUpdates = { 'cursor-cli': { installed: '2026.10.01-e373342', latest: '2026.10.16-e3cb207' } };
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderProviders(); true');
+  const installButtons = await window.webContents.executeJavaScript(`[...document.querySelectorAll('.provider-install')]
+    .map(button => [button.closest('[data-connection-provider]').dataset.connectionProvider, button.textContent, button.title])`);
+  assert.deepEqual(installButtons.filter(([, text]) => text === 'Update'), [['cursor-cli', 'Update', '2026.10.01-e373342 → 2026.10.16-e3cb207']]);
+  await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').showModal(); document.querySelector('#tab-providers').click(); new Promise(r => setTimeout(r, 100))");
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/provider-update.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript(`document.querySelector('#provider-model-list').scrollIntoView({ block: 'start' }); new Promise(r => setTimeout(r, 100))`);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/model-groups.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript("document.querySelector('#tab-general').click(); document.querySelector('#settings-dialog').close(); true");
+  controller.cliUpdates = {};
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderProviders(); true');
+  console.log('Update button for a newer CLI release passed');
+  // Install stays hidden while a provider's check runs; it shows once the check reports the CLI missing.
+  const deepseekInstall = () => window.webContents.executeJavaScript(`document.querySelector('[data-connection-provider="native:deepseek"] .provider-install')?.hidden`);
+  assert.equal(await deepseekInstall(), false, 'DeepSeek is not installed in this fixture');
+  controller.connectingProviders.set('native:deepseek', 1);
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderProviders(); true');
+  assert.equal(await deepseekInstall(), true, 'no Install while the check is still running');
+  controller.connectingProviders.delete('native:deepseek');
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderProviders(); true');
+  assert.equal(await deepseekInstall(), false, 'Install once the check reports it missing');
+  console.log('Install hidden while a provider connects passed');
+  // Clicking Install shows the spinner and "Installing…" on that row until the action ends.
+  let releaseInstall = null;
+  ipcMain.handle('installProvider', () => new Promise(resolve => { releaseInstall = () => resolve(controller.snapshot()); }));
+  await window.webContents.executeJavaScript(`document.querySelector('[data-connection-provider="native:deepseek"] .provider-install').click(); true`);
+  while (!releaseInstall) await new Promise(setImmediate);
+  const installing = await window.webContents.executeJavaScript(`(() => {
+    const row = document.querySelector('[data-connection-provider="native:deepseek"]');
+    const status = row.querySelector('.provider-connecting');
+    return [row.classList.contains('connecting'), !status.hidden, status.textContent.trim(), !!status.querySelector('.models-spinner')];
+  })()`);
+  assert.deepEqual(installing, [true, true, 'Installing…', true]);
+  await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').showModal(); document.querySelector('#tab-providers').click(); new Promise(r => setTimeout(r, 150))");
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/provider-installing.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript("document.querySelector('#tab-general').click(); document.querySelector('#settings-dialog').close(); true");
+  releaseInstall();
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(await window.webContents.executeJavaScript(`document.querySelector('[data-connection-provider="native:deepseek"]').classList.contains('connecting')`), false);
+  ipcMain.removeHandler('installProvider');
+  console.log('Provider action spinner passed');
   // Check removal saves immediately without closing Settings.
   controller.data.settings.checks[controller.data.settings.workspace] = [{ id: 'c1', name: 'Syntax', argv: ['node', '--check', 'demo.js'], cwd: controller.data.settings.workspace, timeoutMs: 120000, readOnlySafe: false }];
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderChecks(); true');
   assert.equal(await window.webContents.executeJavaScript("document.querySelectorAll('#checks-list .check-row').length"), 1);
+  await window.webContents.executeJavaScript(`document.querySelector('#checks-list .check-kind').value = 'build';
+    document.querySelector('#checks-list .check-kind').dispatchEvent(new Event('change', { bubbles: true })); true`);
+  await until(() => savedChecks.at(-1)?.[0]?.kind === 'build', 'check purpose saves through the normal settings path');
   await window.webContents.executeJavaScript(`(async () => {
     [...document.querySelectorAll('#checks-list .check-row button')].find(b => b.textContent === 'Remove').click();
     await new Promise(r => setTimeout(r, 300));
@@ -450,6 +732,26 @@ app.whenReady().then(async () => {
   })()`);
   await changeSetting('settings-font', '115');
   assert.equal(controller.data.settings.fontScale, 115);
+  await changeSetting('settings-background-usage', '95');
+  assert.equal(controller.data.settings.backgroundUsageLimit, 95);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#background-usage-detail").textContent'), /at 95%/);
+  await changeSetting('settings-background-usage', '0');
+  assert.equal(controller.data.settings.backgroundUsageLimit, 95, 'an invalid threshold leaves the saved reserve intact');
+  await changeSetting('settings-background-usage', '90');
+  const nativeQuotaText = await window.webContents.executeJavaScript(`(() => {
+    const previousClaude = state.claude, previousQuotas = state.providerQuotas;
+    state.claude = { ...state.claude, quotaAccountKey: 'native-fixture' };
+    state.providerQuotas = { ...state.providerQuotas, 'claude-cli': {
+      current: { account: 'native-fixture', label: 'Opus weekly', usedPercent: 91, resetsAt: Date.now() + 3600000 },
+      previous: { account: 'old-native-fixture', label: 'Old account', usedPercent: 99, resetsAt: null },
+    } };
+    renderQuotaSettings();
+    const text = document.querySelector('#background-usage-detail').textContent;
+    state.claude = previousClaude; state.providerQuotas = previousQuotas; renderQuotaSettings();
+    return text;
+  })()`);
+  assert.match(nativeQuotaText, /Claude Code report: Opus weekly: 91%/);
+  assert.doesNotMatch(nativeQuotaText, /Old account|99%/);
   const originalWorkspace = controller.data.settings.workspace;
   await window.webContents.executeJavaScript("document.querySelector('#settings-browse').onclick()");
   assert.equal(controller.data.settings.workspace, fs.realpathSync(root), 'choosing a workspace saves immediately');
@@ -553,7 +855,8 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript("document.querySelector('#effort-cap').value = 'max'; document.querySelector('#effort-cap').onchange(); new Promise(r => setTimeout(r, 200))");
   assert.equal(controller.data.settings.effortCap, 'max');
   assert.deepEqual(await cap(), [false, 'max', '⚠ Up to max effort', true]);
-  assert.equal(await window.webContents.executeJavaScript("getComputedStyle(document.querySelector('#effort-cap option[value=high]')).color"), 'rgb(185, 198, 177)', 'other options keep their color');
+  assert.equal(await window.webContents.executeJavaScript("getComputedStyle(document.querySelector('#effort-cap option[value=high]')).color"),
+    await window.webContents.executeJavaScript('getComputedStyle(document.body).color'), 'non-warning options retain the theme text color');
   await window.webContents.executeJavaScript("document.querySelector('#settings').click(); new Promise(r => setTimeout(r, 200))");
   const settingsCap = await window.webContents.executeJavaScript("[document.querySelector('#settings-effort-cap').value, document.querySelector('#effort-cap-detail').textContent]");
   assert.equal(settingsCap[0], 'max');
@@ -567,14 +870,64 @@ app.whenReady().then(async () => {
     assert.equal((await cap())[0], true, 'hidden for a manual model');
     await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); true');
   }
-  // Codex-like composer: access on the left, model picker and cap on the right, each as wide as its selected text.
+  // Advanced model controls stay reachable inside the compact disclosure.
   const layout = await window.webContents.executeJavaScript(`(() => {
+    const options = document.querySelector('#chat-options');
+    options.open = true;
     const box = id => document.querySelector(id).getBoundingClientRect();
     const preset = document.querySelector('#preset');
-    return { accessBeforeModel: box('#permissions').right < box('#preset').left, capAfterModel: box('#preset').right <= box('#effort-cap').left,
-      inModel: !!preset.closest('.composer-model'), fitted: preset.style.width !== '' && box('#preset').width < 260 };
+    const panel = box('.chat-options-panel');
+    const fits = id => box(id).width > 0 && box(id).left >= panel.left && box(id).right <= panel.right;
+    return { inModel: !!preset.closest('.composer-model'), inOptions: !!preset.closest('#chat-options'),
+      routingFits: fits('#quick-routing'), modelFits: fits('#preset'), capFits: fits('#effort-cap') };
   })()`);
-  assert.deepEqual(layout, { accessBeforeModel: true, capAfterModel: true, inModel: true, fitted: true });
+  assert.deepEqual(layout, { inModel: true, inOptions: true, routingFits: true, modelFits: true, capFits: true });
+  await window.webContents.executeJavaScript('document.querySelector("#chat-options").open = true; new Promise(r => setTimeout(r, 200))');
+  // With real usage text the panel must not scroll sideways (seen 2026-10-19 with "322.4K input · 3% cached · 1.8K output").
+  for (const scale of ['1', '1.15', '1.3', '1.5']) {
+    const sideways = await window.webContents.executeJavaScript(`(async () => {
+      const root = document.documentElement, savedScale = root.style.getPropertyValue('--font-scale');
+      const usage = document.querySelector('#usage'), saved = [usage.hidden, usage.textContent];
+      root.style.setProperty('--font-scale', '${scale}');
+      usage.hidden = false; usage.textContent = '322.4K input · 3% cached · 1.8K output';
+      await new Promise(r => setTimeout(r, 50));
+      const panel = document.querySelector('.chat-options-panel'), edge = panel.getBoundingClientRect().right;
+      const result = { scrolls: panel.scrollWidth > panel.clientWidth,
+        wider: [...panel.querySelectorAll('*')].filter(node => node.getBoundingClientRect().right > edge + 1).map(node => node.id || node.className || node.tagName).slice(0, 6) };
+      [usage.hidden, usage.textContent] = saved;
+      if (savedScale) root.style.setProperty('--font-scale', savedScale); else root.style.removeProperty('--font-scale');
+      return result;
+    })()`);
+    assert.deepEqual(sideways, { scrolls: false, wider: [] }, `Options panel scrolls sideways at font scale ${scale}: ` + JSON.stringify(sideways));
+  }
+  await window.webContents.executeJavaScript(`(async () => {
+    document.documentElement.style.setProperty('--font-scale', '1.3');
+    const usage = document.querySelector('#usage');
+    usage.dataset.saved = JSON.stringify([usage.hidden, usage.textContent]);
+    usage.hidden = false; usage.textContent = '322.4K input · 3% cached · 1.8K output';
+    await new Promise(r => setTimeout(r, 100));
+  })()`);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/options-panel-130.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript(`(() => {
+    const usage = document.querySelector('#usage'), [hidden, text] = JSON.parse(usage.dataset.saved);
+    usage.hidden = hidden; usage.textContent = text; delete usage.dataset.saved;
+    document.documentElement.style.setProperty('--font-scale', (state.settings.fontScale || 100) / 100);
+    return true;
+  })()`);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/options-panel.png'), (await window.webContents.capturePage()).toPNG());
+  // The context ring's tooltip opens inside the Options panel instead of being clipped by it.
+  const tip = await window.webContents.executeJavaScript(`(async () => {
+    // The ring is disabled without usage here, so show its tooltip the way hover would.
+    document.querySelector('#context-meter-tip').style.display = 'block';
+    await new Promise(r => setTimeout(r, 100));
+    const panel = document.querySelector('.chat-options-panel').getBoundingClientRect();
+    const box = document.querySelector('#context-meter-tip').getBoundingClientRect();
+    return { shown: box.width > 0, inside: box.left >= panel.left && box.right <= panel.right && box.top >= panel.top };
+  })()`);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/options-tooltip.png'), (await window.webContents.capturePage()).toPNG());
+  assert.deepEqual(tip, { shown: true, inside: true }, 'context tooltip stays inside the Options panel');
+  await window.webContents.executeJavaScript("document.querySelector('#context-meter-tip').style.display = ''; true");
+  await window.webContents.executeJavaScript('document.querySelector("#chat-options").open = false; true');
   console.log('Effort cap passed');
   // Compare with Jev: shown only with a Jev key while Smart routes, with the agreement so far.
   await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').close(); true");
@@ -663,6 +1016,9 @@ app.whenReady().then(async () => {
   ipcMain.removeHandler('settings'); ipcMain.handle('settings', (_event, values, agentId) => agents.settings(values, agentId));
   ipcMain.handle('permissions', (_event, id, access) => { agents.owner(id).permissions(id, access); return agents.snapshot(); });
   ipcMain.handle('saveAgent', (_event, profile) => agents.saveAgent(profile));
+  ipcMain.handle('renameHub', (_event, name) => agents.renameHub(name));
+  ipcMain.handle('saveGroup', (_event, value) => agents.saveGroup(value));
+  ipcMain.handle('archive', (_event, id) => { agents.owner(id).archive(id); return agents.snapshot(); });
   ipcMain.handle('deleteAgent', (_event, id) => agents.deleteAgent(id));
   ipcMain.removeHandler('create'); ipcMain.handle('create', (_event, workspace, access, agentId) => agents.conversation(agents.controller(agentId), true, workspace, access));
   let stoppedAgent;
@@ -682,6 +1038,59 @@ app.whenReady().then(async () => {
   assert.equal(profile.instructions, 'Inspect source and report evidence.');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#agent-list [data-action=delete]")'), null, 'Sidebar deletion uses the context menu');
   await window.webContents.executeJavaScript('selectAgent("main")');
+  const completedBatchChat = agents.conversation(agents.controller(profile.id), true);
+  profile.temporaryBatch = randomUUID(); controller.save();
+  const batchNav = '#agent-list [data-agent="' + profile.id + '"]';
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
+  assert.equal(await window.webContents.executeJavaScript('!!document.querySelector(' + JSON.stringify(batchNav) + ')'), false);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#agent-roster-label").textContent'), 'Other bots · 0');
+  const waitingBatch = agents.snapshot(), batchPendingState = waitingBatch.agentStates[profile.id];
+  batchPendingState.sessions.find(chat => chat.id === batchPendingState.conversationId).queue = [{ id: randomUUID(), text: 'Saved pending work.' }];
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(waitingBatch) + '); true');
+  assert.equal(await window.webContents.executeJavaScript('!!document.querySelector(' + JSON.stringify(batchNav) + ')'), true, 'queued batch work stays visible');
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); document.querySelector("#agents-overview").click(); true');
+  const batchCard = '#agent-cards [data-agent="' + profile.id + '"]';
+  await window.webContents.executeJavaScript('document.querySelector(' + JSON.stringify(batchCard + '[data-action="open"]') + ').click(); true');
+  await until(async () => await window.webContents.executeJavaScript('selectedAgent') === profile.id, 'a finished batch worker opens from Overview');
+  assert.equal(await window.webContents.executeJavaScript('!!document.querySelector(' + JSON.stringify(batchNav) + ')'), true, 'the selected batch chat stays in the sidebar');
+  await window.webContents.executeJavaScript('selectAgent("main")');
+  await window.webContents.executeJavaScript('document.querySelector("#agents-overview").click(); document.querySelector(' + JSON.stringify(batchCard + '[data-action="edit"]') + ').click(); document.querySelector("#agent-form").dispatchEvent(new Event("submit",{cancelable:true})); true');
+  await until(() => !controller.data.agents[0].temporaryBatch, 'editing and saving keeps a batch worker');
+  await window.webContents.executeJavaScript('document.querySelector("#agents-dialog").close(); true');
+  await window.webContents.executeJavaScript('selectAgent("main")');
+  assert.equal(await window.webContents.executeJavaScript('!!document.querySelector(' + JSON.stringify(batchNav) + ')'), true);
+  // Renaming the Hub from its Overview card names it in the sidebar and keeps that name.
+  // The batch worker's Save above still reloads state after the server saves; let it finish so it cannot apply an older name.
+  await until(async () => await window.webContents.executeJavaScript("!document.querySelector('#agent-save').disabled"), 'the batch worker Save finished');
+  await window.webContents.executeJavaScript(`document.querySelector('#agents-overview').click();
+    document.querySelector('#agent-cards [data-agent="main"][data-action="rename"]').click();
+    document.querySelector('#hub-name').value = 'Atlas'; new Promise(r => setTimeout(r, 100))`);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/hub-rename.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript("document.querySelector('#hub-form').dispatchEvent(new Event('submit', { cancelable: true })); true");
+  await until(async () => await window.webContents.executeJavaScript(`(() => {
+    const list = document.querySelector('#main-agent-list');
+    return list.textContent.includes('Atlas') && list.querySelector('.agent-avatar')?.textContent === 'A';
+  })()`), 'the renamed Hub shows its name and initial in the sidebar');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#hub-dialog').open"), false);
+  assert.equal(agents.hubName(), 'Atlas');
+  agents.renameHub('Hub');
+  await window.webContents.executeJavaScript('document.querySelector("#agents-dialog").close(); applyState(' + JSON.stringify(agents.snapshot()) + '); true');
+  console.log('Hub rename from Overview passed');
+  // Update reads the fleet state, so it still shows with a worker selected.
+  controller.cliUpdates = { 'cursor-cli': { installed: '2026.10.01-e373342', latest: '2026.10.16-e3cb207' } };
+  const workerCursor = agents.controller(profile.id).cursor, cursorStatus = workerCursor.status;
+  workerCursor.status = { ...cursorStatus, installed: true };
+  await window.webContents.executeJavaScript(`selectAgent(${JSON.stringify(profile.id)})`);
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); renderProviders(); true');
+  assert.equal(await window.webContents.executeJavaScript('selectedAgent'), profile.id);
+  const workerRows = await window.webContents.executeJavaScript(`[...document.querySelectorAll('.provider-account-row')]
+    .map(row => [row.dataset.connectionProvider, row.dataset.installed, row.querySelector('.provider-install')?.textContent || ''])`);
+  assert.deepEqual(workerRows.filter(([, , button]) => button === 'Update').map(([id]) => id), ['cursor-cli'], JSON.stringify(workerRows));
+  controller.cliUpdates = {};
+  workerCursor.status = cursorStatus;
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); selectAgent("main")');
+  console.log('Update button with a worker selected passed');
+  assert.equal(agents.conversation(agents.controller(profile.id)).id, completedBatchChat.id);
   await window.webContents.executeJavaScript('document.querySelector(\'#agent-list [data-agent="' + profile.id + '"]\').dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: innerWidth - 2, clientY: innerHeight - 2 })); true');
   const menuView = await window.webContents.executeJavaScript(`(() => {
     const menu = document.querySelector('#agent-menu'), box = menu.getBoundingClientRect();
@@ -691,7 +1100,8 @@ app.whenReady().then(async () => {
   })()`);
   assert.equal(menuView.open, true);
   assert.deepEqual(menuView.labels, ['Open', 'Edit', 'Delete']);
-  assert.equal(menuView.color, 'rgb(255, 145, 137)');
+  assert.equal(menuView.color, await window.webContents.executeJavaScript('getComputedStyle(document.querySelector("#delete-confirm")).color'),
+    'Delete retains the theme danger color');
   assert.equal(menuView.inBounds, true, 'menu stays visible near window edges');
   await window.webContents.executeJavaScript('document.querySelector("#agent-menu").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })); true');
   assert.equal(await window.webContents.executeJavaScript('document.activeElement.textContent'), 'Edit');
@@ -723,7 +1133,7 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), 'Researcher draft');
   assert.equal(await window.webContents.executeJavaScript('attachedImages().length'), 1);
   await window.webContents.executeJavaScript('imageDrafts.delete(draftKey()); document.querySelector("#prompt").value = ""; true');
-  const worker = agents.controller(profile.id), workerSession = worker.create();
+  const worker = agents.controller(profile.id), workerSession = agents.conversation(worker, true);
   worker.busy = workerSession.id; workerSession.status = 'running';
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
   assert.equal(await window.webContents.executeJavaScript('state.busy'), workerSession.id);
@@ -731,8 +1141,38 @@ app.whenReady().then(async () => {
   await until(() => stoppedAgent === profile.id, 'Stop targets the selected agent');
   await window.webContents.executeJavaScript('selectAgent("main")');
   assert.equal(await window.webContents.executeJavaScript('state.busy'), controller.busy);
-  assert.match(await window.webContents.executeJavaScript('document.querySelector("#agent-list").textContent'), /ResearcherWorking/);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#agent-list .agent-nav").getAttribute("aria-label")'), 'Researcher · Working');
+  const activeChatState = () => window.webContents.executeJavaScript(`JSON.stringify({
+    selectedAgent, busy: state.busy, draft: document.querySelector('#prompt').value,
+    jobs: state.sessions.map(session => [session.id, session.status, session.queue])
+  })`);
+  const beforeAppearanceChange = await activeChatState();
+  await chooseAppearance('dark');
+  assert.equal(await activeChatState(), beforeAppearanceChange, 'changing appearance preserves active jobs, draft and selection');
+  await chooseAppearance('system');
   stoppedAgent = null;
+  const optionsOpen = () => window.webContents.executeJavaScript('document.querySelector("#chat-options").open');
+  await window.webContents.executeJavaScript(`(() => {
+    const options = document.querySelector('#chat-options');
+    options.querySelector('summary').click();
+    options.querySelector('#preset').click();
+  })()`);
+  assert.equal(await optionsOpen(), true, 'clicking a control inside Options keeps it open');
+  await window.webContents.executeJavaScript('document.querySelector("#prompt").focus(); document.querySelector("#prompt").click(); true');
+  assert.equal(await optionsOpen(), false, 'clicking outside Options dismisses it');
+  await window.webContents.executeJavaScript(`(() => {
+    const summary = document.querySelector('#chat-options > summary');
+    summary.click();
+    summary.focus();
+  })()`);
+  window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+  window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+  await until(async () => !await optionsOpen(), 'Escape dismisses Options');
+  assert.equal(await window.webContents.executeJavaScript('document.activeElement.matches("#chat-options > summary")'), true,
+    'Escape restores focus to the Options trigger');
+  assert.equal(await activeChatState(), beforeAppearanceChange, 'dismissing Options preserves the active job and draft');
+  assert.equal(stoppedAgent, null, 'dismissing Options must not stop the running task');
+  console.log('Options inside click, outside click and Escape dismissal passed');
   await window.webContents.executeJavaScript('document.querySelector(\'#agent-list [data-agent="' + profile.id + '"]\').dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true })); true');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#agent-menu [data-action=delete]").disabled'), true, 'Busy agents cannot be deleted from the menu');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#agent-menu [data-action=edit]").disabled'), true, 'Busy agents cannot be edited from the menu');
@@ -742,7 +1182,7 @@ app.whenReady().then(async () => {
   const waitingState = agents.snapshot();
   waitingState.agentStates[profile.id].waitingForAgents = [workerSession.id];
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(waitingState) + '); true');
-  assert.match(await window.webContents.executeJavaScript('document.querySelector("#agent-list").textContent'), /ResearcherWaiting/);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#agent-list .agent-nav").getAttribute("aria-label")'), 'Researcher · Waiting');
   stoppedAgent = null;
   await window.webContents.executeJavaScript('document.querySelector(\'#agent-list [data-agent="' + profile.id + '"]\').dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true })); document.querySelector("#agent-menu [data-action=stop]").click(); true');
   await until(() => stoppedAgent === profile.id, 'Stop remains available while an agent waits for nested tasks');
@@ -763,7 +1203,9 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); selectSession(' + JSON.stringify(sourceSession.id) + ')');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#agent-delegate, #delegate-dialog, [data-action=delegate]")'), null, 'Task requests use agent tools, not Delegate controls');
   window.setSize(1320, 900);
-  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#sessions, #new-session, #workspace, #welcome h2, #welcome p")'), null, 'Session UI and the selected welcome text are removed');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#sessions, #new-session, #workspace, #welcome p")'), null,
+    'The old session-management controls remain removed');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#welcome h2").textContent'), 'What would you like to work on?');
   worker.connection = 'connecting'; worker.busy = null;
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
   assert.match(await window.webContents.executeJavaScript('document.querySelector("#agent-cards").textContent'), /Starting/);
@@ -789,7 +1231,6 @@ app.whenReady().then(async () => {
   for (let i = 0; i < 100 && await window.webContents.executeJavaScript('selectedAgent') !== 'main'; i++) await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(await window.webContents.executeJavaScript('selectedAgent'), 'main');
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#session-title').textContent"), 'Hub');
-  assert.match(await window.webContents.executeJavaScript("document.querySelector('#permissions-detail').textContent"), /Hub chats and delegates/);
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), 'Main draft stays');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#main-agent-list [data-action=delete]")'), null, 'Main cannot be deleted');
   const names = ['Researcher', 'Reviewer', 'Builder', 'Test runner', 'Documentation', 'Planner', 'Code search', 'UI designer', 'Release notes', 'Performance', 'Refactor', 'Verifier'];
@@ -842,7 +1283,7 @@ app.whenReady().then(async () => {
     return { scrolls: list.scrollHeight > list.clientHeight, room: list.clientHeight > 100, pinned: main.getBoundingClientRect().top === before,
       accessFits: access.getBoundingClientRect().width >= parseFloat(access.style.width) - 1,
       headingFits: roster.right <= overview.left || roster.bottom <= overview.top,
-      controlsFit: add.top >= main.getBoundingClientRect().bottom && add.bottom <= list.getBoundingClientRect().top && add.bottom <= innerHeight };
+      controlsFit: add.bottom <= main.getBoundingClientRect().top && main.getBoundingClientRect().bottom <= list.getBoundingClientRect().top && add.bottom <= innerHeight };
   })()`);
   assert.deepEqual(agentLayout, { scrolls: true, room: true, pinned: true, accessFits: true, headingFits: true, controlsFit: true });
   await window.webContents.executeJavaScript('document.querySelector("#agent-list").scrollTop = 0; document.querySelector("#toast").hidden = true; true');
@@ -853,19 +1294,25 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('document.querySelector("#toast").hidden = true; true');
   await new Promise(resolve => setTimeout(resolve, 200));
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/agents-sidebar.png'), (await window.webContents.capturePage()).toPNG());
+  for (const mode of ['light', 'dark']) {
+    await chooseAppearance(mode);
+    await themeFrame();
+    fs.writeFileSync(path.resolve(__dirname, `../.scratch/app-${mode}.png`), (await window.webContents.capturePage()).toPNG());
+  }
+  await chooseAppearance('system');
   console.log('Agent creation, persistent chat selection, chat-only task requests, deletion, pinned Main and sidebar scrolling passed');
   phase = 'slash commands';
   const compacted = [];
   ipcMain.handle('compact', (_event, id) => { compacted.push(id); });
   let clearPrompts = 0;
-  ipcMain.handle('clearConversation', async (_event, id) => {
+  ipcMain.handle('clearConversation', async (_event, id, groupId) => {
     const fresh = await agents.clearConversation(id, name => {
       clearPrompts++;
       return confirmation.ask({ title: 'Start a fresh conversation?', message: `Clear the current context for ${name} and start with a blank chat.`,
         details: [{ label: 'Fresh context', text: 'The current conversation, draft and attachments leave the chat.' },
           { label: 'Same agent', text: 'Role, workspace and access stay the same.' }],
         note: 'Your previous conversation is archived on this computer.', confirmLabel: 'Clear conversation', cancelLabel: 'Keep conversation', danger: true });
-    });
+    }, groupId);
     return { cleared: !!fresh, sessionId: fresh?.id, state: agents.snapshot() };
   });
   const commandAgent = await window.webContents.executeJavaScript('selectedAgent');
@@ -1127,12 +1574,12 @@ app.whenReady().then(async () => {
   assert.deepEqual(selectableButtons, [], 'all button labels, including nested content and dynamic dialogs, must be unselectable');
   assert.notEqual(await window.webContents.executeJavaScript('getComputedStyle(document.querySelector("#prompt")).userSelect'), 'none', 'the composer keeps text selection');
   console.log('Button text selection disabled throughout Harness');
-  const closeAnswer = confirmation.ask({ title: 'Close Harness?', message: 'Agents are still working. Closing Harness will stop all running tasks.',
-    confirmLabel: 'Stop and close', cancelLabel: 'Keep working', danger: true });
+  const closeAnswer = confirmation.ask({ title: 'Remove provider?', message: 'Remove this provider from Harness settings?',
+    confirmLabel: 'Remove', cancelLabel: 'Keep provider', danger: true });
   await waitForDialog();
-  assert.equal(await window.webContents.executeJavaScript('document.activeElement.textContent'), 'Keep working');
+  assert.equal(await window.webContents.executeJavaScript('document.activeElement.textContent'), 'Keep provider');
   await new Promise(resolve => setTimeout(resolve, 200));
-  fs.writeFileSync(path.resolve(__dirname, '../.scratch/confirmation-close.png'), (await window.webContents.capturePage()).toPNG());
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/confirmation-provider.png'), (await window.webContents.capturePage()).toPNG());
   await window.webContents.executeJavaScript('document.querySelector(".confirmation-close").click(); true');
   assert.equal(await closeAnswer, false);
   const errorWindow = new BrowserWindow({ show: false, webPreferences: { contextIsolation: true, sandbox: true } });
@@ -1141,11 +1588,606 @@ app.whenReady().then(async () => {
   assert.equal(await errorWindow.webContents.executeJavaScript('document.querySelector("#confirmation-description").textContent'), '<test> startup failure');
   assert.equal(await errorWindow.webContents.executeJavaScript('document.activeElement.textContent'), 'Close Harness');
   errorWindow.destroy();
-  console.log('Styled clear/close/startup dialogs, cancel defaults, Escape and visible cursor styles passed');
+  console.log('Styled clear/provider/startup dialogs, cancel defaults, Escape and visible cursor styles passed');
+  phase = 'asynchronous chat under fake worker output';
+  const ownerChat = agents.conversation(controller, true);
+  ownerChat.queue = []; ownerChat.queuePaused = true; ownerChat.error = null;
+  controller.busy = null;
+  const background = [];
+  for (let index = 0; index < 2; index++) {
+    const profile = await agents.saveAgent({ name: `Builder ${index + 1}`, instructions: 'Fake build fixture.', workspace: root, access: ownerChat.access, mode: 'auto' });
+    const worker = agents.controller(profile.id);
+    await agents.initializeController(worker);
+    const chat = agents.conversation(worker, true);
+    chat.title = `Build game ${index + 1}`; chat.status = 'running'; worker.busy = chat.id;
+    chat.delegation = { id: `fake-job-${index}`, source: ownerChat.id, state: 'running', startIndex: 0, delivered: false };
+    chat.items.push({ id: `fake-output-${index}`, type: 'commandExecution', command: 'Fake build',
+      status: 'inProgress', aggregatedOutput: 'Background output\n'.repeat(2000) });
+    background.push({ worker, chat });
+  }
+  const publish = () => window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
+  phase = 'async fixture publishing';
+  await publish();
+  await window.webContents.executeJavaScript('selectAgent("main")');
+  background[0].chat.capacityWaiting = true;
+  await publish();
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-activity-list").textContent'), /Builder 1 · Queued/);
+  delete background[0].chat.capacityWaiting;
+  background[0].chat.delegation.quotaPause = { reason: 'Background work paused: ChatGPT reported 92% usage (background threshold 90%).' };
+  await publish();
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-activity-list").textContent'), /Builder 1 · Paused.*92%.*90%/s);
+  delete background[0].chat.delegation.quotaPause;
+  background[0].chat.delegation.state = 'revising';
+  background[0].chat.delegation.amendments = [{ id: 'ui-change', text: 'Use a blue background.', revision: 2, state: 'received' }];
+  await publish();
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-activity-list").textContent'), /Updating….*Change received · revision 2/s);
+  background[0].chat.delegation.state = 'running';
+  background[0].chat.delegation.amendments[0].state = 'applied';
+  await publish();
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-activity-list").textContent'), /Change applied · revision 2/);
+  delete background[0].chat.delegation.amendments;
+  const updateReceipt = { id: 'ui-update-receipt', type: 'agentMail', localOnly: true, kind: 'note', fromName: 'You',
+    text: 'Use a blue background.', amendment: { id: 'ui-change', revision: 2, state: 'received' } };
+  background[0].chat.items.push(updateReceipt);
+  const workerQueue = background[0].chat.queue, workerProvider = background[0].chat.activeProvider;
+  background[0].chat.queue = [{ id: 'ui-direct-change', text: 'Use blue.', images: [] }];
+  background[0].chat.activeProvider = 'native:deepseek';
+  await publish();
+  await window.webContents.executeJavaScript('selectAgent(' + JSON.stringify(background[0].worker.agentId) + ')');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector(".queue-steer").textContent'), 'Apply now');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector(".queue-steer").disabled'), false);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#messages").textContent'), /Assignment update from You · Received · revision 2/);
+  updateReceipt.amendment.state = 'applied';
+  await publish();
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#messages").textContent'), /Assignment update from You · Applied · revision 2/);
+  background[0].chat.items = background[0].chat.items.filter(item => item !== updateReceipt);
+  background[0].chat.queue = workerQueue; background[0].chat.activeProvider = workerProvider;
+  await window.webContents.executeJavaScript('selectAgent("main")');
+  const originalQueue = ownerChat.queue, originalPause = ownerChat.queuePaused;
+  ownerChat.queuePaused = true;
+  ownerChat.queue = Array.from({ length: 10 }, (_, i) => ({ id: `full-${i}`, text: 'Queued user message', images: [] }));
+  const deferredResult = { id: 'deferred-fixture', type: 'agentResult', localOnly: true, text: 'Saved build evidence.',
+    agentName: 'Builder 1', ownerName: 'Hub', status: 'completed', pendingReply: { id: 'deferred-fixture', agentReply: true } };
+  const fixtureArtifact = { id: 'game', scopeId: 'split-assignment', version: 3, kind: 'program',
+    path: 'Game <img src=x onerror=alert(1)>.exe', label: 'Game', workspace: root };
+  deferredResult.artifacts = [fixtureArtifact];
+  const artifactCalls = [], stoppedRuns = [];
+  ipcMain.handle('artifactAction', (_event, args) => { artifactCalls.push(args); return { status: 'opened' }; });
+  ipcMain.handle('stopArtifactRun', async (_event, id) => {
+    stoppedRuns.push(id); await agents.artifactRuns.stop(id); await publish();
+  });
+  ownerChat.items.push(deferredResult);
+  await publish();
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-activity-summary").textContent'), /1 result waiting/);
+  assert.equal(artifactCalls.length, 0, 'rendering a result cannot launch an artifact');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector(".artifact-path img")'), null);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector(".artifact-list").textContent'), /Files available/);
+  await window.webContents.executeJavaScript(`document.querySelector('.artifact-row button').click(); true`);
+  await until(() => artifactCalls.length === 1, 'artifact folder action reaches the runner');
+  await window.webContents.executeJavaScript(`document.querySelector('.artifact-row button:last-child').click(); true`);
+  await until(() => artifactCalls.length === 2, 'artifact Run is explicit');
+  assert.deepEqual(artifactCalls, ['folder', 'run'].map(action => ({ action, sessionId: ownerChat.id,
+    receiptId: deferredResult.id, artifactId: 'game', expectedVersion: 3 })));
+  const fixtureRunId = '00000000-0000-4000-8000-000000000001';
+  agents.artifactRuns.runs.set(fixtureRunId, { id: fixtureRunId, label: 'Game', path: 'game.exe', workspace: root, child: null });
+  await publish();
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-activity-summary").textContent'), /1 running test/);
+  await window.webContents.executeJavaScript(`document.querySelector('.artifact-run button').click(); true`);
+  await until(() => stoppedRuns.length === 1 && !agents.artifactRuns.busy, 'test Stop uses its stable run ID');
+  assert.deepEqual(stoppedRuns, [fixtureRunId]);
+  ownerChat.items = ownerChat.items.filter(item => item !== deferredResult);
+  ownerChat.queue = originalQueue; ownerChat.queuePaused = originalPause;
+  await publish();
+  phase = 'queued assignment and mailbox UI';
+  const queuedJob = { id: 'fake-queued-job', source: ownerChat.id, state: 'queued', access: ownerChat.access,
+    title: 'Build game three', task: 'Queued game request', delivered: false };
+  background[1].chat.delegationQueue = [queuedJob];
+  await publish();
+  await window.webContents.executeJavaScript('selectAgent(' + JSON.stringify(background[1].worker.agentId) + ')');
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-activity-list").textContent'), /Owner: Hub.*Open owner/s);
+  await window.webContents.executeJavaScript('selectAgent("main")');
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-activity-list").textContent'), /Builder 2 · Queued.*Owner: Hub · Build game three/s);
+  background[1].chat.delegation.owner = background[0].chat.id;
+  const ownershipReceipt = { id: 'fake-owner-handoff', type: 'agentMail', kind: 'note', localOnly: true,
+    fromName: 'Hub', text: 'Hub handed result ownership to Builder 1.',
+    handoff: { jobId: background[1].chat.delegation.id, state: 'committed', ownerId: background[0].worker.agentId } };
+  ownerChat.items.push(ownershipReceipt);
+  await publish();
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-activity-list").textContent'), /Owner: Builder 1.*Open owner/s);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#messages").textContent'), /Result ownership handoff · Recorded/);
+  await window.webContents.executeJavaScript(`(() => {
+    const button = [...document.querySelectorAll('#messages button')].find(button => button.textContent === 'Open receiving chat');
+    if (!button) throw new Error('Missing handoff navigation');
+    button.click();
+    return new Promise(resolve => setTimeout(resolve, 50));
+  })()`);
+  assert.equal(await window.webContents.executeJavaScript('selectedAgent'), background[0].worker.agentId);
+  delete background[1].chat.delegation.owner;
+  ownerChat.items = ownerChat.items.filter(item => item !== ownershipReceipt);
+  await publish();
+  await window.webContents.executeJavaScript('selectAgent("main")');
+  let stoppedQueued;
+  ipcMain.removeHandler('stop');
+  ipcMain.handle('stop', async (_event, id) => {
+    if (id === queuedJob.id) { stoppedQueued = id; await agents.stop(id); }
+    else stoppedAgent = agents.owner(id).agentId;
+  });
+  await window.webContents.executeJavaScript(`(() => {
+    document.querySelector('#job-activity').open = true;
+    const row = [...document.querySelectorAll('#job-activity-list .job-row')].find(row => row.textContent.includes('Build game three'));
+    row.querySelector('button:last-child').click();
+  })()`);
+  await until(() => stoppedQueued === queuedJob.id && queuedJob.delivered, 'queued Stop uses the assignment ID');
+  assert.equal(background[1].worker.busy, background[1].chat.id, 'queued Stop keeps the recipient’s active task running');
+  background[1].worker.activeTurns.set(background[1].chat.id, 'fake-active-turn');
+  const mail = agents.sendMessage(background[1].worker, background[1].chat,
+    { agentId: 'main', messageId: 'ui-question', kind: 'question', text: 'Which format? <img src=x onerror=alert(1)>' });
+  background[1].worker.activeTurns.delete(background[1].chat.id);
+  await publish();
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#messages").textContent'), /Question from Builder 2 · Received/);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#messages img")'), null);
+  await window.webContents.executeJavaScript(`(() => {
+    const panel = [...document.querySelectorAll('#messages details')].find(panel => panel.textContent.includes('Which format?'));
+    panel.open = true;
+    if (!panel.textContent.includes('Which format? <img')) throw new Error('Mailbox text was not retained safely');
+  })()`);
+  ownerChat.items = ownerChat.items.filter(item => item.id !== mail.messageId && item.deliveryId !== queuedJob.id);
+  ownerChat.queue = []; background[1].chat.delegationQueue = [];
+  await publish();
+  await window.webContents.executeJavaScript('document.querySelector("#prompt").value = "Build notes: "; document.querySelector("#prompt").dispatchEvent(new Event("input", { bubbles: true })); document.querySelector("#toast").hidden = true; true');
+  const samples = { baselineInput: [], loadedInput: [], navigation: [], receipt: [], eventDisplay: [], stopFeedback: [] };
+  const inputSample = async list => {
+    list.push(await window.webContents.executeJavaScript(`(async () => {
+      const input = document.querySelector('#prompt'), start = performance.now();
+      input.focus(); input.value += 'x'; input.dispatchEvent(new Event('input', { bubbles: true }));
+      await new Promise(requestAnimationFrame);
+      if (document.activeElement !== input || !input.value.endsWith('x')) throw new Error('Typing lost focus or text');
+      return performance.now() - start;
+    })()`));
+  };
+  phase = 'async baseline typing';
+  for (let index = 0; index < 20; index++) await inputSample(samples.baselineInput);
+  await window.webContents.executeJavaScript('document.querySelector("#job-activity").open = true; true');
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-activity-summary").textContent'), /2 background tasks.*Owner: Hub/);
+  const flood = setInterval(() => {
+    for (const { chat } of background) chat.items[0].aggregatedOutput += 'More build output\n'.repeat(100);
+    window.webContents.send('state', agents.snapshot());
+  }, 30);
+  try {
+    phase = 'async loaded typing and navigation';
+    for (let index = 0; index < 20; index++) {
+      await inputSample(samples.loadedInput);
+      const navigationStart = performance.now();
+      await window.webContents.executeJavaScript('selectAgent(' + JSON.stringify(background[0].worker.agentId) + ')');
+      await window.webContents.executeJavaScript('selectAgent("main")');
+      samples.navigation.push(performance.now() - navigationStart);
+      assert.ok(background.every(({ worker, chat }) => worker.busy === chat.id), 'navigation leaves both workers active');
+    }
+    controller.busy = ownerChat.id;
+    phase = 'async persisted receipts';
+    for (let index = 0; index < 20; index++) {
+      const receiptStart = performance.now();
+      const receipt = await controller.send({ id: ownerChat.id, text: `Make game two cooperative ${index}`, task: 'off' });
+      samples.receipt.push(performance.now() - receiptStart);
+      assert.equal(receipt.queued, true);
+      const stored = JSON.parse(fs.readFileSync(controller.filename, 'utf8')).sessions.find(chat => chat.id === ownerChat.id);
+      assert.match(stored.queue.at(-1).text, /Make game two cooperative/);
+      ownerChat.queue.pop();
+    }
+    ownerChat.queue.push({ id: 'fake-correction', text: 'Make game two cooperative', images: [], mode: 'auto' });
+    controller.save();
+    await publish();
+    assert.match(await window.webContents.executeJavaScript('document.querySelector("#message-queue").textContent'), /Queued: Make game two cooperative/);
+    assert.doesNotMatch(await window.webContents.executeJavaScript('document.querySelector("#message-queue").textContent'), /Applied/);
+    for (let index = 0; index < 20; index++) {
+      background[0].chat.title = `Build game one · update ${index}`;
+      phase = 'async job event display';
+      const eventStart = performance.now();
+      window.webContents.send('state', agents.snapshot());
+      await until(async () => (await window.webContents.executeJavaScript('document.querySelector("#job-activity-list").textContent')).includes(`update ${index}`), 'job event reaches the UI');
+      samples.eventDisplay.push(performance.now() - eventStart);
+    }
+    await window.webContents.executeJavaScript('document.querySelector("#job-activity").open = true; true');
+    phase = 'async Stop feedback';
+    window.setSize(840, 640);
+    await window.webContents.executeJavaScript('document.documentElement.style.setProperty("--font-scale", "1.5"); true');
+    assert.equal(await window.webContents.executeJavaScript(`(() => {
+      return [...document.querySelectorAll('#job-activity-list button')].every(button => {
+        const box = button.getBoundingClientRect();
+        return box.left >= 0 && box.right <= innerWidth;
+      });
+    })()`), true, 'task actions fit a narrow window with large text');
+    window.setSize(1320, 900);
+    await window.webContents.executeJavaScript('document.documentElement.style.setProperty("--font-scale", "1"); true');
+    const draftBeforeStop = await window.webContents.executeJavaScript('document.querySelector("#prompt").value');
+    for (let index = 0; index < 20; index++) {
+      background[1].chat.delegation.id = `fake-stop-${index}`;
+      await publish();
+      samples.stopFeedback.push(await window.webContents.executeJavaScript(`(async () => {
+        const button = document.querySelectorAll('#job-activity-list .job-row button:last-child')[1];
+        const start = performance.now(); button.click();
+        await new Promise(requestAnimationFrame);
+        if (!button.disabled || button.textContent !== 'Stopping…') throw new Error('Stop gave no immediate feedback');
+        return performance.now() - start;
+      })()`));
+    }
+    await until(() => stoppedAgent === background[1].worker.agentId, 'Stop targets game two directly');
+    assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), draftBeforeStop);
+  } finally { clearInterval(flood); }
+  ownerChat.queue = []; ownerChat.queuePaused = true;
+  phase = 'async returned reports';
+  for (let index = 0; index < background.length; index++) {
+    const { worker, chat } = background[index];
+    worker.busy = null; chat.status = index ? 'interrupted' : 'completed';
+    chat.delegation.cancelled = !!index;
+    chat.items.push({ id: `fake-result-${index}`, type: 'agentMessage', text: index ? 'Stopped safely.' : 'Game one is ready for review. <img src=x onerror=alert(1)>' });
+    agents.deliver(worker, chat);
+  }
+  await publish();
+  assert.equal(await window.webContents.executeJavaScript('document.querySelectorAll(".job-result").length'), 2);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#messages").textContent'), /Builder 1 · Result received/);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#messages").textContent'), /Builder 2 · Cancelled/);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector(".job-result img")'), null, 'reports are untrusted text');
+  assert.ok(controller.busy, 'reports appear before their busy owner can resume');
+  window.setSize(840, 640);
+  await window.webContents.executeJavaScript('document.documentElement.style.setProperty("--font-scale", "1.5"); true');
+  const activityFits = await window.webContents.executeJavaScript(`(() => {
+    const box = document.querySelector('#job-activity').getBoundingClientRect();
+    return box.left >= 0 && box.right <= innerWidth;
+  })()`);
+  assert.equal(activityFits, true, 'activity remains reachable in a narrow window with large text');
+  window.setSize(1320, 900);
+  await window.webContents.executeJavaScript('document.documentElement.style.setProperty("--font-scale", "1"); true');
+  phase = 'async screenshot';
+  await new Promise(resolve => setTimeout(resolve, 100));
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/async-chat.png'), (await window.webContents.capturePage()).toPNG());
+  const p95 = list => [...list].sort((a, b) => a - b)[Math.ceil(list.length * 0.95) - 1];
+  const latency = Object.fromEntries(Object.entries(samples).map(([name, values]) => [name, { count: values.length, p95Ms: p95(values) }]));
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/async-chat-latency.json'), JSON.stringify({ measuredAt: new Date().toISOString(), fakeWorkers: 2, modelLatency: 'Not measured; no inference', latency }, null, 2));
+  assert.ok(latency.loadedInput.p95Ms < 100, `Input p95 ${latency.loadedInput.p95Ms} ms exceeds 100 ms`);
+  assert.ok(latency.navigation.p95Ms < 100, `Navigation p95 ${latency.navigation.p95Ms} ms exceeds 100 ms`);
+  assert.ok(latency.receipt.p95Ms < 250, `Receipt p95 ${latency.receipt.p95Ms} ms exceeds 250 ms`);
+  assert.ok(latency.eventDisplay.p95Ms < 500, `Event p95 ${latency.eventDisplay.p95Ms} ms exceeds 500 ms`);
+  assert.ok(latency.stopFeedback.p95Ms < 100, 'Stop feedback exceeds 100 ms');
+  console.log('Async handoffs, saved reports, queued corrections and background-load latency passed:', JSON.stringify(latency));
+  phase = 'separate foreground and assignment details';
+  const splitProfile = await agents.saveAgent({ name: 'Split bot', instructions: 'Private protocol fixture.', workspace: root,
+    access: ownerChat.access, mode: 'auto' });
+  const foreground = agents.controller(splitProfile.id), execution = agents.execution(splitProfile.id);
+  await agents.initializeController(foreground); await agents.initializeController(execution);
+  execution.connection = 'disconnected';
+  const foregroundChat = agents.conversation(foreground, true), assignment = agents.conversation(execution, true);
+  assignment.delegation = { id: 'split-assignment', revision: 1, source: ownerChat.id, owner: ownerChat.id,
+    state: 'queued', access: assignment.access, task: 'Private fixture assignment', title: 'Build a game', startIndex: 0, delivered: false };
+  assignment.delegation.artifacts = [fixtureArtifact];
+  agents.budgets.register(assignment.delegation, ownerChat); agents.budgets.persist();
+  const timeBudget = agents.budgets.forJob(assignment.delegation), budgetCalls = [];
+  ipcMain.handle('jobBudget', async (_event, args) => {
+    budgetCalls.push(args); const result = agents.budgets.update(args); await publish(); return result;
+  });
+  assignment.items.push({ type: 'agentMessage', text: 'Saved evidence <img src=x onerror=alert(1)>' });
+  assignment.status = 'running'; execution.busy = assignment.id;
+  ipcMain.handle('reviseJob', async (_event, args) => { const result = agents.reviseUserJob(args); await publish(); return result; });
+  const answers = [];
+  ipcMain.handle('answer', async (_event, id, answer, agentId, contextId) => {
+    answers.push({ id, answer, agentId, contextId }); execution.requests.delete(id); await publish();
+  });
+  await publish();
+  await window.webContents.executeJavaScript('selectAgent(' + JSON.stringify(splitProfile.id) + ')');
+  const foregroundState = await window.webContents.executeJavaScript(`(() => {
+    document.querySelector('#prompt').value = 'Keep my question';
+    document.querySelector('#prompt').dispatchEvent(new Event('input'));
+    document.querySelector('#job-activity').open = true;
+    document.querySelector('#job-activity-list .job-row button').click();
+    return { busy: state.busy, selectedId, ready: !document.querySelector('#send').disabled,
+      modal: document.querySelector('#job-dialog').matches(':modal'), details: document.querySelector('#job-dialog').open };
+  })()`);
+  assert.equal(foregroundState.busy, null);
+  assert.equal(foregroundState.selectedId, foregroundChat.id);
+  assert.equal(foregroundState.ready, true);
+  assert.equal(foregroundState.details, true);
+  assert.equal(foregroundState.modal, false, 'assignment details do not trap foreground input');
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-artifacts").textContent'), /Open folder.*Run/s);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-artifacts img")'), null);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-budget-summary").textContent'), /120 min/);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-budget-usage").textContent'), /Reported tokens: Not reported\. Provider estimate: Not reported/);
+  timeBudget.requests['cost-fixture'] = { id: 'cost-fixture', kind: 'worker', provider: 'claude-cli', complete: true,
+    usage: { inputTokens: 125, cachedInputTokens: 20, outputTokens: 10, totalTokens: 135 }, providerEstimateUsd: 0.0031 };
+  agents.primary.save(); await publish();
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-budget-usage").textContent'), /Reported tokens: 135\. Provider estimate: \$0\.0031/);
+  await window.webContents.executeJavaScript(`document.querySelector('#job-budget').open = true;
+    document.querySelector('#job-budget-limit').value = '5';
+    document.querySelector('#job-budget-attempts').value = '25';
+    document.querySelector('#job-budget-tokens').value = '500';
+    document.querySelector('#job-budget-limit').dispatchEvent(new Event('input'));
+    document.querySelector('#job-budget-form').dispatchEvent(new Event('submit', { cancelable: true })); true`);
+  await until(() => budgetCalls.length === 1 && timeBudget.limitMs === 300000, 'time limit saves by explicit action');
+  assert.deepEqual(budgetCalls[0], { jobId: timeBudget.id, expectedVersion: 1, limitMinutes: 5, limitAttempts: 25, limitTokens: 500, resume: false });
+  for (let i = 0; i < 100 && await window.webContents.executeJavaScript('!!viewedJob.budgetPending'); i++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(await window.webContents.executeJavaScript(`(() => {
+    const button = document.querySelector('#job-budget-save'); button.scrollIntoView({ block: 'nearest' });
+    const box = button.getBoundingClientRect();
+    return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)?.closest('#job-budget-save') === button;
+  })()`), true, 'the expanded budget form retains a reachable Save button');
+  assert.equal(await window.webContents.executeJavaScript(`(() => {
+    const summary = document.querySelector('#job-budget-summary'), box = summary.getBoundingClientRect();
+    return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)?.closest('summary') === summary;
+  })()`), true, 'the budget disclosure remains reachable after scrolling to its controls');
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/job-budget.png'), (await window.webContents.capturePage()).toPNG());
+  execution.busy = null; agents.budgets.refresh();
+  timeBudget.state = 'paused'; timeBudget.usedMs = timeBudget.limitMs; timeBudget.version++;
+  timeBudget.reason = 'Active-time budget reached. Review the saved work and extend the limit to continue.';
+  agents.primary.save(); await publish();
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-budget-save").textContent'), 'Resume');
+  await window.webContents.executeJavaScript(`document.querySelector('#job-budget-limit').value = '6';
+    document.querySelector('#job-budget-limit').dispatchEvent(new Event('input'));
+    document.querySelector('#job-budget-form').dispatchEvent(new Event('submit', { cancelable: true })); true`);
+  await until(() => budgetCalls.length === 2 && timeBudget.state === 'active', 'budget Resume is an explicit separate action');
+  assert.equal(budgetCalls[1].resume, true);
+  assert.equal(timeBudget.usedMs, 300000, 'the UI cannot reset the consumed allowance');
+  execution.busy = assignment.id;
+  await window.webContents.executeJavaScript('document.querySelector("#job-budget").open = false; true');
+  const sendIsReachable = () => window.webContents.executeJavaScript(`(() => {
+    const send = document.querySelector('#send'), box = send.getBoundingClientRect();
+    return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)?.closest('#send') === send;
+  })()`);
+  assert.equal(await sendIsReachable(), true, 'details reserve space instead of covering the Send button');
+  window.setSize(840, 640);
+  await window.webContents.executeJavaScript('document.documentElement.style.setProperty("--font-scale", "1.5"); true');
+  assert.equal(await sendIsReachable(), true, 'foreground Send remains reachable beside details in a narrow window');
+  window.setSize(1320, 900);
+  await window.webContents.executeJavaScript('document.documentElement.style.setProperty("--font-scale", "1"); true');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-details-log img")'), null);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-details-log").textContent'), /<img src=x/);
+  await window.webContents.executeJavaScript(`document.querySelector('#job-update-text').value = 'Use keyboard controls.';
+    document.querySelector('#job-update-form').dispatchEvent(new Event('submit', { cancelable: true })); true`);
+  await until(() => assignment.delegation.revision === 2, 'the details update was accepted');
+  for (let i = 0; i < 100 && !await window.webContents.executeJavaScript('document.querySelector("#job-update-feedback").textContent.startsWith("Received")'); i++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-update-feedback").textContent'), /^Received/);
+  assignment.delegation.amendments[0].state = 'applied';
+  await publish();
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-update-feedback").textContent'), /^Applied/);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/foreground-job-details.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript('document.querySelector("#job-update-text").value = "unsent update"; document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); true');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-dialog").open'), false);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), 'Keep my question');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-activity-list .job-row button").click(); document.querySelector("#job-update-text").value'), 'unsent update', 'reopening assignment details keeps the unsent update');
+  await window.webContents.executeJavaScript(`document.querySelector('#job-activity-list .job-row button').click();
+    document.querySelector('#prompt').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })); true`);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-dialog").open'), false, 'outside input dismisses assignment details');
+  assignment.delegation.state = 'running';
+  execution.requests.set(7, { id: 7, method: 'item/commandExecution/requestApproval',
+    params: { threadId: 'split-thread', command: 'Private fixture check', reason: 'Review this background action.' } });
+  await publish();
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#request-dialog").open'), false,
+    'a background approval cannot open a modal over chat by itself');
+  await window.webContents.executeJavaScript(`document.querySelector('#job-activity').open = true;
+    [...document.querySelectorAll('#job-activity-list button')].find(button => button.textContent === 'Review').click(); true`);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#request-dialog").open'), true);
+  const deferred = await window.webContents.executeJavaScript(`(() => {
+    const dialog = document.querySelector('#request-dialog'), cancel = new Event('cancel', { cancelable: true });
+    dialog.dispatchEvent(cancel); if (!cancel.defaultPrevented) dialog.close(); return !cancel.defaultPrevented;
+  })()`);
+  assert.equal(deferred, true, 'background approvals can be deferred through Escape');
+  assert.equal(execution.requests.size, 1, 'deferring an approval does not silently allow or reject it');
+  await window.webContents.executeJavaScript(`[...document.querySelectorAll('#job-activity-list button')].find(button => button.textContent === 'Review').click();
+    [...document.querySelectorAll('#request-content button')].find(button => button.textContent === 'Allow once').click(); true`);
+  await until(() => answers.length === 1, 'the background approval reached its controller');
+  assert.deepEqual(answers[0], { id: 7, answer: { decision: 'accept' }, agentId: splitProfile.id, contextId: assignment.id });
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), 'Keep my question');
+  console.log('Separate foreground, nonmodal assignment details, received/applied updates and deferred scoped approvals passed');
+  timeBudget.limitTokens = null;
+  timeBudget.requests['unknown-cost-fixture'] = { id: 'unknown-cost-fixture', kind: 'worker', provider: 'native:deepseek',
+    complete: true, usage: null, providerEstimateUsd: null };
+  ownerChat.items.push({ id: 'archived-assignment-result', type: 'agentResult', localOnly: true,
+    deliveryId: 'replaced-assignment', agentId: splitProfile.id, agentName: 'Split bot', ownerName: 'Hub',
+    title: 'Earlier assignment', status: 'completed', text: 'Retained report after the worker was reused.', budgetId: timeBudget.id });
+  await publish(); await window.webContents.executeJavaScript('selectAgent("main")');
+  await window.webContents.executeJavaScript(`(() => {
+    const result = [...document.querySelectorAll('.job-result')].find(row => row.textContent.includes('Earlier assignment'));
+    [...result.querySelectorAll('button')].find(button => button.textContent === 'Details').click();
+  })()`);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-dialog").open'), true);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-details-log").textContent'), /worker was reused/);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-budget-summary").textContent'), /6 min/);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-budget-usage").textContent'), /Reported tokens: 135 \(incomplete\)\. Provider estimate: \$0\.0031 \(incomplete\)/);
+  await window.webContents.executeJavaScript('document.querySelector("#job-dialog .close-dialog").click(); true');
+  console.log('Saved result details retain their report and shared budget after worker reuse');
+  phase = 'direct tracked task details';
+  const directTask = require('../src/tasks.cjs').createTask({ messageId: 'direct-ui-input',
+    goal: 'Continue my direct task <img src=x onerror=alert(1)>', access: foregroundChat.access, checks: [] });
+  Object.assign(directTask, { foreground: true, workspace: root, state: 'cancelled', budgetPaused: true,
+    originalImageCount: 1, inputImages: ['data:image/png;base64,AA=='], startIndex: foregroundChat.items.length,
+    requestedMode: 'auto', resumeJobId: require('node:crypto').randomUUID() });
+  foregroundChat.tasks = [directTask];
+  agents.budgets.register(directTask, foregroundChat);
+  const directBudget = agents.budgets.forJob(directTask);
+  Object.assign(directBudget, { state: 'paused', reason: 'Time limit reached. Review before continuing.', usedMs: 1000 });
+  foregroundChat.queuePaused = true; foregroundChat.queuePauseBudgetId = directBudget.id;
+  foreground.save(); agents.budgets.persist(); await publish();
+  await window.webContents.executeJavaScript('selectAgent(' + JSON.stringify(splitProfile.id) + ')');
+  await window.webContents.executeJavaScript(`(() => {
+    document.querySelector('#job-activity').open = true;
+    const row = [...document.querySelectorAll('#job-activity-list .job-row')].find(row => row.textContent.includes('Continue my direct task'));
+    row.querySelector('button').click();
+  })()`);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-activity-summary").textContent'), /1 task/);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-update-form").hidden'), true);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-details-log").textContent'), /Original request.*Continue my direct task.*1 original image/s);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-details-log img")'), null);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-budget-save").textContent'), 'Resume');
+  assert.equal(await sendIsReachable(), true);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/direct-task-budget.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript(`document.querySelector('#job-budget').open = true;
+    document.querySelector('#job-budget-form').dispatchEvent(new Event('submit', { cancelable: true })); true`);
+  await until(() => directTask.resumedAsJobId === directTask.resumeJobId, 'direct-task Resume admits one private continuation');
+  assert.equal(agents.findJob(directTask.resumeJobId).job.owner, foregroundChat.id);
+  assert.equal(agents.findJob(directTask.resumeJobId).job.budgetId, directBudget.id);
+  ipcMain.removeHandler('stop');
+  let stoppedDirectTask;
+  ipcMain.handle('stop', async (_event, id) => { stoppedDirectTask = id; await agents.stop(id); await publish(); });
+  await window.webContents.executeJavaScript('document.querySelector("#job-dialog .close-dialog").click(); true');
+  await publish();
+  await window.webContents.executeJavaScript(`(() => {
+    const row = [...document.querySelectorAll('#job-activity-list .job-row')].find(row => row.textContent.includes('Continue the saved direct task'));
+    row.querySelector('button:last-child').click();
+  })()`);
+  await until(() => stoppedDirectTask === directTask.resumeJobId, 'the private continuation Stop uses its stable job identity');
+  console.log('Direct tracked tasks expose a nonmodal Resume, preserve inputs and retain one result owner');
+  phase = 'isolated workspace details';
+  const preparedView = agents.snapshot(), previewCopy = { source: root, workspace: path.join(root, 'preview-project-copy'), state: 'preparing' };
+  const previewJob = preparedView.executionStates[splitProfile.id].sessions.find(chat => chat.id === assignment.id).delegation;
+  previewJob.workspaceCopy = previewCopy;
+  preparedView.jobWorkspaces[previewCopy.workspace] = previewCopy;
+  await window.webContents.executeJavaScript('selectAgent(' + JSON.stringify(splitProfile.id) + ')');
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(preparedView) + '); true');
+  await window.webContents.executeJavaScript(`(() => {
+    document.querySelector('#job-activity').open = true;
+    const row = [...document.querySelectorAll('#job-activity-list .job-row')].find(row => row.textContent.includes('Build a game'));
+    row.querySelector('button').click();
+  })()`);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-dialog").open'), true);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-details-status").textContent'), /Preparing workspace/);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-copy-location").textContent'), /preview-project-copy.*no automatic merge/s);
+  assert.equal(await sendIsReachable(), true);
+  await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/isolated-job-workspace.png'), (await window.webContents.capturePage()).toPNG());
+  previewCopy.state = 'failed'; previewCopy.error = previewJob.error = 'Missing project inputs. No worker was started.';
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(preparedView) + '); true');
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-details-status").textContent'), /Needs review/);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-details-error").textContent'), /No worker was started/);
+  await window.webContents.executeJavaScript(`(() => {
+    document.querySelector('#job-dialog').close();
+    const row = [...document.querySelectorAll('#job-activity-list .job-row')].find(row => row.textContent.includes('Build a game'));
+    row.querySelector('button').click();
+  })()`);
+  await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(resolve))');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-dialog").open && !!viewedJob'), true, 'a queued close event cannot erase a reopened assignment');
+  await window.webContents.executeJavaScript('document.querySelector("#job-dialog .close-dialog").click(); true');
+  console.log('Workspace preparation and failures remain visible beside a usable chat composer');
+  phase = 'restart reconciliation';
+  const heldView = agents.snapshot(), reconcileCalls = [];
+  ipcMain.handle('reconcileJob', async (_event, args) => { reconcileCalls.push(args); return { jobId: args.jobId, status: 'interrupted' }; });
+  const heldJob = heldView.executionStates[splitProfile.id].sessions.find(chat => chat.id === assignment.id).delegation;
+  Object.assign(heldJob, { state: 'interrupted', recovery: { previousState: 'running', kind: 'uncertain' } });
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(heldView) + '); true');
+  await window.webContents.executeJavaScript(`(() => {
+    document.querySelector('#job-activity').open = true;
+    const row = [...document.querySelectorAll('#job-activity-list .job-row')].find(row => row.textContent.includes('Build a game'));
+    row.querySelector('button').click();
+  })()`);
+  const recoveryView = () => window.webContents.executeJavaScript(`({ shown: !document.querySelector('#job-recovery').hidden,
+    start: !document.querySelector('#job-recovery-start').hidden, text: document.querySelector('#job-recovery-text').textContent })`);
+  let held = await recoveryView();
+  assert.deepEqual([held.shown, held.start], [true, false], 'uncertain work offers no rerun');
+  assert.match(held.text, /may have changed files or run commands/);
+  Object.assign(heldJob, { recovery: { previousState: 'queued', kind: 'not-started' }, recoveryVersion: 1 });
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(heldView) + '); true');
+  held = await recoveryView();
+  assert.deepEqual([held.shown, held.start], [true, true]);
+  assert.match(held.text, /before this assignment started/);
+  await window.webContents.executeJavaScript('document.querySelector("#job-recovery-return").click(); true');
+  await until(() => reconcileCalls.length === 1, 'Return reaches the runner');
+  assert.deepEqual(reconcileCalls[0], { jobId: 'split-assignment', action: 'return' });
+  assert.equal(await sendIsReachable(), true);
+  await window.webContents.executeJavaScript('document.querySelector("#job-dialog .close-dialog").click(); true');
+  console.log('Restart-held assignments show the exact decision, and uncertain work offers no rerun');
+  phase = 'batch report and host verification';
+  const proof = require('../src/job-reports.cjs').verification({ checks: [{ id: 'compiler', name: 'Compiler', kind: 'build', argv: ['fixture-build'], cwd: root }],
+    attempts: [{ assignmentId: 'report-proof', assignmentRevision: 1, at: 100, results: [{ id: 'compiler', status: 'passed', exitCode: 0 }] }] }, { id: 'report-proof', revision: 1 });
+  ownerChat.items.push({ id: 'batch-request', type: 'userMessage', content: [{ type: 'text', text: 'Make four games.' }],
+    hubBatch: { id: 'ui-batch', count: 4, dispatched: 3 } });
+  ownerChat.items.push({ id: 'verified-report', type: 'agentResult', localOnly: true, deliveryId: 'report-proof', agentId: splitProfile.id,
+    agentName: 'Checked builder', ownerId: 'main', ownerName: 'Hub', title: 'First output', text: 'Source output available.', status: 'completed',
+    verification: proof, workspaceCopy: { source: root, workspace: path.join(root, 'first-copy') } });
+  const reportView = agents.snapshot();
+  reportView.batchReports['ui-batch'] = { id: 'ui-batch', sessionId: ownerChat.id, requestId: 'batch-request', requested: 4, dispatched: 3, returned: 2,
+    summary: '1 returned, checks passed · 1 failed · 1 waiting · 1 not dispatched', entries: [
+      { index: 1, jobId: 'report-proof', name: 'Checked builder', owner: 'Hub', state: 'returned', workspace: path.join(root, 'first-copy'), verification: proof, text: 'Output <img src=x onerror=alert(1)>' },
+      { index: 2, name: 'Second builder', owner: 'Hub', state: 'failed', error: 'Compiler failed.' },
+      { index: 3, name: 'Third builder', owner: 'Hub', state: 'running' },
+      { index: 4, name: 'Fourth builder', state: 'not-dispatched', error: 'Worker unavailable.' },
+    ] };
+  await window.webContents.executeJavaScript('selectAgent("main")');
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(reportView) + '); true');
+  await window.webContents.executeJavaScript(`(() => {
+    const button = [...document.querySelectorAll('#job-activity-list button')].find(button => button.textContent === 'Batch report');
+    button.click(); document.querySelector('#prompt').value = 'Keep my next question';
+    document.querySelector('#prompt').dispatchEvent(new Event('input'));
+  })()`);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector(".batch-report").open'), true);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelectorAll(".batch-entry").length'), 4);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector(".batch-report").textContent'), /4 jobs: 1 returned, checks passed · 1 failed · 1 waiting · 1 not dispatched.*Compiler failed.*Not dispatched/s);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-activity-summary").textContent'),
+    /Batch report · 1 returned, checks passed · 1 failed · 1 waiting · 1 not dispatched/);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector(".batch-entry [data-kind=build]").textContent'), 'Check passed');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector(".batch-entry [data-kind=launch]").textContent'), 'Not verified');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector(".batch-report img")'), null);
+  await window.webContents.executeJavaScript('document.querySelector(".batch-entry button").click(); true');
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-verification").textContent'), /Build: Check passed.*Gameplay: Not verified/s);
+  assert.equal(await sendIsReachable(), true);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), 'Keep my next question');
+  await window.webContents.executeJavaScript(`document.querySelector('#job-dialog .close-dialog').click();
+    document.querySelector('.batch-report').scrollIntoView({ block: 'start', behavior: 'instant' }); true`);
+  await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/batch-report.png'), (await window.webContents.capturePage()).toPNG());
+  console.log('Batch reports retain partial outcomes, host evidence and a usable chat composer');
+  phase = 'group chat controls';
+  const groupMember = agents.primary.data.agents[0];
+  await window.webContents.executeJavaScript(`document.querySelector('#agents-overview').click();
+    document.querySelector('#groups-add').click();
+    document.querySelector('#group-name').value = 'Game team';
+    document.querySelector('#group-members input').checked = true;
+    document.querySelector('#group-form').requestSubmit(); true`);
+  await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 80))');
+  const group = controller.data.sessions.find(chat => chat.group && chat.title === 'Game team');
+  assert.ok(group);
+  assert.equal(await window.webContents.executeJavaScript('selectedId'), group.id);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#session-title").textContent'), 'Game team');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#group-owner").hidden'), false);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-activity").hidden'), true, 'unrelated Hub work stays out of the group activity');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#main-agent-list button").getAttribute("aria-pressed")'), 'false');
+  await window.webContents.executeJavaScript(`document.querySelector('#prompt').value = 'Review this design';
+    document.querySelector('#group-mention').value = ${JSON.stringify(groupMember.id)};
+    document.querySelector('#group-mention').dispatchEvent(new Event('change')); true`);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), '@' + groupMember.name + ' Review this design');
+  await publish();
+  assert.equal(await window.webContents.executeJavaScript('selectedId'), group.id, 'state updates keep the group selected');
+  await window.webContents.executeJavaScript('selectAgent("main")');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#group-mention").hidden'), true);
+  await window.webContents.executeJavaScript('document.querySelector("#group-list button").click(); true');
+  await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 40))');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), '@' + groupMember.name + ' Review this design', 'group draft survives switching');
+  await window.webContents.executeJavaScript(`document.querySelector('#group-edit').click();
+    document.querySelector('#group-name').value = 'Game team updated'; document.querySelector('#group-form').requestSubmit(); true`);
+  await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 50))');
+  assert.equal(group.title, 'Game team updated');
+  assert.equal(await sendIsReachable(), true);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/group-chat.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript(`document.querySelector('#group-edit').click();
+    document.querySelector('#group-archive').click(); true`);
+  await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 50))');
+  assert.equal(group.archived, true);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#group-section").hidden'), true);
+  console.log('Group creation, targeted mention controls, preserved drafts, edits and archive passed');
+  phase = 'routines are chat-only';
+  // Routines are created, changed and removed only by asking in chat; nothing in the UI or the IPC exposes them.
+  const routineUi = await window.webContents.executeJavaScript(`({
+    elements: ['#routines-dialog', '#routine-open', '#routine-activity', '#routine-manage', 'script[src="routines.js"]']
+      .filter(selector => document.querySelector(selector)),
+    repeat: [...document.querySelectorAll('button')].filter(button => button.textContent.trim() === 'Repeat').length,
+    bridge: typeof window.router?.send === 'function',
+    api: ['routineSave', 'routineChange'].filter(name => typeof window.router[name] === 'function'),
+  })`);
+  assert.deepEqual(routineUi, { elements: [], repeat: 0, bridge: true, api: [] }, 'no routine dialog, button, status row, Repeat action or IPC remains');
+  console.log('Routines have no UI or IPC surface passed');
+  await documents.close();
   agents.closing = true;
-  for (const c of agents.controllers.values()) c.close();
+  agents.budgets.close();
+  for (const c of agents.allControllers()) c.close();
   window.destroy();
   clearTimeout(deadline);
   app.exit(0);
-}).catch(error => { console.error(error.stack); app.exit(1); });
+}).catch(error => { console.error(`UI smoke failed during ${phase}:`, error.stack); app.exit(1); });
 // Chromium still owns files here during shutdown; cleanup is left to the temp directory.

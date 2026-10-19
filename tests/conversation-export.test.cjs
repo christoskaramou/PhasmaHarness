@@ -27,3 +27,32 @@ test('Markdown export preserves messages and plans without private or internal c
 test('an empty conversation still exports a readable Markdown document', () => {
   assert.equal(conversationMarkdown({ items: [] }), '# Conversation\n\n\n');
 });
+
+test('saved worker reports export with their owner and actual outcome', () => {
+  const markdown = conversationMarkdown({ items: [{ type: 'agentResult', agentName: 'Builder', ownerName: 'Hub',
+    status: 'failed', error: 'Build failed', text: 'Files remain available.' }] });
+  assert.match(markdown, /Result from Builder · failed/);
+  assert.match(markdown, /Owner: Hub/);
+  assert.match(markdown, /Build failed\n\nFiles remain available/);
+});
+
+test('mailbox questions export with their sender and correlation ID', () => {
+  const markdown = conversationMarkdown({ items: [{ id: 'mail-1', type: 'agentMail', kind: 'question', fromName: 'Builder',
+    replyTo: null, text: 'Which format?' }] });
+  assert.match(markdown, /question from Builder/);
+  assert.match(markdown, /Message: mail-1/);
+  assert.match(markdown, /Which format/);
+});
+
+test('assignment change receipts and earlier-revision results retain truthful status in exports', () => {
+  const markdown = conversationMarkdown({ items: [
+    { id: 'update-2', type: 'agentMail', kind: 'note', fromName: 'You', text: 'Use blue.', amendment: { revision: 2, state: 'received' } },
+    { type: 'agentResult', agentName: 'Builder', ownerName: 'Hub', status: 'completed', superseded: true, text: 'Earlier evidence.',
+      amendments: [{ revision: 2, state: 'applied', text: 'Use blue.', images: ['private-image-data'] }] },
+  ] });
+  assert.match(markdown, /Change received · revision 2/);
+  assert.match(markdown, /Change applied · revision 2: Use blue/);
+  assert.match(markdown, /Earlier assignment revision. Do not restart it/);
+  assert.match(markdown, /\[Attachment omitted\]/);
+  assert.doesNotMatch(markdown, /private-image-data/);
+});

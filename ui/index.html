@@ -5,31 +5,106 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>Phasma Harness</title>
+  <script src="appearance.js"></script>
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="../node_modules/katex/dist/katex.min.css">
   <script defer src="../node_modules/katex/dist/katex.min.js"></script>
   <script defer src="../node_modules/marked/lib/marked.umd.js"></script>
   <script defer src="../node_modules/dompurify/dist/purify.min.js"></script>
   <script defer src="dialogs.js"></script>
+  <script defer src="attachments.js"></script>
+  <script defer src="documents.js"></script>
   <script defer src="app.js"></script>
+  <script defer src="dictation.js"></script>
 </head>
 <body>
   <aside id="agents-sidebar" class="sidebar">
-    <div class="brand"><span>Phasma <b>Harness</b></span></div>
-    <section class="main-agent" aria-label="Hub agent"><div class="agents-heading"><span>HUB</span></div><div id="main-agent-list"></div><button id="agent-new" type="button" aria-label="New agent" title="New agent"><svg width=".7em" height=".7em" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M7 2v10M2 7h10"/></svg></button></section>
-    <section class="agent-picker" aria-label="Your agents">
-      <div class="agents-heading"><span id="agent-roster-label">YOUR AGENTS</span><button id="agents-overview" type="button">Overview</button></div>
+    <div class="sidebar-toolbar">
+      <div class="brand">PhasmaHarness</div>
+      <button id="agent-new" type="button" aria-label="New agent" title="New agent">
+        <svg width=".7em" height=".7em" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+          <path d="M7 2v10M2 7h10"/>
+        </svg>
+      </button>
+    </div>
+    <section class="main-agent" aria-label="Hub agent">
+      <div id="main-agent-list"></div>
+    </section>
+    <section id="group-section" class="group-picker" aria-label="Group chats" hidden>
+      <div class="agents-heading"><span>Groups</span></div>
+      <div id="group-list" aria-label="Choose a group chat"></div>
+    </section>
+    <section class="agent-picker" aria-label="Other bots">
+      <div class="agents-heading">
+        <span id="agent-roster-label">Other bots</span>
+        <button id="agents-overview" type="button">Overview</button>
+      </div>
       <div id="agent-list" aria-label="Choose an agent"></div>
     </section>
+    <div class="sidebar-bottom">
+      <button id="settings" class="settings-button" type="button" title="Settings" aria-label="Settings">
+        <span aria-hidden="true"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="m9 3 1-1h4l1 1 .5 2 2 1 2-.5 1.5 2.5-.5 2-1.5 1v2l1.5 1 .5 2-1.5 2.5-2-.5-2 1-.5 2-1 1h-4l-1-1-.5-2-2-1-2 .5L3 16l.5-2L5 13v-2l-1.5-1L3 8l1.5-2.5 2 .5 2-1Z"/>
+          <circle cx="12" cy="12" r="3"/>
+        </svg></span> Settings
+      </button>
+    </div>
   </aside>
   <div id="sidebar-resizer" role="separator" tabindex="0" aria-label="Resize agents area" aria-controls="agents-sidebar" aria-orientation="vertical" title="Drag to resize agents. Arrow keys adjust; double-click or Enter resets."></div>
   <main>
-    <header><div><h1 id="session-title">New session</h1><span id="session-path">Your workspace, your models.</span></div><div class="header-actions"><select id="quick-routing" class="rules-tag" aria-label="Model routing" title="Choose Smart or Jev routing"><option value="smart">SMART ROUTING</option><option value="jev">JEV ROUTING</option></select><button id="browse-session" class="compact-action" type="button" title="Session changes" aria-label="Session changes" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z M14 2v6h6 M8 13h8 M8 17h5"/></svg></button><button id="browse-files" class="compact-action" type="button" title="Browse workspace files" aria-label="Browse workspace files"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></svg></button><button id="browse-changes" class="compact-action" type="button" title="View Git changes" aria-label="View Git changes" disabled><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="5" r="3"/><circle cx="6" cy="19" r="3"/><circle cx="18" cy="6" r="3"/><path d="M6 8v8m12-7a10 10 0 0 1-9 10"/></svg></button><button id="settings" class="compact-action" type="button" title="Settings" aria-label="Settings"><span aria-hidden="true">&#9881;</span></button></div></header>
+<header>
+ <div>
+  <h1 id="session-title">
+   New session
+  </h1>
+  <span class="session-workspace" id="session-path">
+   Your workspace, your models.
+  </span>
+  <span id="group-owner" class="muted" hidden>Coordinated by Hub</span>
+  <select id="group-mention" class="permissions-control" aria-label="Mention a group member" hidden></select>
+ </div>
+ <div class="header-actions">
+  <button type="button" id="group-edit" class="compact-action" aria-label="Edit group members" title="Edit group members" hidden>Group</button>
+<span hidden="" id="provider-connection" role="status">
+ <span aria-hidden="true" class="models-spinner">
+ </span>
+ Connecting…
+</span>
+  <button aria-label="Session changes" class="compact-action" disabled="" id="browse-session" title="Session changes" type="button">
+   <svg aria-hidden="true" fill="none" height="18" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" viewbox="0 0 24 24" width="18">
+    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z M14 2v6h6 M8 13h8 M8 17h5">
+    </path>
+   </svg>
+  </button>
+  <button aria-label="Browse workspace files" class="compact-action" id="browse-files" title="Browse workspace files" type="button">
+   <svg aria-hidden="true" fill="none" height="18" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" viewbox="0 0 24 24" width="18">
+    <path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z">
+    </path>
+   </svg>
+  </button>
+  <button aria-label="View Git changes" class="compact-action" disabled="" id="browse-changes" title="View Git changes" type="button">
+   <svg aria-hidden="true" fill="none" height="18" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" viewbox="0 0 24 24" width="18">
+    <circle cx="6" cy="5" r="3">
+    </circle>
+    <circle cx="6" cy="19" r="3">
+    </circle>
+    <circle cx="18" cy="6" r="3">
+    </circle>
+    <path d="M6 8v8m12-7a10 10 0 0 1-9 10">
+    </path>
+   </svg>
+  </button>
+ </div>
+</header>
     <div id="banner" class="banner" role="status" hidden></div>
     <div id="update-banner" class="update-banner" role="status" hidden><span id="update-text"></span><button type="button" id="update-install">Update and restart</button><button type="button" id="update-notes">What's new</button><button type="button" id="update-dismiss" class="icon-button" aria-label="Hide until the next start">×</button></div>
+    <details id="job-activity" class="job-activity" hidden>
+      <summary id="job-activity-summary"></summary>
+      <div id="job-activity-list" aria-label="Background tasks"></div>
+    </details>
     <section id="conversation" aria-label="Conversation" aria-live="polite">
       <div id="welcome" class="welcome">
-        <div class="eyebrow">A LITTLE LESS OVERHEAD.</div>
+        <h2>What would you like to work on?</h2>
         <div class="suggestions"><button data-prompt="Explain the structure of this workspace and where I should start."><span>⌕</span><strong>Explore this workspace</strong><small>Find the important pieces</small></button><button data-prompt="Review my current changes for correctness. Keep the review read-only."><span>⎇</span><strong>Review my changes</strong><small>Get a focused second look</small></button><button data-prompt="Help me investigate this bug: "><span>⌁</span><strong>Work through a bug</strong><small>Start with the evidence</small></button></div>
       </div>
       <div id="messages"></div>
@@ -39,9 +114,59 @@
     <div class="composer-area">
       <div id="message-queue" aria-label="Queued messages"></div>
       <div id="route-preview" class="route-preview"><span class="route-dot"></span><strong>Auto</strong><span>Choose a starting preset for each message.</span></div>
-      <form id="composer" class="composer"><div id="slash-menu" hidden><div class="slash-menu-heading"><span>Commands</span><span>↑ ↓ select · Enter run · Tab complete</span></div><div id="slash-options" role="listbox" aria-label="Slash commands"></div><p id="slash-empty" role="status" hidden>No matching commands</p></div><div id="image-previews" aria-label="Attached images"></div><textarea id="prompt" rows="3" placeholder="What would you like to work on? Type / for commands." aria-label="Message" role="combobox" aria-autocomplete="list" aria-controls="slash-options" aria-haspopup="listbox" aria-expanded="false" maxlength="200000"></textarea><div class="composer-bottom"><div class="composer-controls"><select id="permissions" class="permissions-control" aria-label="Session permissions" aria-describedby="permissions-detail"></select></div><div class="composer-model"><span id="local-model-controls" hidden><button id="local-model-toggle" type="button"></button><button id="local-model-unload" type="button" hidden>Unload</button></span><label class="preset-control"><select id="preset" aria-label="Model"><option value="auto">Auto · choose for me</option></select><select id="effort" aria-label="Reasoning effort" title="Reasoning effort" hidden></select></label><select id="effort-cap" class="effort-cap-control" aria-label="Effort cap for Auto" hidden><option value="low">Up to low effort</option><option value="medium">Up to medium effort</option><option value="high">Up to high effort</option><option value="xhigh">Up to xhigh effort</option><option value="max">⚠ Up to max effort</option></select></div><button id="send" type="submit" aria-label="Send message" title="Send message">↑</button><button id="stop" type="button" class="stop" aria-label="Stop task" title="Stop task" hidden><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1" fill="currentColor"/></svg></button></div></form>
-      <p id="permissions-detail" class="permissions-detail"></p>
-      <div class="composer-footer"><span>Enter to send <span class="separator">·</span> Shift + Enter for a new line <span class="separator">·</span> ↑ for sent history <span class="separator">·</span> <button id="commands-help" type="button">Commands /</button></span><div class="usage-controls"><button id="clear-conversation" type="button" title="Clear this conversation after confirmation">Clear</button><span id="provider-connection" role="status" hidden><span class="models-spinner" aria-hidden="true"></span>Connecting…</span><span id="usage">Connected</span><div class="context-meter-wrap"><button id="context-meter" type="button" aria-label="Compact context" aria-describedby="context-meter-tip"><span class="context-ring" aria-hidden="true"></span></button><span id="context-meter-tip" role="tooltip">Context usage unavailable</span></div></div></div>
+      <form id="composer" class="composer"><div id="slash-menu" hidden><div class="slash-menu-heading"><span>Commands</span><span>↑ ↓ select · Enter run · Tab complete</span></div><div id="slash-options" role="listbox" aria-label="Slash commands"></div><p id="slash-empty" role="status" hidden>No matching commands</p></div><div id="image-previews" aria-label="Attachments"></div><textarea id="prompt" rows="2" placeholder="Message Hub…" aria-label="Message" role="combobox" aria-autocomplete="list" aria-controls="slash-options" aria-haspopup="listbox" aria-expanded="false" maxlength="200000"></textarea><div class="composer-bottom"><div class="composer-controls"><button id="attach-files" type="button" class="icon-button" title="Attach text/code files or images" aria-label="Attach files">+</button><input id="file-input" type="file" multiple hidden><select id="permissions" class="permissions-control" aria-label="Session permissions"></select></div><details class="chat-options" id="chat-options">
+ <summary>
+  Options
+ </summary>
+ <div class="chat-options-panel">
+  <label class="routing-choice">
+   <span class="options-label">Worker routing</span>
+   <select aria-label="Model routing" class="rules-tag" id="quick-routing" title="Choose Smart or Jev routing">
+    <option value="smart">Smart routing</option>
+    <option value="jev">Jev routing</option>
+   </select>
+  </label>
+  <span class="options-label">Model</span>
+  <div class="composer-model">
+   <span hidden="" id="local-model-controls">
+    <button id="local-model-toggle" type="button"></button>
+    <button hidden="" id="local-model-unload" type="button">Unload</button>
+   </span>
+   <label class="preset-control">
+    <select aria-label="Model" id="preset">
+     <option value="auto">Auto · choose for me</option>
+    </select>
+    <select aria-label="Reasoning effort" hidden="" id="effort" title="Reasoning effort">
+    </select>
+   </label>
+   <select aria-label="Effort cap for Auto" class="effort-cap-control" hidden="" id="effort-cap">
+    <option value="low">Up to low effort</option>
+    <option value="medium">Up to medium effort</option>
+    <option value="high">Up to high effort</option>
+    <option value="xhigh">Up to xhigh effort</option>
+    <option value="max">⚠ Up to max effort</option>
+   </select>
+  </div>
+  <div class="chat-toolbar">
+   <div class="chat-actions">
+    <button aria-label="Commands" id="commands-help" title="Commands (type / in the message box)" type="button"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M14.5 7.5l-5 9"/></svg></button>
+    <button aria-label="Clear conversation" id="clear-conversation" title="Clear this conversation after confirmation" type="button"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 21-4.3-4.3a2.4 2.4 0 0 1 0-3.4l9.6-9.6a2.4 2.4 0 0 1 3.4 0l5.6 5.6a2.4 2.4 0 0 1 0 3.4L13 21"/><path d="M22 21H7"/><path d="m5 11 9 9"/></svg></button>
+   </div>
+   <span id="usage">
+    Connected
+   </span>
+   <div class="context-meter-wrap">
+    <button aria-describedby="context-meter-tip" aria-label="Compact context" id="context-meter" type="button">
+     <span aria-hidden="true" class="context-ring">
+     </span>
+    </button>
+    <span id="context-meter-tip" role="tooltip">
+     Context usage unavailable
+    </span>
+   </div>
+  </div>
+ </div>
+</details><button id="send" type="submit" aria-label="Send message" title="Send message">↑</button><button id="stop" type="button" class="stop" aria-label="Stop task" title="Stop task" hidden><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1" fill="currentColor"/></svg></button></div></form>
     </div>
   </main>
   <dialog id="commands-dialog" aria-labelledby="commands-title"><div class="dialog-heading"><h2 id="commands-title">Commands</h2><button type="button" class="close-dialog icon-button" aria-label="Close commands">×</button></div><p class="hint">Type a command and press Enter, or choose one below. Commands apply to the selected agent.</p><div id="commands-list"></div></dialog>
@@ -54,10 +179,18 @@
   <div id="agent-menu" popover="auto" role="menu" aria-label="Agent options"></div>
   <dialog id="agents-dialog" aria-labelledby="agents-title">
     <div class="dialog-heading"><div><div class="eyebrow">LOCAL AGENT TEAM</div><h2 id="agents-title">Your agents</h2></div><button type="button" class="close-dialog icon-button" aria-label="Close agent overview">×</button></div>
-    <div class="agents-toolbar"><p id="agents-summary" class="muted"></p><button id="agents-add" type="button" class="primary">＋ New agent</button></div>
+    <div class="agents-toolbar"><p id="agents-summary" class="muted"></p><button id="groups-add" type="button">New group</button><button id="agents-add" type="button" class="primary">＋ New agent</button></div>
     <div id="agent-cards"></div>
     <p class="hint">Separate conversations and roles, running on this computer. Shared workspaces run one task at a time.</p>
   </dialog>
+  <dialog id="group-dialog" aria-labelledby="group-heading"><form id="group-form">
+    <div class="dialog-heading"><h2 id="group-heading">New group</h2><button type="button" class="close-dialog icon-button" aria-label="Close group editor">×</button></div>
+    <label>Name<input id="group-name" required maxlength="80" placeholder="Game team"></label>
+    <fieldset id="group-members"><legend>Members</legend></fieldset>
+    <p class="hint">Hub coordinates. Start a message with @Name to bring in that member. Membership keeps each bot’s existing access.</p>
+    <p id="group-error" class="turn-error" role="alert"></p>
+    <div class="dialog-footer"><button id="group-archive" type="button" hidden>Archive group</button><button id="group-save" class="primary" type="submit">Create group</button></div>
+  </form></dialog>
   <dialog id="agent-dialog"><form id="agent-form">
     <div class="dialog-heading"><h2 id="agent-heading">New agent</h2><button type="button" class="close-dialog icon-button" aria-label="Close agent editor">×</button></div>
     <label>Name<input id="agent-name" required maxlength="60" placeholder="Researcher"></label>
@@ -66,6 +199,11 @@
     <div class="agent-form-options"><label>Model<select id="agent-model"></select></label><label>Access<select id="agent-access"></select></label></div>
     <p class="hint">Your agent is saved immediately. Connections start in the background.</p>
     <p id="agent-error" class="turn-error" role="alert"></p><div class="dialog-footer"><button id="agent-save" class="primary" type="submit">Create agent</button></div>
+  </form></dialog>
+  <dialog id="hub-dialog" aria-labelledby="hub-heading"><form id="hub-form">
+    <div class="dialog-heading"><h2 id="hub-heading">Rename Hub</h2><button type="button" class="close-dialog icon-button" aria-label="Close rename">×</button></div>
+    <label>Name<input id="hub-name" required maxlength="60"></label>
+    <p id="hub-error" class="turn-error" role="alert"></p><div class="dialog-footer"><button id="hub-save" class="primary" type="submit">Save</button></div>
   </form></dialog>
   <dialog id="settings-dialog"><form id="settings-form">
     <div class="dialog-heading"><h2>Settings</h2><button type="button" class="close-dialog icon-button" aria-label="Close settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
@@ -86,7 +224,30 @@
     </div>
     <div id="panel-general" class="settings-panel" role="tabpanel" aria-labelledby="tab-general">
     <h3 class="settings-section">General</h3>
+      <label>Appearance
+        <select id="settings-appearance">
+          <option value="system">System</option>
+          <option value="dark">Dark</option>
+          <option value="light">Light</option>
+        </select>
+      </label>
     <label>Font size<select id="settings-font"><option value="85">85%</option><option value="100">100%</option><option value="115">115%</option><option value="130">130%</option><option value="150">150%</option></select></label>
+    <label id="runner-start-row">Start at sign-in<select id="settings-runner-start" disabled><option value="off">Off</option><option value="on">On</option></select></label>
+    <p class="muted" id="runner-status">Closing the window keeps work running. Use the tray menu to reopen Harness or quit the runner.</p>
+    <details id="remote-settings"><summary>Browser access</summary>
+      <p class="muted" id="remote-status">Off. Jobs stay on this runner.</p>
+      <label>Local port<input id="remote-port" type="number" min="1" max="65535" value="8788"></label>
+      <label>HTTPS address (optional)<input id="remote-origin" type="url" placeholder="https://your-runner.example"></label>
+      <p class="hint">The listener stays on this computer. A private HTTPS proxy connects your phone or another computer.</p>
+      <div class="workspace-actions"><button type="button" id="remote-toggle">Start browser access</button>
+        <button type="button" id="remote-copy" hidden>Copy connection link</button>
+        <button type="button" id="remote-disconnect-all" hidden>Disconnect browsers</button>
+        <button type="button" id="remote-reset-link" hidden>Reset connection link</button></div>
+      <p class="hint">The connection link grants access to this runner. Keep it private.</p>
+    </details>
+    <button type="button" id="remote-logout">Disconnect this browser</button>
+    <label>Background usage threshold (%)<input id="settings-background-usage" type="number" min="1" max="100" step="1" value="90" aria-describedby="background-usage-detail"></label>
+    <p class="hint" id="background-usage-detail">Pause new background turns at 90% of a reported ChatGPT allowance. Active turns may finish. Other providers' quotas are unknown.</p>
     <label>Agent workspace<div class="path-field"><input id="settings-workspace" readonly><button id="settings-browse" type="button">Browse</button></div></label>
     <button id="context-search" type="button">Find project context</button>
     <label>Agent permissions<select id="settings-access" aria-describedby="settings-access-detail"></select></label>
@@ -159,6 +320,41 @@
     <div class="dialog-footer"><p id="settings-save-status" class="hint" role="status"></p><button id="settings-close" class="primary" type="button">Close</button></div>
   </form></dialog>
   <dialog id="request-dialog"><div id="request-content"></div></dialog>
+  <dialog id="job-dialog" class="job-details" aria-labelledby="job-details-heading">
+    <div class="dialog-heading"><h2 id="job-details-heading">Assignment</h2><button type="button" class="close-dialog" aria-label="Close assignment details">×</button></div>
+    <p id="job-details-status" class="muted"></p>
+    <p id="job-copy-location" class="muted" hidden></p>
+    <div id="job-verification"></div>
+    <p id="job-details-error" class="error" hidden></p>
+    <div id="job-recovery" hidden>
+      <p id="job-recovery-text"></p>
+      <button type="button" id="job-recovery-start">Start now</button>
+      <button type="button" id="job-recovery-return">Return as interrupted</button>
+    </div>
+    <div id="job-artifacts" hidden></div>
+    <details id="job-budget" class="activity" hidden>
+      <summary id="job-budget-summary">Budget</summary>
+      <p id="job-budget-status" class="muted"></p>
+      <p id="job-budget-usage" class="muted"></p>
+      <form id="job-budget-form">
+        <label for="job-budget-limit">Total active time (minutes)</label>
+        <input id="job-budget-limit" type="number" min="1" max="10080" step="1" required>
+        <label for="job-budget-attempts">Total AI attempts</label>
+        <input id="job-budget-attempts" type="number" min="1" max="10000" step="1" required>
+        <label for="job-budget-tokens">Reported-token limit (optional)</label>
+        <input id="job-budget-tokens" type="number" min="1" max="1000000000000" step="1" placeholder="No token limit">
+        <button id="job-budget-save" type="submit">Save limit</button>
+        <p id="job-budget-feedback" role="status" hidden></p>
+      </form>
+    </details>
+    <div id="job-details-log" class="job-transcript" tabindex="0" aria-label="Assignment conversation"></div>
+    <form id="job-update-form">
+      <label for="job-update-text">Update this assignment</label>
+      <textarea id="job-update-text" rows="3" maxlength="8000" placeholder="Describe the change…"></textarea>
+      <button type="submit" id="job-update-send">Send update</button>
+      <p id="job-update-feedback" role="status" hidden></p>
+    </form>
+  </dialog>
   <dialog id="context-dialog" aria-labelledby="context-heading">
     <div class="dialog-heading"><h2 id="context-heading">Find project context</h2><button type="button" class="close-dialog" aria-label="Close context search">Close</button></div>
     <p class="muted">Search the selected workspace source and documentation. Jev sends the question and up to 12 bounded excerpts to TypeSafe. Results are starting evidence; continue searching when needed.</p>

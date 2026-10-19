@@ -10,23 +10,42 @@ const { FINAL, OUTPUT_CAP, canProposeWiki, capStream, childBlocksClear, confirmT
 const { accessMode, sameEffort, treeEntries } = require('./shared.cjs');
 const { stripTaskStatus } = require('../routing/task-state.cjs');
 const { readWiki, assessWikiUpdate } = require('../workspace/wiki-assess.cjs');
+const { lessonFromTask, recordLesson, readLessons, relevantLessons, lessonsBlock } = require('../lessons.cjs');
 
 module.exports = {
   openTask(session, selected, text, clientId, taskMode) {
-    if (!shouldTrack(taskMode) || selected.directAnswer) return null;
-    const configured = this.data.settings.checks?.[session.workspace] || [];
-    const checksSkippedByRouter = configured.length > 0 && selected.assessment?.needsChecks === false;
-    const task = createTask({
-      messageId: clientId, goal: text, access: session.access,
-      checks: checksSkippedByRouter ? [] : configured,
-    });
+    if (!shouldTrack(taskMode) || selected?.directAnswer) return null;
+    let task = (session.tasks || []).find(task => task.messageId === clientId);
+    const locked = session.delegation?.taskChecks;
+    const configured = locked || this.data.settings.checks?.[session.workspace] || [];
+    const checksSkippedByRouter = locked ? !!session.delegation.taskChecksSkippedByRouter
+      : configured.length > 0 && selected?.assessment?.needsChecks === false;
+    if (!task) {
+      task = createTask({ messageId: clientId, goal: text, access: session.access, checks: configured });
+      if (session.delegation && !session.delegation.delivered) task.assignmentId = session.delegation.id;
+      task.workspace = session.workspace; task.startIndex = session.items.length;
+      task.corrections = session.delegation?.taskCorrections || 0;
+      task.amendments = [...(session.delegation?.taskAmendments || [])];
+      task.requestedMode = session.pendingMessage?.requestedMode || this.data.settings.mode;
+      task.originalImageCount = session.pendingMessage?.content?.filter(part => part.type === 'image').length || 0;
+      // Relevant lessons ride in this task's first worker message only; corrections never get them.
+      if (!task.corrections && !text.startsWith('[Router]'))
+        task.lessonBlock = this.lessonsFor(session.workspace, text, configured);
+      task.foreground = !(session.delegation && !session.delegation.delivered) && !session.agentReplyActive;
+      if (task.foreground) task.inputImages = (session.pendingMessage?.content || []).filter(part => part.type === 'image').map(part => part.url);
+      this.agents?.budgets.register(task, session);
+      (session.tasks ||= []).push(task);
+      session.activeTaskId = task.id;
+      this.agents?.budgets.persist();
+      this.save();
+    }
+    if (checksSkippedByRouter) task.checks = Object.freeze([]);
     task.checksSkippedByRouter = checksSkippedByRouter;
-    task.route = {
+    if (selected) task.route = {
       provider: selected.provider || 'codex', model: selected.model, effort: selected.effort,
       label: selected.label, id: selected.id, images: selected.images !== false,
     };
     task.summary = summaryLine(task);
-    (session.tasks ||= []).push(task);
     return task;
   },
 
@@ -85,6 +104,7 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
     this.gate = null;
     session.status = 'running';
     session.pendingMessage = { id: clientId, clientId, type: 'userMessage', content: [{ type: 'text', text }], internal: true, createdAt: Date.now() };
+    session.userTurn = false;
     await this.submitWorker(session, { ...worker, wikiMaintenanceTaskId: task.id }, text, [], clientId, null);
     return true;
   },
@@ -208,6 +228,11 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
   },
 
   releaseSlot(session) {
+    session.replyBudgetId = null;
+    const active = (session.tasks || []).find(task => task.id === session.activeTaskId);
+    const savedInput = active && session.items.find(item => (item.clientId || item.id) === active.messageId);
+    if (active && !active.budgetPaused && FINAL.has(active.state) && (!active.originalImageCount || savedInput)) delete active.inputImages;
+    session.activeTaskId = null;
     this.traceChecks(session);
     this.gate = null;
     this.stopping.delete(session.id);
@@ -230,7 +255,8 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
 
   async runGate(session, task, submission, outcome, stopping) {
     const workerOutcome = outcome.status === 'completed' ? 'completed' : outcome.status === 'interrupted' ? 'interrupted' : 'failed';
-    const attempt = { token: submission.token, turnId: submission.turnId, workerOutcome, results: [], at: Date.now(), evidence: null };
+    const attempt = { token: submission.token, turnId: submission.turnId, workerOutcome, results: [], at: Date.now(), evidence: null,
+      assignmentId: submission.assignmentId || null, assignmentRevision: submission.assignmentRevision || null };
     task.attempts.push(attempt);
     if (outcome.reason === 'connection lost') {
       task.state = 'needs-you'; task.reason = 'connection lost'; task.summary = summaryLine(task);
@@ -247,14 +273,22 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
     }
     // A worker's cleanup still running (Cursor's ends every turn) delays the checks; only an unconfirmed one blocks them,
     // and a Stop pressed meanwhile cancels them.
-    let refusal = this.readyToStart(session);
-    if (refusal?.then) refusal = await refusal; // awaited only when it waited, so timing is unchanged otherwise
+    let refusal;
+    try {
+      refusal = this.readyToStart(session);
+      if (refusal?.then) refusal = await refusal; // awaited only when it waited, so timing is unchanged otherwise
+    } catch (error) {
+      // An admission failure (e.g. an unconfirmed allowance lookup) must block the checks, not leave the bot busy.
+      refusal = { blocked: true, error: error.message };
+    }
     if (refusal?.stopped) {
       task.state = 'cancelled'; task.reason = 'cancelled'; task.summary = summaryLine(task);
       this.releaseSlot(session); return;
     }
     if (refusal) {
-      task.state = 'blocked'; task.reason = this.data.executionBlock ? 'check execution unconfirmed' : 'stopped task cleanup unconfirmed'; task.summary = summaryLine(task);
+      task.state = 'blocked';
+      task.reason = this.data.executionBlock ? 'check execution unconfirmed' : refusal.error || 'stopped task cleanup unconfirmed';
+      task.summary = summaryLine(task);
       this.releaseSlot(session); return;
     }
     const gate = { sessionId: session.id, taskId: task.id, token: randomUUID(), abort: new AbortController(), processId: null, approvals: new Set() };
@@ -271,7 +305,8 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
       this.writeTaskFile(session, task);
       if (!this.ownsGate(gate)) return this.cancelGate(session, task);
       for (let index = 0; index < task.checks.length; index++) {
-        const result = await this.runCheck(session, task, task.checks[index], gate);
+        const response = await this.runCheck(session, task, task.checks[index], gate);
+        const result = response ? { ...response, finishedAt: Date.now() } : null;
         if (result?.status === 'unknown') {
           attempt.results.push(result);
           task.state = 'blocked';
@@ -305,6 +340,8 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
       task.summary = summaryLine(task);
       this.writeTaskFile(session, task);
       this.traceChecks(session);
+      // Before wiki upkeep snapshots the wiki, so the lesson files never count as an upkeep change.
+      this.saveLesson(session, task);
       try { if (task.state === 'checks-passed' && task.wikiAvailable && await this.maintainWiki(session, task)) return; }
       catch (error) { task.wikiMaintenance = { ...task.wikiMaintenance, state: 'failed', error: error.message }; this.wikiSnapshots.delete(task.id); }
       this.releaseSlot(session);
@@ -326,6 +363,7 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
       content: [{ type: 'text', text }], routeLabel: 'Router',
     };
     session.status = 'running'; session.error = null;
+    session.userTurn = false;
     this.busy = session.id;
     this.gate = null;
     this.changed();
@@ -361,10 +399,14 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
     }
     const started = Date.now();
     try {
-      const response = await this.client.call('command/exec', {
-        command: [...check.argv], processId, cwd: check.cwd, timeoutMs: check.timeoutMs,
-        sandboxPolicy,
-      }, check.timeoutMs + 30000);
+      let response;
+      gate.checkRunning = true;
+      try {
+        response = await this.client.call('command/exec', {
+          command: [...check.argv], processId, cwd: check.cwd, timeoutMs: check.timeoutMs,
+          sandboxPolicy,
+        }, check.timeoutMs + 30000);
+      } finally { gate.checkRunning = false; }
       this.clearExecutionBlock(processId);
       if (!this.ownsGate(gate)) return null;
       return this.classifyExec(check, response, Date.now() - started);
@@ -433,15 +475,18 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
       if (!pendingSave) pendingSave = setTimeout(persistTree, Math.max(0, lastSave + 2000 - Date.now()));
     });
     const started = Date.now();
+    gate.checkRunning = true;
     const outcome = new Promise(resolve => {
       let stdout = '', stderr = '', timedOut = false, done = false;
       const finish = value => {
         if (done) return;
+        gate.checkRunning = false;
         done = true; clearTimeout(timer); gate.abort.signal.removeEventListener('abort', kill);
         resolve({ ...value, stdout, stderr, timedOut });
       };
       const kill = () => {
         if (done) return;
+        gate.checkRunning = false;
         this.killCheckRoot(child);
         setTimeout(() => finish({ stuck: true }), 5000).unref?.();
       };
@@ -483,6 +528,40 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
     if (exitCode === 0) return { ...row, status: 'passed', detail: null };
     if (exitCode === 124) return { ...row, status: 'failed', detail: 'timed out' };
     return { ...row, status: 'failed', detail: `exit ${exitCode}` };
+  },
+
+  // Batch copies keep their lessons with the source project, so later tasks there find them.
+  lessonWorkspace(workspace) {
+    try {
+      const record = this.agents?.workspaces?.record(workspace);
+      return record ? record.projectRoot || record.source : workspace;
+    } catch {
+      return workspace;
+    }
+  },
+
+  saveLesson(session, task) {
+    const lesson = lessonFromTask(task, task.state);
+    if (!lesson || !this.wikiStore)
+      return;
+
+    try {
+      recordLesson(this.wikiStore.ensure(this.lessonWorkspace(session.workspace)).root, lesson);
+    } catch (error) {
+      this.log.warn('Lesson not saved', { task: task.id, error: error.message });
+    }
+  },
+
+  lessonsFor(workspace, text, checks = []) {
+    if (!this.wikiStore)
+      return null;
+
+    try {
+      const root = this.wikiStore.location(this.lessonWorkspace(workspace)).root;
+      return lessonsBlock(relevantLessons(readLessons(root), text, checks.map(check => check.name)));
+    } catch {
+      return null;
+    }
   },
 
   captureEvidence(session, task, attempt) {
