@@ -194,8 +194,8 @@ class ApiAgent {
     const total = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0 };
     let reported = false, answer = '';
     // Harness owns this loop, so a follow-up joins the conversation before the next model call. It counts as
-    // delivered only then; one still waiting when the turn ends goes back to the Harness queue.
-    const pending = [];
+    // delivered only once that call succeeds; one still waiting when the turn ends goes back to the Harness queue.
+    const pending = [], sent = [];
     let accepting = true;
     onInput?.(message => {
       if (!accepting || signal.aborted)
@@ -205,7 +205,7 @@ class ApiAgent {
     const deliver = () => {
       for (const item of pending.splice(0)) {
         messages.push({ role: 'user', content: userContent(item.message.text, item.message.images || []) });
-        item.resolve();
+        sent.push(item);
       }
     };
 
@@ -216,6 +216,8 @@ class ApiAgent {
         signal.throwIfAborted();
         deliver();
         const answered = await this.step({ provider, model, effort, cwd, access, approve, bridge, signal, onEvent, messages, tools, total });
+        for (const item of sent.splice(0))
+          item.resolve();
         if (answered.reported)
           reported = true;
 
@@ -228,6 +230,9 @@ class ApiAgent {
       accepting = false;
       onInput?.(null);
       for (const item of pending.splice(0)) item.reject(new Error('The turn ended before this message reached the model.'));
+      // The call carrying these failed: the provider may or may not have read them, so they stay queued as uncertain.
+      for (const item of sent.splice(0))
+        item.reject(new Error('The model call with this message failed and its connection closed. Check the conversation before resending.'));
     }
 
     this.save(id, messages);

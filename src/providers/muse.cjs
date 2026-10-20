@@ -217,8 +217,14 @@ class MuseCLI {
         });
         submissions.add(acked);
         acked.finally(() => submissions.delete(acked)).catch(() => {});
-        return acked.then(({ next, joined }) => joined || done.has(next.turnId) ? undefined
-          : new Promise((resolve, reject) => { waiting.set(next.turnId, { resolve, reject }); }));
+        return acked.then(({ next, joined }) => {
+          if (joined || done.has(next.turnId))
+            return undefined;
+          // Acknowledged after the run stopped waiting: its turn will never be watched, so say so instead of hanging.
+          if (!accepting)
+            throw new Error('Muse closed before the queued message ran. Check the conversation before resending.');
+          return new Promise((resolve, reject) => { waiting.set(next.turnId, { resolve, reject }); });
+        });
       });
 
       let last = turn;

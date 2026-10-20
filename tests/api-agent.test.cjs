@@ -120,6 +120,26 @@ test('a follow-up joins the next model call, counts as delivered only then, and 
   await assert.rejects(input({ id: 'after', text: 'Too late.', images: [] }), /no longer accepting/);
 });
 
+test('a follow-up whose model call fails is uncertain, not delivered', async t => {
+  const { agent, workspace } = fixture(t, [[call(0, 'a', 'read_file', { path: 'notes.txt' })]]);
+  let input = null, delivered = false, calls = 0;
+  const modelRequest = agent.providers.modelRequest;
+  agent.providers.modelRequest = async (...args) => {
+    calls++;
+    // The first call runs a tool; the follow-up joins the second call, which fails.
+    if (calls === 1) {
+      input.sent = input({ id: 'carried', text: 'Also check beta.', images: [] });
+      input.sent.then(() => { delivered = true; }, () => {});
+      return modelRequest(...args);
+    }
+    throw new Error('Model unavailable.');
+  };
+  await assert.rejects(agent.run({ provider: 'local', model: 'test', cwd: workspace, prompt: 'Read the notes.', access: 'workspace-write',
+    signal: new AbortController().signal, approve: async () => true, onEvent: () => {}, onInput: fn => { if (fn) input = fn; } }), /Model unavailable/);
+  await assert.rejects(input.sent, /closed/);
+  assert.equal(delivered, false);
+});
+
 test('a follow-up still waiting when the turn fails goes back to Harness instead of being lost', async t => {
   const { agent, workspace } = fixture(t, [[call(0, 'a', 'read_file', { path: 'notes.txt' })]]);
   let input = null;

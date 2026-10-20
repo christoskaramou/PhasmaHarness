@@ -75,6 +75,39 @@ test('Send now cancels the Cursor step and prompts again in the same session; a 
   await assert.rejects(input({ id: 'late', text: 'Too late.', images: [] }, { steer: true }), /no longer accepting/);
 });
 
+test('a Stop while Cursor Send now is still cancelling the step never sends the message', async () => {
+  const cursor = new CursorCLI(), prompts = [];
+  let failFirst;
+  // Like the real connection: Stop closes it and fails the pending prompt; session/cancel alone does not end the step.
+  cursor.connect = ({ signal }) => {
+    signal?.addEventListener('abort', () => failFirst?.(new Error('Cursor connection closed.')), { once: true });
+    return {
+      child: null,
+      notify: () => {},
+      call: async (method, params) => {
+        if (method === 'session/new') return { sessionId: 's' };
+        if (method !== 'session/prompt') return {};
+        prompts.push(params);
+        if (prompts.length === 1) return new Promise((_, reject) => { failFirst = reject; });
+        return { stopReason: 'end_turn' };
+      },
+      close() {},
+    };
+  };
+  const abort = new AbortController();
+  let input = null;
+  const running = cursor.run({ model: 'm', prompt: 'Build it.', access: 'workspace-write', signal: abort.signal,
+    onInput: fn => { if (fn) input = fn; } });
+  for (let i = 0; i < 200 && !(input && prompts.length); i++) await new Promise(resolve => setTimeout(resolve, 5));
+  const sent = input({ id: 'now', text: 'Use the new requirement.', images: [] }, { steer: true });
+  const refused = assert.rejects(sent, /stopped before the message was sent/);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  abort.abort();
+  await refused;
+  await assert.rejects(running);
+  assert.equal(prompts.length, 1, 'nothing is sent on the closing connection');
+});
+
 test('an Allow answered after Cursor Send now does not approve anything', async () => {
   const { cursor, prompts, request } = steerable();
   let input = null, answer;

@@ -177,7 +177,7 @@ class DeepSeekCLI {
         if (finished || steering || options.signal?.aborted)
           return Promise.reject(new Error('DeepSeek Harness is no longer accepting messages.'));
 
-        steering = this.steer(host, context, options, message, current).then(next => { current = next; })
+        steering = this.steer(host, context, options, message, current, () => finished).then(next => { current = next; })
           .finally(() => { steering = null; });
         return steering;
       });
@@ -224,7 +224,7 @@ class DeepSeekCLI {
 
   // Cancel the step, answer its open approvals as cancelled, confirm the commands it started are gone, then prompt
   // again in the same session. If cleanup is not confirmed the message stays queued with that error.
-  async steer(host, context, options, message, previous) {
+  async steer(host, context, options, message, previous, finished = () => false) {
     const parts = [{ type: 'text', text: message.text }, ...this.images(host, message.images)];
     context.promptAbort.abort();
     const { interrupted, remaining } = stopStartedSince(host.child, context.promptStartedAt, `${host.child.ownerKey || 'deepseek'}/${randomUUID()}`,
@@ -235,6 +235,9 @@ class DeepSeekCLI {
     await interrupted;
     if ((await remaining).length)
       throw new Error('DeepSeek Harness has not confirmed that the cancelled step stopped. The message stays queued.');
+    // A Stop or failure during cleanup ended the run: nothing may be sent on its closing connection.
+    if (finished() || options.signal?.aborted)
+      throw new Error('DeepSeek Harness stopped before the message was sent. The message stays queued.');
 
     return this.prompt(host, context, options, parts);
   }

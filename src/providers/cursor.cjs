@@ -213,6 +213,9 @@ class CursorCLI {
         await interrupted;
         if ((await remaining).length)
           throw new Error('Cursor has not confirmed that the cancelled step stopped. The message stays queued.');
+        // A Stop or failure during cleanup ended the run: nothing may be sent on its closing connection.
+        if (finished || signal?.aborted)
+          throw new Error('Cursor stopped before the message was sent. The message stays queued.');
 
         current = send(parts);
       };

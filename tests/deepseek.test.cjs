@@ -304,6 +304,20 @@ test('Send now cancels the DeepSeek step and prompts again in the same session w
   await assert.rejects(input({ id: 'after', text: 'Too late.', images: [] }, { steer: true }), /no longer accepting/);
 });
 
+test('a Stop while DeepSeek Send now is still cancelling the step never sends the message', async t => {
+  const { backend, calls } = await fixture(t, { wait: true });
+  const abort = new AbortController();
+  let input = null;
+  const running = backend.run({ ...runOptions(), signal: abort.signal, onInput: fn => { if (fn) input = fn; } });
+  for (let i = 0; i < 200 && !(input && methodCalls(calls, 'prompt').length); i++) await new Promise(resolve => setTimeout(resolve, 5));
+  const refused = assert.rejects(input({ id: 'now', text: 'Use the new requirement.', images: [] }, { steer: true }), /stopped before the message was sent/);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  abort.abort();
+  await refused;
+  await assert.rejects(running, /stopped/);
+  assert.equal(methodCalls(calls, 'prompt').length, 1, 'nothing is sent on the closing connection');
+});
+
 test('an approval answered after Send now cannot approve anything for the replacement prompt', async t => {
   let answer;
   const { backend, calls } = await fixture(t, { permission: true, cancelFirst: true });
