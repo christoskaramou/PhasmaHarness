@@ -68,6 +68,7 @@ async function createRunner({ app, data = app?.getPath('userData'), safeStorage,
     },
     quit: () => { log.info('Installing update', { from: version, to: updater.state.latest }); quit(); },
   });
+  agents.checkUpdate = () => updater.checkFromAgent();
   return { controller, agents, wikiStore, updater, voice, documents, containment,
     async initialize() {
       sweepAgentFiles([...agents.allControllers().flatMap(context => [context.data.settings.workspace,

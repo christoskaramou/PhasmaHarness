@@ -26,6 +26,17 @@ class Updater extends EventEmitter {
     return this.result;
   }
 
+  async checkFromAgent() {
+    const result = await this.check();
+    const confirmationRequired = result.installable && !this.installing;
+    if (confirmationRequired) this.set({ confirmationRequest: (this.state.confirmationRequest || 0) + 1 });
+    return { current: this.current, latest: result.latest, newer: result.newer, url: result.url,
+      confirmationRequired, message: this.installing ? 'An update is already in progress.'
+        : confirmationRequired ? 'Ask the user to confirm downloading and installing with the Download and install button in the desktop update banner. Finish this reply first; installation waits for active work to finish. This check did not download an installer.'
+        : result.newer ? 'A newer release is available. Automatic installation is unavailable in this run; use the official release link to update manually.'
+        : 'Phasma Harness is up to date.' };
+  }
+
   install() {
     if (!this.installable) return Promise.reject(new Error('Automatic updates work in the installed app. Update the source folder with git instead.'));
     if (this.installing) return this.installing;

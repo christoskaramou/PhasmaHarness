@@ -170,3 +170,35 @@ test('clearing old downloads while an update is downloading leaves that download
   updater.cleanup();
   assert.equal(fs.existsSync(path.join(directory, 'Phasma-Harness-Setup-0.0.9.exe')), false, 'older installers are still cleared when idle');
 });
+
+
+test('agent checks request user confirmation without downloading or bypassing active work', async t => {
+  const { updater, log, setBusy } = setup(t);
+  setBusy(true);
+  const result = await updater.checkFromAgent();
+  assert.equal(result.current, '0.1.0');
+  assert.equal(result.latest, '0.2.0');
+  assert.equal(result.confirmationRequired, true);
+  assert.equal(updater.state.confirmationRequest, 1);
+  await updater.check();
+  assert.equal(updater.state.confirmationRequest, 1);
+  await updater.checkFromAgent();
+  assert.equal(updater.state.confirmationRequest, 2);
+  assert.equal(log.downloads, 0);
+  assert.equal(log.quit, 0);
+  await assert.rejects(updater.install(), /Finish or stop/);
+  setBusy(false);
+  await updater.install();
+  assert.equal(log.downloads, 1);
+});
+
+test('agent checks do not offer installation for source runs or current versions', async t => {
+  const { updater, log } = setup(t, { installable: false });
+  assert.equal((await updater.checkFromAgent()).confirmationRequired, false);
+  assert.equal(updater.state.confirmationRequest, undefined);
+  updater.current = '0.2.0';
+  const result = await updater.checkFromAgent();
+  assert.equal(result.newer, false);
+  assert.match(result.message, /up to date/);
+  assert.equal(log.downloads, 0);
+});

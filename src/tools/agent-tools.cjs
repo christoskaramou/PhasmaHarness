@@ -22,5 +22,6 @@ const TOOLS = [
     required: ['action'], additionalProperties: false } },
   { name: 'routines_report', description: 'Report saved routines with id, the agent each runs on, name, text, trigger, next run, state and last run. Hub sees every routine; other agents see their own.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'harness_check_update', description: 'Check the running Phasma Harness version against the latest official release when the user asks for app updates. Opens a user confirmation banner when installation is supported. Never downloads or installs automatically. Ask the user to confirm with the desktop banner button and finish your reply so the app can become idle.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
 ];
 module.exports = { TOOLS };

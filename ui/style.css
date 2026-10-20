@@ -3501,6 +3501,9 @@ dialog {
 }
 
 .sidebar-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   flex-shrink: 0;
   border: 0;
   padding: 12px 0 0;
@@ -4188,4 +4191,9 @@ main > header {
 
 .composer-access svg {
   transform: translateX(-4px);
+}
+
+.update-available {
+  color: #2684ff;
+  flex-shrink: 0;
 }

@@ -1770,6 +1770,11 @@ class Agents extends EventEmitter {
     if (session.delegation?.cancelled && !session.delegation.delivered && !['agents_list', 'agent_models', 'agent_read_context'].includes(name)) throw new Error('This assignment was stopped. Wait for a new user request.');
     if (session.agentReplyCancelledActive && !['agents_list', 'agent_models', 'agent_read_context'].includes(name)) throw new Error('A cancelled result cannot start or change work. Wait for a new user request.');
     if (session.delegation && ['revising', 'revision-blocked'].includes(session.delegation.state) && !['agents_list', 'agent_models', 'agent_read_context', 'agent_stop'].includes(name)) throw new Error('Wait for the accepted assignment change before taking another action.');
+    if (name === 'harness_check_update') {
+      if (Object.keys(args).length) throw new Error('The update check takes no arguments; installation requires user confirmation in the app.');
+      if (!this.checkUpdate) throw new Error('The update service is unavailable.');
+      return this.checkUpdate();
+    }
     if (name === 'agents_list' && !Object.keys(args).length) return [...this.controllers].map(([id, worker]) => {
       const current = this.conversation(worker);
       const contexts = this.allControllers().filter(context => context.agentId === id);

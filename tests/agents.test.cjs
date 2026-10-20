@@ -1930,7 +1930,7 @@ test('new and existing Codex chats expose agent tools through a session-bound MC
   assert.equal(started.params.config['features.multi_agent'], false, 'untracked agent chats must not expose provider-native subagents');
   assert.match(started.params.developerInstructions, /MUST call agent_create and confirm its returned id/);
   const server = started.params.config['mcp_servers.phasma_harness'];
-  assert.deepEqual(server.enabled_tools, ['agent_revise', 'agent_transfer_owner', 'agents_list', 'agent_models', 'agent_create', 'agent_delegate', 'agent_read_context', 'agent_stop', 'agent_set_access', 'agent_message', 'agent_artifact', 'routine', 'routines_report']);
+  assert.deepEqual(server.enabled_tools, ['agent_revise', 'agent_transfer_owner', 'agents_list', 'agent_models', 'agent_create', 'agent_delegate', 'agent_read_context', 'agent_stop', 'agent_set_access', 'agent_message', 'agent_artifact', 'routine', 'routines_report', 'harness_check_update']);
   assert.ok(!MCP_TOOLS.some(tool => tool.name === 'agent_delete') && !claudeAllowedHelpers('danger-full-access').includes('mcp__phasma_harness__agent_delete'));
   assert.equal(server.env.PHASMA_SESSION_ID, source.id);
   assert.equal(server.env.ELECTRON_RUN_AS_NODE, '1');
@@ -3402,4 +3402,16 @@ nodeTest('Stop ends the commands a Codex turn started, spares the app-server and
   assert.equal(worker.data.workerCleanup, undefined);
   assert.equal(worker.blockedReason(), null);
   assert.ok(alive(helper) && alive(server.pid));
+});
+
+
+test('agents can check app updates but cannot supply installation consent', async t => {
+  const { agents, primary } = await setup(t);
+  let checks = 0;
+  agents.checkUpdate = async () => { checks++; return { confirmationRequired: true }; };
+  const session = { access: 'read-only' };
+  assert.deepEqual(await agents.tool(primary, session, 'harness_check_update', {}), { confirmationRequired: true });
+  assert.throws(() => agents.tool(primary, session, 'harness_check_update', { confirmed: true }), /no arguments/);
+  assert.equal(checks, 1);
+  assert.ok(MCP_TOOLS.some(tool => tool.name === 'harness_check_update'));
 });

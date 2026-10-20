@@ -2411,15 +2411,23 @@ $('#check-updates').onclick = async () => {
 };
 $('#open-release').onclick = () => { if (releaseURL) api.openLink(releaseURL).catch(notify); };
 // Automatic update (installed app): the main process checks, the banner offers it, and nothing installs until clicked.
-var update = { status: 'idle' }, updateHidden = null; // var: applyState may render before this line has run
+var update = { status: 'idle' }, updateHidden = null, updateConfirmation = null; // var: applyState may render before this line has run
 function renderUpdate() {
   const u = update || { status: 'idle' }, busy = !!(state?.anyAgentBusy || state?.busy);
+  if (u.confirmationRequest && u.confirmationRequest !== updateConfirmation) {
+    updateConfirmation = u.confirmationRequest;
+    updateHidden = null;
+  }
+  $('#update-available').hidden = !u.latest || !['available', 'error', 'downloading', 'installing'].includes(u.status);
+  $('#update-available').title = `Phasma Harness ${u.latest} is available`;
+  $('#update-available').setAttribute('aria-label', $('#update-available').title);
   const shown = u.installable && (u.status === 'downloading' || u.status === 'installing' || u.status === 'error' || (u.status === 'available' && updateHidden !== u.latest));
   $('#update-banner').hidden = !shown;
   if (!shown) return;
   $('#update-text').textContent = u.status === 'downloading' ? `Downloading Phasma Harness ${u.latest}… ${u.progress ?? 0}%`
     : u.status === 'installing' ? `Installing Phasma Harness ${u.latest}. It restarts when the installer finishes.`
     : u.status === 'error' ? `Update failed: ${u.error}`
+    : u.confirmationRequest ? `Download and install Phasma Harness ${u.latest}? The app will restart.`
     : `Phasma Harness ${u.latest} is available.`;
   const idle = u.status === 'available' || u.status === 'error';
   for (const id of ['#update-install', '#install-update']) {
@@ -2427,11 +2435,19 @@ function renderUpdate() {
     $(id).title = busy ? 'Finish or stop the current turn first; updating restarts the app.' : '';
   }
   $('#update-install').hidden = !idle;
-  $('#update-install').textContent = u.status === 'error' ? 'Try again' : 'Update and restart';
+  $('#update-install').textContent = u.status === 'error' ? 'Try again' : u.confirmationRequest ? 'Download and install' : 'Update and restart';
   $('#update-notes').hidden = !idle;
   $('#update-dismiss').hidden = u.status !== 'available' && u.status !== 'error';
 }
 const installUpdate = () => api.installUpdate().catch(error => { if (update.status !== 'error') notify(error); });
+$('#update-available').onclick = () => {
+  if (!update.installable) {
+    if (update.url) api.openLink(update.url).catch(notify);
+    return;
+  }
+  updateHidden = null;
+  renderUpdate();
+};
 $('#update-install').onclick = installUpdate;
 $('#install-update').onclick = () => { $('#settings-dialog').close(); installUpdate(); };
 $('#update-notes').onclick = () => { if (update.url) api.openLink(update.url).catch(notify); };

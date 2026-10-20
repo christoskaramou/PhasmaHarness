@@ -1063,6 +1063,24 @@ app.whenReady().then(async () => {
   assert.equal((await banner())[3], true, 'disabled while a turn runs');
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + "); document.querySelector('#update-dismiss').click(); true");
   assert.equal((await banner())[0], true, 'hidden after dismissing');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#update-available').hidden"), false, 'update icon survives banner dismissal');
+  await window.webContents.executeJavaScript("document.querySelector('#update-available').click(); true");
+  assert.equal((await banner())[0], false, 'icon reopens confirmation');
+  assert.equal(installs, 1, 'icon does not install');
+  await push({ status: 'current', latest: '0.2.0', installable: false });
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#update-available').hidden"), true, 'no icon when current');
+  const requestedUpdate = { status: 'available', latest: '0.2.0', installable: true, confirmationRequest: 1 };
+  await push(requestedUpdate);
+  assert.equal((await banner())[0], false, 'agent request reopens a dismissed release');
+  assert.match((await banner())[1], /Download and install.*app will restart/);
+  assert.equal(installs, 1, 'agent request does not install');
+  await window.webContents.executeJavaScript("document.querySelector('#update-dismiss').click(); true");
+  await push(requestedUpdate);
+  assert.equal((await banner())[0], true, 'same request stays dismissed');
+  await push({ ...requestedUpdate, confirmationRequest: 2 });
+  assert.equal((await banner())[0], false);
+  await window.webContents.executeJavaScript("document.querySelector('#update-install').click(); new Promise(r => setTimeout(r, 100))");
+  assert.equal(installs, 2, 'only the user click installs');
   console.log('Update banner passed');
   // Effort cap next to Auto: saved as a setting, max marked with a warning, hidden for a manual model, mirrored in Settings.
   const cap = () => window.webContents.executeJavaScript("[document.querySelector('#effort-cap').hidden, document.querySelector('#effort-cap').value, document.querySelector('#effort-cap').selectedOptions[0].textContent, document.querySelector('#effort-cap').classList.contains('max-cap')]");
