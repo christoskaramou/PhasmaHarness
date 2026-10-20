@@ -40,6 +40,30 @@ jobs:
           $testTemp = node -p "require('fs').realpathSync.native(require('os').tmpdir())"
           "TEMP=$testTemp" >> $env:GITHUB_ENV
           "TMP=$testTemp" >> $env:GITHUB_ENV
+      - name: Diagnose Windows document startup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          @'
+          const { DocumentReader } = require('./src/documents.cjs');
+          const { docx } = require('./tests/fixtures/documents.cjs');
+          const started = Date.now();
+          const reader = new DocumentReader({ timeoutMs: 90000 });
+          const startLimiter = reader.startLimiter.bind(reader);
+          reader.startLimiter = () => {
+            const limiter = startLimiter();
+            limiter.ready.then(value => console.log('Limiter ready:', value, Date.now() - started));
+            return limiter;
+          };
+          const limit = reader.limit.bind(reader);
+          reader.limit = async entry => {
+            entry.child.stderr.on('data', data => console.log('Worker:', String(data)));
+            await limit(entry);
+            console.log('Worker limited:', Date.now() - started);
+          };
+          reader.read({ name: 'probe.docx', bytes: docx() }).then(() => console.log('Read completed:', Date.now() - started))
+            .catch(error => { console.error(error); process.exitCode = 1; }).finally(() => reader.close());
+          '@ | node
       - run: npm test
       - name: Installer script test
         if: runner.os == 'Windows'

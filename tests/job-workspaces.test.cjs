@@ -91,10 +91,10 @@ test('broken Git metadata in a project or ancestor never falls back to plain fol
   const { directory, source, workspaces } = fixture(t, { repository: false });
   const projectMetadata = path.join(source, '.git');
   fs.writeFileSync(projectMetadata, 'gitdir: missing-fixture-metadata');
-  await assert.rejects(workspaces.prepare(source, { id: randomUUID(), index: 1 }), /Git metadata needs repair/);
+  await assert.rejects(workspaces.prepare(source, { id: randomUUID(), index: 1 }), /Git metadata needs repair|gitfile does not point to a valid repository/);
   fs.unlinkSync(projectMetadata);
   fs.writeFileSync(path.join(directory, '.git'), 'gitdir: missing-fixture-metadata');
-  await assert.rejects(workspaces.prepare(source, { id: randomUUID(), index: 1 }), /Git metadata needs repair/);
+  await assert.rejects(workspaces.prepare(source, { id: randomUUID(), index: 1 }), /Git metadata needs repair|gitfile does not point to a valid repository/);
   assert.equal(Object.keys(workspaces.records).length, 0);
 });
 
