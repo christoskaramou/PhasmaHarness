@@ -33,6 +33,13 @@ jobs:
           cache: npm
       # Also downloads the pinned ripgrep and RTK builds (tools/fetch.cjs) and checks their SHA256.
       - run: npm ci
+      - name: Canonical Windows temp path
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $testTemp = node -p "require('fs').realpathSync(require('os').tmpdir())"
+          "TEMP=$testTemp" >> $env:GITHUB_ENV
+          "TMP=$testTemp" >> $env:GITHUB_ENV
       - run: npm test
       - name: Installer script test
         if: runner.os == 'Windows'

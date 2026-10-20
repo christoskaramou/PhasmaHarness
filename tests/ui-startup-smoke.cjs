@@ -173,15 +173,28 @@ app.whenReady().then(async () => {
   })()`);
   assert.deepEqual(shieldFocus, { focused: true, outline: 'none', stroke: '3px' },
     'focused access selector highlights only the shield, never a surrounding box');
-    const composerFocus = await window.webContents.executeJavaScript(`(() => {
+  const composerFocus = await window.webContents.executeJavaScript(`(() => {
     const prompt = document.querySelector('#prompt');
     return ['#composer', '.composer-bottom', '.composer-controls'].every(selector => {
       prompt.blur();
-      document.querySelector(selector).click();
+      document.querySelector(selector).dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
       return document.activeElement === prompt;
     });
   })()`);
   assert.ok(composerFocus, 'clicking composer whitespace focuses the text input');
+  for (const edge of ['top', 'bottom', 'left', 'right']) {
+    const point = await window.webContents.executeJavaScript(`(() => {
+      document.querySelector('#prompt').blur();
+      const box = document.querySelector('#composer').getBoundingClientRect();
+      return { x: Math.round(${JSON.stringify(edge)} === 'left' ? box.left + 3 : ${JSON.stringify(edge)} === 'right' ? box.right - 3 : box.left + box.width / 2),
+        y: Math.round(${JSON.stringify(edge)} === 'top' ? box.top + 3 : ${JSON.stringify(edge)} === 'bottom' ? box.bottom - 3 : box.top + box.height / 2) };
+    })()`);
+    window.webContents.sendInputEvent({ type: 'mouseDown', ...point, button: 'left', clickCount: 1 });
+    window.webContents.sendInputEvent({ type: 'mouseUp', ...point, button: 'left', clickCount: 1 });
+    assert.ok(await window.webContents.executeJavaScript(`document.activeElement === document.querySelector('#prompt')`),
+      `clicking the composer's ${edge} padding focuses the input`);
+  }
+
   const composerLayout = await window.webContents.executeJavaScript(`(() => {
     const prompt = document.querySelector('#prompt');
     const root = document.documentElement;

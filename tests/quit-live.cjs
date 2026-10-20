@@ -15,6 +15,7 @@ const node = execFileSync('sh', ['-c', 'command -v node'], { encoding: 'utf8' })
 const WORKER = `
 const { spawn } = require('node:child_process');
 if (process.argv.includes('--version')) { console.log('codex-cli 99.0.0'); process.exit(0); }
+if (process.argv.includes('auth')) { console.log(JSON.stringify({ loggedIn: false })); process.exit(0); }
 const keep = ['-e', 'setInterval(() => {}, 1000)'];
 const child = spawn(process.execPath, keep, { stdio: 'ignore' });
 const detached = spawn(process.execPath, keep, { stdio: 'ignore', detached: true });

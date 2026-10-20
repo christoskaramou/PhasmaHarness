@@ -2125,10 +2125,10 @@ for (const [name, command] of Object.entries(COMMANDS)) {
 }
 $('#commands-help').onclick = () => runCommand('help');
 $('#clear-conversation').onclick = () => runCommand('clear');
-$('#composer').addEventListener('click', event => {
-  if (event.target.matches('#composer, .composer-bottom, .composer-controls, #image-previews')) {
-    $('#prompt').focus({ preventScroll: true });
-  }
+$('#composer').addEventListener('pointerdown', event => {
+  if (event.button !== 0 || event.target.closest('button, input, textarea, select, label, details, a, #slash-menu, .image-preview')) return;
+  event.preventDefault();
+  $('#prompt').focus({ preventScroll: true });
 });
 
 $('#composer').addEventListener('submit', async event => {
