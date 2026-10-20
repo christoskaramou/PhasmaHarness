@@ -1932,6 +1932,8 @@ function renderRequest() {
     }
     const actions = element('div', 'dialog-footer');
     const decline = element('button', '', 'Decline'); decline.onclick = () => finish({ decision: 'decline' }); actions.append(decline);
+    // A request that opened on its own focuses Decline, so a keypress meant for the composer cannot approve it.
+    decline.autofocus = !reviewingExecution;
     if (request.canAllowSession) {
       const session = element('button', '', 'Allow for this session');
       session.title = request.method === 'router/tool/requestApproval'
@@ -1941,7 +1943,7 @@ function renderRequest() {
     }
     if (!unsupported) {
       const allow = element('button', 'primary', 'Allow once');
-      allow.autofocus = true;
+      allow.autofocus = !!reviewingExecution;
       allow.onclick = () => finish({ decision: 'accept' });
       actions.append(allow);
     }

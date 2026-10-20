@@ -2323,6 +2323,19 @@ app.whenReady().then(async () => {
   assert.deepEqual(answers[0], { id: 7, answer: { decision: 'accept' }, agentId: splitProfile.id, contextId: assignment.id });
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), 'Keep my question');
   console.log('Separate foreground, nonmodal assignment details, received/applied updates and deferred scoped approvals passed');
+  // An approval that opens on its own focuses Decline: Enter typed for the composer must not approve a command.
+  const foregroundFocus = await window.webContents.executeJavaScript(`(() => {
+    const saved = { requests: state.requests, reviewing: reviewingExecution };
+    reviewingExecution = null; shownRequest = null;
+    state.requests = [{ id: 'focus-check', method: 'item/commandExecution/requestApproval', params: { threadId: 'none', command: 'echo focus', reason: 'Focus check' } }];
+    renderRequest();
+    const focused = document.activeElement.textContent;
+    state.requests = saved.requests; reviewingExecution = saved.reviewing; shownRequest = null;
+    renderRequest();
+    return focused;
+  })()`);
+  assert.equal(foregroundFocus, 'Decline');
+  console.log('Approvals that open on their own focus Decline passed');
   timeBudget.limitTokens = null;
   timeBudget.requests['unknown-cost-fixture'] = { id: 'unknown-cost-fixture', kind: 'worker', provider: 'native:deepseek',
     complete: true, usage: null, providerEstimateUsd: null };
