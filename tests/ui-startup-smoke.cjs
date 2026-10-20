@@ -2541,6 +2541,56 @@ app.whenReady().then(async () => {
     new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/comparison-revealed.png'), (await window.webContents.capturePage()).toPNG());
   console.log('Comparison cards stay blind until a pick, then reveal the change and the verdict');
+  phase = 'send scrolls to the newest message';
+  await window.webContents.executeJavaScript(`document.querySelector('#conversation').scrollTo({ top: 0, behavior: 'instant' });
+    new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+  const startScroll = await window.webContents.executeJavaScript(`(() => { const chat = document.querySelector('#conversation');
+    return [chat.scrollHeight, chat.scrollTop, chat.clientHeight]; })()`);
+  assert.ok(startScroll[0] - startScroll[1] - startScroll[2] > 200, 'the chat starts scrolled well above its end: ' + startScroll);
+  const beforeScrollSend = sent.length;
+  await submit('Show me the newest message');
+  await until(() => sent.length === beforeScrollSend + 1, 'the message is sent');
+  ownerChat.items.push({ id: 'scroll-sent', type: 'userMessage', content: [{ type: 'text', text: 'Show me the newest message' }], createdAt: Date.now() });
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + ');' +
+    ' new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  // The chat follows new messages with a smooth scroll; give it time to settle.
+  const sentInView = () => window.webContents.executeJavaScript(`(() => {
+    const conversation = document.querySelector('#conversation'), chat = conversation.getBoundingClientRect();
+    const message = [...document.querySelectorAll('#messages .message.user')].at(-1);
+    const box = message.getBoundingClientRect();
+    return { shown: message.textContent.includes('Show me the newest message') && box.top >= chat.top && box.bottom <= chat.bottom + 1,
+      at: [conversation.scrollTop, conversation.scrollHeight, conversation.clientHeight, Math.round(box.top), Math.round(box.bottom), Math.round(chat.bottom)] };
+  })()`);
+  let view = await sentInView();
+  for (let i = 0; i < 50 && !view.shown; i++) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+    view = await sentInView();
+  }
+  assert.ok(view.shown, 'the sent message is in view after sending from a scrolled-up chat: ' + view.at);
+  // The roll is animated and takes the same time from far back in history as from close by.
+  const rolls = await window.webContents.executeJavaScript(`(async () => {
+    const chat = document.querySelector('#conversation'), frame = () => new Promise(resolve => requestAnimationFrame(resolve));
+    const left = () => chat.scrollHeight - chat.scrollTop - chat.clientHeight, results = [];
+    for (const from of [0, Math.round((chat.scrollHeight - chat.clientHeight) * 0.8)]) {
+      // Let any smooth scroll from an earlier step finish first.
+      await new Promise(resolve => setTimeout(resolve, 400));
+      chat.scrollTo({ top: from, behavior: 'instant' });
+      await frame();
+      const distance = Math.round(left()), began = performance.now();
+      let between = false;
+      scrollChatToEnd();
+      while (left() > 1 && performance.now() - began < 2000) {
+        await frame();
+        between ||= chat.scrollTop > from + 1 && left() > 1;
+      }
+      results.push({ from, distance, ms: Math.round(performance.now() - began), between });
+    }
+    return results;
+  })()`);
+  for (const roll of rolls)
+    assert.ok(roll.between && roll.ms >= 250 && roll.ms <= 500, 'an animated roll of about 300 ms: ' + JSON.stringify(rolls));
+  assert.ok(Math.abs(rolls[0].ms - rolls[1].ms) <= 80, 'the same time from far and near: ' + JSON.stringify(rolls));
+  console.log(`Sending from a scrolled-up chat rolls to the newest message (${rolls.map(roll => `${roll.distance} px away: ${roll.ms} ms`).join(', ')})`);
   phase = 'group chat controls';
   const groupMember = agents.primary.data.agents[0];
   await window.webContents.executeJavaScript(`document.querySelector('#agents-overview').click();

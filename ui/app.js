@@ -537,6 +537,8 @@ $('#prompt').addEventListener('paste', event => {
 });
 const messageNodes = new Map();
 let renderedSession = null;
+// A send roll (scrollChatToEnd) in progress, and the newest one's number.
+let sendScroll = 0, rollingToEnd = false;
 let submitting = false;
 let draftAccess = null;
 let changingPermissions = false;
@@ -1913,7 +1915,8 @@ function renderMessages(session) {
     }
   }
   for (const [id, entry] of messageNodes) if (!ids.has(id)) { entry.node.remove(); entry.routeNode?.remove(); messageNodes.delete(id); }
-  if (atBottom) requestAnimationFrame(() => { container.scrollTop = container.scrollHeight; });
+  // During a send roll the roll follows the end itself; a smooth scroll started here would take over its frames.
+  if (atBottom && !rollingToEnd) requestAnimationFrame(() => { container.scrollTop = container.scrollHeight; });
 }
 
 async function selectSession(id) {
@@ -2291,6 +2294,7 @@ $('#composer').addEventListener('submit', async event => {
     sentHistory = null; sentHistoryIndex = -1;
     drafts.set(selectedId, ''); $('#prompt').value = ''; updatePreview();
     imageDrafts.delete(selectedId); fileDrafts.delete(selectedId); renderImages();
+    scrollChatToEnd();
     // Not awaited: a Claude or Cursor send resolves only when its turn ends, which kept the composer locked. The main
     // process marks the session busy before it yields, so the next message sent meanwhile is queued, not doubled.
     const id = selectedId;
@@ -2298,6 +2302,34 @@ $('#composer').addEventListener('submit', async event => {
   } catch (error) { restoreDraft(selectedId, text, images, error, files); }
   finally { submitting = false; render(); }
 });
+
+// Sending rolls the chat to its end in the same short time from any distance, so the sent message shows even from far
+// back in history. The end is read every frame, so a message rendered meanwhile is included. Reduced motion jumps.
+const SEND_SCROLL_MS = 300;
+function scrollChatToEnd() {
+  const chat = $('#conversation');
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    chat.scrollTo({ top: chat.scrollHeight, behavior: 'instant' });
+    return;
+  }
+
+  const start = chat.scrollTop, began = performance.now(), run = ++sendScroll;
+  rollingToEnd = true;
+  const step = now => {
+    if (run !== sendScroll)
+      return;
+
+    const t = Math.min(1, Math.max(0, now - began) / SEND_SCROLL_MS);
+    const eased = t < 0.5 ? 4 * t ** 3 : 1 - (2 - 2 * t) ** 3 / 2;
+    // Instant per frame: the chat's CSS smooth scrolling would otherwise animate every step.
+    chat.scrollTo({ top: start + (chat.scrollHeight - chat.clientHeight - start) * eased, behavior: 'instant' });
+    if (t < 1)
+      requestAnimationFrame(step);
+    else
+      rollingToEnd = false;
+  };
+  requestAnimationFrame(step);
+}
 
 // A message that could not be sent goes back to its chat's composer, unless something new was typed there meanwhile.
 function restoreDraft(id, text, images, error, files = []) {
