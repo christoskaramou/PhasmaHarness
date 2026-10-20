@@ -62,12 +62,13 @@ app.whenReady().then(async () => {
   controller.cursor.start([], root);
   for (let i = 0; i < 150 && recorded().length < 3; i++) await new Promise(r => setTimeout(r, 100));
   if (recorded().length < 3) return fail(`expected 3 fake workers (Codex, Claude, Cursor), found ${recorded().length}`);
-  controller.busy = 'quit-live';
+  const session = controller.create();
+  controller.busy = session.id;
   controller.stop = () => Promise.reject(new Error('interrupt failed (quit test)'));
   closedAt = Date.now();
   const window = BrowserWindow.getAllWindows()[0];
   window.close();
-  if (window.isDestroyed() || window.isVisible() || controller.busy !== 'quit-live') return fail('Close did not preserve the background runner');
+  if (window.isDestroyed() || window.isVisible() || controller.busy !== session.id) return fail('Close did not preserve the background runner');
   app.quit();
 });
 
