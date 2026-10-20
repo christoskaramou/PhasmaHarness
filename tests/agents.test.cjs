@@ -3355,6 +3355,8 @@ nodeTest('Stop ends the commands a Codex turn started, spares the app-server and
   });
   await wait(() => pids.length === 1);
   const helper = pids[0];
+  // Keep the pre-existing helper outside the process scanner's 50 ms turn-start tolerance.
+  await new Promise(resolve => setTimeout(resolve, 100));
   worker.client.process = server;
   const runCommand = async (session, processId) => {
     server.stdin.write('run\n');
