@@ -138,6 +138,28 @@ test('updates wait for routine admission, queued jobs, messages, approvals and c
   assert.equal(hasPendingWork(agents), true);
 });
 
+test('a failed unsent draft does not block updates or lose its retry content', () => {
+  const session = { status: 'failed', submission: null,
+    pendingMessage: { content: [{ type: 'text', text: 'Keep this draft' }], error: 'Selected model is disabled or not available.' } };
+  const saved = JSON.stringify(session);
+  const worker = { loading: new Set(), requests: new Map(), stopping: new Set(), blockedReason: () => null,
+    data: { sessions: [session] } };
+  const agents = { busy: false, pendingJobs: () => [], allControllers: () => [worker] };
+  assert.equal(hasPendingWork(agents), false);
+  assert.equal(JSON.stringify(session), saved);
+  session.submission = { state: 'unconfirmed' };
+  assert.equal(hasPendingWork(agents), true, 'uncertain delivery still blocks updates');
+  session.submission = null;
+  agents.busy = true;
+  assert.equal(hasPendingWork(agents), true, 'other active work still blocks updates');
+  agents.busy = false;
+  session.status = 'running';
+  assert.equal(hasPendingWork(agents), true);
+  session.status = 'failed';
+  delete session.pendingMessage.error;
+  assert.equal(hasPendingWork(agents), true, 'a pending message without a confirmed failure remains protected');
+});
+
 test('runner recovery keeps verified original stores once and refuses a broken backup', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-recovery-backup-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));

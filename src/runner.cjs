@@ -102,8 +102,11 @@ function hasPendingWork(agents) {
   if (agents.busy || agents.routines?.busy || agents.workspaces?.busy || agents.artifactRuns?.busy || agents.downloads?.busy || agents.revisionOperations?.size || agents.budgets?.inflight.size || agents.pendingJobs().length || agents.foregroundTasks?.().length) return true;
   return agents.allControllers().some(controller => controller.connection === 'connecting' || controller.connectingProviders?.size ||
     controller.chatgptLoginPending || controller.loading.size || controller.requests.size ||
-    controller.stopping.size || controller.blockedReason() || controller.data.sessions.some(session =>
-      session.queue?.length || session.queueSending || session.pendingMessage || session.items?.some(item => item.pendingReply)));
+    controller.stopping.size || controller.blockedReason() || controller.data.sessions.some(session => {
+      const failedDraft = session.status === 'failed' && session.pendingMessage?.error && !session.submission;
+      return session.queue?.length || session.queueSending || (session.pendingMessage && !failedDraft) ||
+        session.items?.some(item => item.pendingReply);
+    }));
 }
 
 function backupStores(filename) {
