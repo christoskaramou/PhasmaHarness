@@ -15,7 +15,7 @@ const node = execFileSync('sh', ['-c', 'command -v node'], { encoding: 'utf8' })
 const WORKER = `
 const { spawn } = require('node:child_process');
 if (process.argv.includes('--version')) { console.log('codex-cli 99.0.0'); process.exit(0); }
-if (process.argv.includes('auth')) { console.log(JSON.stringify({ loggedIn: false })); process.exit(0); }
+if (process.argv.includes('auth') || process.argv.includes('status')) { console.log(JSON.stringify({ loggedIn: false })); process.exit(0); }
 const keep = ['-e', 'setInterval(() => {}, 1000)'];
 const child = spawn(process.execPath, keep, { stdio: 'ignore' });
 const detached = spawn(process.execPath, keep, { stdio: 'ignore', detached: true });
@@ -58,6 +58,9 @@ app.whenReady().then(async () => {
   // Codex starts with the app; Claude and Cursor are started through their real launch paths.
   for (let i = 0; i < 150 && (!recorded().length || !BrowserWindow.getAllWindows().length); i++) await new Promise(r => setTimeout(r, 100));
   const controller = main.controller();
+  for (let i = 0; i < 150 && (!controller.codex.connected || controller.connectingProviders.size); i++)
+    await new Promise(resolve => setTimeout(resolve, 100));
+  if (!controller.codex.connected || controller.connectingProviders.size) return fail('provider initialization did not finish');
   controller.claude.start([], root);
   controller.cursor.start([], root);
   for (let i = 0; i < 150 && recorded().length < 3; i++) await new Promise(r => setTimeout(r, 100));
