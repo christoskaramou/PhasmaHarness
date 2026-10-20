@@ -5,6 +5,7 @@ for (const method of ['benchmarkData', 'benchmarkRefresh', 'benchmarkImport', 'b
 }
 api.copyText = text => ipcRenderer.invoke('copyText', text);
 api.nativeProviderAction = (id, action) => ipcRenderer.invoke('nativeProviderAction', id, action);
+api.runnerOnExit = value => ipcRenderer.invoke('runnerOnExit', value);
 api.runnerInfo = () => ipcRenderer.invoke('runnerInfo');
 api.runnerAutostart = enabled => ipcRenderer.invoke('runnerAutostart', enabled);
 api.quitRunner = () => ipcRenderer.invoke('quitRunner');

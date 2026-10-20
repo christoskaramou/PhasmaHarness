@@ -2264,3 +2264,105 @@ test('the effort cap narrows what Auto routing is offered and is recorded with t
   assert.equal(session.routes.at(-1).effort, 'xhigh', 'a manual pick is not capped');
   assert.equal(session.routes.at(-1).effortCap, undefined);
 });
+
+
+test('Send now restarts non-steering providers only after the previous turn stops', async t => {
+  const { controller } = await setup(t);
+  for (const provider of ['cursor-cli', 'native:muse', 'native:deepseek', 'native:antigravity', 'test-api']) {
+    const session = controller.create();
+    session.activeProvider = provider;
+    controller.busy = session.id;
+    controller.activeTurns.set(session.id, 'old-turn');
+    const message = { id: 'correction', text: 'Use the new requirement', images: [], mode: 'manual', task: 'off' };
+    session.queue = [message];
+    const events = [];
+    controller.stop = async () => {
+      controller.stopGeneration = (controller.stopGeneration || 0) + 1;
+      events.push('stop');
+      setTimeout(() => { events.push('stopped'); controller.busy = null; }, 10);
+    };
+    controller.send = async value => { events.push('send'); assert.equal(value.text, message.text); };
+    await controller.queuedMessage(session.id, message.id, 'steer');
+    assert.deepEqual(events, ['stop', 'stopped', 'send']);
+    assert.equal(session.queue.length, 0);
+  }
+});
+
+test('live delivery keeps a queued correction until acknowledgement and preserves uncertain delivery', async t => {
+  const { controller } = await setup(t);
+  const session = controller.create();
+  session.activeProvider = 'claude-cli';
+  controller.busy = session.id;
+  controller.activeTurns.set(session.id, 'live-turn');
+  const message = { id: 'live-note', text: 'new requirement', images: [] };
+  session.queue = [message];
+  let acknowledge;
+  controller.liveInput = () => new Promise(resolve => { acknowledge = resolve; });
+  const delivery = controller.queuedMessage(session.id, message.id, 'live');
+  assert.equal(session.queue.length, 1);
+  assert.equal(session.queueSending, true);
+  acknowledge();
+  await delivery;
+  assert.equal(session.queue.length, 0);
+  assert.equal(session.items.filter(item => item.clientId === message.id).length, 1);
+  session.queue = [{ ...message, id: 'uncertain-note' }];
+  controller.liveInput = async () => { throw new Error('Claude input disconnected before delivery was confirmed.'); };
+  await assert.rejects(controller.queuedMessage(session.id, 'uncertain-note', 'live'), /disconnected/);
+  assert.equal(session.queue[0].uncertain, true);
+});
+
+test('Send now preserves the queued message if another Stop cancels restart', async t => {
+  const { controller } = await setup(t);
+  const session = controller.create();
+  session.activeProvider = 'cursor-cli'; controller.busy = session.id;
+  controller.activeTurns.set(session.id, 'old-turn');
+  session.queue = [{ id: 'note', text: 'change', images: [] }];
+  controller.stop = async () => { controller.stopGeneration = 2; controller.busy = null; };
+  controller.send = async () => { assert.fail('must not restart'); };
+  await assert.rejects(controller.queuedMessage(session.id, 'note', 'steer'), /cancelled by Stop/);
+  assert.equal(session.queue.length, 1);
+});
+
+
+test('Claude queues are forwarded during work in order, without replaying uncertain or different-model messages', async t => {
+  const { controller } = await setup(t);
+  const session = controller.create();
+  controller.busy = session.id;
+  session.activeProvider = 'claude-cli';
+  controller.activeTurns.set(session.id, 'live-turn');
+  controller.liveInputMode = controller.data.settings.mode;
+  const delivered = [];
+  const acknowledgements = [];
+  controller.liveInput = message => new Promise(resolve => {
+    delivered.push(message.text); acknowledgements.push(resolve);
+  });
+  await controller.send({ id: session.id, text: 'first correction' });
+  await controller.send({ id: session.id, text: 'second correction' });
+  assert.deepEqual(delivered, ['first correction']);
+  acknowledgements.shift()();
+  await new Promise(setImmediate);
+  assert.deepEqual(delivered, ['first correction', 'second correction']);
+  acknowledgements.shift()();
+  await new Promise(setImmediate);
+  assert.equal(session.queue.length, 0);
+  await controller.send({ id: session.id, text: 'different model', mode: 'different' });
+  assert.equal(delivered.length, 2);
+  assert.equal(session.queue.length, 1);
+});
+
+
+test('Send now cannot resume through an unconfirmed cleanup block', async t => {
+  const { controller } = await setup(t);
+  const session = controller.create();
+  session.activeProvider = 'cursor-cli'; controller.busy = session.id;
+  controller.activeTurns.set(session.id, 'old-turn');
+  session.queue = [{ id: 'note', text: 'change', images: [] }];
+  controller.stop = async () => {
+    controller.stopGeneration = 1; controller.busy = null;
+    controller.blockedReason = () => 'Worker cleanup is unconfirmed.';
+  };
+  controller.send = async () => { assert.fail('must not overlap old execution'); };
+  await assert.rejects(controller.queuedMessage(session.id, 'note', 'steer'), /cleanup is unconfirmed/);
+  assert.equal(session.queue.length, 1);
+  assert.equal(session.queueSending, false);
+});

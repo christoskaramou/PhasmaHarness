@@ -197,10 +197,11 @@ class ClaudeCLI {
     }
     return await this.refresh();
   }
-  run({ cwd, model, effort, prompt, images = [], resume, access, signal, onEvent = () => {}, approve, schema, helpers, instructions = WORKER_INSTRUCTIONS }) {
+  run({ cwd, model, effort, prompt, images = [], resume, access, signal, onEvent = () => {}, approve, schema, helpers, onInput, instructions = WORKER_INSTRUCTIONS }) {
     return new Promise((resolve, reject) => {
       if (signal?.aborted) return reject(new Error('Claude stopped.'));
       const args = ['-p', '--verbose', '--input-format', 'stream-json', '--output-format', 'stream-json', '--include-partial-messages', '--model', model];
+      if (onInput && !schema) args.push('--replay-user-messages');
       if (EFFORTS.includes(effort)) args.push('--effort', effort);
       // With an approval callback, the Harness access setting applies: pre-approved tools run, anything else asks the user in the Harness.
       const ask = !schema && typeof approve === 'function' && ['read-only', 'workspace-write'].includes(access);
@@ -236,7 +237,15 @@ class ClaudeCLI {
       args.push('--permission-mode', access === 'danger-full-access' && !schema ? 'bypassPermissions'
         : ask ? (access === 'workspace-write' ? 'acceptEdits' : 'default') : 'dontAsk');
       let settled = false, rateLimited = false, limitInfo = null;
-      const done = (fn, value) => { if (!settled) { settled = true; fn(value); } };
+      const deliveries = new Map();
+      const done = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        onInput?.(null);
+        for (const delivery of deliveries.values()) delivery.reject(new Error('Claude closed before confirming message delivery.'));
+        deliveries.clear();
+        fn(value);
+      };
       const child = this.start(args, cwd); let buffer = '', result, stderr = '';
       // The whole tree: Claude's tool commands and MCP servers would otherwise outlive it.
       const abort = () => stopTree(child); signal?.addEventListener('abort', abort, { once: true });
@@ -283,7 +292,25 @@ class ClaudeCLI {
           catch { done(reject, new Error('Invalid Claude Code stream event.')); stopTree(child); return; }
           if (ask && event.type === 'control_request') { permission(event).catch(() => {}); continue; }
           if (ask && event.type === 'control_cancel_request') { pending.get(event.request_id)?.abort(); continue; }
-          if (event.type === 'result') { result = event; if (ask) child.stdin.end(); }
+          if (event.type === 'user' && deliveries.has(event.uuid)) {
+            deliveries.get(event.uuid).resolve();
+            deliveries.delete(event.uuid);
+          }
+          if (event.type === 'result') {
+            if (result && onInput) {
+              for (const key of ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens']) {
+                if (Number.isFinite(result.usage?.[key]) && Number.isFinite(event.usage?.[key]))
+                  event.usage[key] += result.usage[key];
+              }
+              if (Number.isFinite(result.total_cost_usd) && Number.isFinite(event.total_cost_usd))
+                event.total_cost_usd += result.total_cost_usd;
+            }
+            result = event;
+            if ((ask || onInput) && !deliveries.size) {
+              onInput?.(null);
+              child.stdin.end();
+            }
+          }
           // Plan usage limits: the rate-limit event carries the window and its reset; a blocked reply is marked "rate_limit".
           if (event.type === 'rate_limit_event' && event.rate_limit_info) {
             limitInfo = event.rate_limit_info;
@@ -313,8 +340,25 @@ class ClaudeCLI {
         else done(resolve, result);
       });
       const message = JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: prompt }, ...images.map(url => imageData(url)).map(({ mime, data }) => ({ type: 'image', source: { type: 'base64', media_type: mime, data } }))] } }) + '\n';
-      // Approval answers travel over stdin, so it stays open until the result arrives.
-      if (ask) child.stdin.write(message); else child.stdin.end(message);
+      // Live input and approval answers share stdin until Claude finishes processing queued messages.
+      if (ask || onInput) child.stdin.write(message); else child.stdin.end(message);
+      if (onInput && !schema) onInput(({ id, text, images = [] }) => {
+        if (settled || closed || signal?.aborted || !child.stdin.writable || child.stdin.writableEnded)
+          return Promise.reject(new Error('Claude is no longer accepting messages.'));
+        const content = [{ type: 'text', text }, ...images.map(imageData).map(({ mime, data }) =>
+          ({ type: 'image', source: { type: 'base64', media_type: mime, data } }))];
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('Claude message delivery timed out. Check the conversation before resending.')), 30000);
+          deliveries.set(id, {
+            resolve: () => { clearTimeout(timer); resolve(); },
+            reject: error => { clearTimeout(timer); reject(error); },
+          });
+          child.stdin.write(JSON.stringify({ type: 'user', uuid: id,
+            message: { role: 'user', content }, parent_tool_use_id: null }) + '\n', error => {
+            if (error) deliveries.get(id)?.reject(new Error('Claude input disconnected before delivery was confirmed.'));
+          });
+        });
+      });
     });
   }
   close() {

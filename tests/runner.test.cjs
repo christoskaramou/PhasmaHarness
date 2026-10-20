@@ -7,7 +7,7 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { RunnerWindow, autostart, loginOptions, hasPendingWork, backupStores } = require('../src/runner.cjs');
 
-function fixture() {
+function fixture(settingsFile) {
   let quitting = false, status = 'Runner ready', startup = false;
   const calls = [];
   const app = { isPackaged: false, getAppPath: () => 'C:\\Work space\\Harness',
@@ -23,7 +23,7 @@ function fixture() {
     destroy() { calls.push('tray-destroyed'); }
   }
   const desktop = new RunnerWindow({ app, window, Tray, Menu: { buildFromTemplate: value => value }, icon: 'fixture',
-    isQuitting: () => quitting, quit: () => { quitting = true; calls.push('quit'); }, status: () => status });
+    settingsFile, isQuitting: () => quitting, quit: () => { quitting = true; calls.push('quit'); }, status: () => status });
   return { desktop, app, window, calls, setStatus: value => { status = value; } };
 }
 
@@ -210,5 +210,28 @@ test('a desktop startup failure keeps the runner lease so the error stays readab
     detached.length = 0;
     await assert.rejects(createRunner({ app, data, log, safeStorage: { isEncryptionAvailable: () => false } }), /job budget is invalid/);
     assert.equal(detached.length, desktop ? 0 : 1);
+  }
+});
+
+
+test('exit preference persists, validates and uses the normal quit path', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-exit-'));
+  try {
+    const file = path.join(directory, 'runner-window.json');
+    const first = fixture(file);
+    assert.equal(first.desktop.info().onExit, 'tray');
+    first.desktop.setOnExit('close');
+    const restored = fixture(file);
+    assert.equal(restored.desktop.info().onExit, 'close');
+    assert.throws(() => restored.desktop.setOnExit('invalid'), /Choose/);
+    let prevented = false;
+    restored.window.emit('close', { preventDefault: () => { prevented = true; } });
+    assert.equal(prevented, true);
+    assert.ok(restored.calls.includes('quit'));
+    assert.ok(!restored.calls.includes('hide'));
+    first.desktop.setOnExit('tray');
+    assert.equal(fixture(file).desktop.info().onExit, 'tray');
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });

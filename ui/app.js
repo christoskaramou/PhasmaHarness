@@ -1,5 +1,23 @@
 'use strict';
 const $ = selector => document.querySelector(selector);
+// Preserve bottom-following when the composer changes the conversation viewport.
+{
+  const conversation = $('#conversation');
+  let height = conversation.clientHeight;
+  let width = conversation.clientWidth;
+  let following = true;
+  conversation.addEventListener('scroll', () => {
+    if (conversation.clientHeight === height && conversation.clientWidth === width) {
+      following = conversation.scrollHeight - conversation.scrollTop - height < 2;
+    }
+  }, { passive: true });
+  new ResizeObserver(() => {
+    height = conversation.clientHeight;
+    width = conversation.clientWidth;
+    if (following) conversation.scrollTo({ top: conversation.scrollHeight, behavior: 'instant' });
+  }).observe(conversation);
+}
+
 const sidebarResizer = $('#sidebar-resizer');
 let sidebarWidth = null, sidebarDrag = null;
 try {
@@ -207,8 +225,8 @@ function capHint(cap) {
 const measure = document.createElement('canvas').getContext('2d');
 function fitSelect(select) {
   if (select.hidden || !select.selectedOptions.length) return;
-  // Selects in the Options panel fill its width; only the composer bar's selects shrink to their text.
-  if (select.closest('.chat-options-panel')) {
+  // Panel selects fill their container; the access select fills its icon button.
+  if (select.id === 'permissions' || select.closest('.chat-options-panel')) {
     select.style.width = '';
     return;
   }
@@ -217,6 +235,20 @@ function fitSelect(select) {
   const extra = ['paddingLeft', 'paddingRight', 'borderLeftWidth', 'borderRightWidth'].reduce((sum, key) => sum + (parseFloat(style[key]) || 0), 0);
   select.style.width = `${Math.ceil(measure.measureText(select.selectedOptions[0].textContent).width + extra) + 2}px`;
 }
+function resizeComposer() {
+  const prompt = $('#prompt');
+  const row = $('.composer-bottom');
+  const style = getComputedStyle(prompt);
+  const inlineWidth = parseFloat(getComputedStyle(row).gridTemplateColumns.split(' ')[1]);
+  const padding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+  measure.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  measure.letterSpacing = style.letterSpacing;
+  const expanded = prompt.value.includes('\n') || measure.measureText(prompt.value).width > inlineWidth - padding;
+  $('#composer').classList.toggle('composer-expanded', expanded);
+}
+
+new ResizeObserver(resizeComposer).observe($('.composer-bottom'));
+
 function fitComposer() { for (const id of ['#preset', '#effort', '#permissions', '#effort-cap']) fitSelect($(id)); }
 document.fonts?.ready.then(() => { if (state) fitComposer(); });
 function showEffortCap() {
@@ -564,7 +596,6 @@ function applyState(next) {
     $('#prompt').value = drafts.get(draftKey()) || '';
   }
   render(); renderUpdate(); renderJobDetails();
-  if ($('#settings-dialog').open) renderQuotaSettings();
   if (loginFinished && $('#settings-dialog').open) renderProviders();
 }
 
@@ -1039,7 +1070,6 @@ function render() {
   if (!state) return;
   renderSlashMenu();
   probeWorkspace();
-  document.documentElement.style.setProperty('--font-scale', (state.settings.fontScale || 100) / 100);
   $('#benchmark-summary').textContent = state.benchmarks ? `${state.benchmarks.records} benchmark records · ${state.benchmarks.matched}/${state.benchmarks.workers} models matched` : 'Routing benchmarks';
   const session = current();
   renderAgents();
@@ -1062,7 +1092,8 @@ function render() {
     if (!select.options.length) for (const mode of state.accessModes) select.add(new Option(mode.label, mode.id));
   }
   $('#permissions').value = permission.id;
-  $('#permissions').title = permission.description;
+  $('#permissions').title = `${permission.label}: ${permission.description}`;
+  $('#permissions').setAttribute('aria-label', `Session permissions: ${permission.label}`);
   $('#permissions').disabled = changingPermissions || submitting || !!(session && state.busy === session.id);
   $('#permissions').classList.toggle('full-access', permission.id === 'danger-full-access');
   $('#browse-session').disabled = !selectedId;
@@ -1128,16 +1159,20 @@ function render() {
     const text = element('span', '', `${message.error ? 'Paused' : 'Queued'}: ${message.text}${message.images.length ? ` (${message.images.length} images)` : ''}`);
     text.title = message.error || message.text;
     row.append(text);
-    for (const [action, label] of [[state.busy || revise ? 'steer' : 'send', revise ? 'Apply now' : state.busy ? '↵ Steer' : 'Send now'], ['edit', '✎'], ['remove', '×']]) {
+    for (const [action, label] of [[state.busy || revise ? 'steer' : 'send', 'Send now'], ['edit', '✎'], ['remove', '×']]) {
       const button = element('button', 'compact-action', label);
       button.type = 'button';
       button.classList.add(`queue-${action}`);
-      if (action === 'steer' && !revise) button.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 5v7a3 3 0 0 1-3 3H5m4-4-4 4 4 4"/></svg><span>Steer</span>';
+      if (action === 'steer' && !revise) button.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 5v7a3 3 0 0 1-3 3H5m4-4-4 4 4 4"/></svg><span>Send now</span>';
       if (action === 'edit') button.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15Z"/></svg>';
       if (action === 'remove') button.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>';
       button.setAttribute('aria-label', action === 'remove' ? 'Remove queued message' : action === 'edit' ? 'Edit queued message' : label);
-      button.disabled = (action === 'steer' && (state.coordinator || (revise && !['queued', 'running'].includes(session.delegation.state)) || (!revise && !providerCaps(session.activeProvider).steer))) || !!session.queueSending || (action !== 'remove' && (message.uncertain || (action !== 'edit' && (!ready || (state.busy && (state.busy !== selectedId || (!revise && (!session.turnId || session.compacting))))))));
-      button.title = action === 'edit' ? 'Move back to the composer to edit and resend' : button.getAttribute('aria-label');
+      button.disabled = (action === 'steer' && (revise && !['queued', 'running'].includes(session.delegation.state))) || !!session.queueSending || (action !== 'remove' && (message.uncertain || (action !== 'edit' && (!ready || (state.busy && (state.busy !== selectedId || (!revise && ((!session.turnId && providerCaps(session.activeProvider).steer && !state.coordinator) || session.compacting))))))));
+      button.title = action === 'edit' ? 'Move back to the composer to edit and resend'
+        : action === 'steer' && !revise && !providerCaps(session.activeProvider).steer
+          ? session.activeProvider === 'claude-cli' ? 'Send to Claude while it is working'
+            : 'Stop the current turn, then send this message with conversation context'
+          : button.getAttribute('aria-label');
       button.onclick = async () => {
         try {
           if (action === 'edit' && ($('#prompt').value.trim() || attachedImages().length || attachedFiles().length || readingImages || submitting)) throw new Error('Send or clear your current draft before editing a queued message.');
@@ -1157,7 +1192,7 @@ function render() {
     }
     $('#message-queue').append(row);
   }
-  $('#send').disabled = (!ready && !slashCommand($('#prompt').value)) || changingPermissions || submitting || readingImages || (!$('#prompt').value.trim() && !attachedImages().length && !attachedFiles().length);
+  $('#send').disabled = (!ready && !slashCommand($('#prompt').value)) || !!session?.queueSending || !!session?.compacting || (state.busy && state.busy !== selectedId && !state.coordinator) || changingPermissions || submitting || readingImages || (!$('#prompt').value.trim() && !attachedImages().length && !attachedFiles().length);
   renderImages();
   $('#working').hidden = !state.busy || state.busy !== selectedId || !!session?.pendingMessage;
   const turnError = state.busy === selectedId ? '' : session?.error || '';
@@ -1765,7 +1800,8 @@ function renderSendButton() {
   const hasDraft = !!$('#prompt').value.trim() || attachedImages().length > 0 || attachedFiles().length > 0;
   const busyHere = !!selectedId && state?.busy === selectedId;
   $('#attach-files').disabled = readingImages || submitting || changingPermissions;
-  $('#attach-files').textContent = readingImages ? '…' : '+';
+  $('#attach-files').innerHTML = readingImages ? '…'
+    : '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
   $('#attach-files').title = readingImages ? 'Reading attachments…' : 'Attach text/code files, PDF, DOCX or images';
   $('#attach-files').setAttribute('aria-busy', String(readingImages));
   $('#send').hidden = busyHere && !hasDraft;
@@ -1774,6 +1810,7 @@ function renderSendButton() {
   $('#send').setAttribute('aria-label', $('#send').title);
   const checking = (current()?.tasks || []).some(task => task.state === 'checking' || task.state === 'correcting');
   $('#stop').hidden = current()?.delegation?.state === 'queued' ? false : checking ? false : !busyHere || hasDraft;
+  resizeComposer();
 }
 
 async function updatePreview() {
@@ -1856,11 +1893,16 @@ function renderRequest() {
         : 'Codex allows this action again without asking for the rest of this conversation.';
       session.onclick = () => finish({ decision: 'acceptForSession' }); actions.append(session);
     }
-    if (!unsupported) { const allow = element('button', 'primary', 'Allow once'); allow.onclick = () => finish({ decision: 'accept' }); actions.append(allow); }
+    if (!unsupported) {
+      const allow = element('button', 'primary', 'Allow once');
+      allow.autofocus = true;
+      allow.onclick = () => finish({ decision: 'accept' });
+      actions.append(allow);
+    }
     content.append(actions);
   }
-  const stop = element('button', 'icon-button', 'Stop task'); stop.onclick = () => api.stop(reviewingExecution ? session?.id || execution.conversationId : selectedId).catch(notify); content.append(stop);
   if (!dialog.open) dialog.showModal();
+  content.querySelector('[autofocus]')?.focus({ preventScroll: true });
 }
 
 function slashCommand(text) {
@@ -2083,6 +2125,12 @@ for (const [name, command] of Object.entries(COMMANDS)) {
 }
 $('#commands-help').onclick = () => runCommand('help');
 $('#clear-conversation').onclick = () => runCommand('clear');
+$('#composer').addEventListener('click', event => {
+  if (event.target.matches('#composer, .composer-bottom, .composer-controls, #image-previews')) {
+    $('#prompt').focus({ preventScroll: true });
+  }
+});
+
 $('#composer').addEventListener('submit', async event => {
   event.preventDefault();
   if (submitting || readingImages || changingPermissions) return;
@@ -2243,9 +2291,7 @@ $('#settings').onclick = async () => {
   $('#settings-quick').value = state.settings.jevQuickAnswers === false ? 'off' : 'on';
   $('#settings-jev-compare').value = state.settings.jevCompare === true ? 'on' : 'off';
   $('#settings-wiki-check').value = state.settings.wikiAssessment === true ? 'on' : 'off';
-  $('#settings-font').value = String(state.settings.fontScale || 100);
   $('#settings-background-usage').value = String(state.settings.backgroundUsageLimit || 90);
-  renderQuotaSettings();
   $('#settings-routing').onchange();
   $('#jev-key').value = '';
   $('#jev-result').textContent = '';
@@ -2259,27 +2305,18 @@ $('#settings').onclick = async () => {
   loadRemoteSettings();
 };
 
-function renderQuotaSettings() {
-  const windows = Object.values(state.providerQuotas?.codex || {}).filter(window =>
-    Number.isFinite(window.usedPercent) && (!window.resetsAt || window.resetsAt > Date.now()));
-  const reported = windows.length ? `Last ChatGPT report: ${windows.map(window => window.usedPercent + '%').join(' / ')} used.` : 'ChatGPT allowance is unknown.';
-  const claude = Object.values(state.providerQuotas?.['claude-cli'] || {}).filter(window =>
-    state.claude?.quotaAccountKey && window.account === state.claude.quotaAccountKey && Number.isFinite(window.usedPercent) &&
-    (!window.resetsAt || window.resetsAt > Date.now()));
-  const native = claude.length ? `Last Claude Code report: ${claude.map(window => `${window.label}: ${window.usedPercent}%`).join(' / ')} used.` : 'Claude Code allowance is unknown.';
-  $('#background-usage-detail').textContent = `Pause new background turns at ${state.settings.backgroundUsageLimit || 90}% of a reported allowance. Active turns may finish. ${reported} ${native} Other providers’ quotas are unknown.`;
-}
-
 async function loadRunnerSettings() {
   const control = $('#settings-runner-start');
+  $('#runner-exit-row').hidden = !!api.remote;
+  $('#settings-runner-exit').disabled = true;
   control.disabled = true;
   try {
     const info = await api.runnerInfo();
+    $('#settings-runner-exit').value = info.onExit || 'tray';
+    $('#settings-runner-exit').disabled = !!api.remote;
     control.value = info.autostart.enabled ? 'on' : 'off';
     control.disabled = api.remote || !info.autostart.supported;
-    $('#runner-status').textContent = api.remote ? 'Connected to your runner. Closing this tab keeps jobs running.'
-      : `${info.status}. Closing the window keeps work running. Reopen Harness or quit the runner from its tray icon.`;
-  } catch { $('#runner-status').textContent = 'Runner status unavailable. Reopen Harness to reconnect.'; }
+  } catch (error) { notify(error); }
 }
 
 let remoteInfo = null;
@@ -2321,6 +2358,15 @@ $('#remote-reset-link').onclick = async () => {
   catch (error) { notify(error); }
 };
 
+$('#settings-runner-exit').onchange = async event => {
+  const control = event.target;
+  control.disabled = true;
+  try {
+    await api.runnerOnExit(control.value);
+    $('#settings-save-status').textContent = 'Saved';
+  } catch (error) { notify(error); }
+  finally { await loadRunnerSettings(); }
+};
 $('#settings-runner-start').onchange = async event => {
   const control = event.target;
   control.disabled = true;
@@ -2426,9 +2472,6 @@ async function showBenchmarks() {
   $('#benchmark-refresh').disabled = !!state.busy || !workers.length;
   $('#benchmark-reset').disabled = !!state.busy;
 }
-$('#benchmark-open').onclick = async () => {
-  try { await showBenchmarks(); $('#benchmark-dialog').showModal(); } catch (error) { notify(error); }
-};
 $('#benchmark-import').onclick = async () => {
   try {
     const candidate = await api.benchmarkImport();
@@ -2463,7 +2506,7 @@ $('#benchmark-refresh').onclick = async () => {
     applyState(await api.bootstrap()); await selectAgent(agent.id);
     const session = await api.create(workspace, 'workspace-write');
     applyState(await api.settings({ mode }));
-    $('#benchmark-dialog').close(); $('#settings-dialog').close();
+    $('#settings-dialog').close();
     await selectSession(session.id);
     drafts.set(session.id, prompt); $('#prompt').value = prompt; updatePreview(); $('#prompt').focus();
     notify('Refresh task prepared. Review the selected worker and press Send when ready.');
@@ -2545,7 +2588,7 @@ async function saveSetting(control, key, value, agentId = selectedAgent) {
   } catch (error) {
     if (agentId === selectedAgent) {
       const saved = ((key === 'workspace' || key === 'access') ? current()?.[key] ?? state.settings[key] : state.settings[key])
-        ?? { fontScale: 100, backgroundUsageLimit: 90, effortCap: 'high', contextRanking: 'local', toolSelection: 'off', jevQuickAnswers: true, jevCompare: false, wikiAssessment: false }[key];
+        ?? { backgroundUsageLimit: 90, effortCap: 'high', contextRanking: 'local', toolSelection: 'off', jevQuickAnswers: true, jevCompare: false, wikiAssessment: false }[key];
       control.value = typeof value === 'boolean' ? (saved ? 'on' : 'off') : String(saved ?? '');
       control.onchange?.();
     }
@@ -2558,7 +2601,7 @@ async function saveSetting(control, key, value, agentId = selectedAgent) {
 }
 const settingsFields = {
   'settings-background-usage': 'backgroundUsageLimit',
-  'settings-font': 'fontScale', 'settings-access': 'access', 'settings-routing': 'routing',
+  'settings-access': 'access', 'settings-routing': 'routing',
   'settings-router-preset': 'routerPreset', 'settings-effort-cap': 'effortCap',
   'settings-context': 'contextRanking', 'settings-tools': 'toolSelection',
   'settings-quick': 'jevQuickAnswers', 'settings-jev-compare': 'jevCompare', 'settings-wiki-check': 'wikiAssessment',
@@ -2566,7 +2609,7 @@ const settingsFields = {
 $('#settings-form').addEventListener('change', event => {
   const control = event.target, key = settingsFields[control.id];
   if (!key) return;
-  const value = ['fontScale', 'backgroundUsageLimit'].includes(key) ? Number(control.value)
+  const value = key === 'backgroundUsageLimit' ? Number(control.value)
     : ['jevQuickAnswers', 'jevCompare', 'wikiAssessment'].includes(key) ? control.value === 'on' : control.value;
   saveSetting(control, key, value);
 });
@@ -3035,6 +3078,8 @@ document.querySelectorAll('.settings-tab').forEach(tab => {
     $('#panel-checks').hidden = name !== 'checks';
     $('#panel-wiki').hidden = name !== 'wiki';
     $('#panel-about').hidden = name !== 'about';
+    $('#panel-benchmarks').hidden = name !== 'benchmarks';
+    if (name === 'benchmarks') showBenchmarks().catch(notify);
     if (name === 'wiki') {
       $('#wiki-kind').textContent = '';
       $('#wiki-location').textContent = 'Loading…';

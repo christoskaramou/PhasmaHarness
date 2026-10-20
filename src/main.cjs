@@ -4,6 +4,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { pathToFileURL } = require('node:url');
 const { createRunner, RunnerWindow } = require('./runner.cjs');
+const { configureWindowZoom } = require('./window-zoom.cjs');
 const { confirmations } = require('./confirmations.cjs');
 const { validateSnapshot, pruneSources, MAX_BYTES } = require('./routing/benchmarks.cjs');
 const { Log } = require('./log.cjs');
@@ -32,7 +33,11 @@ function windowBackground() {
   let mode = 'system';
   try { mode = JSON.parse(fs.readFileSync(appearanceFile, 'utf8')); } catch { /* System until the renderer reports a choice. */ }
   const dark = mode === 'dark' || (mode !== 'light' && nativeTheme.shouldUseDarkColors);
-  return dark ? '#151719' : '#ffffff';
+  return dark ? '#191919' : '#ffffff';
+}
+function windowControls() {
+  const color = windowBackground();
+  return { color, symbolColor: color === '#ffffff' ? '#202020' : '#ededed', height: 40 };
 }
 process.on('uncaughtExceptionMonitor', error => log.error('Uncaught exception', { message: error?.message, stack: String(error?.stack || '').slice(0, 1500) }));
 process.on('unhandledRejection', reason => log.error('Unhandled rejection', { message: reason?.message || String(reason) }));
@@ -71,10 +76,22 @@ async function start() {
     width: 1320, height: 900, minWidth: 840, minHeight: 640,
     resizable: true, maximizable: true,
     title: 'Phasma Harness', backgroundColor: windowBackground(), show: false,
-    ...(process.platform === 'win32' ? { icon: path.join(__dirname, '..', 'ui', 'icon.ico') } : {}),
+    ...(process.platform === 'win32' ? {
+      icon: path.join(__dirname, '..', 'ui', 'icon.ico'),
+      titleBarStyle: 'hidden', titleBarOverlay: windowControls(),
+    } : {}),
     autoHideMenuBar: true,
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
+  configureWindowZoom(window.webContents, path.join(app.getPath('userData'), 'zoom.json'),
+    error => log.warn('Could not save window zoom', { message: error.message }));
+  const updateWindowAppearance = () => {
+    if (window.isDestroyed()) return;
+    window.setBackgroundColor(windowBackground());
+    if (process.platform === 'win32') window.setTitleBarOverlay(windowControls());
+  };
+  nativeTheme.on('updated', updateWindowAppearance);
+  window.once('closed', () => nativeTheme.removeListener('updated', updateWindowAppearance));
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
@@ -85,6 +102,7 @@ async function start() {
     if (!window.isDestroyed()) window.webContents.send('voice', event);
   });
   desktop = new RunnerWindow({ app, window, Tray, Menu, icon: path.join(__dirname, '..', 'ui', 'icon.ico'),
+    settingsFile: path.join(app.getPath('userData'), 'runner-window.json'),
     isQuitting: () => quitting || !!closing, quit: () => app.quit(),
     status: () => agents.allControllers().some(worker => worker.requests.size) ? 'Needs attention'
       : agents.busy ? 'Work in progress' : 'Runner ready',
@@ -121,12 +139,13 @@ async function start() {
     });
   };
   handle('runnerInfo', () => desktop.info());
+  handle('runnerOnExit', value => desktop.setOnExit(value));
   handle('runnerAutostart', enabled => desktop.setAutostart(enabled));
   handle('quitRunner', () => { setImmediate(() => app.quit()); });
   handle('setAppearance', mode => {
     if (!['system', 'dark', 'light'].includes(mode)) throw new Error('Invalid appearance.');
     fs.writeFileSync(appearanceFile, JSON.stringify(mode));
-    window.setBackgroundColor(windowBackground());
+    updateWindowAppearance();
   });
   const localConfirmation = confirmations(window);
   const confirmation = { ask: options => browserRequest.getStore()?.ask(options) || localConfirmation.ask(options),

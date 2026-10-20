@@ -29,6 +29,8 @@ app.whenReady().then(async () => {
   const imageRequests = [];
   ipcMain.handle('image', (_event, ...args) => { imageRequests.push(args); return 'data:image/jpeg;base64,/9j/4AAQ'; });
   ipcMain.handle('setAppearance', () => {});
+  ipcMain.handle('benchmarkData', () => ({ data: { records: [] },
+    summary: { records: 0, matched: 0, workers: 0, updatedAt: 'fixture', sources: [] } }));
   const sent = [];
   let failSend = false;
   ipcMain.handle('create', (_event, workspace, access) => controller.create(workspace, access));
@@ -65,9 +67,10 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle('providerKey', (_event, id, key) => { if (key) providerKeys.set(id, key); else providerKeys.delete(id); return controller.snapshot(); });
   ipcMain.handle('appInfo', () => ({ version: '0.1.0', packaged: true }));
-  let runnerStart = false;
-  ipcMain.handle('runnerInfo', () => ({ status: 'Runner ready', running: true, background: true,
+  let runnerStart = false, runnerExit = 'tray';
+  ipcMain.handle('runnerInfo', () => ({ status: 'Runner ready', running: true, background: true, onExit: runnerExit,
     autostart: { supported: true, enabled: runnerStart } }));
+  ipcMain.handle('runnerOnExit', (_event, value) => (runnerExit = value));
   ipcMain.handle('runnerAutostart', (_event, enabled) => ({ supported: true, enabled: (runnerStart = enabled) }));
   let browserAccess = { running: false, port: 8788, origin: null, connectionURL: null };
   ipcMain.handle('remoteInfo', () => browserAccess);
@@ -99,10 +102,35 @@ app.whenReady().then(async () => {
     return nextModels;
   });
   // Offscreen rendering keeps hidden-window captures current, including modal top layers.
-  const window = new BrowserWindow({ show: false, webPreferences: { preload: path.resolve(__dirname, '../src/preload.cjs'), contextIsolation: true, sandbox: true, backgroundThrottling: false, offscreen: true } });
+  const window = new BrowserWindow({ show: false,
+    ...(process.platform === 'win32' ? { titleBarStyle: 'hidden', titleBarOverlay: { height: 40 } } : {}),
+    webPreferences: { preload: path.resolve(__dirname, '../src/preload.cjs'), contextIsolation: true, sandbox: true, backgroundThrottling: false, offscreen: true } });
+  require('../src/window-zoom.cjs').configureWindowZoom(window.webContents, path.join(root, 'zoom.json'), error => { throw error; });
   const confirmation = confirmations(window);
   ipcMain.handle('answerConfirmation', (_event, id, accepted) => confirmation.answer(id, accepted));
   await window.loadFile(path.resolve(__dirname, '../ui/index.html'));
+  const titlebar = await window.webContents.executeJavaScript(`(() => {
+    const header = document.querySelector('main > header');
+    const action = document.querySelector('#browse-session');
+    const overlay = navigator.windowControlsOverlay;
+    const safe = overlay?.getTitlebarAreaRect();
+    return {
+      draggable: getComputedStyle(header).webkitAppRegion,
+      clickable: getComputedStyle(action).webkitAppRegion,
+      visible: overlay?.visible || false,
+      clear: !overlay?.visible || document.querySelector('.header-actions').getBoundingClientRect().right <= safe.right
+    };
+  })()`);
+  assert.equal(titlebar.draggable, 'drag');
+  assert.equal(titlebar.clickable, 'no-drag');
+  assert.equal(titlebar.clear, true, 'header actions stay out of the native window controls');
+  if (process.platform === 'win32') assert.equal(titlebar.visible, true);
+  console.log('Native titlebar overlay, drag region and header safe area passed');
+  assert.equal(window.webContents.getZoomFactor(), 1.15, 'new windows default to 115% whole-page zoom');
+  for (let i = 0; i < 3; i++) window.webContents.emit('before-input-event', { preventDefault() {} },
+    { type: 'keyDown', control: true, key: '-' });
+  await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#settings-font") === null'), true);
   // A cold Windows runner can spend 10+ seconds starting Chromium before any checks run.
   deadline.refresh(); phase = 'settings checks';
   console.log(`Renderer ready after ${Date.now() - startedAt} ms; starting UI checks`);
@@ -113,6 +141,166 @@ app.whenReady().then(async () => {
   })()`);
   assert.equal(result.banner, '');
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#provider-connection').hidden"), false, 'startup shows connection progress');
+  const sidebarSettings = await window.webContents.executeJavaScript(`(() => {
+    const button = document.querySelector('#settings');
+    const icon = button.querySelector('svg');
+    const width = icon.getBoundingClientRect().width;
+    icon.setAttribute('width', '1em');
+    const previousWidth = icon.getBoundingClientRect().width;
+    icon.setAttribute('width', '.8em');
+    return { text: button.textContent.trim(), name: button.getAttribute('aria-label'), title: button.title,
+      ratio: width / previousWidth,
+      shieldShift: getComputedStyle(document.querySelector('.composer-access svg')).transform };
+  })()`);
+  assert.equal(sidebarSettings.text, '');
+  assert.equal(sidebarSettings.name, 'Settings');
+  assert.equal(sidebarSettings.title, 'Settings');
+  assert.ok(Math.abs(sidebarSettings.ratio - .8) < .01, 'sidebar gear is 20% smaller: ' + JSON.stringify(sidebarSettings));
+  assert.equal(sidebarSettings.shieldShift, 'matrix(1, 0, 0, 1, -4, 0)', 'shield moves closer to plus');
+  const shieldFocus = await window.webContents.executeJavaScript(`(() => {
+    const access = document.querySelector('#permissions');
+    const disabled = access.disabled;
+    access.disabled = false;
+    access.focus();
+    const result = {
+      focused: document.activeElement === access,
+      outline: getComputedStyle(access.parentElement).outlineStyle,
+      stroke: getComputedStyle(access.parentElement.querySelector('svg')).strokeWidth
+    };
+    access.blur();
+    access.disabled = disabled;
+    return result;
+  })()`);
+  assert.deepEqual(shieldFocus, { focused: true, outline: 'none', stroke: '3px' },
+    'focused access selector highlights only the shield, never a surrounding box');
+    const composerFocus = await window.webContents.executeJavaScript(`(() => {
+    const prompt = document.querySelector('#prompt');
+    return ['#composer', '.composer-bottom', '.composer-controls'].every(selector => {
+      prompt.blur();
+      document.querySelector(selector).click();
+      return document.activeElement === prompt;
+    });
+  })()`);
+  assert.ok(composerFocus, 'clicking composer whitespace focuses the text input');
+  const composerLayout = await window.webContents.executeJavaScript(`(() => {
+    const prompt = document.querySelector('#prompt');
+    const root = document.documentElement;
+    const savedScale = root.style.getPropertyValue('--font-scale');
+    const savedPrompt = prompt.value;
+    const results = [];
+  for (const scale of [1, 1.5]) {
+      root.style.setProperty('--font-scale', scale);
+      const line = parseFloat(getComputedStyle(prompt).lineHeight);
+      prompt.value = ''; resizeComposer();
+      const empty = prompt.getBoundingClientRect().height;
+      prompt.value = 'first\\nsecond\\nthird'; resizeComposer();
+      const three = prompt.getBoundingClientRect().height;
+      prompt.value = 'wrapped content '.repeat(500); resizeComposer();
+      const capped = prompt.getBoundingClientRect().height;
+      const scrolls = prompt.scrollHeight > prompt.clientHeight;
+      prompt.value = 'short'; resizeComposer();
+      const shrunk = prompt.getBoundingClientRect().height;
+      const controls = ['#attach-files', '.composer-access', '#dictate', '.chat-options > summary', '#send']
+        .map(selector => document.querySelector(selector).getBoundingClientRect());
+      const centers = controls.map(rect => rect.top + rect.height / 2);
+      const inputRect = prompt.getBoundingClientRect();
+      centers.push(inputRect.top + inputRect.height / 2);
+      const order = ['#attach-files', '.composer-access', '#prompt', '#chat-options', '#dictate', '#send']
+        .map(selector => document.querySelector(selector).getBoundingClientRect());
+      const ordered = order.every((rect, i) => !i || rect.left >= order[i - 1].right - 1);
+      const access = document.querySelector('#permissions');
+      const wasFull = access.classList.contains('full-access');
+      access.classList.add('full-access');
+      const red = getComputedStyle(access.parentElement).color.match(/\\d+/g).map(Number);
+      access.classList.toggle('full-access', wasFull);
+      const inlineBottom = document.querySelector('#composer').getBoundingClientRect().bottom - controls[0].bottom;
+      const inlineWidth = prompt.getBoundingClientRect().width;
+      prompt.value = 'W'.repeat(Math.ceil(inlineWidth / measure.measureText('W').width) + 1);
+      resizeComposer();
+      const expanded = document.querySelector('#composer').classList.contains('composer-expanded');
+      const aboveControls = prompt.getBoundingClientRect().bottom <= document.querySelector('.composer-controls').getBoundingClientRect().top;
+      const fullWidth = Math.abs(prompt.getBoundingClientRect().width - document.querySelector('.composer-bottom').clientWidth) < 1;
+      const bottomOffset = document.querySelector('#composer').getBoundingClientRect().bottom - document.querySelector('#attach-files').getBoundingClientRect().bottom;
+      const shield = getComputedStyle(document.querySelector('.composer-access'));
+      const bareShield = parseFloat(shield.borderTopWidth) === 0 && shield.backgroundColor === 'rgba(0, 0, 0, 0)';
+      prompt.value = 'short'; resizeComposer();
+      const collapsed = !document.querySelector('#composer').classList.contains('composer-expanded');
+      const icons = ['#attach-files svg', '#dictate svg', '#send svg'].map(selector => {
+        const icon = document.querySelector(selector);
+        const rect = icon.getBoundingClientRect();
+        const button = icon.closest('button').getBoundingClientRect();
+        return Math.abs(rect.top + rect.height / 2 - button.top - button.height / 2);
+      });
+      results.push({ expanded, aboveControls, fullWidth, collapsed, bareShield, bottomDrift: Math.abs(bottomOffset - inlineBottom), scale, line, empty, three, capped, scrolls, shrunk, ordered, redAccess: red[0] > red[1] && red[0] > red[2],
+        centerSpread: Math.max(...centers) - Math.min(...centers),
+        heightSpread: Math.max(...controls.slice(1).map(r => r.height)) - Math.min(...controls.slice(1).map(r => r.height)),
+        iconOffset: Math.max(...icons) });
+    }
+    prompt.value = savedPrompt; resizeComposer();
+    if (savedScale) root.style.setProperty('--font-scale', savedScale);
+    else root.style.removeProperty('--font-scale');
+    return results;
+  })()`);
+  for (const result of composerLayout) {
+    assert.ok(Math.abs(result.empty - result.line) < 1, 'empty composer is one line');
+    assert.ok(Math.abs(result.three - 3 * result.line) < 1, 'newlines grow the composer');
+    assert.ok(Math.abs(result.capped - 6 * result.line) < 1, 'wrapped text caps at six lines');
+    assert.equal(result.scrolls, true);
+    assert.ok(Math.abs(result.shrunk - result.line) < 1, 'deleting text shrinks the composer');
+    assert.equal(result.expanded && result.aboveControls && result.fullWidth, true, 'overflow moves text to a full-width row above controls');
+    assert.equal(result.collapsed, true, 'short drafts return to the inline row');
+    assert.equal(result.bareShield, true, 'access shield has no outer box');
+    assert.ok(result.bottomDrift < 1, 'controls stay anchored to the composer bottom');
+    assert.equal(result.ordered, true, 'composer controls and input form one ordered row');
+    assert.equal(result.redAccess, true, 'full access is shown in red');
+    assert.ok(result.centerSpread < 1, 'all composer controls and input share a vertical center');
+    assert.ok(result.heightSpread < 1, 'composer controls except plus share the smaller height');
+    assert.ok(result.iconOffset < 1, 'icons are centered inside their buttons');
+  }
+  console.log('Composer growth, six-line limit and control alignment passed at both font scales');
+  const composerScroll = await window.webContents.executeJavaScript(`(async () => {
+    const conversation = document.querySelector('#conversation');
+    const prompt = document.querySelector('#prompt');
+    const saved = prompt.value;
+    const content = document.createElement('div');
+    content.style.height = '2000px';
+    conversation.append(content);
+    const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    prompt.value = '';
+    await settle();
+    conversation.scrollTo({ top: conversation.scrollHeight, behavior: 'instant' });
+    await settle();
+    const gap = () => conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight;
+    const beforeHeight = conversation.clientHeight;
+    prompt.value = 'long draft '.repeat(500);
+    await settle();
+    const grownGap = gap();
+    const shrankViewport = conversation.clientHeight < beforeHeight;
+    const noOverlap = conversation.getBoundingClientRect().bottom <= document.querySelector('.composer-area').getBoundingClientRect().top + 1;
+    prompt.value = '';
+    await settle();
+    const shrunkGap = gap();
+    conversation.scrollTo({ top: 100, behavior: 'instant' });
+    await settle();
+    const historyTop = conversation.scrollTop;
+    prompt.value = 'long draft '.repeat(500);
+    await settle();
+    const historyAfterGrowth = conversation.scrollTop;
+    prompt.value = '';
+    await settle();
+    const historyAfterShrink = conversation.scrollTop;
+    content.remove();
+    prompt.value = saved;
+    await settle();
+    return { grownGap, shrunkGap, shrankViewport, noOverlap, historyTop, historyAfterGrowth, historyAfterShrink };
+  })()`);
+  assert.equal(composerScroll.shrankViewport, true);
+  assert.equal(composerScroll.noOverlap, true);
+  assert.ok(Math.abs(composerScroll.grownGap) < 2, 'composer growth keeps the newest chat visible');
+  assert.ok(Math.abs(composerScroll.shrunkGap) < 2, 'composer shrink keeps the newest chat visible');
+  assert.ok(Math.abs(composerScroll.historyAfterGrowth - composerScroll.historyTop) < 2, 'growth preserves history reading position');
+  assert.ok(Math.abs(composerScroll.historyAfterShrink - composerScroll.historyTop) < 2, 'shrink preserves history reading position');
+  console.log('Composer resize preserves bottom-following and history reading position');
   const quietComposer = await window.webContents.executeJavaScript(`(() => {
     const area = document.querySelector('.composer-area');
     return {
@@ -730,28 +918,14 @@ app.whenReady().then(async () => {
     control.dispatchEvent(new Event('change', { bubbles: true }));
     await settingsWrites.catch(() => {}); await new Promise(r => setTimeout(r, 10));
   })()`);
-  await changeSetting('settings-font', '115');
-  assert.equal(controller.data.settings.fontScale, 115);
+
+
   await changeSetting('settings-background-usage', '95');
   assert.equal(controller.data.settings.backgroundUsageLimit, 95);
-  assert.match(await window.webContents.executeJavaScript('document.querySelector("#background-usage-detail").textContent'), /at 95%/);
   await changeSetting('settings-background-usage', '0');
   assert.equal(controller.data.settings.backgroundUsageLimit, 95, 'an invalid threshold leaves the saved reserve intact');
   await changeSetting('settings-background-usage', '90');
-  const nativeQuotaText = await window.webContents.executeJavaScript(`(() => {
-    const previousClaude = state.claude, previousQuotas = state.providerQuotas;
-    state.claude = { ...state.claude, quotaAccountKey: 'native-fixture' };
-    state.providerQuotas = { ...state.providerQuotas, 'claude-cli': {
-      current: { account: 'native-fixture', label: 'Opus weekly', usedPercent: 91, resetsAt: Date.now() + 3600000 },
-      previous: { account: 'old-native-fixture', label: 'Old account', usedPercent: 99, resetsAt: null },
-    } };
-    renderQuotaSettings();
-    const text = document.querySelector('#background-usage-detail').textContent;
-    state.claude = previousClaude; state.providerQuotas = previousQuotas; renderQuotaSettings();
-    return text;
-  })()`);
-  assert.match(nativeQuotaText, /Claude Code report: Opus weekly: 91%/);
-  assert.doesNotMatch(nativeQuotaText, /Old account|99%/);
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#background-usage-detail')"), null);
   const originalWorkspace = controller.data.settings.workspace;
   await window.webContents.executeJavaScript("document.querySelector('#settings-browse').onclick()");
   assert.equal(controller.data.settings.workspace, fs.realpathSync(root), 'choosing a workspace saves immediately');
@@ -761,17 +935,47 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').open"), true);
   await changeSetting('settings-context', 'jev');
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-context').value"), 'local', 'a rejected option returns to the saved value');
-  assert.equal(controller.data.settings.fontScale, 115, 'a failed save does not undo another setting');
+
   await changeSetting('settings-quick', 'off');
   assert.equal(controller.data.settings.jevQuickAnswers, false, 'the write queue recovers after rejection');
-  await changeSetting('settings-font', '100');
+
   await changeSetting('settings-quick', 'on');
   await window.webContents.executeJavaScript(`(async () => {
     document.querySelector('#settings-close').click(); await new Promise(r => setTimeout(r, 20));
     document.querySelector('#settings').click(); await new Promise(r => setTimeout(r, 100));
   })()`);
-  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-font').value"), '100');
+
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-close').textContent"), 'Close');
+  const settingsLayout = await window.webContents.executeJavaScript(`(async () => {
+    document.querySelector('#tab-benchmarks').click();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const panel = document.querySelector('#panel-benchmarks');
+    const result = { visible: !panel.hidden, loaded: document.querySelector('#benchmark-status').textContent.includes('fixture'),
+      fits: panel.scrollWidth <= panel.clientWidth };
+    document.querySelector('#tab-general').click();
+    const input = document.querySelector('#settings-background-usage');
+    const compact = input.getBoundingClientRect().height;
+    input.style.paddingBlock = '10px';
+    result.ratio = compact / input.getBoundingClientRect().height;
+    input.style.removeProperty('padding-block');
+    return result;
+  })()`);
+  assert.ok(settingsLayout.visible && settingsLayout.loaded && settingsLayout.fits, 'benchmark tab loads inside settings');
+  assert.ok(Math.abs(settingsLayout.ratio - .75) < .02, 'number field is one-quarter shorter');
+  const compactGear = await window.webContents.executeJavaScript(`(() => {
+    const button = document.querySelector('#settings');
+    return button.getBoundingClientRect().width < 50;
+  })()`);
+  assert.ok(compactGear, 'sidebar gear hit area fits the icon');
+  for (const choice of ['close', 'tray']) {
+    await window.webContents.executeJavaScript(`(async () => {
+      const select = document.querySelector('#settings-runner-exit');
+      select.value = '${choice}';
+      await select.onchange({ target: select });
+    })()`);
+    assert.equal(runnerExit, choice);
+    assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-runner-exit').value"), choice);
+  }
   // Incomplete checks survive tab changes and block Close, the X and Escape until fixed or removed.
   await window.webContents.executeJavaScript(`document.querySelector('#tab-checks').click(); document.querySelector('#checks-add').click();
     document.querySelector('#checks-list .check-name').value = 'Auto saved check';
@@ -893,12 +1097,13 @@ app.whenReady().then(async () => {
       await new Promise(r => setTimeout(r, 50));
       const panel = document.querySelector('.chat-options-panel'), edge = panel.getBoundingClientRect().right;
       const result = { scrolls: panel.scrollWidth > panel.clientWidth,
+        usageVisible: usage.scrollWidth <= usage.clientWidth + 1 && usage.scrollHeight <= usage.clientHeight + 1 && getComputedStyle(usage).whiteSpace === 'normal',
         wider: [...panel.querySelectorAll('*')].filter(node => node.getBoundingClientRect().right > edge + 1).map(node => node.id || node.className || node.tagName).slice(0, 6) };
       [usage.hidden, usage.textContent] = saved;
       if (savedScale) root.style.setProperty('--font-scale', savedScale); else root.style.removeProperty('--font-scale');
       return result;
     })()`);
-    assert.deepEqual(sideways, { scrolls: false, wider: [] }, `Options panel scrolls sideways at font scale ${scale}: ` + JSON.stringify(sideways));
+    assert.deepEqual(sideways, { scrolls: false, usageVisible: true, wider: [] }, `Options panel scrolls sideways at font scale ${scale}: ` + JSON.stringify(sideways));
   }
   await window.webContents.executeJavaScript(`(async () => {
     document.documentElement.style.setProperty('--font-scale', '1.3');
@@ -1281,7 +1486,7 @@ app.whenReady().then(async () => {
     const overview = document.querySelector('#agents-overview').getBoundingClientRect();
     const before = main.getBoundingClientRect().top; list.scrollTop = list.scrollHeight;
     return { scrolls: list.scrollHeight > list.clientHeight, room: list.clientHeight > 100, pinned: main.getBoundingClientRect().top === before,
-      accessFits: access.getBoundingClientRect().width >= parseFloat(access.style.width) - 1,
+      accessFits: access.getBoundingClientRect().right <= access.parentElement.getBoundingClientRect().right,
       headingFits: roster.right <= overview.left || roster.bottom <= overview.top,
       controlsFit: add.bottom <= main.getBoundingClientRect().top && main.getBoundingClientRect().bottom <= list.getBoundingClientRect().top && add.bottom <= innerHeight };
   })()`);
@@ -1634,7 +1839,7 @@ app.whenReady().then(async () => {
   background[0].chat.activeProvider = 'native:deepseek';
   await publish();
   await window.webContents.executeJavaScript('selectAgent(' + JSON.stringify(background[0].worker.agentId) + ')');
-  assert.equal(await window.webContents.executeJavaScript('document.querySelector(".queue-steer").textContent'), 'Apply now');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector(".queue-steer").textContent'), 'Send now');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector(".queue-steer").disabled'), false);
   assert.match(await window.webContents.executeJavaScript('document.querySelector("#messages").textContent'), /Assignment update from You · Received · revision 2/);
   updateReceipt.amendment.state = 'applied';
@@ -1972,7 +2177,11 @@ app.whenReady().then(async () => {
   assert.equal(deferred, true, 'background approvals can be deferred through Escape');
   assert.equal(execution.requests.size, 1, 'deferring an approval does not silently allow or reject it');
   await window.webContents.executeJavaScript(`[...document.querySelectorAll('#job-activity-list button')].find(button => button.textContent === 'Review').click();
-    [...document.querySelectorAll('#request-content button')].find(button => button.textContent === 'Allow once').click(); true`);
+    true`);
+  assert.equal(await window.webContents.executeJavaScript('document.activeElement.textContent'), 'Allow once');
+  window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+  window.webContents.sendInputEvent({ type: 'char', keyCode: '\r' });
+  window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
   await until(() => answers.length === 1, 'the background approval reached its controller');
   assert.deepEqual(answers[0], { id: 7, answer: { decision: 'accept' }, agentId: splitProfile.id, contextId: assignment.id });
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), 'Keep my question');
@@ -2183,6 +2392,44 @@ app.whenReady().then(async () => {
   assert.deepEqual(routineUi, { elements: [], repeat: 0, bridge: true, api: [] }, 'no routine dialog, button, status row, Repeat action or IPC remains');
   console.log('Routines have no UI or IPC surface passed');
   await documents.close();
+  await window.webContents.executeJavaScript(`document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
+    document.documentElement.style.setProperty('--font-scale', '1');
+    document.querySelector('#prompt').value = 'Zoom check'; renderSendButton(); true`);
+  let zoomPercent = 100;
+  for (const percent of [50, 115, 300]) {
+    while (zoomPercent !== percent) {
+      const direction = percent > zoomPercent ? 5 : -5;
+      window.webContents.emit('before-input-event', { preventDefault() {} },
+        { type: 'keyDown', control: true, key: direction > 0 ? '+' : '-' });
+      zoomPercent += direction;
+    }
+    assert.ok(Math.abs(window.webContents.getZoomFactor() - percent / 100) < .001);
+    await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+    const zoomLayout = await window.webContents.executeJavaScript(`(() => {
+      const icons = ['.composer-access svg', '#chat-options summary svg', '#dictate svg', '#send svg']
+        .map(selector => document.querySelector(selector).getBoundingClientRect().width);
+      const send = document.querySelector('#send').getBoundingClientRect();
+      const gear = document.querySelector('#chat-options summary svg').getBoundingClientRect();
+      const microphone = document.querySelector('#dictate svg').getBoundingClientRect();
+      const attach = document.querySelector('#attach-files').getBoundingClientRect();
+      const shield = document.querySelector('.composer-access').getBoundingClientRect();
+      const rightGapDifference = Math.abs((microphone.left - gear.right) - (send.left - microphone.right));
+      const leftGap = shield.left - attach.right;
+      const sizeRatio = send.width / attach.width;
+      const plus = document.querySelector('#attach-files svg').getBoundingClientRect().width;
+      return { icons, plus, rightGapDifference, leftGap, sizeRatio, plusFont: parseFloat(getComputedStyle(document.querySelector('#attach-files')).fontSize),
+        fits: send.right <= innerWidth && send.bottom <= innerHeight,
+        fontScale: document.documentElement.style.getPropertyValue('--font-scale') };
+    })()`);
+    assert.ok(zoomLayout.icons.every(size => Math.abs(size - 15) < .1), 'other composer icons have equal CSS size at every zoom: ' + JSON.stringify(zoomLayout));
+    assert.ok(Math.abs(zoomLayout.plus - zoomLayout.plusFont * .75) < .1, 'plus icon is 25% smaller');
+    assert.equal(zoomLayout.fits, true, 'composer controls remain inside the zoomed window');
+    assert.ok(zoomLayout.rightGapDifference < 1, 'visible gaps between gear, microphone and Send are equal');
+    assert.ok(Math.abs(zoomLayout.leftGap) < 1, 'shield sits next to plus without extra gap');
+    assert.ok(Math.abs(zoomLayout.sizeRatio - 5 / 6) < .01, 'other buttons shrink by one-sixth while plus stays unchanged');
+    assert.equal(zoomLayout.fontScale, '1', 'whole-page zoom does not also multiply text size');
+  }
+  console.log('Whole-interface zoom at 50%, 115%, 300% and consistent composer icons passed');
   agents.closing = true;
   agents.budgets.close();
   for (const c of agents.allControllers()) c.close();

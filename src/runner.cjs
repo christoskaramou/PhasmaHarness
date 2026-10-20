@@ -162,14 +162,25 @@ function autostart(app, enabled, platform = process.platform) {
 }
 
 class RunnerWindow {
-  constructor({ app, window, Tray, Menu, icon, isQuitting, quit, status = () => 'Runner ready', onError = () => {} }) {
+  constructor({ app, window, Tray, Menu, icon, isQuitting, quit, status = () => 'Runner ready', onError = () => {}, settingsFile }) {
     Object.assign(this, { app, window, Menu, isQuitting, quit, status, onError });
+    this.settingsFile = settingsFile;
+    this.onExit = 'tray';
+    if (settingsFile) {
+      try {
+        const saved = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+        if (['close', 'tray'].includes(saved.onExit)) this.onExit = saved.onExit;
+      } catch (error) {
+        if (error.code !== 'ENOENT') onError(error);
+      }
+    }
     this.tray = new Tray(icon);
     this.tray.on('click', () => this.show());
     window.on('close', event => {
       if (isQuitting()) return;
       event.preventDefault();
-      window.hide();
+      if (this.onExit === 'close') quit();
+      else window.hide();
     });
     window.webContents.on('render-process-gone', () => { this.rendererGone = true; });
     this.refresh();
@@ -183,7 +194,17 @@ class RunnerWindow {
     this.window.focus();
   }
 
-  info() { return { running: true, background: true, status: this.status(), autostart: autostart(this.app) }; }
+  info() { return { running: true, background: true, onExit: this.onExit, status: this.status(), autostart: autostart(this.app) }; }
+
+  setOnExit(value) {
+    if (!['close', 'tray'].includes(value)) throw new Error('Choose Close App or Stay on Tray.');
+    if (this.settingsFile) {
+      fs.writeFileSync(this.settingsFile + '.tmp', JSON.stringify({ onExit: value }));
+      fs.renameSync(this.settingsFile + '.tmp', this.settingsFile);
+    }
+    this.onExit = value;
+    return value;
+  }
 
   setAutostart(enabled) {
     const result = autostart(this.app, enabled);

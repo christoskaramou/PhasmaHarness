@@ -187,9 +187,7 @@ if (wrapper) {
     assert.equal(await phone.webContents.executeJavaScript('getComputedStyle(document.querySelector("#remote-settings")).display'), 'none');
     await phone.webContents.executeJavaScript('document.querySelector("#settings-appearance").value="dark"; document.querySelector("#settings-appearance").dispatchEvent(new Event("change",{bubbles:true})); true');
     assert.equal(await phone.webContents.executeJavaScript('document.documentElement.dataset.appearance'), 'dark');
-    await phone.webContents.executeJavaScript('document.querySelector("#settings-font").value="150"; document.querySelector("#settings-font").dispatchEvent(new Event("change",{bubbles:true})); true');
-    await until(() => c.data.settings.fontScale === 150);
-    await until(() => phone.webContents.executeJavaScript('document.documentElement.style.getPropertyValue("--font-scale")==="1.5"'));
+    phone.webContents.setZoomFactor(1.5);
     await phone.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
     const settingsLayout = await phone.webContents.executeJavaScript('(()=>{const d=document.querySelector("#settings-dialog");return {open:d.open,scroll:d.scrollWidth,width:d.clientWidth}})()');
     fs.mkdirSync(path.resolve(__dirname, '../.scratch'), { recursive: true });
@@ -197,9 +195,8 @@ if (wrapper) {
     assert.equal(settingsLayout.open, true);
     assert.ok(settingsLayout.width > 100);
     assert.ok(settingsLayout.scroll <= settingsLayout.width + 1, 'phone Settings remains readable with enlarged text');
-    await phone.webContents.executeJavaScript('document.querySelector("#settings-font").value="100"; document.querySelector("#settings-font").dispatchEvent(new Event("change",{bubbles:true})); document.querySelector("#settings-appearance").value="light"; document.querySelector("#settings-appearance").dispatchEvent(new Event("change",{bubbles:true})); true');
-    await until(() => c.data.settings.fontScale === 100);
-    await until(() => phone.webContents.executeJavaScript('document.documentElement.style.getPropertyValue("--font-scale")==="1"'));
+    await phone.webContents.executeJavaScript('document.querySelector("#settings-appearance").value="light"; document.querySelector("#settings-appearance").dispatchEvent(new Event("change",{bubbles:true})); true');
+    phone.webContents.setZoomFactor(1);
     assert.equal(await phone.webContents.executeJavaScript('document.querySelector("#prompt").value'), 'typing while work runs');
     await phone.webContents.executeJavaScript('document.querySelector("#settings-dialog").close(); true');
     await phone.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');

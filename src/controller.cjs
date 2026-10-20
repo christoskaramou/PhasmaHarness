@@ -584,6 +584,7 @@ class Controller extends EventEmitter {
         ...(agentResult ? { agentResult } : {}), ...(agentMail ? { agentMail } : {}), ...(wikiTaskId ? { wikiTaskId } : {}),
         ...(routineRun ? { routineRun } : {}) });
       this.save(); this.changed();
+      this.flushLiveQueue(session);
       return { queued: true };
     }
     session.queuePaused = false;
@@ -876,6 +877,12 @@ class Controller extends EventEmitter {
         call: (name, args, signal) => this.bridgeTool(session.id, name, args, signal) } : undefined;
       const result = await runtime.run({
         provider: selected.provider, bridge,
+        ...(selected.provider === 'claude-cli' ? { onInput: input => {
+          if (session.submission !== submission) return;
+          this.liveInput = input;
+          this.liveInputMode = session.items.find(item => item.clientId === clientId)?.requestedMode;
+          if (input) setImmediate(() => this.flushLiveQueue(session));
+        } } : {}),
         cwd: this.workspace(session.workspace), model: selected.model, effort: selected.effort || null, effortOption: selected.effortOption, parameterized: selected.parameterized, parameters: selected.parameters,
         prompt, images, instructions: this.workerInstructions(session),
         resume: session[sessionKey], access: session.agentReplyCancelledActive ? 'read-only' : session.access, signal: abort.signal, helpers,
@@ -962,7 +969,7 @@ class Controller extends EventEmitter {
       (session.directContext ||= []).push({ question: text, answer: answer || `[${backend} turn ${outcome.status}]` });
       if (outcome.status === 'completed') session[lastKey] = session.items.at(-1)?.id;
       else { session[lastKey] = null; session[sessionKey] = null; }
-      this.cliAbort = null; turnOver = true;
+      this.cliAbort = null; this.liveInput = null; turnOver = true;
       // An approval still open when the CLI turn ends can no longer be used.
       for (const [id, resolve] of this.helperApprovals) if (id.startsWith('cli-')) { resolve(false); this.requests.delete(id); this.helperApprovals.delete(id); this.approvalKeys.delete(id); }
       this.finishTurn(session, submission, outcome);
@@ -998,7 +1005,6 @@ class Controller extends EventEmitter {
   }
 
   async queuedMessage(id, messageId, action) {
-    if (action === 'steer' && this.isCoordinator()) throw new Error('Hub accepts queued follow-ups. Stop its reply to send immediately.');
     const session = this.session(id);
     const message = session.queue?.find(m => m.id === messageId);
     if (!message || session.queueSending) throw new Error('This queued message is no longer available.');
@@ -1006,8 +1012,7 @@ class Controller extends EventEmitter {
       return this.agents.revise(this, session, { jobId: session.delegation.id,
         expectedRevision: message.assignmentRevision || session.delegation.revision || 1, amendmentId: message.id, text: message.text }, message);
     }
-    if (action === 'steer' && !capabilities(session.activeProvider).steer) throw new Error('This CLI supports queued follow-ups here. Stop the turn to send the correction immediately.');
-    if (['send', 'steer'].includes(action) && !this.canReceiveQueued(session, message)) throw new Error('This message belongs to another assignment and waits for the current work to finish.');
+    if (['send', 'steer', 'live'].includes(action) && !this.canReceiveQueued(session, message)) throw new Error('This message belongs to another assignment and waits for the current work to finish.');
     if (action === 'remove' || action === 'edit') {
       if (action === 'edit' && message.uncertain) throw new Error('Check the conversation before resending an unconfirmed message.');
       const previousQueue = session.queue;
@@ -1015,17 +1020,28 @@ class Controller extends EventEmitter {
       try { this.save(); } catch (error) { session.queue = previousQueue; throw error; }
       this.changed(); return action === 'edit' ? message : undefined;
     }
-    if (!['send', 'steer'].includes(action)) throw new Error('Invalid queue action.');
+    if (!['send', 'steer', 'live'].includes(action)) throw new Error('Invalid queue action.');
     if (message.uncertain) throw new Error('Delivery was not confirmed. Check the conversation before removing this message.');
     const turnId = this.activeTurns.get(id);
     const activeTask = (session.tasks || []).find(item => !FINAL.has(item.state));
     if (action === 'steer' && activeTask?.state === 'checking') throw new Error('Checks are running. Stop the task before steering.');
-    if (action === 'steer' && (this.busy !== id || !turnId || session.compacting || this.stopping.has(id))) throw new Error('Wait for an active turn before steering.');
+    if (['steer', 'live'].includes(action) && (this.busy !== id ||
+        (!turnId && capabilities(session.activeProvider).steer && !this.isCoordinator()) ||
+        session.compacting || this.stopping.has(id))) throw new Error('Wait for an active turn before steering.');
     if (action === 'send' && this.busy) throw new Error('Wait for the active turn to finish.');
     if (action === 'send') session.queuePaused = false;
-    session.queueSending = true; this.changed();
+    if (action === 'live' && (!this.liveInput || session.delegation || message.agentReply || activeTask?.state === 'checking'))
+      throw new Error('Live input is unavailable for this turn.');
+    session.queueSending = true;
     try {
-      if (action === 'steer') {
+      this.save(); this.changed();
+      if ((action === 'steer' || action === 'live') && this.liveInput && !this.isCoordinator() && !message.agentReply && !message.wikiTaskId && !message.routineRun) {
+        this.lastSends.delete(session.id);
+        await this.liveInput(message);
+        this.recordLiveMessage(session, message, activeTask);
+      } else if (action === 'steer' && (!capabilities(session.activeProvider).steer || this.isCoordinator())) {
+        await this.restartWithMessage(session, message, activeTask);
+      } else if (action === 'steer') {
         await this.client.call('turn/steer', {
           threadId: session.threadId, expectedTurnId: turnId, clientUserMessageId: message.id,
           input: [{ type: 'text', text: message.text, text_elements: [] }, ...message.images.map(url => ({ type: 'image', url }))],
@@ -1041,7 +1057,40 @@ class Controller extends EventEmitter {
       message.error = error.message;
       message.uncertain = /timed out|closed|disconnect/i.test(error.message);
       throw error;
-    } finally { session.queueSending = false; this.save(); this.changed(); this.settle(session); }
+    } finally { session.queueSending = false; this.save(); this.changed(); this.settle(session); this.flushLiveQueue(session); }
+  }
+
+  flushLiveQueue(session) {
+    if (!this.liveInput || this.busy !== session.id || session.queueSending || session.queuePaused ||
+        session.compacting || this.stopping.has(session.id) || session.delegation || this.isCoordinator()) return;
+    const message = session.queue?.[0];
+    if (!message || message.error || message.uncertain || message.agentReply || message.routineRun || message.wikiTaskId ||
+        (message.mode && message.mode !== this.liveInputMode)) return;
+    this.queuedMessage(session.id, message.id, 'live').catch(() => {});
+  }
+
+  recordLiveMessage(session, message, task) {
+    if (!session.items.some(item => item.clientId === message.id)) session.items.push({
+      id: message.id, clientId: message.id, type: 'userMessage', localOnly: true, createdAt: Date.now(),
+      ...(message.fileMessage ? { fileMessage: message.fileMessage } : {}),
+      content: [{ type: 'text', text: message.text }, ...message.images.map(url => ({ type: 'image', url }))],
+    });
+    if (task?.state === 'running') task.amendments.push({ id: message.id, text: message.text });
+  }
+
+  async restartWithMessage(session, message, task) {
+    const generation = (this.stopGeneration || 0) + 1;
+    if (task?.foreground && this.agents) await this.agents.stopForegroundTask({ controller: this, session, task });
+    else {
+      this.stopping.add(session.id);
+      await this.stop();
+    }
+    const deadline = Date.now() + 15000;
+    while (this.busy === session.id && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
+    if (this.busy) throw new Error('The previous turn has not stopped. Message remains queued.');
+    if (this.stopGeneration !== generation) throw new Error('Send now was cancelled by Stop.');
+    if (this.blockedReason()) throw new Error(this.blockedReason());
+    await this.send({ ...message, id: session.id });
   }
 
   // Claude Code's own /compact on the resumed Claude session; the visible chat stays as is.
@@ -1117,6 +1166,7 @@ class Controller extends EventEmitter {
   }
 
   async stop(budgetId = null) {
+    this.stopGeneration = (this.stopGeneration || 0) + 1;
     if (!this.busy) return;
     this.modelPreparation?.abort();
     const session = this.session(this.busy);

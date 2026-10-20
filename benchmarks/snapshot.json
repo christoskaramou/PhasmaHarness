@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-09-30",
+  "updatedAt": "2026-10-20",
   "records": [
     {
       "source": "aa-critpt",
@@ -5893,20 +5893,15 @@
       "effort": "high",
       "version": "4.3.2",
       "harness": "api",
-      "observedAt": "2026-09-25",
+      "observedAt": "2026-10-20",
       "evaluatedAt": null,
       "origin": "independent",
       "url": "https://artificialanalysis.ai/models/gpt-6-luna-high",
       "metrics": {
-        "score": 32.1,
-        "costUsd": 0.0286,
-        "firstChunkSeconds": 12.48,
-        "firstAnswerSeconds": 12.48,
-        "tokensPerSecond": 123.16,
+        "score": 33,
+        "costUsd": 0.03,
         "inputUsdPerMillion": 0.1,
-        "outputUsdPerMillion": 0.5,
-        "cacheReadUsdPerMillion": 0.01,
-        "cacheWriteUsdPerMillion": 0.125
+        "outputUsdPerMillion": 0.5
       }
     },
     {
@@ -6001,20 +5996,15 @@
       "effort": "low",
       "version": "4.3.2",
       "harness": "api",
-      "observedAt": "2026-09-25",
+      "observedAt": "2026-10-20",
       "evaluatedAt": null,
       "origin": "independent",
       "url": "https://artificialanalysis.ai/models/gpt-6-luna-low",
       "metrics": {
-        "score": 20.9,
+        "score": 22,
         "costUsd": 0.0045,
-        "firstChunkSeconds": 2.43,
-        "firstAnswerSeconds": 2.43,
-        "tokensPerSecond": 124.12,
         "inputUsdPerMillion": 0.1,
-        "outputUsdPerMillion": 0.5,
-        "cacheReadUsdPerMillion": 0.01,
-        "cacheWriteUsdPerMillion": 0.125
+        "outputUsdPerMillion": 0.5
       }
     },
     {
@@ -6109,20 +6099,15 @@
       "effort": "max",
       "version": "4.3.2",
       "harness": "api",
-      "observedAt": "2026-09-25",
+      "observedAt": "2026-10-20",
       "evaluatedAt": null,
       "origin": "independent",
       "url": "https://artificialanalysis.ai/models/gpt-6-luna",
       "metrics": {
-        "score": 37.3,
-        "costUsd": 0.0681,
-        "firstChunkSeconds": 122.98,
-        "firstAnswerSeconds": 122.98,
-        "tokensPerSecond": 128.32,
+        "score": 38,
+        "costUsd": 0.07,
         "inputUsdPerMillion": 0.1,
-        "outputUsdPerMillion": 0.5,
-        "cacheReadUsdPerMillion": 0.01,
-        "cacheWriteUsdPerMillion": 0.125
+        "outputUsdPerMillion": 0.5
       }
     },
     {
@@ -6433,20 +6418,15 @@
       "effort": "xhigh",
       "version": "4.3.2",
       "harness": "api",
-      "observedAt": "2026-09-25",
+      "observedAt": "2026-10-20",
       "evaluatedAt": null,
       "origin": "independent",
       "url": "https://artificialanalysis.ai/models/gpt-6-luna-xhigh",
       "metrics": {
-        "score": 33.9,
-        "costUsd": 0.0417,
-        "firstChunkSeconds": 23.16,
-        "firstAnswerSeconds": 23.16,
-        "tokensPerSecond": 125.8,
+        "score": 35,
+        "costUsd": 0.04,
         "inputUsdPerMillion": 0.1,
-        "outputUsdPerMillion": 0.5,
-        "cacheReadUsdPerMillion": 0.01,
-        "cacheWriteUsdPerMillion": 0.125
+        "outputUsdPerMillion": 0.5
       }
     },
     {
@@ -6541,20 +6521,15 @@
       "effort": "high",
       "version": "4.3.2",
       "harness": "api",
-      "observedAt": "2026-09-25",
+      "observedAt": "2026-10-20",
       "evaluatedAt": null,
       "origin": "independent",
       "url": "https://artificialanalysis.ai/models/gpt-6-sol-high",
       "metrics": {
-        "score": 42.8,
-        "costUsd": 0.3746,
-        "firstChunkSeconds": 13.4,
-        "firstAnswerSeconds": 13.4,
-        "tokensPerSecond": 87.08,
+        "score": 42,
+        "costUsd": 0.37,
         "inputUsdPerMillion": 2,
-        "outputUsdPerMillion": 10,
-        "cacheReadUsdPerMillion": 0.2,
-        "cacheWriteUsdPerMillion": 2.5
+        "outputUsdPerMillion": 10
       }
     },
     {
@@ -6973,20 +6948,15 @@
       "effort": "none",
       "version": "4.3.2",
       "harness": "api",
-      "observedAt": "2026-09-25",
+      "observedAt": "2026-10-20",
       "evaluatedAt": null,
       "origin": "independent",
       "url": "https://artificialanalysis.ai/models/gpt-6-sol-non-reasoning",
       "metrics": {
-        "score": 28.1,
-        "costUsd": 0.3314,
-        "firstChunkSeconds": 0.89,
-        "firstAnswerSeconds": 0.89,
-        "tokensPerSecond": 80.27,
+        "score": 29,
+        "costUsd": 0.33,
         "inputUsdPerMillion": 2,
-        "outputUsdPerMillion": 10,
-        "cacheReadUsdPerMillion": 0.2,
-        "cacheWriteUsdPerMillion": 2.5
+        "outputUsdPerMillion": 10
       }
     },
     {
@@ -8631,6 +8601,234 @@
         "inputUsdPerMillion": 2,
         "outputUsdPerMillion": 10,
         "cacheReadUsdPerMillion": 0.1
+      }
+    },
+    {
+      "source": "aa-index",
+      "model": "claude-haiku-5-5",
+      "effort": "low",
+      "version": "4.3.2",
+      "harness": "api",
+      "observedAt": "2026-10-09",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-haiku-5-5-low",
+      "metrics": {
+        "score": 29
+      }
+    },
+    {
+      "source": "aa-index",
+      "model": "claude-haiku-5-5",
+      "effort": "medium",
+      "version": "4.3.2",
+      "harness": "api",
+      "observedAt": "2026-10-09",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-haiku-5-5-medium",
+      "metrics": {
+        "score": 34
+      }
+    },
+    {
+      "source": "aa-index",
+      "model": "claude-haiku-5-5",
+      "effort": "high",
+      "version": "4.3.2",
+      "harness": "api",
+      "observedAt": "2026-10-09",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-haiku-5-5-high",
+      "metrics": {
+        "score": 38
+      }
+    },
+    {
+      "source": "aa-index",
+      "model": "claude-haiku-5-5",
+      "effort": "xhigh",
+      "version": "4.3.2",
+      "harness": "api",
+      "observedAt": "2026-10-09",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-haiku-5-5-xhigh",
+      "metrics": {
+        "score": 41
+      }
+    },
+    {
+      "source": "aa-index",
+      "model": "claude-haiku-5-5",
+      "effort": "max",
+      "version": "4.3.2",
+      "harness": "api",
+      "observedAt": "2026-10-09",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-haiku-5-5",
+      "metrics": {
+        "score": 43
+      }
+    },
+    {
+      "source": "aa-index",
+      "model": "grok-4.7",
+      "effort": "low",
+      "version": "4.3.2",
+      "harness": "api",
+      "observedAt": "2026-10-09",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/grok-4-7-low",
+      "metrics": {
+        "score": 42,
+        "costUsd": 1.25,
+        "inputUsdPerMillion": 2,
+        "outputUsdPerMillion": 6
+      }
+    },
+    {
+      "source": "aa-index",
+      "model": "claude-sonnet-5-5",
+      "effort": "low",
+      "version": "4.3.2",
+      "harness": "api-default-fallback",
+      "observedAt": "2026-10-09",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/claude-sonnet-5-5-low",
+      "metrics": {
+        "score": 36,
+        "costUsd": 0.35,
+        "inputUsdPerMillion": 2,
+        "outputUsdPerMillion": 10
+      }
+    },
+    {
+      "source": "aa-index",
+      "model": "muse-wonder-1.0",
+      "effort": "max",
+      "version": "4.3.2",
+      "harness": "api",
+      "observedAt": "2026-10-20",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/muse-wonder",
+      "metrics": {
+        "score": 52,
+        "costUsd": 4.52,
+        "inputUsdPerMillion": 4,
+        "outputUsdPerMillion": 20
+      }
+    },
+    {
+      "source": "aa-terminal",
+      "model": "muse-wonder-1.0",
+      "effort": "max",
+      "version": "4.0",
+      "harness": "mini-swe-agent",
+      "observedAt": "2026-10-20",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/articles/muse-wonder",
+      "metrics": {
+        "passPercent": 52
+      }
+    },
+    {
+      "source": "aa-omniscience",
+      "model": "muse-wonder-1.0",
+      "effort": "max",
+      "version": "aa-2026-09",
+      "harness": "api",
+      "observedAt": "2026-10-20",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/articles/muse-wonder",
+      "metrics": {
+        "score": 25
+      }
+    },
+    {
+      "source": "aa-index",
+      "model": "muse-spark-1.3",
+      "effort": "max",
+      "version": "4.3.2",
+      "harness": "api",
+      "observedAt": "2026-10-20",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/muse-spark-1-3",
+      "metrics": {
+        "score": 48,
+        "costUsd": 1.6,
+        "inputUsdPerMillion": 1.25,
+        "outputUsdPerMillion": 4.25
+      }
+    },
+    {
+      "source": "aa-index",
+      "model": "muse-spark-1.3",
+      "effort": "xhigh",
+      "version": "4.3.2",
+      "harness": "api",
+      "observedAt": "2026-10-20",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/muse-spark-1-3-xhigh",
+      "metrics": {
+        "score": 45,
+        "costUsd": 1.37,
+        "inputUsdPerMillion": 1.25,
+        "outputUsdPerMillion": 4.25
+      }
+    },
+    {
+      "source": "aa-terminal",
+      "model": "muse-spark-1.3",
+      "effort": "max",
+      "version": "4.0",
+      "harness": "mini-swe-agent",
+      "observedAt": "2026-10-20",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/articles/muse-wonder",
+      "metrics": {
+        "passPercent": 33
+      }
+    },
+    {
+      "source": "aa-index",
+      "model": "meta-models/muse-spark-open",
+      "effort": "xhigh",
+      "version": "4.3.2",
+      "harness": "api",
+      "observedAt": "2026-10-20",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/muse-spark-open",
+      "metrics": {
+        "score": 39
+      }
+    },
+    {
+      "source": "aa-index",
+      "model": "deepseek-flash",
+      "effort": "max",
+      "version": "4.3.2",
+      "harness": "api",
+      "observedAt": "2026-10-20",
+      "evaluatedAt": null,
+      "origin": "independent",
+      "url": "https://artificialanalysis.ai/models/deepseek-v4-1-flash-1017",
+      "metrics": {
+        "score": 45,
+        "costUsd": 0.26,
+        "inputUsdPerMillion": 0.3,
+        "outputUsdPerMillion": 1.2
       }
     }
   ]

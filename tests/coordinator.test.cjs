@@ -985,7 +985,7 @@ test('Hub management preserves access checks and rejects unsupported tools and s
     await assert.rejects(send('Review this'), /valid worker id|worker name|invalid action arguments/);
     assert.equal(hub.data.agents.length, 1);
   }
-  await assert.rejects(hub.queuedMessage(session.id, 'queued', 'steer'), /queued follow-ups/);
+  await assert.rejects(hub.queuedMessage(session.id, 'queued', 'steer'), /no longer available/);
   let release;
   hub.smartRouter.complete = () => new Promise(resolve => { release = resolve; });
   const pending = send('Create another worker');

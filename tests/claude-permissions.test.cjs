@@ -173,3 +173,38 @@ test('Claude usage limits: a blocked reply or a rejected window is a limit, unle
     { type: 'result', is_error: true, subtype: 'error_max_turns', errors: ['Reached the maximum number of turns'] }]);
   assert.equal(overage.limit, undefined, 'another failure while extra usage covers the window is not a usage limit');
 });
+
+
+test('Claude streams follow-ups during full-access work and waits for acknowledgement before closing', async () => {
+  const { cli, state, send } = fake();
+  let input;
+  const run = cli.run({ model: 'claude-opus-5-5', prompt: 'first', access: 'danger-full-access',
+    onInput: value => { input = value; } });
+  assert.equal(state.ended, false);
+  assert.ok(state.args.includes('--replay-user-messages'));
+  let accepted = false;
+  const delivery = input({ id: 'follow-up', text: 'correct this', images: [] }).then(() => { accepted = true; });
+  assert.equal(state.input[1].uuid, 'follow-up');
+  assert.equal(state.input[1].message.content[0].text, 'correct this');
+  send({ type: 'result', result: 'first finished' });
+  assert.equal(state.ended, false, 'an unacknowledged input keeps the pipe open');
+  assert.equal(accepted, false);
+  send({ type: 'user', uuid: 'follow-up', message: { role: 'user', content: [{ type: 'text', text: 'correct this' }] } });
+  await delivery;
+  send({ type: 'result', result: 'corrected' });
+  assert.equal((await run).result, 'corrected');
+  assert.equal(input, null);
+});
+
+test('Claude retains uncertainty when its process closes before acknowledging live input', async () => {
+  const { cli, state } = fake();
+  let input;
+  const run = cli.run({ model: 'claude-opus-5-5', prompt: 'first', access: 'danger-full-access',
+    onInput: value => { input = value; } });
+  const delivery = input({ id: 'follow-up', text: 'correction' });
+  const failedDelivery = assert.rejects(delivery, /closed before confirming/);
+  const failedRun = assert.rejects(run);
+  state.child.emit('close', 1);
+  await Promise.all([failedDelivery, failedRun]);
+  assert.equal(input, null);
+});

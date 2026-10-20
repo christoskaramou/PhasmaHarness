@@ -4,7 +4,8 @@
   button.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/></svg>';
   const status = element('span', 'dictation-status');
   status.id = 'dictation-status'; status.setAttribute('role', 'status');
-  $('.composer-controls').append(button, status);
+  $('#send').before(button);
+  $('#composer').append(status);
   let info, record = null;
 
   function renderDictation() {
