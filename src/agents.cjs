@@ -518,6 +518,8 @@ class Agents extends EventEmitter {
 
   async initialize() {
     await Promise.all([...this.allControllers()].filter(c => c !== this.primary).map(c => this.initializeController(c)));
+    // Bots of comparisons that ended before this start (including ones from before the cleanup existed).
+    await this.primary.removeComparisonBots();
     this.pump();
     this.emit('state', this.snapshot());
   }

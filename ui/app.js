@@ -1600,7 +1600,7 @@ function renderComparison(view, sessionId, opened = true) {
   const returned = view.runs.filter(run => run.result).length;
   const states = { running: `Running · ${returned} of ${view.runs.length} back`, finished: view.revealed ? 'Revealed' : 'Waiting for your pick', failed: 'Did not start' };
   const targets = { bot: 'worker instructions', project: 'project INSTRUCTIONS.md' };
-  details.append(element('summary', '', `Comparison · ${view.pairs * 2} runs on ${view.model} · ${states[view.state] || view.state}`),
+  details.append(element('summary', '', `Comparison${view.number ? ' ' + view.number : ''} · ${view.pairs * 2} runs on ${view.model} · ${states[view.state] || view.state}`),
     element('p', '', `Task: ${view.task}`), element('p', '', `Change to the ${targets[view.target]}: ${view.change}`));
   if (view.error)
     details.append(element('p', 'muted', view.error));
@@ -1634,7 +1634,8 @@ function renderComparison(view, sessionId, opened = true) {
         apply.setAttribute('aria-label', `Apply run ${run.label}'s changes to my project`);
         apply.onclick = () => applyCopy(result.workspace); action.append(apply);
       }
-      if (run.jobId) {
+      // A revealed comparison's bots are removed, and their job details with them.
+      if (run.jobId && (!result || state.agents?.some(agent => agent.id === result.agentId))) {
         const button = element('button', 'compact-action', 'Details'); button.type = 'button';
         button.setAttribute('aria-label', `Details for run ${run.label}`);
         button.onclick = () => openJobDetails(run.jobId); action.append(button);

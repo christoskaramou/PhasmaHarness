@@ -227,7 +227,7 @@ function publicView(record) {
   const runs = record.runs.map(run => ({ index: run.index, pair: run.pair, label: run.label, name: run.name || null, jobId: run.jobId || null,
     ...(run.result ? { result: { ...run.result, setups: undefined, setup: run.result.setups[0]?.hash || null } } : {}),
     ...(revealed ? { changed: run.variant } : {}) }));
-  return { id: record.id, state: record.state, project: record.project, task: excerpt(record.task, 400), target: record.target,
+  return { id: record.id, number: record.number || null, state: record.state, project: record.project, task: excerpt(record.task, 400), target: record.target,
     change: excerpt(record.change, 600), model: record.model, pairs: record.pairs, picks: { ...record.picks }, revealed, error: record.error || null,
     runs, ...(revealed ? { verdict: record.verdict, confidence: record.confidence, pairVerdicts: record.pairVerdicts,
       preferences: Object.fromEntries(Object.keys(record.picks || {}).map(pair => [pair, preference(record, Number(pair))])) } : {}) };

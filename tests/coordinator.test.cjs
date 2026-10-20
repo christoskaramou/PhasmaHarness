@@ -1798,7 +1798,10 @@ test('Hub compare asks first, runs both copies from one snapshot with only the c
     for (const { run, profile } of runs)
       assert.equal(profile.instructions.includes(change), target === 'bot' && run.variant);
 
+    assert.deepEqual(hub.data.agents.map(agent => agent.name).sort(), ['Comparison 1 · A', 'Comparison 1 · B']);
     await until(() => runs.every(({ worker }) => worker.activeTurns.size), 20000);
+    await hub.removeComparisonBots();
+    assert.equal(hub.data.agents.length, 2, 'a running comparison keeps its bots');
     for (const { run, worker } of runs) {
       const work = agents.conversation(worker);
       const input = JSON.stringify(worker.client.calls.find(call => call.method === 'turn/start').params);
@@ -1855,6 +1858,9 @@ test('Hub compare asks first, runs both copies from one snapshot with only the c
     assert.equal(view.confidence, 'low');
     assert.equal(view.preferences[1], 'the change');
     assert.equal(hub.data.comparisons[record.id], undefined);
+    assert.deepEqual(hub.data.agents, [], 'the revealed comparison\'s bots are removed');
+    assert.ok(view.runs.every(run => agents.workspaces.record(run.result.workspace)), 'their project copies stay for Apply');
+    assert.equal(view.number, 1);
     await assert.rejects(async () => hub.comparisonPick(session.id, record.id, 1, 'A'), /no results to judge/);
   });
 });

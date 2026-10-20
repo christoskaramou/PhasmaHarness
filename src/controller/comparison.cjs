@@ -72,6 +72,8 @@ module.exports = {
     const record = { id: randomUUID(), version: 1, at: Date.now(), state: 'running', project: args.workspace,
       task: args.task, change: args.change, target: args.target, pairs: args.pairs, mode: args.mode,
       model: this.resolveWorker(args.mode)?.label || args.mode, threshold: comparisons.THRESHOLD,
+      // Numbers the comparison for its bots' names and its card.
+      number: this.data.comparisonCount = (this.data.comparisonCount || 0) + 1,
       // Computed once, so both runs of every pair start with the same lessons.
       lessonBlock: this.lessonsFor(args.workspace, args.task, checks),
       runs: comparisons.planRuns(args.pairs), picks: {}, sessionId: session.id, requestId: request.id };
@@ -144,7 +146,7 @@ module.exports = {
   },
 
   // A pick per pair (A, B or none); the last pick, or Reveal, shows which run had the change and the verdict.
-  comparisonPick(id, comparisonId, pair, pick) {
+  async comparisonPick(id, comparisonId, pair, pick) {
     const session = this.session(id);
     const message = session.items.find(item => item.hubComparison?.id === comparisonId);
     const record = this.data.comparisons?.[comparisonId];
@@ -167,7 +169,29 @@ module.exports = {
     }
     this.save();
     this.changed();
+    if (record.revealedAt)
+      await this.removeComparisonBots();
     return message.hubComparison;
+  },
+
+  // Removes the idle bots of comparisons that are over (revealed, or no longer in Harness data), so they do not pile up
+  // in the sidebar. Their project copies stay, so Apply still works. A bot that is busy is kept for a later sweep.
+  async removeComparisonBots() {
+    for (const profile of [...this.agents.primary.data.agents]) {
+      let copy = null;
+      try {
+        copy = profile.temporaryBatch ? this.agents.workspaces.record(profile.workspace) : null;
+      } catch { /* a moved copy is left for the user to review */ }
+      const record = copy?.comparisonId && this.data.comparisons?.[copy.comparisonId];
+      if (!copy?.comparisonId || (record && !record.revealedAt))
+        continue;
+
+      try {
+        await this.agents.deleteAgent(profile.id);
+      } catch (error) {
+        this.log.warn('Comparison bot kept', { agent: profile.name, reason: error.message });
+      }
+    }
   },
 
   // The running comparison a worker's project copy belongs to, or null (also after it finished).

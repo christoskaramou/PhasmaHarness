@@ -238,13 +238,15 @@ module.exports = {
       request = { ...request, workspaceCopy: copy };
     }
     if (!agentId) {
-      let name = args.name ?? 'Worker', suffix = 2;
+      const comparison = request.comparison && this.data.comparisons?.[request.comparison.id];
+      const run = comparison?.runs.find(entry => entry.index === request.batch?.index);
+      // A comparison run is named after its comparison and card label, which says nothing about which run has the change.
+      let name = run ? `Comparison ${comparison.number} · ${comparison.pairs > 1 ? run.pair : ''}${run.label}` : args.name ?? 'Worker', suffix = 2;
       if (typeof name !== 'string' || !name.trim() || name.length > 48) throw new Error('Choose a worker name under 48 characters.');
       name = name.trim();
       const base = name;
       while (this.agents.primary.data.agents.some(a => a.name.toLowerCase() === name.toLowerCase()) || this.agents.reservedName(name)) name = `${base} ${suffix++}`;
-      const comparison = request.comparison && this.data.comparisons?.[request.comparison.id];
-      const changed = comparison?.target === 'bot' && comparison.runs.find(run => run.index === request.batch?.index)?.variant;
+      const changed = comparison?.target === 'bot' && run?.variant;
       const instructions = changed ? `${WORKER_INSTRUCTIONS}\n\n${comparison.change}` : WORKER_INSTRUCTIONS;
       const profile = await this.agents.tool(this, { ...session, workspace }, 'agent_create', { name, instructions, ...(args.mode !== undefined ? { mode: args.mode } : {}), ...(args.effort !== undefined ? { effort: args.effort } : {}) }, request.batch?.id || null);
       agentId = profile.id;
