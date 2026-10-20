@@ -2492,6 +2492,45 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/batch-report.png'), (await window.webContents.capturePage()).toPNG());
   console.log('Batch reports retain partial outcomes, host evidence and a usable chat composer');
+  phase = 'comparison card';
+  const comparisons = require('../src/comparisons.cjs');
+  const compareSetup = bot => ({ hash: `setup-${bot}`, provider: 'codex', model: 'gpt-5.6-terra', effort: 'low', instructions: { bot: { hash: bot } } });
+  const compareRun = (label, variant, extra) => ({ index: label === 'A' ? 1 : 2, pair: 1, label, variant, name: `Compare ${label === 'A' ? 1 : 2}`,
+    result: { status: 'completed', checks: { 'greet check': 'passed' }, corrections: 0, setups: [compareSetup(variant ? 'changed' : 'base')],
+      restored: [], diff: ' greet.js | 2 +-', text: `Run ${label} updated greet.js.`, tokens: 120000, activeMs: 21000, ...extra } });
+  const compareRecord = { id: 'ui-compare', version: 1, at: Date.now(), project: root, task: "Change greet.js so greet('Ann') returns 'Hello, Ann!'.",
+    change: "Greeting functions must return 'Hello, stranger!' for an empty name.", target: 'bot', pairs: 1, model: 'gpt-5.6-terra · low',
+    threshold: comparisons.THRESHOLD, picks: {}, runs: [compareRun('A', false, { corrections: 1, restored: ['check.cjs'], tokens: 155000, activeMs: 30000 }), compareRun('B', true)] };
+  comparisons.finish(compareRecord);
+  controller.data.comparisons = { [compareRecord.id]: compareRecord };
+  ownerChat.items.push({ id: 'compare-request', type: 'userMessage', content: [{ type: 'text', text: 'Compare that instruction change.' }],
+    hubComparison: comparisons.publicView(compareRecord) });
+  const pickCalls = [];
+  ipcMain.handle('comparisonPick', (_event, ...args) => {
+    pickCalls.push(args);
+    return controller.comparisonPick(...args);
+  });
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
+  const cardText = () => window.webContents.executeJavaScript('document.querySelector(".comparison-card")?.textContent || ""');
+  let card = await cardText();
+  assert.match(card, /Comparison · 2 runs on gpt-5\.6-terra · low · Finished · pick the better run or reveal/);
+  assert.match(card, /A is better.*B is better.*No preference.*Reveal without picking/s);
+  assert.doesNotMatch(card, /with the change|current setup|Verdict/, 'nothing tells the runs apart before the pick');
+  assert.match(card, /restored before its checks: check\.cjs/);
+  await window.webContents.executeJavaScript(`document.querySelector('.comparison-card').scrollIntoView({ block: 'start', behavior: 'instant' });
+    new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/comparison-blind.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript(`[...document.querySelectorAll('.comparison-card button')].find(button => button.textContent === 'B is better').click(); true`);
+  await until(() => pickCalls.length === 1, 'the pick reaches the runner');
+  assert.deepEqual(pickCalls[0], [ownerChat.id, 'ui-compare', 1, 'B']);
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
+  card = await cardText();
+  assert.match(card, /Revealed.*Verdict: helped, low confidence.*A · current setup.*B · with the change.*Your pick: the change/s);
+  assert.equal(controller.data.comparisons['ui-compare'], undefined);
+  await window.webContents.executeJavaScript(`document.querySelector('.comparison-card').scrollIntoView({ block: 'start', behavior: 'instant' });
+    new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/comparison-revealed.png'), (await window.webContents.capturePage()).toPNG());
+  console.log('Comparison cards stay blind until a pick, then reveal the change and the verdict');
   phase = 'group chat controls';
   const groupMember = agents.primary.data.agents[0];
   await window.webContents.executeJavaScript(`document.querySelector('#agents-overview').click();

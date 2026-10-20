@@ -13,6 +13,7 @@ const { FINAL, validateChecks } = require('./tasks.cjs');
 const { JobBudgets, usageText } = require('./job-budgets.cjs');
 const { JobWorkspaces, summary: workspaceSummary } = require('./workspace/job-workspaces.cjs');
 const reports = require('./job-reports.cjs');
+const { prepareCopy: prepareComparisonCopy } = require('./comparisons.cjs');
 const groupChats = require('./group-chats.cjs');
 const { Routines } = require('./routines.cjs');
 const { UNKNOWN_RESET_MS } = require('./providers/limits.cjs');
@@ -918,6 +919,8 @@ class Agents extends EventEmitter {
           if (!copy || copy.state !== 'ready') continue;
           if (!job.taskChecks) {
             try {
+              if (copy.comparisonId)
+                prepareComparisonCopy(this.primary.data.comparisons?.[copy.comparisonId], copy, path.join(this.workspaces.batchDirectory(copy.batchId), 'input'));
               job.taskChecks = this.copyChecks({ ...copy, source: job.sourceChecksRoot || copy.source }, job.sourceTaskChecks || []); controller.save();
             } catch (error) { job.error = error.message; session.error = error.message; continue; }
           }
@@ -1137,6 +1140,9 @@ class Agents extends EventEmitter {
         budgetSummary, verification, workspace: session.workspace,
         requestId: request.id,
         batch: job.originalRequest?.batch || null, batchAttempt: job.originalRequest?.attempts || 1,
+        // A comparison measures corrections and checks every attempt's setup (src/comparisons.cjs).
+        ...(job.originalRequest?.comparison ? { corrections: task?.corrections ?? null,
+          attempts: (task?.attempts || []).map(attempt => ({ setup: attempt.setup || null, restored: attempt.restored || [], diff: attempt.evidence?.diff || null })) } : {}),
         ...(hasRoom || superseded ? { notified: true } : { pendingReply: reply }) });
       if (hasRoom) (source.queue ||= []).push(reply);
       delivered.push(deliveryId);

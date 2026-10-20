@@ -48,7 +48,7 @@ api.jobBudget = args => ipcRenderer.invoke('jobBudget', args);
 api.stopArtifactRun = id => ipcRenderer.invoke('stopArtifactRun', id);
 api.stopDownloads = () => ipcRenderer.invoke('stopDownloads');
 api.browseWorkspace = (...args) => ipcRenderer.invoke('browseWorkspace', ...args);
-for (const method of ['cursorLogin', 'cursorRefresh', 'cursorLogout', 'claudeLogin', 'claudeRefresh', 'claudeLogout', 'connectChatGPT', 'logoutChatGPT', 'installProvider', 'providerSettings', 'providerKey', 'providerModels', 'localModel', 'renewModels', 'bootstrap', 'settings', 'jevSaveKey', 'jevRemoveKey', 'jevTest', 'create', 'permissions', 'load', 'image', 'rename', 'archive', 'deleteSession', 'findContext', 'cancelContext', 'preview', 'send', 'compact', 'stop', 'answer', 'checks', 'acknowledgeTask', 'proposeWiki', 'workspaceWiki', 'chooseWorkspaceWiki', 'openWorkspaceWiki', 'chooseWorkspace', 'openLink', 'diagnostics', 'openLogs', 'appInfo', 'checkUpdates']) {
+for (const method of ['cursorLogin', 'cursorRefresh', 'cursorLogout', 'claudeLogin', 'claudeRefresh', 'claudeLogout', 'connectChatGPT', 'logoutChatGPT', 'installProvider', 'providerSettings', 'providerKey', 'providerModels', 'localModel', 'renewModels', 'bootstrap', 'settings', 'jevSaveKey', 'jevRemoveKey', 'jevTest', 'create', 'permissions', 'load', 'image', 'rename', 'archive', 'deleteSession', 'findContext', 'cancelContext', 'preview', 'send', 'compact', 'stop', 'answer', 'checks', 'acknowledgeTask', 'comparisonPick', 'proposeWiki', 'workspaceWiki', 'chooseWorkspaceWiki', 'openWorkspaceWiki', 'chooseWorkspace', 'openLink', 'diagnostics', 'openLogs', 'appInfo', 'checkUpdates']) {
   api[method] = (...args) => ipcRenderer.invoke(method, ...args);
 }
 api.updateStatus = () => ipcRenderer.invoke('updateStatus');

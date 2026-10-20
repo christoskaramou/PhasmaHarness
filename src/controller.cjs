@@ -227,7 +227,8 @@ class Controller extends EventEmitter {
   get routingProvider() { return this.data.settings.jevEnabled === false && this.data.settings.routing === 'jev' ? 'smart' : this.data.settings.routing; }
 
   snapshot() {
-    const { jobBudgets, routines, ...visibleData } = this.data;
+    // Comparisons hold which run carries the change; the chat card gets a public view instead.
+    const { jobBudgets, routines, comparisons, ...visibleData } = this.data;
     return {
       benchmarks: this.smartRouter.benchmarks?.summary(this.catalog().filter(p => p.worker && p.enabled && this.available(p))),
       cursor: { ...this.cursor.status, enabled: this.data.settings.cursorEnabled !== false },
@@ -1471,6 +1472,7 @@ for (const methods of [
   require('./controller/helpers.cjs'),
   require('./controller/task-gate.cjs'),
   require('./controller/suggestions.cjs'),
+  require('./controller/comparison.cjs'),
 ]) {
   for (const [name, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(methods))) {
     if (Object.hasOwn(Controller.prototype, name)) throw new Error(`Controller.${name} is defined twice.`);

@@ -14,7 +14,7 @@ const REMOTE_METHODS = new Set([
   'browseWorkspace', 'settings', 'benchmarkData', 'create', 'permissions', 'load', 'image', 'rename', 'archive',
   'deleteSession', 'findContext', 'cancelContext', 'preview', 'send', 'stop', 'reviseJob', 'reconcileJob', 'jobBudget',
   'stopArtifactRun', 'artifactAction', 'artifactDownload', 'stopDownloads', 'appInfo', 'runnerInfo', 'updateStatus', 'queuedMessage', 'replySuggestion', 'compact',
-  'clearConversation', 'acknowledgeTask', 'proposeWiki', 'answer', 'readDocument', 'answerConfirmation',
+  'clearConversation', 'acknowledgeTask', 'comparisonPick', 'proposeWiki', 'answer', 'readDocument', 'answerConfirmation',
   'providerConnection', 'renewModels', 'providerModels',
 ]);
 

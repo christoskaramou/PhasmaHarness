@@ -1766,3 +1766,83 @@ test('a new delegation to an explicitly selected model starts its own task goal'
   assert.equal(work.job.originalRequestId, work.delegation.originalRequest.id);
 });
 
+
+test('Hub compare asks first, runs both copies from one snapshot with only the change, restores edited checks and reveals a blind pick', async t => {
+  for (const target of ['bot', 'project']) await t.test(target, async t => {
+    const { root, hub, session, agents, replies, calls, send } = await setup(t);
+    const project = projectFixture(root, session);
+    session.access = 'danger-full-access';
+    fs.writeFileSync(path.join(project, 'check.cjs'), "process.exit(require('node:fs').existsSync('done.txt') ? 0 : 1);");
+    hub.data.settings.checks[project] = [{ id: 'done-check', name: 'Done check', argv: [process.execPath, path.join(project, 'check.cjs')], cwd: project, timeoutMs: 10000 }];
+    hub.lessonsFor = () => 'Lessons block for this comparison.';
+    const change = 'Always create done.txt before anything else.';
+    replies.push(action('compare', { task: 'Create done.txt.', change, target, mode: 'codex:gpt-5.6-terra:low' }));
+    await send(`Compare creating done.txt with the instruction change "${change}"`);
+    assert.match(session.items.at(-1).text, /Start this comparison\?[\s\S]*2 paid runs \(1 pair\)[\s\S]*Done check[\s\S]*check\.cjs[\s\S]*Reply yes/);
+    assert.equal(hub.data.agents.length, 0, 'nothing runs before the user confirms');
+
+    replies.push(action('compare', { confirm: true }));
+    await send('yes');
+    const record = Object.values(hub.data.comparisons)[0];
+    assert.equal(record.state, 'running');
+    assert.equal(hub.data.agents.length, 2);
+    assert.equal(JSON.stringify(agents.snapshot()).includes('"variant"'), false, 'the change mapping stays out of the renderer state');
+    const runs = record.runs.map(run => {
+      const profile = hub.data.agents.find(agent => agent.name === run.name), worker = agents.execution(profile.id);
+      return { run, profile, worker };
+    });
+    for (const { run, profile } of runs)
+      assert.equal(profile.instructions.includes(change), target === 'bot' && run.variant);
+
+    await until(() => runs.every(({ worker }) => worker.activeTurns.size), 20000);
+    for (const { run, worker } of runs) {
+      const work = agents.conversation(worker);
+      const input = JSON.stringify(worker.client.calls.find(call => call.method === 'turn/start').params);
+      assert.match(input, /Lessons block for this comparison/);
+      assert.doesNotMatch(input, /instruction change|agent_read_context/, 'workers see the task, not the compare message');
+      const developer = worker.client.calls.find(call => call.method === 'thread/start').params.developerInstructions;
+      // Bot instructions and the project entry both travel in the developer instructions.
+      assert.equal(developer.includes(change), run.variant, 'the change reaches only its run\'s provider');
+      const entry = fs.readFileSync(path.join(work.workspace, 'INSTRUCTIONS.md'), 'utf8');
+      assert.equal(entry.includes(change), target === 'project' && run.variant);
+    }
+
+    const finish = async (worker, text) => {
+      const work = agents.conversation(worker), turns = worker.client.calls.filter(call => call.method === 'turn/start').length;
+      worker.notification({ method: 'item/completed', params: { threadId: work.threadId, turnId: work.turnId, item: { id: randomUUID(), type: 'agentMessage', phase: 'final_answer', text } } });
+      worker.notification({ method: 'turn/completed', params: { threadId: work.threadId, turn: { id: work.turnId, status: 'completed' } } });
+      return turns;
+    };
+    // The changed run gets it right first time. The other edits its check to pass, is judged by the restored one,
+    // and needs a correction.
+    const changed = runs.find(({ run }) => run.variant), current = runs.find(({ run }) => !run.variant);
+    fs.writeFileSync(path.join(agents.conversation(changed.worker).workspace, 'done.txt'), 'done');
+    await finish(changed.worker, 'Created done.txt.');
+    const currentWork = agents.conversation(current.worker);
+    fs.writeFileSync(path.join(currentWork.workspace, 'check.cjs'), 'process.exit(0);');
+    const turns = await finish(current.worker, 'Made the check pass.');
+    await until(() => current.worker.client.calls.filter(call => call.method === 'turn/start').length > turns && current.worker.activeTurns.size, 20000);
+    fs.writeFileSync(path.join(currentWork.workspace, 'done.txt'), 'done');
+    await finish(current.worker, 'Created done.txt.');
+    await until(() => record.state === 'finished' && !hub.busy, 20000);
+
+    const card = session.items.find(item => item.hubComparison).hubComparison;
+    assert.equal(card.revealed, false);
+    assert.equal(card.verdict, undefined);
+    assert.match(session.items.at(-1).text, /comparison finished/i);
+    const shown = label => card.runs.find(run => run.label === label).result;
+    assert.deepEqual(shown(current.run.label).restored, ['check.cjs']);
+    assert.equal(shown(current.run.label).corrections, 1);
+    assert.equal(shown(changed.run.label).corrections, 0);
+    assert.equal(calls.filter(call => call.request.schema.properties.fulfilled).length, 0, 'no completion check or follow-up for comparison runs');
+    assert.equal(calls.filter(call => call.request.schema.properties.action).length, 2);
+
+    const view = await hub.comparisonPick(session.id, record.id, 1, changed.run.label);
+    assert.equal(view.revealed, true);
+    assert.equal(view.verdict, 'helped', JSON.stringify(view.pairVerdicts));
+    assert.equal(view.confidence, 'low');
+    assert.equal(view.preferences[1], 'the change');
+    assert.equal(hub.data.comparisons[record.id], undefined);
+    await assert.rejects(async () => hub.comparisonPick(session.id, record.id, 1, 'A'), /no results to judge/);
+  });
+});

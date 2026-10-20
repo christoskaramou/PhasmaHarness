@@ -1589,6 +1589,86 @@ function renderVerification(evidence) {
   return container;
 }
 
+// A two-run comparison (src/comparisons.cjs): runs by label only until the user picks or reveals.
+function renderComparison(view, sessionId, opened = true) {
+  const details = element('details', 'batch-report comparison-card'); details.open = opened;
+  const states = { running: 'Running', finished: view.revealed ? 'Revealed' : 'Finished · pick the better run or reveal', failed: 'Did not start' };
+  const targets = { bot: 'worker instructions', project: 'project INSTRUCTIONS.md' };
+  details.append(element('summary', '', `Comparison · ${view.pairs * 2} runs on ${view.model} · ${states[view.state] || view.state}`),
+    element('p', '', `Task: ${view.task}`), element('p', '', `Change to the ${targets[view.target]}: ${view.change}`));
+  if (view.error)
+    details.append(element('p', 'muted', view.error));
+  if (view.revealed)
+    details.append(element('p', '', `Verdict: ${view.verdict}, ${view.confidence} confidence.`));
+
+  for (let pair = 1; pair <= view.pairs; pair++) {
+    const runs = view.runs.filter(run => run.pair === pair);
+    if (view.pairs > 1)
+      details.append(element('strong', '', `Pair ${pair}`));
+
+    const table = element('table', 'batch-table'), head = element('tr'), body = element('tbody');
+    for (const label of ['Run', 'Status', 'Checks', 'Corrections', 'Tokens', 'Active time', '']) {
+      const cell = element('th', '', label); cell.scope = 'col'; head.append(cell);
+    }
+    const thead = element('thead'); thead.append(head); table.append(thead);
+    for (const run of runs) {
+      const result = run.result, checks = Object.entries(result?.checks || {});
+      const row = element('tr', 'batch-entry'), name = element('td');
+      name.append(element('strong', '', run.label + (view.revealed ? (run.changed ? ' · with the change' : ' · current setup') : '')));
+      if (run.name)
+        name.append(element('small', 'muted', run.name));
+      row.append(name, element('td', '', result ? result.status : 'Running'),
+        element('td', '', result ? `${checks.filter(([, status]) => status === 'passed').length}/${checks.length} passed` : ''),
+        element('td', '', String(result?.corrections ?? '')),
+        element('td', '', result ? (Number.isFinite(result.tokens) ? result.tokens.toLocaleString() : 'Not fully reported') : ''),
+        element('td', '', Number.isFinite(result?.activeMs) ? `${Math.round(result.activeMs / 1000)} s` : ''));
+      const action = element('td');
+      if (run.jobId) {
+        const button = element('button', 'compact-action', 'Details'); button.type = 'button';
+        button.setAttribute('aria-label', `Details for run ${run.label}`);
+        button.onclick = () => openJobDetails(run.jobId); action.append(button);
+      }
+      row.append(action); body.append(row);
+    }
+    table.append(body); details.append(table);
+
+    const answers = element('div', 'comparison-answers');
+    for (const run of runs.filter(entry => entry.result)) {
+      const answer = element('details', 'activity');
+      answer.append(element('summary', '', `Run ${run.label}: answer and diff`), element('pre', '', run.result.text || 'No answer.'),
+        element('pre', '', run.result.diff || 'Diff unavailable.'));
+      if (run.result.restored?.length)
+        answer.append(element('p', 'muted', `Check files restored before its checks: ${run.result.restored.join(', ')}`));
+      answers.append(answer);
+    }
+    details.append(answers);
+
+    if (view.revealed) {
+      const verdict = view.pairVerdicts?.find(entry => entry.pair === pair);
+      const pick = view.preferences?.[pair];
+      if (verdict)
+        details.append(element('p', '', `${verdict.verdict}: ${verdict.reason}.${pick ? ` Your pick: ${pick}.` : ''}`));
+    } else if (view.state === 'finished') {
+      const picks = element('div', 'comparison-picks');
+      for (const [pick, label] of [['A', 'A is better'], ['B', 'B is better'], ['none', 'No preference']]) {
+        const button = element('button', 'compact-action', label); button.type = 'button';
+        button.setAttribute('aria-pressed', String(view.picks?.[pair] === pick));
+        button.onclick = () => api.comparisonPick(sessionId, view.id, pair, pick).catch(notify);
+        picks.append(button);
+      }
+      details.append(picks);
+    }
+  }
+
+  if (view.state === 'finished' && !view.revealed) {
+    const reveal = element('button', 'compact-action', 'Reveal without picking'); reveal.type = 'button';
+    reveal.onclick = () => api.comparisonPick(sessionId, view.id, null, 'reveal').catch(notify);
+    details.append(reveal);
+  }
+  details.append(element('p', 'muted', 'One pair is weak evidence. Nothing is adopted automatically.'));
+  return details;
+}
+
 function renderBatchReport(report, opened = false) {
   const details = element('details', 'batch-report'); details.open = opened;
   details.dataset.batchId = report.id;
@@ -1697,7 +1777,8 @@ function renderMessages(session) {
     }
     entry.signature = signature;
     const node = entry.node;
-    const batchOpened = node.querySelector('.batch-report')?.open || false;
+    const batchOpened = node.querySelector('.batch-report:not(.comparison-card)')?.open || false;
+    const comparisonOpened = node.querySelector('.comparison-card')?.open ?? true;
     if (item.type === 'agentMail') {
       node.className = 'message';
       const details = element('details', 'activity'); details.open = node.querySelector('details')?.open || false;
@@ -1778,6 +1859,7 @@ function renderMessages(session) {
       };
       node.replaceChildren(bubble, actions);
       if (user && batch) node.append(renderBatchReport(batch, batchOpened));
+      if (user && item.hubComparison) node.append(renderComparison(item.hubComparison, session.id, comparisonOpened));
       if (user) {
         const images = item.content.filter(part => part.type === 'image');
         images.forEach((part, index) => {

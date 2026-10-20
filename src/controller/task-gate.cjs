@@ -12,6 +12,7 @@ const { accessMode, sameEffort, treeEntries } = require('./shared.cjs');
 const { stripTaskStatus } = require('../routing/task-state.cjs');
 const { readWiki, assessWikiUpdate } = require('../workspace/wiki-assess.cjs');
 const { lessonFromTask, recordLesson, readLessons, relevantLessons, lessonsBlock, diffHashes } = require('../lessons.cjs');
+const { restoreCheckFiles } = require('../comparisons.cjs');
 
 module.exports = {
   openTask(session, selected, text, clientId, taskMode) {
@@ -29,9 +30,11 @@ module.exports = {
       task.amendments = [...(session.delegation?.taskAmendments || [])];
       task.requestedMode = session.pendingMessage?.requestedMode || this.data.settings.mode;
       task.originalImageCount = session.pendingMessage?.content?.filter(part => part.type === 'image').length || 0;
-      // Relevant lessons ride in this task's first worker message only; corrections never get them.
+      // Relevant lessons ride in this task's first worker message only; corrections never get them. Comparison runs
+      // all get the block computed once when the comparison started.
+      const comparison = this.comparisonOf(session);
       if (!task.corrections && !text.startsWith('[Router]'))
-        task.lessonBlock = this.lessonsFor(session.workspace, text, configured);
+        task.lessonBlock = comparison ? comparison.record.lessonBlock || null : this.lessonsFor(session.workspace, text, configured);
       task.foreground = !(session.delegation && !session.delegation.delivered) && !session.agentReplyActive;
       if (task.foreground) task.inputImages = (session.pendingMessage?.content || []).filter(part => part.type === 'image').map(part => part.url);
       this.agents?.budgets.register(task, session);
@@ -86,7 +89,8 @@ module.exports = {
   async maintainWiki(session, task) {
     if (task.wikiMaintenance || task.state !== 'checks-passed' || !canProposeWiki(task) ||
         this.blockedReason() || this.stopping.has(session.id) || session.queuePaused ||
-        (session.access === 'read-only' || task.access === 'read-only') || (!this.wikiStore && !hasProjectWiki(session.workspace))) return false;
+        (session.access === 'read-only' || task.access === 'read-only') || (!this.wikiStore && !hasProjectWiki(session.workspace)) ||
+        this.comparisonOf(session)) return false;
     const worker = this.resolveWorker(task.route.id);
     if (!worker || !this.available(worker) || worker.model !== task.route.model || worker.provider !== task.route.provider || !sameEffort(worker, task.route)) return false;
     const wiki = this.wikiStore?.ensure(session.workspace) || { index: path.join(session.workspace, 'docs/wiki/index.md') };
@@ -306,6 +310,11 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
       if (!task.corrections) Object.assign(task, parseChecklist(final));
       attempt.citations = resolveCitations(session.workspace, final);
       attempt.evidence = this.captureEvidence(session, task, attempt);
+      // A comparison run is judged by the snapshot's check files, after its own diff was captured.
+      const comparison = this.comparisonOf(session);
+      if (comparison)
+        attempt.restored = restoreCheckFiles(task.checks, session.workspace, path.join(this.agents.workspaces.batchDirectory(comparison.copy.batchId), 'input'));
+
       this.writeTaskFile(session, task);
       if (!this.ownsGate(gate)) return this.cancelGate(session, task);
       for (let index = 0; index < task.checks.length; index++) {
@@ -553,8 +562,9 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
   },
 
   saveLesson(session, task) {
+    // A comparison run records none, so one run's lessons cannot reach the other.
     const lesson = lessonFromTask(task, task.state);
-    if (!lesson || !this.wikiStore)
+    if (!lesson || !this.wikiStore || this.comparisonOf(session))
       return;
 
     try {

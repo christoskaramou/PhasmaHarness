@@ -3766,6 +3766,12 @@ body:has(#job-dialog[open]) main {
   margin-top: 5px;
   max-width: 190px;
 }
+.comparison-answers {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
 .verification-check pre {
   overflow-wrap: anywhere;
   white-space: pre-wrap;

@@ -106,6 +106,7 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
     return { cleared: !!session, sessionId: session?.id, state: agents.snapshot() };
   });
   handle('acknowledgeTask', (id, taskId) => agents.owner(id).acknowledgeTask(id, taskId));
+  handle('comparisonPick', (id, comparisonId, pair, pick) => agents.owner(id).comparisonPick(id, comparisonId, pair, pick));
   handle('proposeWiki', (id, taskId) => agents.owner(id).proposeWiki(id, taskId));
   handle('answer', (id, answer, agentId, contextId) => {
     const target = contextId ? agents.owner(contextId) : agents.controller(agentId);
