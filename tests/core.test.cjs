@@ -2311,6 +2311,36 @@ test('live delivery keeps a queued correction until acknowledgement and preserve
   assert.equal(session.queue[0].uncertain, true);
 });
 
+test('Send now steers where the provider can, uses its own queue otherwise, and steer-only providers are never fed the queue', async t => {
+  const { controller } = await setup(t);
+  const { capabilities } = require('../src/providers/capabilities.cjs');
+  for (const [provider, steer] of [['test-api', true], ['claude-cli', false]]) {
+    const session = controller.create();
+    session.activeProvider = provider;
+    controller.busy = session.id;
+    controller.activeTurns.set(session.id, 'live-turn');
+    session.queue = [{ id: 'now-' + provider, text: 'Use the new requirement', images: [] }];
+    const calls = [];
+    controller.liveInput = async (message, options) => { calls.push(options); };
+    controller.liveInputCaps = capabilities(provider);
+    await controller.queuedMessage(session.id, 'now-' + provider, 'steer');
+    assert.deepEqual(calls, [{ steer }], provider);
+    assert.equal(session.queue.length, 0);
+  }
+
+  // A provider that can only interrupt (cancel and prompt again) must not consume ordinary queued messages.
+  const session = controller.create();
+  controller.busy = session.id;
+  session.queue = [{ id: 'later', text: 'Next thing', images: [] }];
+  let fed = false;
+  controller.liveInput = async () => { fed = true; };
+  controller.liveInputCaps = { liveSteer: true };
+  controller.flushLiveQueue(session);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fed, false);
+  assert.equal(session.queue.length, 1);
+});
+
 test('Send now preserves the queued message if another Stop cancels restart', async t => {
   const { controller } = await setup(t);
   const session = controller.create();
@@ -2331,6 +2361,8 @@ test('Claude queues are forwarded during work in order, without replaying uncert
   session.activeProvider = 'claude-cli';
   controller.activeTurns.set(session.id, 'live-turn');
   controller.liveInputMode = controller.data.settings.mode;
+  // sendCLI sets both together from the running provider's capabilities.
+  controller.liveInputCaps = require('../src/providers/capabilities.cjs').capabilities('claude-cli');
   const delivered = [];
   const acknowledgements = [];
   controller.liveInput = message => new Promise(resolve => {

@@ -38,7 +38,8 @@ async function fixture(t, options = {}) {
     };
     children.push({ child, args, options: spawnOptions });
     const stream = ndJsonStream(Writable.toWeb(child.stdout), Readable.toWeb(child.stdin));
-    let helpers;
+    let helpers, cancelPending, cancelled = false, seeCancel;
+    const cancelSeen = new Promise(resolve => { seeCancel = resolve; });
     const rpc = new AgentSideConnection(connection => ({
       async initialize(params) {
         calls.push(['initialize', params]);
@@ -63,11 +64,19 @@ async function fixture(t, options = {}) {
         if (options.permission) {
           await update(params.sessionId, { sessionUpdate: 'tool_call', toolCallId: 'tool-1', title: 'bash', kind: 'other', status: 'in_progress',
             ...(options.noRawInput ? {} : { rawInput: { command: 'build' } }) });
-          const permission = await connection.requestPermission({ sessionId: params.sessionId, toolCall: { toolCallId: 'tool-1' },
-            options: [{ optionId: 'allow-once', kind: 'allow_once', name: 'Allow once' }, { optionId: 'reject-once', kind: 'reject_once', name: 'Reject' }] });
-          calls.push(['permission', permission]);
+          const asked = connection.requestPermission({ sessionId: params.sessionId, toolCall: { toolCallId: 'tool-1' },
+            options: [{ optionId: 'allow-once', kind: 'allow_once', name: 'Allow once' }, { optionId: 'reject-once', kind: 'reject_once', name: 'Reject' }] })
+            .then(permission => { calls.push(['permission', permission]); });
+          // Like dsh, a cancel ends the first prompt at once, even while its approval is still open.
+          if (options.cancelFirst && methodCalls(calls, 'prompt').length === 1) await Promise.race([asked, cancelSeen]);
+          else await asked;
         }
         if (options.wait) return new Promise(() => {});
+        // Like dsh, a prompt cancelled while it waited (here on an approval) ends as cancelled.
+        if (options.cancelFirst && methodCalls(calls, 'prompt').length === 1) {
+          if (cancelled) return { stopReason: 'cancelled' };
+          return new Promise(resolve => { cancelPending = () => resolve({ stopReason: 'cancelled' }); });
+        }
         if (options.noise) {
           await update('foreign-session', { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'FOREIGN' } });
           await update(params.sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'image', mimeType: 'image/png', data: 'aGk=' } });
@@ -84,7 +93,7 @@ async function fixture(t, options = {}) {
         }
         return { stopReason: options.stopReason || 'end_turn' };
       },
-      async cancel(params) { calls.push(['cancel', params]); },
+      async cancel(params) { calls.push(['cancel', params]); cancelled = true; cancelPending?.(); seeCancel(); },
     }), stream);
     rpc.closed.catch(() => {});
     return child;
@@ -97,10 +106,10 @@ async function fixture(t, options = {}) {
 const runOptions = () => ({ cwd: process.cwd(), model: FLASH, access: 'read-only', prompt: 'Reply briefly.' });
 const methodCalls = (calls, name) => calls.filter(([method]) => method === name);
 
-test('DeepSeek is registered, installable and reports no steer, compact or usage', () => {
+test('DeepSeek is registered, installable and reports Send now by cancel and re-prompt, no compact or usage', () => {
   assert.deepEqual(NATIVE_CLI_INFO['native:deepseek'], { label: 'DeepSeek Harness CLI', setting: 'deepseekEnabled', slug: 'deepseek-cli' });
   assert.match(installer('native:deepseek').command, /npm install --global @deepseek-ai\/dsh@latest$/);
-  assert.deepEqual({ ...capabilities('native:deepseek') }, { cli: true, steer: false, compact: false, usage: false });
+  assert.deepEqual({ ...capabilities('native:deepseek') }, { cli: true, steer: false, compact: false, usage: false, liveSteer: true });
 });
 
 test('DeepSeek is found as the npm package script, and a missing executable reads as not installed', async t => {
@@ -277,4 +286,39 @@ test('DeepSeek cancellation stops its process tree and releases the active turn'
 test('DeepSeek sign-in explains that dsh keeps its own API key', async t => {
   const { backend } = await fixture(t);
   await assert.rejects(backend.login(), /DEEPSEEK_API_KEY/);
+});
+
+test('Send now cancels the DeepSeek step and prompts again in the same session without restarting the process', async t => {
+  const { backend, calls, children } = await fixture(t, { cancelFirst: true, text: ['Replaced answer.'] });
+  let input = null;
+  const running = backend.run({ ...runOptions(), onInput: fn => { if (fn) input = fn; } });
+  for (let i = 0; i < 200 && !(input && methodCalls(calls, 'prompt').length); i++) await new Promise(resolve => setTimeout(resolve, 5));
+  await assert.rejects(input({ id: 'queued', text: 'Later.', images: [] }, { steer: false }), /one prompt at a time/);
+  await input({ id: 'now', text: 'Use the new requirement.', images: [] }, { steer: true });
+  const result = await running;
+  assert.equal(result.result, 'Replaced answer.');
+  assert.deepEqual(methodCalls(calls, 'cancel').map(([, params]) => params.sessionId), ['session-1']);
+  assert.deepEqual(methodCalls(calls, 'prompt').map(([, params]) => params.sessionId), ['session-1', 'session-1']);
+  assert.equal(methodCalls(calls, 'prompt')[1][1].prompt[0].text, 'Use the new requirement.');
+  assert.equal(children.length, 1, 'the same dsh process serves the replacement prompt');
+  await assert.rejects(input({ id: 'after', text: 'Too late.', images: [] }, { steer: true }), /no longer accepting/);
+});
+
+test('an approval answered after Send now cannot approve anything for the replacement prompt', async t => {
+  let answer;
+  const { backend, calls } = await fixture(t, { permission: true, cancelFirst: true });
+  let input = null;
+  const running = backend.run({ ...runOptions(), access: 'workspace-write', onInput: fn => { if (fn) input = fn; },
+    // Only the first prompt's approval is held; the replacement prompt's own request is denied at once.
+    approve: () => answer ? Promise.resolve(false) : new Promise(resolve => { answer = resolve; }) });
+  for (let i = 0; i < 200 && !answer; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  await input({ id: 'now', text: 'Change course.', images: [] }, { steer: true });
+  for (let i = 0; i < 200 && methodCalls(calls, 'prompt').length < 2; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  answer(true);
+  for (let i = 0; i < 200 && methodCalls(calls, 'permission').length < 2; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  await running.catch(() => {});
+  // Both requests end cancelled: the replacement's own (denied) and the old step's late Allow.
+  assert.deepEqual(methodCalls(calls, 'permission').map(([, permission]) => permission.outcome), [{ outcome: 'cancelled' }, { outcome: 'cancelled' }],
+    'the late Allow does not apply');
+  assert.equal(methodCalls(calls, 'prompt').length, 2);
 });

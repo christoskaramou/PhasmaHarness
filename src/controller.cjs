@@ -9,7 +9,7 @@ const { ApiAgent } = require('./providers/api-agent.cjs');
 const { TOOLS: AGENT_TOOLS } = require('./tools/agent-tools.cjs');
 const { NATIVE_CLI_INFO } = require('./providers/native-cli.cjs');
 const { ClaudeCLI, handoff } = require('./providers/claude.cjs');
-const { CAPABILITIES, capabilities, isCLI } = require('./providers/capabilities.cjs');
+const { CAPABILITIES, API: API_CAPABILITIES, capabilities, isCLI } = require('./providers/capabilities.cjs');
 const { ProviderLimits } = require('./providers/limits.cjs');
 const { NO_LOG } = require('./log.cjs');
 const { NO_TRACE } = require('./trace.cjs');
@@ -254,7 +254,8 @@ class Controller extends EventEmitter {
       accessModes: ACCESS_MODES,
       providerLimits: this.limits.active(),
       providerQuotas: this.data.providerQuotas,
-      providerCapabilities: CAPABILITIES,
+      // api: what an API provider (an id without a colon) supports; the UI applies it like capabilities() does.
+      providerCapabilities: { ...CAPABILITIES, api: API_CAPABILITIES },
       requests: [...this.requests.values()].map(request => ({
         ...request,
         canAccept: request.method !== 'mcpServer/elicitation/request' || isMcpConfirmation(request.params),
@@ -885,9 +886,10 @@ class Controller extends EventEmitter {
         call: (name, args, signal) => this.bridgeTool(session.id, name, args, signal) } : undefined;
       const result = await runtime.run({
         provider: selected.provider, bridge,
-        ...(selected.provider === 'claude-cli' ? { onInput: input => {
+        ...(capabilities(selected.provider).liveQueue || capabilities(selected.provider).liveSteer ? { onInput: input => {
           if (session.submission !== submission) return;
           this.liveInput = input;
+          this.liveInputCaps = capabilities(selected.provider);
           this.liveInputMode = session.items.find(item => item.clientId === clientId)?.requestedMode;
           if (input) setImmediate(() => this.flushLiveQueue(session));
         } } : {}),
@@ -977,7 +979,7 @@ class Controller extends EventEmitter {
       (session.directContext ||= []).push({ question: text, answer: answer || `[${backend} turn ${outcome.status}]` });
       if (outcome.status === 'completed') session[lastKey] = session.items.at(-1)?.id;
       else { session[lastKey] = null; session[sessionKey] = null; }
-      this.cliAbort = null; this.liveInput = null; turnOver = true;
+      this.cliAbort = null; this.liveInput = null; this.liveInputCaps = null; turnOver = true;
       // An approval still open when the CLI turn ends can no longer be used.
       for (const [id, resolve] of this.helperApprovals) if (id.startsWith('cli-')) { resolve(false); this.requests.delete(id); this.helperApprovals.delete(id); this.approvalKeys.delete(id); }
       this.finishTurn(session, submission, outcome);
@@ -1045,7 +1047,8 @@ class Controller extends EventEmitter {
       this.save(); this.changed();
       if ((action === 'steer' || action === 'live') && this.liveInput && !this.isCoordinator() && !message.agentReply && !message.wikiTaskId && !message.routineRun) {
         this.lastSends.delete(session.id);
-        await this.liveInput(message);
+        // Send now applies within the turn where the provider can (liveSteer); otherwise it joins the provider's own queue.
+        await this.liveInput(message, { steer: action === 'steer' && !!this.liveInputCaps?.liveSteer });
         this.recordLiveMessage(session, message, activeTask);
       } else if (action === 'steer' && (!capabilities(session.activeProvider).steer || this.isCoordinator())) {
         await this.restartWithMessage(session, message, activeTask);
@@ -1069,7 +1072,7 @@ class Controller extends EventEmitter {
   }
 
   flushLiveQueue(session) {
-    if (!this.liveInput || this.busy !== session.id || session.queueSending || session.queuePaused ||
+    if (!this.liveInput || !this.liveInputCaps?.liveQueue || this.busy !== session.id || session.queueSending || session.queuePaused ||
         session.compacting || this.stopping.has(session.id) || session.delegation || this.isCoordinator()) return;
     const message = session.queue?.[0];
     if (!message || message.error || message.uncertain || message.agentReply || message.routineRun || message.wikiTaskId ||

@@ -83,7 +83,20 @@ renderSidebarWidth();
 const CODEX_CAPS = { cli: false, steer: true, compact: true, usage: true };
 function providerCaps(provider) {
   const all = state?.providerCapabilities || {};
-  return (Object.hasOwn(all, provider) && all[provider]) || all.codex || CODEX_CAPS;
+  if (Object.hasOwn(all, provider) && all[provider]) return all[provider];
+  // API providers (ids without a colon) run in Harness's own loop, as on the main process.
+  if (typeof provider === 'string' && provider && !provider.includes(':') && all.api) return all.api;
+  return all.codex || CODEX_CAPS;
+}
+
+// What Send now will actually do for this provider, so the button never claims more than happens.
+function sendNowTitle(provider) {
+  const caps = providerCaps(provider);
+  if (state.coordinator || (!caps.steer && !caps.liveSteer && !caps.liveQueue)) return 'Stop the current turn, then send this message with conversation context';
+  if (caps.steer) return 'Send into the running turn now';
+  if (caps.liveSteer && !caps.liveQueue) return 'Cancel the current step, then send this in the same session';
+  if (caps.liveSteer) return 'Add this to the running turn now';
+  return 'Send to the provider’s own queue; it answers after the current step';
 }
 const api = { ...window.router,
   settings: values => window.router.settings(values, selectedAgent),
@@ -1169,9 +1182,7 @@ function render() {
       button.setAttribute('aria-label', action === 'remove' ? 'Remove queued message' : action === 'edit' ? 'Edit queued message' : label);
       button.disabled = (action === 'steer' && (revise && !['queued', 'running'].includes(session.delegation.state))) || !!session.queueSending || (action !== 'remove' && (message.uncertain || (action !== 'edit' && (!ready || (state.busy && (state.busy !== selectedId || (!revise && ((!session.turnId && providerCaps(session.activeProvider).steer && !state.coordinator) || session.compacting))))))));
       button.title = action === 'edit' ? 'Move back to the composer to edit and resend'
-        : action === 'steer' && !revise && !providerCaps(session.activeProvider).steer
-          ? session.activeProvider === 'claude-cli' ? 'Send to Claude while it is working'
-            : 'Stop the current turn, then send this message with conversation context'
+        : action === 'steer' && !revise ? sendNowTitle(session.activeProvider)
           : button.getAttribute('aria-label');
       button.onclick = async () => {
         try {

@@ -89,3 +89,47 @@ test('an unreachable provider says where it looked and what to do next', async (
       error => error.message.startsWith(`P is not reachable at ${baseUrl} (net::ERR_CONNECTION_REFUSED).`) && next.test(error.message));
   }
 });
+
+test('a follow-up joins the next model call, counts as delivered only then, and keeps a finished answer going', async t => {
+  const { agent, workspace, requests } = fixture(t, [
+    [call(0, 'a', 'read_file', { path: 'notes.txt' })],
+    [{ choices: [{ delta: { content: 'First answer.' } }] }],
+    [{ choices: [{ delta: { content: 'Answer with the correction.' } }] }],
+  ]);
+  let input = null, delivered = [];
+  const modelRequest = agent.providers.modelRequest;
+  agent.providers.modelRequest = async (choice, body, ...rest) => {
+    // While the model writes its final answer, the user sends a correction.
+    if (requests.length === 1) input({ id: 'late', text: 'Also mention beta.', images: [] }).then(() => delivered.push('late'));
+    return modelRequest(choice, body, ...rest);
+  };
+  const result = await agent.run({ provider: 'local', model: 'test', cwd: workspace, prompt: 'Read the notes.', access: 'workspace-write',
+    signal: new AbortController().signal, approve: async () => true, onEvent: () => {},
+    onInput: fn => {
+      if (fn && !input) {
+        input = fn;
+        fn({ id: 'early', text: 'Keep it short.', images: [] }).then(() => delivered.push('early'));
+      }
+    } });
+
+  assert.equal(result.result, 'Answer with the correction.', 'a correction during the final call gets its own answer');
+  const userTexts = request => request.messages.filter(message => message.role === 'user').map(message => message.content);
+  assert.deepEqual(userTexts(requests[0]), ['Read the notes.', 'Keep it short.'], 'a follow-up sent before the first call joins it');
+  assert.deepEqual(userTexts(requests[2]), ['Read the notes.', 'Keep it short.', 'Also mention beta.']);
+  assert.deepEqual(delivered, ['early', 'late']);
+  await assert.rejects(input({ id: 'after', text: 'Too late.', images: [] }), /no longer accepting/);
+});
+
+test('a follow-up still waiting when the turn fails goes back to Harness instead of being lost', async t => {
+  const { agent, workspace } = fixture(t, [[call(0, 'a', 'read_file', { path: 'notes.txt' })]]);
+  let input = null;
+  agent.providers.modelRequest = async () => {
+    const waiting = input({ id: 'queued', text: 'One more thing.', images: [] });
+    waiting.catch(() => {});
+    input.waiting = waiting;
+    throw new Error('Model unavailable.');
+  };
+  await assert.rejects(agent.run({ provider: 'local', model: 'test', cwd: workspace, prompt: 'Read the notes.', access: 'workspace-write',
+    signal: new AbortController().signal, approve: async () => true, onEvent: () => {}, onInput: fn => { if (fn) input = fn; } }), /Model unavailable/);
+  await assert.rejects(input.waiting, /ended before this message reached the model/);
+});

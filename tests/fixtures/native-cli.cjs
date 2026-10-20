@@ -85,10 +85,11 @@ async function museFixture(t, options = {}) {
     children.push({ child, args, options: spawnOptions });
     const send = message => child.stdout.write(JSON.stringify(message) + '\n');
     const notify = (method, params) => send({ jsonrpc: '2.0', method, params: { sessionId: 'session-1', viewCursor: 'cursor', ...params } });
-    let helpers;
+    let helpers, activeTurn = null;
+    const acks = new Map();
     const finishTurn = (turnId, text = 'Hello world') => {
       if (child.exitCode !== null) return;
-      const itemId = options.onPrompt ? `answer-${turnId}` : 'answer';
+      const itemId = options.onPrompt || options.live ? `answer-${turnId}` : 'answer';
       notify('item/completed', { item: { itemId: 'private', turnId, kind: 'reasoning', revision: 1, status: 'completed', text: 'PRIVATE_REASONING' } });
       notify('item/started', { item: { itemId, turnId, kind: 'agentMessage', revision: 1, status: 'inProgress', text: text.slice(0, 5) } });
       notify('item/delta', { itemId, field: 'text', delta: text.slice(5) });
@@ -122,10 +123,45 @@ async function museFixture(t, options = {}) {
             sessionId: 'session-1', activeTurnId: null, permissionState: { profileId: options.profile || p.permissionProfile, reviewerAuthority: 'human' } },
             viewCursor: 'cursor' };
         }
+        // Like Muse, a turn/start re-sent under its original commandId gets the original answer and starts nothing.
+        if (request.method === 'turn/start' && acks.has(p.commandId)) {
+          send({ jsonrpc: '2.0', id: request.id, result: acks.get(p.commandId) });
+          continue;
+        }
+        // live: the first turn stays open; a steer lands in it (same turnId), a queued message runs as a second turn after it.
+        if (request.method === 'turn/start' && options.live && activeTurn) {
+          const current = activeTurn;
+          activeTurn = null;
+          if (p.ifBusy === 'steer') {
+            acks.set(p.commandId, { commandId: p.commandId, disposition: 'steered', startedNewTurn: false, status: 'accepted', turnId: current });
+            send({ jsonrpc: '2.0', id: request.id, result: acks.get(p.commandId) });
+            setImmediate(() => finishTurn(current, 'Steered answer'));
+          } else {
+            acks.set(p.commandId, { commandId: p.commandId, disposition: 'queued', startedNewTurn: false, status: 'accepted', turnId: p.commandId });
+            send({ jsonrpc: '2.0', id: request.id, result: acks.get(p.commandId) });
+            setImmediate(() => {
+              // liveFailFirst: the running turn fails after the queued message was acknowledged; the queued turn never runs.
+              if (options.liveFailFirst) {
+                notify('turn/completed', { turnId: current, terminal: 'failed', reason: 'Model unavailable', error: { kind: 'modelError', message: 'Model unavailable', retryable: false } });
+                return;
+              }
+              finishTurn(current, 'First answer');
+              notify('turn/started', { turnId: p.commandId, commandId: p.commandId });
+              finishTurn(p.commandId, 'Queued answer');
+            });
+          }
+          continue;
+        }
         if (request.method === 'turn/start') {
           const turnId = p.commandId;
           result = { commandId: p.commandId, disposition: 'started', startedNewTurn: true, status: 'accepted', turnId };
+          acks.set(p.commandId, result);
           notify('turn/started', { turnId });
+          if (options.live) {
+            activeTurn = turnId;
+            send({ jsonrpc: '2.0', id: request.id, result });
+            continue;
+          }
           if (options.onPrompt) {
             send({ jsonrpc: '2.0', id: request.id, result });
             Promise.resolve().then(() => options.onPrompt({ params: p, helpers }))

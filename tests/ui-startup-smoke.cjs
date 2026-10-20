@@ -2470,3 +2470,15 @@ app.whenReady().then(async () => {
   app.exit(0);
 }).catch(error => { console.error(`UI smoke failed during ${phase}:`, error.stack); app.exit(1); });
 // Chromium still owns files here during shutdown; cleanup is left to the temp directory.
+  // Send now describes what each provider will actually do with the message.
+  const sendNowTitles = await window.webContents.executeJavaScript(`(() => {
+    const saved = state.coordinator;
+    state.coordinator = false;
+    const titles = ['codex', 'claude-cli', 'native:deepseek', 'cursor-cli', 'native:muse', 'test-api', 'native:antigravity'].map(sendNowTitle);
+    state.coordinator = saved;
+    return titles;
+  })()`);
+  assert.deepEqual(sendNowTitles, ['Send into the running turn now', 'Send to the provider’s own queue; it answers after the current step',
+    'Cancel the current step, then send this in the same session', 'Cancel the current step, then send this in the same session',
+    'Add this to the running turn now', 'Add this to the running turn now', 'Stop the current turn, then send this message with conversation context']);
+  console.log('Send now describes each provider’s delivery passed');

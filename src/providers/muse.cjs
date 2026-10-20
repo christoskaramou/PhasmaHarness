@@ -195,17 +195,64 @@ class MuseCLI {
       options.onEvent?.({ type: 'system', session_id: session.sessionId });
       const input = [{ type: 'text', text: [options.instructions, options.helpers?.instructions, options.prompt].filter(Boolean).join('\n\n') }];
       for (const { mime, data } of (options.images || []).map(imageData)) input.push({ type: 'image', mediaType: mime, base64Data: data });
-      const turn = await deadline(Promise.race([session.sendUserTurn({ input, ifBusy: 'queue',
+      const submit = (parts, ifBusy) => deadline(Promise.race([session.sendUserTurn({ input: parts, ifBusy,
         ...(options.effort ? { reasoningEffort: options.effort } : {}) }), host.failure]), 30000, LABEL, options.signal);
-      const outcome = await deadline(Promise.race([turn.completed, host.failure]), options.timeoutMs || 30 * 60 * 1000, LABEL, options.signal);
-      if (outcome.kind !== 'completed' || outcome.params.terminal !== 'completed') {
-        // Muse reports why a turn ended (a model, billing or account error); show that instead of a generic failure.
-        const reason = String(outcome.params?.error?.message || outcome.params?.reason || '').slice(0, 1000);
-        throw new Error(reason ? `${LABEL} could not complete this turn: ${reason}` : 'Muse did not complete this turn. Review its saved session before retrying.');
+      const turn = await submit(input, 'queue');
+      // Muse takes follow-ups natively: a steer lands in the running turn (same turnId) and is delivered on its
+      // acknowledgement; a queued one becomes a new turn this run also waits for, and is delivered only when that turn
+      // completes. If the run ends first, the message stays queued as uncertain instead of being dropped.
+      const turns = [turn], submissions = new Set(), waiting = new Map(), done = new Set();
+      let accepting = true;
+      options.onInput?.((message, { steer } = {}) => {
+        if (!accepting || options.signal?.aborted)
+          return Promise.reject(new Error('Muse is no longer accepting messages.'));
+
+        const parts = [{ type: 'text', text: message.text }];
+        for (const { mime, data } of (message.images || []).map(imageData)) parts.push({ type: 'image', mediaType: mime, base64Data: data });
+        const acked = submit(parts, steer ? 'steer' : 'queue').then(next => {
+          const joined = turns.some(known => known.turnId === next.turnId);
+          if (!joined)
+            turns.push(next);
+          return { next, joined };
+        });
+        submissions.add(acked);
+        acked.finally(() => submissions.delete(acked)).catch(() => {});
+        return acked.then(({ next, joined }) => joined || done.has(next.turnId) ? undefined
+          : new Promise((resolve, reject) => { waiting.set(next.turnId, { resolve, reject }); }));
+      });
+
+      let last = turn;
+      try {
+        for (let index = 0; ;) {
+          if (index < turns.length) {
+            last = turns[index++];
+            const outcome = await deadline(Promise.race([last.completed, host.failure]), options.timeoutMs || 30 * 60 * 1000, LABEL, options.signal);
+            if (outcome.kind !== 'completed' || outcome.params.terminal !== 'completed') {
+              // Muse reports why a turn ended (a model, billing or account error); show that instead of a generic failure.
+              const reason = String(outcome.params?.error?.message || outcome.params?.reason || '').slice(0, 1000);
+              throw new Error(reason ? `${LABEL} could not complete this turn: ${reason}` : 'Muse did not complete this turn. Review its saved session before retrying.');
+            }
+            done.add(last.turnId);
+            waiting.get(last.turnId)?.resolve();
+            waiting.delete(last.turnId);
+            continue;
+          }
+
+          if (!submissions.size)
+            break;
+          await Promise.allSettled([...submissions]);
+        }
+      } finally {
+        accepting = false;
+        options.onInput?.(null);
+        for (const { reject } of waiting.values()) reject(new Error('Muse closed before the queued message ran. Check the conversation before resending.'));
+        waiting.clear();
       }
-      const text = session.fold.items.list().filter(item => item.turnId === turn.turnId && item.kind === 'agentMessage').map(item => item.text || '').join('\n\n');
+
+      const text = session.fold.items.list().filter(item => item.turnId === last.turnId && item.kind === 'agentMessage').map(item => item.text || '').join('\n\n');
       // Raw cache conventions vary; use Muse's counted-once per-completion projection.
-      const events = [...host.tokenEvents.values()].filter(event => event.turnId === turn.turnId);
+      const ids = new Set(turns.map(known => known.turnId));
+      const events = [...host.tokenEvents.values()].filter(event => ids.has(event.turnId));
       const counts = events.filter(event =>
         Number.isSafeInteger(event.promptTokens) && event.promptTokens >= 0 &&
         Number.isSafeInteger(event.usage?.outputTokens) && event.usage.outputTokens >= 0);

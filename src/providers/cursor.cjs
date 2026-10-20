@@ -1,6 +1,7 @@
 const { WORKER_INSTRUCTIONS } = require('../worker-instructions.cjs');
 const { spawn } = require('node:child_process');
-const { spawnOwned, stopTree } = require('../process-tree.cjs');
+const { spawnOwned, stopTree, stopStartedSince } = require('../process-tree.cjs');
+const { stepStopped } = require('./native-cli.cjs');
 const { cursorLimitText } = require('./limits.cjs');
 const { imageData } = require('../image-input.cjs');
 const fs = require('node:fs');
@@ -130,14 +131,15 @@ class CursorCLI {
     child.stderr.on('data', () => {});
     child.once('error', e => { fail(e); close(); }); child.once('close', () => { closed = true; fail(new Error('Cursor connection closed.')); signal?.removeEventListener('abort', close); });
     signal?.addEventListener('abort', close, { once: true }); if (signal?.aborted) close();
-    return { call, close };
+    return { call, close, child, notify: (method, params) => write({ method, params }) };
   }
-  async run({ cwd, model, effort, effortOption, parameterized, parameters = [], prompt, images = [], resume, access, signal, onEvent = () => {}, approve = async () => false, schema, helpers, instructions = WORKER_INSTRUCTIONS }) {
+  async run({ cwd, model, effort, effortOption, parameterized, parameters = [], prompt, images = [], resume, access, signal, onEvent = () => {}, approve = async () => false, schema, helpers, onInput, instructions = WORKER_INSTRUCTIONS }) {
     // Models from cursor/list_available_models are base names with separate parameters: Cursor accepts them, and their
     // reasoning option, only from a client that declares the parameterized model picker.
     const setEffort = typeof effort === 'string' && effort && typeof effortOption === 'string' && effortOption;
     const picker = parameterized === true || setEffort;
-    let sessionId, output = '', prompting = false; const messageId = randomUUID();
+    // Each prompt has its own reply id, approval signal and start time (Send now replaces the prompt in this session).
+    let sessionId, output = '', prompting = false, messageId = randomUUID(), promptAbort = new AbortController(), promptStartedAt = Date.now();
     const rpc = this.connect({ cwd, model, signal,
       onUpdate: p => {
         if (!prompting || p.sessionId !== sessionId) return;
@@ -152,7 +154,9 @@ class CursorCLI {
       onRequest: async (method, p) => {
         if (method === 'session/request_permission') {
           // Ask and Workspace access both ask the user in the Harness, like Codex and Claude; classifiers never get tools.
-          const allowed = !schema && (access === 'danger-full-access' || await approve(p.toolCall) === true);
+          // The prompt's own signal: after Send now a late answer cannot approve the replacement prompt's tools.
+          const asked = promptAbort.signal;
+          const allowed = !schema && (access === 'danger-full-access' || await approve(p.toolCall, { signal: asked }) === true) && !asked.aborted;
           const option = p.options?.find(o => o.kind === (allowed ? 'allow_once' : 'reject_once'));
           return { outcome: option ? { outcome: 'selected', optionId: option.optionId } : { outcome: 'cancelled' } };
         }
@@ -185,7 +189,58 @@ class CursorCLI {
       await rpc.call('session/set_mode', { sessionId, modeId: schema || access === 'read-only' ? 'ask' : 'agent' });
       prompting = true;
       const helperNote = (!schema && helpers?.instructions) ? '\n\nApp helper note (not Cursor system policy):' + helpers.instructions : '';
-      const result = await rpc.call('session/prompt', { sessionId, prompt: [{ type: 'text', text: (schema ? '' : 'Harness worker defaults (subject to user overrides):\n' + instructions + '\n\nCurrent request:\n') + prompt + helperNote + (schema ? '\nReturn only JSON matching this schema: ' + JSON.stringify(schema) : '') }, ...images.map(url => imageData(url)).map(({ mime, data }) => ({ type: 'image', mimeType: mime, data }))] }, 0);
+      const pictures = urls => {
+        if (urls.length && !init.agentCapabilities?.promptCapabilities?.image) throw new Error('Cursor CLI did not advertise image support.');
+        return urls.map(url => imageData(url)).map(({ mime, data }) => ({ type: 'image', mimeType: mime, data }));
+      };
+      const send = parts => {
+        promptAbort = new AbortController(); promptStartedAt = Date.now(); messageId = randomUUID(); output = '';
+        return rpc.call('session/prompt', { sessionId, prompt: parts }, 0);
+      };
+      let current = send([{ type: 'text', text: (schema ? '' : 'Harness worker defaults (subject to user overrides):\n' + instructions + '\n\nCurrent request:\n') + prompt + helperNote + (schema ? '\nReturn only JSON matching this schema: ' + JSON.stringify(schema) : '') }, ...pictures(images)]);
+      let steering = null, finished = false;
+      // ACP runs one prompt at a time: Send now cancels the step, closes its approvals, stops what it started, then
+      // prompts again in the same session and process. Unconfirmed cleanup keeps the message queued.
+      const steer = async message => {
+        const parts = [{ type: 'text', text: message.text }, ...pictures(message.images || [])];
+        const previous = current;
+        promptAbort.abort();
+        const { interrupted, remaining } = stopStartedSince(rpc.child, promptStartedAt, `${rpc.child?.ownerKey || 'cursor'}/${randomUUID()}`,
+          async () => {
+            rpc.notify('session/cancel', { sessionId });
+            return stepStopped(previous, 'Cursor');
+          }, async () => {});
+        await interrupted;
+        if ((await remaining).length)
+          throw new Error('Cursor has not confirmed that the cancelled step stopped. The message stays queued.');
+
+        current = send(parts);
+      };
+      if (!schema) onInput?.((message, { steer: now } = {}) => {
+        if (!now)
+          return Promise.reject(new Error('Cursor takes one prompt at a time. Use Send now to replace the current step.'));
+        if (finished || steering || signal?.aborted)
+          return Promise.reject(new Error('Cursor is no longer accepting messages.'));
+
+        steering = steer(message).finally(() => { steering = null; });
+        return steering;
+      });
+
+      let result;
+      try {
+        for (;;) {
+          const mine = current;
+          result = await mine;
+          if (steering)
+            await steering.catch(() => {});
+          if (current === mine)
+            break;
+        }
+      } finally {
+        finished = true;
+        onInput?.(null);
+      }
+
       if (result.stopReason !== 'end_turn') throw new Error(`Cursor stopped: ${result.stopReason || 'unknown reason'}`);
       // Cursor reports usage and rate limits as a closing line of the reply, not as an error.
       const limit = cursorLimitText(output);

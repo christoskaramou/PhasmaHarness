@@ -182,46 +182,84 @@ class ApiAgent {
   }
 
   async run(options) {
-    const { provider, model, effort, cwd, prompt, images = [], instructions, resume, access, signal, approve, onEvent, bridge } = options;
+    const { provider, model, effort, cwd, prompt, images = [], instructions, resume, access, signal, approve, onEvent, bridge, onInput } = options;
     const previous = resume ? this.load(resume) : null;
     const id = previous ? resume : randomUUID();
     const messages = previous || [{ role: 'system', content: `${instructions || ''}\n\nYou work in ${cwd} on ${process.platform}. ` +
       'Use the tools to inspect and change files and to run commands; relative paths start at the workspace. Report what you changed and verified.' }];
-    messages.push({ role: 'user', content: images.length ? [{ type: 'text', text: prompt }, ...images.map(url => ({ type: 'image_url', image_url: { url } }))] : prompt });
+    const userContent = (text, urls) => urls.length ? [{ type: 'text', text }, ...urls.map(url => ({ type: 'image_url', image_url: { url } }))] : text;
+    messages.push({ role: 'user', content: userContent(prompt, images) });
     const tools = [...TOOLS, ...(bridge?.tools || []).map(tool => ({ name: tool.name, description: tool.description, parameters: tool.inputSchema }))]
       .map(tool => ({ type: 'function', function: tool }));
     const total = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0 };
     let reported = false, answer = '';
-    onEvent({ type: 'system', session_id: id });
-    for (let step = 0; ; step++) {
-      if (step === MAX_STEPS) throw new Error(`The model was still calling tools after ${MAX_STEPS} steps, so the turn was stopped.`);
-      signal.throwIfAborted();
-      const messageId = randomUUID();
-      onEvent({ type: 'stream_event', event: { type: 'message_start', message: { id: messageId } } });
-      const body = { model, messages, tools, stream: true, stream_options: { include_usage: true }, ...(effort ? { reasoning_effort: effort } : {}) };
-      const { message, usage } = await this.complete({ provider, model }, body, signal,
-        text => onEvent({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text } } }));
-      const cached = usage?.prompt_tokens_details?.cached_tokens ?? usage?.prompt_cache_hit_tokens ?? 0;
-      const stepUsage = usage ? { input_tokens: (usage.prompt_tokens || 0) - cached, output_tokens: usage.completion_tokens || 0, cache_read_input_tokens: cached } : null;
-      if (stepUsage) {
-        reported = true;
-        for (const key of Object.keys(total)) total[key] += stepUsage[key];
+    // Harness owns this loop, so a follow-up joins the conversation before the next model call. It counts as
+    // delivered only then; one still waiting when the turn ends goes back to the Harness queue.
+    const pending = [];
+    let accepting = true;
+    onInput?.(message => {
+      if (!accepting || signal.aborted)
+        return Promise.reject(new Error('This turn is no longer accepting messages.'));
+      return new Promise((resolve, reject) => pending.push({ message, resolve, reject }));
+    });
+    const deliver = () => {
+      for (const item of pending.splice(0)) {
+        messages.push({ role: 'user', content: userContent(item.message.text, item.message.images || []) });
+        item.resolve();
       }
-      const calls = message.tool_calls || [];
-      onEvent({ type: 'assistant', message: { id: messageId, ...(stepUsage ? { usage: stepUsage } : {}), content: [
-        ...(message.content ? [{ type: 'text', text: message.content }] : []),
-        ...calls.map(call => ({ type: 'tool_use', id: call.id, name: call.function.name, input: (() => { try { return JSON.parse(call.function.arguments || '{}'); } catch { return call.function.arguments; } })() })),
-      ] } });
-      messages.push(message);
-      if (!calls.length) { answer = message.content; break; }
-      for (const call of calls) {
-        const output = await this.tool(call, { cwd, access, approve, bridge, signal });
-        onEvent({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: call.id, is_error: output.error, content: output.text }] } });
-        messages.push({ role: 'tool', tool_call_id: call.id, content: output.text });
+    };
+
+    try {
+      onEvent({ type: 'system', session_id: id });
+      for (let step = 0; ; step++) {
+        if (step === MAX_STEPS) throw new Error(`The model was still calling tools after ${MAX_STEPS} steps, so the turn was stopped.`);
+        signal.throwIfAborted();
+        deliver();
+        const answered = await this.step({ provider, model, effort, cwd, access, approve, bridge, signal, onEvent, messages, tools, total });
+        if (answered.reported)
+          reported = true;
+
+        if (answered.final && !pending.length) {
+          answer = answered.final.content;
+          break;
+        }
       }
+    } finally {
+      accepting = false;
+      onInput?.(null);
+      for (const item of pending.splice(0)) item.reject(new Error('The turn ended before this message reached the model.'));
     }
+
     this.save(id, messages);
     return { result: answer, session_id: id, ...(reported ? { usage: total } : {}) };
+  }
+
+  // One model call and the tools it asked for. Returns the final message when the model asked for no tools.
+  async step({ provider, model, effort, cwd, access, approve, bridge, signal, onEvent, messages, tools, total }) {
+    const messageId = randomUUID();
+    onEvent({ type: 'stream_event', event: { type: 'message_start', message: { id: messageId } } });
+    const body = { model, messages, tools, stream: true, stream_options: { include_usage: true }, ...(effort ? { reasoning_effort: effort } : {}) };
+    const { message, usage } = await this.complete({ provider, model }, body, signal,
+      text => onEvent({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text } } }));
+    const cached = usage?.prompt_tokens_details?.cached_tokens ?? usage?.prompt_cache_hit_tokens ?? 0;
+    const stepUsage = usage ? { input_tokens: (usage.prompt_tokens || 0) - cached, output_tokens: usage.completion_tokens || 0, cache_read_input_tokens: cached } : null;
+    if (stepUsage) {
+      for (const key of Object.keys(total)) total[key] += stepUsage[key];
+    }
+
+    const calls = message.tool_calls || [];
+    onEvent({ type: 'assistant', message: { id: messageId, ...(stepUsage ? { usage: stepUsage } : {}), content: [
+      ...(message.content ? [{ type: 'text', text: message.content }] : []),
+      ...calls.map(call => ({ type: 'tool_use', id: call.id, name: call.function.name, input: (() => { try { return JSON.parse(call.function.arguments || '{}'); } catch { return call.function.arguments; } })() })),
+    ] } });
+    messages.push(message);
+    for (const call of calls) {
+      const output = await this.tool(call, { cwd, access, approve, bridge, signal });
+      onEvent({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: call.id, is_error: output.error, content: output.text }] } });
+      messages.push({ role: 'tool', tool_call_id: call.id, content: output.text });
+    }
+
+    return { reported: !!stepUsage, final: calls.length ? null : message };
   }
 }
 

@@ -66,4 +66,14 @@ function deadline(promise, milliseconds, label, signal) {
   });
 }
 
-module.exports = { findNativeCLI, executableOnPath, deadline, NATIVE_CLI_INFO };
+// Waits for a cancelled step to end. Refusing after `ms` keeps a Send now message queued (a plain error, not an
+// uncertain delivery) instead of starting a second writer next to a step that may still run.
+function stepStopped(promise, label, ms = 15000) {
+  let timer;
+  const refused = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} did not stop the current step. The message stays queued.`)), ms);
+  });
+  return Promise.race([promise.catch(() => null), refused]).finally(() => clearTimeout(timer));
+}
+
+module.exports = { findNativeCLI, executableOnPath, deadline, stepStopped, NATIVE_CLI_INFO };

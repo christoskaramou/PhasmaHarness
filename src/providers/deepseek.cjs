@@ -1,10 +1,11 @@
 const { spawn } = require('node:child_process');
+const { randomUUID } = require('node:crypto');
 const { Readable, Writable } = require('node:stream');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnOwned, stopTree } = require('../process-tree.cjs');
-const { findNativeCLI, deadline } = require('./native-cli.cjs');
+const { spawnOwned, stopTree, stopStartedSince } = require('../process-tree.cjs');
+const { findNativeCLI, deadline, stepStopped } = require('./native-cli.cjs');
 const { structuredResponse } = require('./structured.cjs');
 const { imageData } = require('../image-input.cjs');
 
@@ -118,8 +119,9 @@ class DeepSeekCLI {
   }
 
   async permission(host, request) {
-    const context = host.context;
-    if (!context || context.schema || context.signal?.aborted) return { outcome: { outcome: 'cancelled' } };
+    // The prompt's own signal: a Send now replacement aborts it, so a late answer cannot approve the new prompt's tools.
+    const context = host.context, signal = context?.signal;
+    if (!context || context.schema || signal?.aborted) return { outcome: { outcome: 'cancelled' } };
     const allow = request.options?.find(option => option.kind === 'allow_once');
     if (!allow || typeof context.approve !== 'function') return { outcome: { outcome: 'cancelled' } };
     // dsh sends only the call id with the request; the tool name and arguments come from the tool_call update before it.
@@ -129,9 +131,9 @@ class DeepSeekCLI {
     try {
       accepted = await context.approve({ title: call?.title ? `Allow ${call.title} once?` : 'Allow DeepSeek tool once?',
         // Without concrete input every call of one tool would share a session-allow key; a null name is never remembered.
-        toolName: rawInput ? call.title || null : null, input: rawInput || {}, rawInput: call?.rawInput ?? request.toolCall }, { signal: context.signal });
+        toolName: rawInput ? call.title || null : null, input: rawInput || {}, rawInput: call?.rawInput ?? request.toolCall }, { signal });
     } catch { return { outcome: { outcome: 'cancelled' } }; }
-    if (!accepted || context.signal?.aborted) return { outcome: { outcome: 'cancelled' } };
+    if (!accepted || signal?.aborted) return { outcome: { outcome: 'cancelled' } };
     return { outcome: { outcome: 'selected', optionId: allow.optionId } };
   }
 
@@ -166,9 +168,35 @@ class DeepSeekCLI {
       context.onEvent({ type: 'system', session_id: session.sessionId });
       const prompt = [{ type: 'text', text: [options.instructions || '', options.helpers?.instructions || '',
         options.schema ? `Return only a JSON object matching this schema. No tools are available.\n${JSON.stringify(options.schema)}` : '', options.prompt].filter(Boolean).join('\n\n') }];
-      if (options.images?.length && !host.info.agentCapabilities?.promptCapabilities?.image) throw new Error('This DeepSeek model does not support image prompts.');
-      for (const { mime, data } of (options.images || []).map(imageData)) prompt.push({ type: 'image', mimeType: mime, data });
-      const result = await deadline(host.rpc.prompt({ sessionId: session.sessionId, prompt }), options.timeoutMs || 30 * 60 * 1000, LABEL, options.signal);
+      prompt.push(...this.images(host, options.images));
+      let current = this.prompt(host, context, options, prompt), steering = null, finished = false;
+      // ACP allows one prompt in flight, so Send now replaces the current step inside the same session and process.
+      if (!options.schema) options.onInput?.((message, { steer } = {}) => {
+        if (!steer)
+          return Promise.reject(new Error('DeepSeek Harness takes one prompt at a time. Use Send now to replace the current step.'));
+        if (finished || steering || options.signal?.aborted)
+          return Promise.reject(new Error('DeepSeek Harness is no longer accepting messages.'));
+
+        steering = this.steer(host, context, options, message, current).then(next => { current = next; })
+          .finally(() => { steering = null; });
+        return steering;
+      });
+
+      let result;
+      try {
+        for (;;) {
+          const mine = current;
+          result = await deadline(mine, options.timeoutMs || 30 * 60 * 1000, LABEL, options.signal);
+          if (steering)
+            await steering.catch(() => {});
+          if (current === mine)
+            break;
+        }
+      } finally {
+        finished = true;
+        options.onInput?.(null);
+      }
+
       if (result.stopReason !== 'end_turn') throw new Error(result.stopReason === 'cancelled' ? 'DeepSeek Harness stopped.' : `DeepSeek Harness turn ended without completion: ${result.stopReason}`);
       return { result: context.text, session_id: session.sessionId,
         ...(options.schema ? { structured_output: structuredResponse(context.text, options.schema) } : {}) };
@@ -178,6 +206,37 @@ class DeepSeekCLI {
       try { if (options.schema && host && this.hosts.has(host)) await this.closeHost(host); }
       finally { this.active = false; }
     }
+  }
+
+  images(host, urls = []) {
+    if (urls.length && !host.info.agentCapabilities?.promptCapabilities?.image) throw new Error('This DeepSeek model does not support image prompts.');
+    return urls.map(imageData).map(({ mime, data }) => ({ type: 'image', mimeType: mime, data }));
+  }
+
+  // Each prompt gets its own signal for approvals and its own start time for cleanup.
+  prompt(host, context, options, parts) {
+    context.promptAbort = new AbortController();
+    context.signal = options.signal ? AbortSignal.any([options.signal, context.promptAbort.signal]) : context.promptAbort.signal;
+    context.promptStartedAt = Date.now();
+    context.text = '';
+    return host.rpc.prompt({ sessionId: context.sessionId, prompt: parts });
+  }
+
+  // Cancel the step, answer its open approvals as cancelled, confirm the commands it started are gone, then prompt
+  // again in the same session. If cleanup is not confirmed the message stays queued with that error.
+  async steer(host, context, options, message, previous) {
+    const parts = [{ type: 'text', text: message.text }, ...this.images(host, message.images)];
+    context.promptAbort.abort();
+    const { interrupted, remaining } = stopStartedSince(host.child, context.promptStartedAt, `${host.child.ownerKey || 'deepseek'}/${randomUUID()}`,
+      async () => {
+        await host.rpc.cancel({ sessionId: context.sessionId });
+        return stepStopped(previous, LABEL);
+      }, async () => {});
+    await interrupted;
+    if ((await remaining).length)
+      throw new Error('DeepSeek Harness has not confirmed that the cancelled step stopped. The message stays queued.');
+
+    return this.prompt(host, context, options, parts);
   }
 
   // dsh has no sign-in over ACP; its API key lives in its own credential store or environment.
