@@ -257,3 +257,32 @@ test('exit preference persists, validates and uses the normal quit path', () => 
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+
+test('paused reports, interrupted assignments and cancelled drafts survive updates without blocking them', () => {
+  const session = { status: 'completed', queuePaused: true, queue: [{ agentReply: true, agentReplyCancelled: true }],
+    items: [{ pendingReply: { agentReply: true } }] };
+  const cancelled = { status: 'interrupted', delegation: { cancelled: true, delivered: true },
+    pendingMessage: { text: 'Retain for inspection' }, submission: null };
+  const worker = { loading: new Set(), requests: new Map(), stopping: new Set(), activeTurns: new Map(),
+    cleanupPending: new Set(), blockedReason: () => null, data: { sessions: [session, cancelled] } };
+  const jobs = [{ job: { state: 'interrupted', recovery: { kind: 'uncertain' } } }];
+  const agents = { busy: false, pendingJobs: () => jobs, allControllers: () => [worker] };
+  const saved = JSON.stringify(worker.data);
+  assert.equal(hasPendingWork(agents), false);
+  assert.equal(JSON.stringify(worker.data), saved, 'checking never discards or resumes saved work');
+  session.queuePaused = false;
+  assert.equal(hasPendingWork(agents), true, 'runnable messages remain protected');
+  session.queuePaused = true;
+  cancelled.submission = { state: 'unconfirmed' };
+  assert.equal(hasPendingWork(agents), true);
+  cancelled.submission = null;
+  worker.activeTurns.set('turn', 'active');
+  assert.equal(hasPendingWork(agents), true);
+  worker.activeTurns.clear();
+  worker.cleanupPending.add('process');
+  assert.equal(hasPendingWork(agents), true);
+  worker.cleanupPending.clear();
+  jobs[0].job.state = 'queued';
+  assert.equal(hasPendingWork(agents), true, 'accepted queued jobs still block');
+});

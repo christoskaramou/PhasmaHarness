@@ -437,6 +437,28 @@ async function start() {
     if (!['https:', 'http:'].includes(url.protocol)) throw new Error('Only web links can be opened.');
     await shell.openExternal(url.href);
   });
+  agents.settingsTools.host = {
+    ask: options => confirmation.ask(options),
+    read: name => {
+      if (name === 'appearance') {
+        try { return JSON.parse(fs.readFileSync(appearanceFile, 'utf8')); } catch { return 'system'; }
+      }
+      if (name === 'onExit') return desktop.onExit;
+      if (name === 'startAtSignIn') return desktop.info().autostart.enabled;
+      if (name === 'browserAccess') {
+        const { running, port, origin } = browserInfo();
+        return { enabled: running, port, origin };
+      }
+      if (name === 'about') return { version: app.getVersion(), packaged: app.isPackaged };
+    },
+    write: async (name, value) => {
+      const methods = { appearance: 'setAppearance', onExit: 'runnerOnExit', startAtSignIn: 'runnerAutostart' };
+      if (Object.hasOwn(methods, name)) {
+        await commands.get(methods[name])(value);
+        if (name === 'appearance' && !window.isDestroyed()) window.webContents.send('appearance', value);
+      } else throw new Error('Unknown desktop setting.');
+    },
+  };
   await window.loadURL(rendererURL);
   if (showRequested) desktop.show();
   await runner.initialize();

@@ -119,28 +119,15 @@
     <div class="composer-area">
       <div id="message-queue" aria-label="Queued messages"></div>
       <div id="route-preview" class="route-preview"><span class="route-dot"></span><strong>Auto</strong><span>Choose a starting preset for each message.</span></div>
-      <form id="composer" class="composer"><div id="slash-menu" hidden><div class="slash-menu-heading"><span>Commands</span><span>↑ ↓ select · Enter run · Tab complete</span></div><div id="slash-options" role="listbox" aria-label="Slash commands"></div><p id="slash-empty" role="status" hidden>No matching commands</p></div><div id="image-previews" aria-label="Attachments"></div><div class="composer-bottom"><div class="composer-controls"><button id="attach-files" type="button" class="icon-button" title="Attach text/code files or images" aria-label="Attach files"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><input id="file-input" type="file" multiple hidden><label class="composer-access"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6Z"/><path d="m9 12 2 2 4-4"/></svg><select id="permissions" class="permissions-control" aria-label="Session permissions"></select></label></div><textarea id="prompt" rows="1" placeholder="Message Hub…" aria-label="Message" role="combobox" aria-autocomplete="list" aria-controls="slash-options" aria-haspopup="listbox" aria-expanded="false" maxlength="200000"></textarea><details class="chat-options" id="chat-options">
- <summary aria-label="Chat settings" title="Chat settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="m9 3 1-1h4l1 1 .5 2 2 1 2-.5 1.5 2.5-.5 2-1.5 1v2l1.5 1 .5 2-1.5 2.5-2-.5-2 1-.5 2-1 1h-4l-1-1-.5-2-2-1-2 .5L3 16l.5-2L5 13v-2l-1.5-1L3 8l1.5-2.5 2 .5 2-1Z"/>
-          <circle cx="12" cy="12" r="3"/>
-        </svg></summary>
- <div class="chat-options-panel">
-  <label class="routing-choice">
-   <span class="options-label">Worker routing</span>
-   <select aria-label="Model routing" class="rules-tag" id="quick-routing" title="Choose Smart or Jev routing">
-    <option value="smart">Smart routing</option>
-    <option value="jev">Jev routing</option>
-   </select>
-  </label>
-  <span class="options-label">Model</span>
-  <div class="composer-model">
+      <form id="composer" class="composer">  <span class="options-label" id="composer-model-label" hidden>Model</span>
+  <div class="composer-model" hidden>
    <span hidden="" id="local-model-controls">
     <button id="local-model-toggle" type="button"></button>
     <button hidden="" id="local-model-unload" type="button">Unload</button>
    </span>
    <label class="preset-control">
     <select aria-label="Model" id="preset">
-     <option value="auto">Auto · choose for me</option>
+     <option value="auto">Auto</option>
     </select>
     <select aria-label="Reasoning effort" hidden="" id="effort" title="Reasoning effort">
     </select>
@@ -153,26 +140,10 @@
     <option value="max">⚠ Up to max effort</option>
    </select>
   </div>
-  <div class="chat-toolbar">
-   <div class="chat-actions">
-    <button aria-label="Commands" id="commands-help" title="Commands (type / in the message box)" type="button"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M14.5 7.5l-5 9"/></svg></button>
-    <button aria-label="Clear conversation" id="clear-conversation" title="Clear this conversation after confirmation" type="button"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 21-4.3-4.3a2.4 2.4 0 0 1 0-3.4l9.6-9.6a2.4 2.4 0 0 1 3.4 0l5.6 5.6a2.4 2.4 0 0 1 0 3.4L13 21"/><path d="M22 21H7"/><path d="m5 11 9 9"/></svg></button>
-   </div>
-   <span id="usage">
-    Connected
-   </span>
-   <div class="context-meter-wrap">
-    <button aria-describedby="context-meter-tip" aria-label="Compact context" id="context-meter" type="button">
-     <span aria-hidden="true" class="context-ring">
-     </span>
-    </button>
-    <span id="context-meter-tip" role="tooltip">
-     Context usage unavailable
-    </span>
-   </div>
-  </div>
- </div>
-</details><button id="send" type="submit" aria-label="Send message" title="Send message">↑</button><button id="stop" type="button" class="stop" aria-label="Stop task" title="Stop task" hidden><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1" fill="currentColor"/></svg></button></div></form>
+<div id="slash-menu" hidden><div class="slash-menu-heading"><span>Commands</span><span>↑ ↓ select · Enter run · Tab complete</span></div><div id="slash-options" role="listbox" aria-label="Slash commands"></div><p id="slash-empty" role="status" hidden>No matching commands</p></div><div id="image-previews" aria-label="Attachments"></div><div class="composer-bottom"><div class="composer-controls"><button id="attach-files" type="button" class="icon-button" title="Attach text/code files or images" aria-label="Attach files"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><input id="file-input" type="file" multiple hidden><label class="composer-access"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6Z"/><path d="m9 12 2 2 4-4"/></svg><select id="permissions" class="permissions-control" aria-label="Session permissions"></select></label></div><textarea id="prompt" rows="1" placeholder="Message Hub…" aria-label="Message" role="combobox" aria-autocomplete="list" aria-controls="slash-options" aria-haspopup="listbox" aria-expanded="false" maxlength="200000"></textarea><div class="context-meter-wrap">
+  <button aria-describedby="context-meter-tip" aria-label="Context usage" id="context-meter" type="button"><span aria-hidden="true" class="context-ring"></span></button>
+  <span id="context-meter-tip" role="tooltip"><span id="context-detail">Context usage unavailable</span><span id="usage"></span></span>
+</div><button id="send" type="submit" aria-label="Send message" title="Send message">↑</button><button id="stop" type="button" class="stop" aria-label="Stop task" title="Stop task" hidden><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1" fill="currentColor"/></svg></button></div></form>
     </div>
   </main>
   <dialog id="commands-dialog" aria-labelledby="commands-title"><div class="dialog-heading"><h2 id="commands-title">Commands</h2><button type="button" class="close-dialog icon-button" aria-label="Close commands">×</button></div><p class="hint">Type a command and press Enter, or choose one below. Commands apply to the selected agent.</p><div id="commands-list"></div></dialog>
@@ -207,8 +178,9 @@
     <p id="agent-error" class="turn-error" role="alert"></p><div class="dialog-footer"><button id="agent-save" class="primary" type="submit">Create agent</button></div>
   </form></dialog>
   <dialog id="hub-dialog" aria-labelledby="hub-heading"><form id="hub-form">
-    <div class="dialog-heading"><h2 id="hub-heading">Rename Hub</h2><button type="button" class="close-dialog icon-button" aria-label="Close rename">×</button></div>
+    <div class="dialog-heading"><h2 id="hub-heading">Edit main Bot</h2><button type="button" class="close-dialog icon-button" aria-label="Close edit">×</button></div>
     <label>Name<input id="hub-name" required maxlength="60"></label>
+    <label>Model<select id="hub-model" required></select></label>
     <p id="hub-error" class="turn-error" role="alert"></p><div class="dialog-footer"><button id="hub-save" class="primary" type="submit">Save</button></div>
   </form></dialog>
   <dialog id="settings-dialog"><form id="settings-form">
@@ -260,12 +232,10 @@
     <label>Agent permissions<select id="settings-access" aria-describedby="settings-access-detail"></select></label>
     <p id="settings-access-detail" class="hint"></p>
     <h3 class="settings-section">Routing</h3>
-    <label>Router<select id="settings-routing" aria-describedby="router-detail"><option value="smart">Smart</option><option value="jev">Jev</option></select></label>
-    <p id="router-detail" class="hint"></p>
-    <label>Routing model<select id="settings-router-preset"></select></label>
+    <label>Routing model (Auto)<select id="settings-router-preset"></select></label>
+    <label>Jev quick answers<select id="settings-quick"><option value="on">On</option><option value="off">Off</option></select></label>
     <label>Effort cap for Auto<select id="settings-effort-cap" aria-describedby="effort-cap-detail"><option value="low">Up to low effort</option><option value="medium">Up to medium effort</option><option value="high">Up to high effort (recommended)</option><option value="xhigh">Up to xhigh effort</option><option value="max">⚠ Up to max effort</option></select></label>
     <p id="effort-cap-detail" class="hint"></p>
-    <label>Jev quick answers<select id="settings-quick"><option value="on">On</option><option value="off">Off</option></select></label>
     <label id="jev-compare-row">Compare with Jev<select id="settings-jev-compare" aria-describedby="jev-compare-detail"><option value="off">Off</option><option value="on">Log only</option></select></label>
     <p id="jev-compare-detail" class="hint"></p>
     <h3 class="settings-section">Tools</h3>

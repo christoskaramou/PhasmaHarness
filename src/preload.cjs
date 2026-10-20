@@ -10,6 +10,11 @@ api.runnerInfo = () => ipcRenderer.invoke('runnerInfo');
 api.runnerAutostart = enabled => ipcRenderer.invoke('runnerAutostart', enabled);
 api.quitRunner = () => ipcRenderer.invoke('quitRunner');
 api.setAppearance = mode => ipcRenderer.invoke('setAppearance', mode);
+api.onAppearance = callback => {
+  const listener = (_event, mode) => callback(mode);
+  ipcRenderer.on('appearance', listener);
+  return () => ipcRenderer.removeListener('appearance', listener);
+};
 for (const method of ['remoteInfo', 'remoteStart', 'remoteStop', 'remoteDisconnectAll', 'remoteResetLink'])
   api[method] = (...args) => ipcRenderer.invoke(method, ...args);
 api.exportConversation = id => ipcRenderer.invoke('exportConversation', id);

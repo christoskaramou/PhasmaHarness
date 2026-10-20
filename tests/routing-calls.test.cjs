@@ -491,3 +491,61 @@ test('Jev asks whether the prompt continues the task only when there is one, and
   answers = { preset: small.id, presetConfidence: 0.8 };
   assert.equal((await router.choose('design the renderer', { routingCatalog: catalog, jevQuickAnswers: false }, [], 'jev')).id, bigHigh.id, 'high confidence does not lower the required capability');
 });
+
+
+test('Jev requests the stable alias and learns its displayed version only from valid provider responses', async () => {
+  let reported = 'jev-9.8.7', calls = 0;
+  const client = new JevClient({ configured: true, read: () => 'fixture-key' }, async (_url, request) => {
+    calls++;
+    assert.equal(JSON.parse(request.body).model, 'jev-latest');
+    return { ok: true, text: async () => JSON.stringify({ model: reported,
+      answers: { relevant: { type: 'noul', noul: 0.9 } }, usage: { input_tokens: 2, output_tokens: 0 } }) };
+  });
+  const questions = { relevant: { type: 'noul', instructions: 'Relevant?' } };
+  assert.equal(client.model, null);
+  assert.equal(calls, 0, 'reading the model never probes the paid endpoint');
+  await client.evaluate('fixture', questions);
+  assert.equal(client.model, 'jev-9.8.7');
+  reported = 'jev-9.8.8';
+  await client.evaluate('fixture', questions);
+  assert.equal(client.model, 'jev-9.8.8');
+  reported = 'invalid identifier';
+  await assert.rejects(client.evaluate('fixture', questions), /invalid model identifier/);
+  assert.equal(client.model, 'jev-9.8.8', 'invalid responses cannot replace the observed version');
+});
+
+
+test('Jev quick answers return only confident low-risk yes/no results and otherwise select a worker', async () => {
+  const jev = new JevClient({ configured: true });
+  const router = new SmartRouter(__dirname);
+  router.jev = jev;
+  router.inspect = async () => assert.fail('these fixtures need no workspace scan');
+  for (const scenario of [
+    { answer: 'yes', expected: 'Yes.' },
+    { answer: 'no', expected: 'No.' },
+    { answer: 'yes', confidence: 0.94 },
+    { answer: 'yes', probability: 0.97 },
+    { answer: 'yes', risk: 'high' },
+    { answer: 'yes', uncertainty: 'high' },
+    { answer: 'yes', enabled: false },
+    { answer: 'yes', images: 1 },
+  ]) {
+    let calls = 0;
+    jev.evaluate = async (_context, questions) => {
+      calls++;
+      const quick = !!questions.quickAnswer;
+      const values = { preset: quick ? 'jev' : worker.id, difficulty: 'low', taskKind: 'general',
+        workspaceRelevant: 'no', needsChecks: 'no', risk: scenario.risk || 'low', uncertainty: scenario.uncertainty || 'low' };
+      const answers = Object.fromEntries(Object.entries(values).map(([id, choice]) => [id, { choice, confidence: 1 }]));
+      if (quick) answers.quickAnswer = { choice: scenario.answer, confidence: scenario.confidence ?? 1,
+        probabilities: { [scenario.answer]: scenario.probability ?? 1 } };
+      return { model: 'jev-test', answers, usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, estimatedCostUsd: 0, durationMs: 1 };
+    };
+    const selected = await router.choose('Does the text mention rain? Text: Rain is expected.',
+      { ...session, jevQuickAnswers: scenario.enabled, attachedImageCount: scenario.images || 0 }, [], 'jev');
+    assert.equal(selected.directAnswer || undefined, scenario.expected);
+    if (!scenario.expected) assert.equal(selected.id, worker.id);
+    const retried = !scenario.expected && scenario.enabled !== false && !scenario.images;
+    assert.equal(calls, retried ? 2 : 1);
+  }
+});

@@ -1840,6 +1840,36 @@ test('the Hub can be renamed; it keeps the name, and no bot can take it, "hub" o
     await assert.rejects(agents.saveAgent({ id: helper.id, name, instructions: '', workspace, mode: 'auto', access: 'read-only' }), /belongs to the Hub/, name);
 });
 
+test('Hub edits validate and atomically save the name and explicit model', async t => {
+  const { agents, primary } = await setup(t);
+  const model = primary.catalog().find(p => p.worker && primary.available(p));
+  assert.ok(model);
+  const previousMode = primary.data.settings.mode;
+  const available = primary.available;
+  primary.available = () => false;
+  assert.throws(() => agents.renameHub({ name: 'Atlas', mode: model.id }), /available model/);
+  primary.available = available;
+  const resolve = primary.resolveWorker;
+  primary.resolveWorker = () => ({ ...model, provider: 'native:muse' });
+  assert.throws(() => agents.renameHub({ name: 'Atlas', mode: model.id }), /available model/);
+  primary.resolveWorker = resolve;
+  for (const mode of ['auto', 'unknown-model']) {
+    assert.throws(() => agents.renameHub({ name: 'Atlas', mode }), /available model/);
+    assert.equal(agents.hubName(), 'Hub');
+    assert.equal(primary.data.settings.mode, previousMode);
+  }
+  const save = primary.save;
+  primary.save = () => { throw new Error('Disk full'); };
+  assert.throws(() => agents.renameHub({ name: 'Atlas', mode: model.id }), /Disk full/);
+  primary.save = save;
+  assert.equal(agents.hubName(), 'Hub');
+  assert.equal(primary.data.settings.mode, previousMode);
+  agents.renameHub({ name: 'Atlas', mode: model.id });
+  const saved = JSON.parse(fs.readFileSync(primary.filename, 'utf8'));
+  assert.equal(saved.hubName, 'Atlas');
+  assert.equal(saved.settings.mode, model.id);
+});
+
 test('agents discover available models and create children with default or requested efforts across provider bridges', async t => {
   const { agents, primary, workspace, add } = await setup(t);
   primary.models[0].supportedReasoningEfforts = ['low', 'medium', 'high'].map(reasoningEffort => ({ reasoningEffort }));
@@ -1930,7 +1960,7 @@ test('new and existing Codex chats expose agent tools through a session-bound MC
   assert.equal(started.params.config['features.multi_agent'], false, 'untracked agent chats must not expose provider-native subagents');
   assert.match(started.params.developerInstructions, /MUST call agent_create and confirm its returned id/);
   const server = started.params.config['mcp_servers.phasma_harness'];
-  assert.deepEqual(server.enabled_tools, ['agent_revise', 'agent_transfer_owner', 'agents_list', 'agent_models', 'agent_create', 'agent_delegate', 'agent_read_context', 'agent_stop', 'agent_set_access', 'agent_message', 'agent_artifact', 'routine', 'routines_report', 'harness_check_update']);
+  assert.deepEqual(server.enabled_tools, ['agent_revise', 'agent_transfer_owner', 'agents_list', 'agent_models', 'agent_create', 'agent_delegate', 'agent_read_context', 'agent_stop', 'agent_set_access', 'agent_message', 'agent_artifact', 'routine', 'routines_report', 'harness_check_update', 'read_settings', 'write_settings']);
   assert.ok(!MCP_TOOLS.some(tool => tool.name === 'agent_delete') && !claudeAllowedHelpers('danger-full-access').includes('mcp__phasma_harness__agent_delete'));
   assert.equal(server.env.PHASMA_SESSION_ID, source.id);
   assert.equal(server.env.ELECTRON_RUN_AS_NODE, '1');
@@ -3464,6 +3494,22 @@ test('agents can check app updates but cannot supply installation consent', asyn
   assert.throws(() => agents.tool(primary, session, 'harness_check_update', { confirmed: true }), /no arguments/);
   assert.equal(checks, 1);
   assert.ok(MCP_TOOLS.some(tool => tool.name === 'harness_check_update'));
+});
+
+
+test('settings tools use the bound agent and expose only the settings service result', async t => {
+  const { agents, primary } = await setup(t);
+  const calls = [];
+  agents.settingsTools = {
+    read: (caller, args) => { calls.push([caller.agentId, args]); return { settings: { effortCap: 'high' } }; },
+    write: async (caller, args) => { calls.push([caller.agentId, args]); return { status: 'queued' }; },
+    snapshot: () => [],
+  };
+  const session = primary.create();
+  assert.deepEqual(agents.tool(primary, session, 'read_settings', {}), { settings: { effortCap: 'high' } });
+  assert.deepEqual(await agents.tool(primary, session, 'write_settings', { name: 'effortCap', value: 'medium' }), { status: 'queued' });
+  assert.equal(calls[0][0], 'main');
+  assert.equal(calls[1][0], 'main');
 });
 
 test('turning reply suggestions on reaches a bot that is mid-turn', async t => {

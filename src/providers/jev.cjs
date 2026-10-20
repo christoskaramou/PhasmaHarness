@@ -1,4 +1,4 @@
-const MODEL = 'jev-1.13.0';
+const MODEL = 'jev-latest';
 const { BenchmarkStore, POLICY, DIFFICULTY, DIFFICULTY_POLICY, TASK_KINDS } = require('../routing/benchmarks.cjs');
 const { PRESETS } = require('../routing/router.cjs');
 const INPUT_PRICE = 0.042 / 1e6; // USD/input token, https://docs.typesafe.ai/models (2026-09-19).
@@ -95,7 +95,7 @@ function choices(response, questions) {
 }
 
 class JevClient {
-  constructor(keyStore, fetchFn = fetch, enabled = () => true) { this.keyStore = keyStore; this.fetch = fetchFn; this.isEnabled = enabled; this.resetHealth(); }
+  constructor(keyStore, fetchFn = fetch, enabled = () => true) { this.keyStore = keyStore; this.fetch = fetchFn; this.isEnabled = enabled; this.model = null; this.resetHealth(); }
   get enabled() { return this.isEnabled(); }
   get configured() { return this.enabled && this.keyStore.configured; }
   // Every Jev feature shares this client, so one failing call means its features are on their fallbacks (Smart router,
@@ -145,6 +145,7 @@ class JevClient {
         throw new Error(`Jev request failed${safeCodes.includes(code) ? ` (${code})` : ' (transport error)'}. No worker was selected.`);
       }
       accounted = choices(payload, questions);
+      this.model = accounted.model;
       return { ...accounted, durationMs: Date.now() - started };
     } finally {
       account?.({ usage: payload?.usage || accounted?.usage, uncertain: !payload });

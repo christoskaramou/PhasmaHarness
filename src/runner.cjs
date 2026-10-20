@@ -57,11 +57,14 @@ async function createRunner({ app, data = app?.getPath('userData'), safeStorage,
     if (!app) containment.detach?.();
     throw error;
   }
+  agents.settingsTools = new (require('./settings-tools.cjs').SettingsTools)({ agents, controller, wikiStore });
   const voice = new Dictation();
   const documents = new DocumentReader();
+  agents.updateBlockedReason = () => voice.busy ? 'Finish dictation before updating.'
+    : documents.busy ? 'Wait for document processing before updating.' : updateBlockedReason(agents);
   const updater = new Updater({ current: version, fetch, directory: path.join(data, 'updates'),
     ...(containment.launchInstaller ? { launch: containment.launchInstaller } : {}),
-    installable: !!app?.isPackaged && process.platform === 'win32', busy: () => voice.busy || documents.busy || hasPendingWork(agents),
+    installable: !!app?.isPackaged && process.platform === 'win32', busy: () => agents.updateBlockedReason(),
     pause: () => {
       agents.closing = true;
       return () => { agents.closing = false; agents.pump(); };
@@ -100,14 +103,37 @@ async function createRunner({ app, data = app?.getPath('userData'), safeStorage,
 }
 
 function hasPendingWork(agents) {
-  if (agents.busy || agents.routines?.busy || agents.workspaces?.busy || agents.artifactRuns?.busy || agents.downloads?.busy || agents.revisionOperations?.size || agents.budgets?.inflight.size || agents.pendingJobs().length || agents.foregroundTasks?.().length) return true;
-  return agents.allControllers().some(controller => controller.connection === 'connecting' || controller.connectingProviders?.size ||
-    controller.chatgptLoginPending || controller.loading.size || controller.requests.size ||
-    controller.stopping.size || controller.blockedReason() || controller.data.sessions.some(session => {
+  return !!updateBlockedReason(agents);
+}
+
+function updateBlockedReason(agents) {
+  if (agents.settingsTools?.busy) return 'Wait for settings changes to finish before updating.';
+  if (agents.busy) return 'Finish or stop the current turn first; updating restarts the app.';
+  if (agents.routines?.busy || agents.workspaces?.busy || agents.artifactRuns?.busy || agents.downloads?.busy ||
+      agents.revisionOperations?.size || agents.budgets?.inflight.size)
+    return 'Wait for background work or cleanup to finish before updating.';
+  if (agents.pendingJobs().some(({ job }) => !job || !['interrupted', 'revision-blocked', 'delivery-pending'].includes(job.state)) ||
+      agents.foregroundTasks?.().length)
+    return 'Finish or stop pending tasks in Overview before updating.';
+  for (const controller of agents.allControllers()) {
+    if (controller.connection === 'connecting' || controller.connectingProviders?.size || controller.chatgptLoginPending)
+      return 'Wait for provider sign-in or connection to finish before updating.';
+    if (controller.requests.size) return 'Resolve the pending permission request before updating.';
+    if (controller.loading.size || controller.activeTurns?.size || controller.stopping.size ||
+        controller.cleanupPending?.size || controller.blockedReason())
+      return 'Wait for active work or process cleanup to finish before updating.';
+    for (const session of controller.data.sessions) {
       const failedDraft = session.status === 'failed' && session.pendingMessage?.error && !session.submission;
-      return session.queue?.length || session.queueSending || (session.pendingMessage && !failedDraft) ||
-        session.items?.some(item => item.pendingReply);
-    }));
+      const cancelledDraft = session.status === 'interrupted' && session.delegation?.cancelled &&
+        session.delegation.delivered && !session.submission;
+      if (session.submission || session.queueSending || (session.pendingMessage && !failedDraft && !cancelledDraft))
+        return 'Resolve the pending message submission before updating.';
+      // Paused messages and saved reports survive restart and cannot start work on their own.
+      if (!session.queuePaused && (session.queue?.length || session.items?.some(item => item.pendingReply)))
+        return 'Send or pause queued messages and results before updating.';
+    }
+  }
+  return null;
 }
 
 function backupStores(filename) {
@@ -235,4 +261,4 @@ class RunnerWindow {
   dispose() { this.tray.destroy(); }
 }
 
-module.exports = { createRunner, hasPendingWork, RunnerWindow, autostart, loginOptions, backupStores };
+module.exports = { createRunner, hasPendingWork, updateBlockedReason, RunnerWindow, autostart, loginOptions, backupStores };

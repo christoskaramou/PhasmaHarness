@@ -192,7 +192,7 @@ app.whenReady().then(async () => {
     })()`);
     window.webContents.sendInputEvent({ type: 'mouseDown', ...point, button: 'left', clickCount: 1 });
     window.webContents.sendInputEvent({ type: 'mouseUp', ...point, button: 'left', clickCount: 1 });
-    assert.ok(await window.webContents.executeJavaScript(`document.activeElement === document.querySelector('#prompt')`),
+    assert.ok(await window.webContents.executeJavaScript(`new Promise(resolve => requestAnimationFrame(() => resolve(document.activeElement === document.querySelector('#prompt'))))`),
       `clicking the composer's ${edge} padding focuses the input`);
   }
 
@@ -214,12 +214,12 @@ app.whenReady().then(async () => {
       const scrolls = prompt.scrollHeight > prompt.clientHeight;
       prompt.value = 'short'; resizeComposer();
       const shrunk = prompt.getBoundingClientRect().height;
-      const controls = ['#attach-files', '.composer-access', '#dictate', '.chat-options > summary', '#send']
+      const controls = ['#attach-files', '.composer-access', '#dictate', '#context-meter', '#send']
         .map(selector => document.querySelector(selector).getBoundingClientRect());
       const centers = controls.map(rect => rect.top + rect.height / 2);
       const inputRect = prompt.getBoundingClientRect();
       centers.push(inputRect.top + inputRect.height / 2);
-      const order = ['#attach-files', '.composer-access', '#prompt', '#chat-options', '#dictate', '#send']
+      const order = ['#attach-files', '.composer-access', '#prompt', '.context-meter-wrap', '#dictate', '#send']
         .map(selector => document.querySelector(selector).getBoundingClientRect());
       const ordered = order.every((rect, i) => !i || rect.left >= order[i - 1].right - 1);
       const access = document.querySelector('#permissions');
@@ -319,19 +319,19 @@ app.whenReady().then(async () => {
     const area = document.querySelector('.composer-area');
     return {
       endsAtComposer: area.lastElementChild.id === 'composer',
-      actionsHidden: ['clear-conversation', 'commands-help', 'context-meter', 'usage']
-        .every(id => !document.getElementById(id).checkVisibility()),
+      actionsRemoved: ['clear-conversation', 'commands-help', 'chat-options'].every(id => !document.getElementById(id)),
+      contextVisible: document.querySelector('#context-meter').checkVisibility(),
       connectionInHeader: !!document.querySelector('header #provider-connection')
     };
   })()`);
-  assert.deepEqual(quietComposer, { endsAtComposer: true, actionsHidden: true, connectionInHeader: true },
+  assert.deepEqual(quietComposer, { endsAtComposer: true, actionsRemoved: true, contextVisible: true, connectionInHeader: true },
     'the composer has no persistent footer; advanced actions remain on demand');
   const appearanceState = () => window.webContents.executeJavaScript(`({
     mode: document.documentElement.dataset.appearance,
     background: getComputedStyle(document.body).backgroundColor,
     draft: document.querySelector('#prompt').value,
     sidebar: !!document.querySelector('#agents-sidebar #settings'),
-    optionsClosed: !document.querySelector('#chat-options').open
+    optionsClosed: !document.querySelector('#chat-options')
   })`);
   const chooseAppearance = mode => window.webContents.executeJavaScript(`(() => {
     const control = document.querySelector('#settings-appearance');
@@ -602,6 +602,7 @@ app.whenReady().then(async () => {
   assert.doesNotMatch(tagged[0], /\[task/);
   assert.match(tagged[0], /Which cascade flickers\?/);
   assert.deepEqual(tagged[1], ['Needs your input']);
+  assert.equal(await window.webContents.executeJavaScript("!!document.querySelector('.message-bubble .task-status')"), true, 'task status stays visible outside the hover-only metadata');
   console.log('Task status line shown as a tag passed');
   // Each reply is labelled with the provider that wrote it, not always "Codex".
   await window.webContents.executeJavaScript(`renderMessages({ items: [
@@ -613,6 +614,22 @@ app.whenReady().then(async () => {
   ], routes: [{ turnId: 't-codex', provider: 'codex' }, { turnId: 't-claude', provider: 'claude-cli' }, { turnId: 't-cursor', provider: 'cursor-cli' }] });`);
   const writers = await window.webContents.executeJavaScript("[...document.querySelectorAll('.message-label')].map(e => e.firstChild.textContent)");
   assert.deepEqual(writers, ['Codex CLI', 'Claude CLI', 'Cursor CLI', 'Jev', 'Codex CLI']);
+  const replyMetadata = await window.webContents.executeJavaScript(`(() => {
+    const message = document.querySelector('.message.assistant');
+    const row = message.querySelector('.message-actions');
+    const label = message.querySelector('.message-label');
+    const initial = getComputedStyle(row).opacity;
+    message.querySelector('.message-bubble').click();
+    const clicked = getComputedStyle(row).opacity;
+    const focused = document.activeElement === message;
+    document.querySelector('#prompt').focus();
+    return { initial, clicked, focused, hiddenAgain: getComputedStyle(row).opacity,
+      labelAfterCopy: label.parentElement === row && label.previousElementSibling.classList.contains('message-copy'),
+      leftAligned: getComputedStyle(row).justifyContent === 'flex-start',
+      compactSpacing: parseFloat(getComputedStyle(message).marginBottom) === 8 };
+  })()`);
+  assert.deepEqual(replyMetadata, { initial: '0', clicked: '1', focused: true, hiddenAgain: '0',
+    labelAfterCopy: true, leftAligned: true, compactSpacing: true });
   console.log('Reply labels name their provider passed');
   await window.webContents.executeJavaScript(`renderMessages({ items: [
     { id: 'hub-auto', type: 'userMessage', content: [{ type: 'text', text: 'Hello' }] },
@@ -621,11 +638,73 @@ app.whenReady().then(async () => {
     { messageId: 'hub-auto', source: 'hub-auto', label: 'Balanced model · low' },
     { messageId: 'hub-manual', source: 'manual', label: 'Chosen model · medium' }
   ] });`);
-  assert.deepEqual(await window.webContents.executeJavaScript("[...document.querySelectorAll('.routing-row')].map(e => e.textContent)"), [
-    'Model: Balanced model · low · Auto-selected for Hub', 'Model: Chosen model · medium · manual selection',
-  ]);
+  assert.equal(await window.webContents.executeJavaScript("document.querySelectorAll('.message.user .message-label').length"), 0, 'user messages have no You label');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelectorAll('.routing-row').length"), 0,
+    'manual and Hub model labels do not add redundant text or empty rows');
   assert.equal(await window.webContents.executeJavaScript("document.querySelectorAll('#messages details.activity').length"), 0, 'pinned Hub routes do not claim another routing call');
-  console.log('Hub Auto and manual selection labels passed');
+  const bubbles = await window.webContents.executeJavaScript(`(() => {
+    renderMessages({ items: [
+      { id: 'short-bubble', type: 'userMessage', content: [{ type: 'text', text: 'hi' }], createdAt: Date.now() },
+      { id: 'long-bubble', type: 'userMessage', content: [{ type: 'text', text: 'Long message '.repeat(100) }] }
+    ], routes: [] });
+    const [short, long] = document.querySelectorAll('.message.user .message-bubble');
+    const shortBox = short.getBoundingClientRect(), longBox = long.getBoundingClientRect();
+    const range = document.createRange(); range.selectNodeContents(short.querySelector('.message-body'));
+    const textBox = range.getBoundingClientRect();
+    const lineHeight = parseFloat(getComputedStyle(short.querySelector('.message-body')).lineHeight);
+    const messages = document.querySelector('#messages').getBoundingClientRect();
+    return { hugsText: shortBox.width - textBox.width <= 30,
+      compact: Math.abs(shortBox.height / (lineHeight + 32) - 2 / 3) < .03,
+      aligned: Math.abs(shortBox.right - messages.right) < 1,
+      wraps: longBox.height > shortBox.height && longBox.width <= messages.width * .88 + 1,
+      noOverflow: long.scrollWidth <= long.clientWidth + 1 };
+  })()`);
+  assert.deepEqual(bubbles, { hugsText: true, compact: true, aligned: true, wraps: true, noOverflow: true });
+  assert.deepEqual(await window.webContents.executeJavaScript(`(() => {
+    const now = Date.now();
+    const labels = [-1000, 0, 59000, 60000, 120000, 3600000, 64800000, 172800000, 2592000000, 31536000000]
+      .map(age => elapsedMessageTime(now - age, now));
+    const time = document.querySelector('#messages .message-actions time');
+    const dateTime = new Date(now - 120000).toISOString();
+    time.dateTime = dateTime;
+    const title = time.title;
+    refreshMessageTimes();
+    return { labels, refreshed: time.textContent, preserved: time.dateTime === dateTime && time.title === title };
+  })()`), { labels: ['Just now', 'Just now', 'Just now', '1 minute ago', '2 minutes ago', '1 hour ago',
+    '18 hours ago', '2 days ago', '1 month ago', '1 year ago'], refreshed: '2 minutes ago', preserved: true });
+
+  for (const appearance of ['light', 'dark']) {
+    const colors = await window.webContents.executeJavaScript(`(() => {
+      const savedAppearance = document.documentElement.dataset.appearance;
+      document.documentElement.dataset.appearance = '${appearance}';
+      renderMessages({ items: [
+        { id: 'user-grey', type: 'userMessage', content: [{ type: 'text', text: 'Hi <a href="https://example.com">link</a> <code>code</code>' }] },
+        { id: 'agent-grey', type: 'agentMessage', text: 'Hello', phase: 'final_answer' },
+        { id: 'commentary-grey', type: 'agentMessage', text: 'Working', phase: 'commentary' }
+      ], routes: [] });
+      const user = document.querySelector('.message.user .message-bubble');
+      const agent = document.querySelector('.message.assistant .message-bubble');
+      const commentary = document.querySelector('.message.commentary .message-bubble');
+      const color = element => getComputedStyle(element).backgroundColor.match(/\\d+/g).slice(0, 3).map(Number);
+      const result = { user: color(user), agent: color(agent), commentary: color(commentary),
+        userText: getComputedStyle(user).color, linkText: getComputedStyle(user.querySelector('a')).color,
+        codeBackground: color(user.querySelector('code')),
+        leftAligned: Math.abs(agent.getBoundingClientRect().left - document.querySelector('#messages').getBoundingClientRect().left) < 1,
+        fits: agent.getBoundingClientRect().width < 100 };
+      document.documentElement.dataset.appearance = savedAppearance;
+      return result;
+    })()`);
+    assert.ok(colors.user.every(channel => channel === colors.user[0]) && colors.agent.every(channel => channel === colors.agent[0]));
+    assert.deepEqual(colors.user, appearance === 'light' ? [28, 28, 28] : [25, 25, 25]);
+    assert.deepEqual(colors.agent, appearance === 'light' ? [239, 239, 239] : [41, 41, 41]);
+    assert.equal(colors.userText, 'rgb(255, 255, 255)');
+    assert.equal(colors.linkText, colors.userText);
+    assert.deepEqual(colors.codeBackground, [41, 41, 41]);
+    assert.deepEqual(colors.commentary, colors.agent);
+    assert.equal(colors.leftAligned, true);
+    assert.equal(colors.fits, true);
+  }
+  console.log('Compact content-sized bubbles and removed model-selection rows passed');
   await window.webContents.executeJavaScript(`window.fetchTest = Promise.all([loadDiscoveredModels('cursor-cli'), loadDiscoveredModels('cursor-cli')]).catch(() => null); true;`);
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#models-loading').hidden"), false);
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#provider-connection').hidden"), false);
@@ -691,7 +770,32 @@ app.whenReady().then(async () => {
     [state.coordinator, state.presets] = saved;
     return result;
   })()`), [false, true]);
-  console.log('Hub model menu excludes worker-only models passed');
+  assert.deepEqual(await window.webContents.executeJavaScript(`(() => {
+    const saved = [state.coordinator, state.hubMode, state.settings.mode];
+    state.coordinator = true;
+    const pinned = presetGroups()[0].variants[0];
+    state.hubMode = pinned.id;
+    state.settings.mode = 'auto';
+    render();
+    const main = document.querySelector('.composer-model').hidden
+      && document.querySelector('#composer-model-label').hidden
+      && !document.querySelector('#preset option[value=auto]') && currentMode() === pinned.id
+      && !commandChoices('model').some(row => row.id === 'auto')
+      && commandChoices('effort').length === 0;
+    const capHidden = document.querySelector('#effort-cap').hidden;
+    state.hubMode = null;
+    render();
+    const unselected = currentMode() === null && document.querySelector('#preset').value === '';
+    state.coordinator = false;
+    render();
+    const worker = !!document.querySelector('#preset option[value=auto]') && currentMode() === 'auto'
+      && commandChoices('model').length === 0 && commandChoices('effort').length === 0
+      && document.querySelector('.composer-model').hidden && document.querySelector('#composer-model-label').hidden;
+    [state.coordinator, state.hubMode, state.settings.mode] = saved;
+    render();
+    return { main, capHidden, unselected, worker };
+  })()`), { main: true, capHidden: true, unselected: true, worker: true });
+  console.log('Hub model menu excludes Auto and worker-only models; workers retain Auto');
   // Disconnected in the Harness while the CLIs stay signed in: no models listed, detail says the CLI is still signed in.
   controller.account = null; controller.models = [];
   controller.codex = { installed: true, connected: true, signedIn: true };
@@ -1078,6 +1182,11 @@ app.whenReady().then(async () => {
   await push({ status: 'available', latest: '0.2.0', installable: true });
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify({ ...controller.snapshot(), busy: 'someone' }) + '); true');
   assert.equal((await banner())[3], true, 'disabled while a turn runs');
+  const blocker = 'Resolve the pending permission request before updating.';
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify({ ...controller.snapshot(), agents: [{ id: 'main', name: 'Bot' }], agentStates: { main: controller.snapshot() }, anyAgentBusy: false, updateBlockedReason: blocker }) + '); true');
+  assert.equal((await banner())[3], true, 'the runner blocker survives selection of an agent snapshot');
+  assert.ok((await banner())[1].includes(blocker), 'the banner explains the specific blocking work');
+
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + "); document.querySelector('#update-dismiss').click(); true");
   assert.equal((await banner())[0], true, 'hidden after dismissing');
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#update-available').hidden"), false, 'update icon survives banner dismissal');
@@ -1102,7 +1211,6 @@ app.whenReady().then(async () => {
   console.log('Update banner passed');
   // Effort cap next to Auto: saved as a setting, max marked with a warning, hidden for a manual model, mirrored in Settings.
   const cap = () => window.webContents.executeJavaScript("[document.querySelector('#effort-cap').hidden, document.querySelector('#effort-cap').value, document.querySelector('#effort-cap').selectedOptions[0].textContent, document.querySelector('#effort-cap').classList.contains('max-cap')]");
-  assert.ok(await window.webContents.executeJavaScript("!!(document.querySelector('#permissions').compareDocumentPosition(document.querySelector('#effort-cap')) & Node.DOCUMENT_POSITION_FOLLOWING)"), 'the cap comes after the access control');
   await window.webContents.executeJavaScript("document.querySelector('#preset').value = 'auto'; document.querySelector('#preset').onchange(); new Promise(r => setTimeout(r, 200))");
   assert.deepEqual(await cap(), [false, 'high', 'Up to high effort', false]);
   await window.webContents.executeJavaScript("document.querySelector('#effort-cap').value = 'max'; document.querySelector('#effort-cap').onchange(); new Promise(r => setTimeout(r, 200))");
@@ -1123,65 +1231,24 @@ app.whenReady().then(async () => {
     assert.equal((await cap())[0], true, 'hidden for a manual model');
     await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); true');
   }
-  // Advanced model controls stay reachable inside the compact disclosure.
-  const layout = await window.webContents.executeJavaScript(`(() => {
-    const options = document.querySelector('#chat-options');
-    options.open = true;
-    const box = id => document.querySelector(id).getBoundingClientRect();
-    const preset = document.querySelector('#preset');
-    const panel = box('.chat-options-panel');
-    const fits = id => box(id).width > 0 && box(id).left >= panel.left && box(id).right <= panel.right;
-    return { inModel: !!preset.closest('.composer-model'), inOptions: !!preset.closest('#chat-options'),
-      routingFits: fits('#quick-routing'), modelFits: fits('#preset'), capFits: fits('#effort-cap') };
-  })()`);
-  assert.deepEqual(layout, { inModel: true, inOptions: true, routingFits: true, modelFits: true, capFits: true });
-  await window.webContents.executeJavaScript('document.querySelector("#chat-options").open = true; new Promise(r => setTimeout(r, 200))');
-  // With real usage text the panel must not scroll sideways (seen 2026-10-19 with "322.4K input · 3% cached · 1.8K output").
+  // Context usage is available directly in the composer, with a tooltip instead of a menu.
   for (const scale of ['1', '1.15', '1.3', '1.5']) {
-    const sideways = await window.webContents.executeJavaScript(`(async () => {
+    const layout = await window.webContents.executeJavaScript(`(async () => {
       const root = document.documentElement, savedScale = root.style.getPropertyValue('--font-scale');
-      const usage = document.querySelector('#usage'), saved = [usage.hidden, usage.textContent];
       root.style.setProperty('--font-scale', '${scale}');
-      usage.hidden = false; usage.textContent = '322.4K input · 3% cached · 1.8K output';
-      await new Promise(r => setTimeout(r, 50));
-      const panel = document.querySelector('.chat-options-panel'), edge = panel.getBoundingClientRect().right;
-      const result = { scrolls: panel.scrollWidth > panel.clientWidth,
-        usageVisible: usage.scrollWidth <= usage.clientWidth + 1 && usage.scrollHeight <= usage.clientHeight + 1 && getComputedStyle(usage).whiteSpace === 'normal',
-        wider: [...panel.querySelectorAll('*')].filter(node => node.getBoundingClientRect().right > edge + 1).map(node => node.id || node.className || node.tagName).slice(0, 6) };
-      [usage.hidden, usage.textContent] = saved;
+      const meter = document.querySelector('#context-meter');
+      meter.focus();
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      const tooltip = document.querySelector('#context-meter-tip');
+      const box = tooltip.getBoundingClientRect();
+      const result = { visible: box.width > 0, fits: box.left >= 0 && box.right <= innerWidth && box.top >= 0,
+        wraps: tooltip.scrollWidth <= tooltip.clientWidth + 1, noGear: !document.querySelector('#chat-options') };
+      document.querySelector('#prompt').focus();
       if (savedScale) root.style.setProperty('--font-scale', savedScale); else root.style.removeProperty('--font-scale');
       return result;
     })()`);
-    assert.deepEqual(sideways, { scrolls: false, usageVisible: true, wider: [] }, `Options panel scrolls sideways at font scale ${scale}: ` + JSON.stringify(sideways));
+    assert.deepEqual(layout, { visible: true, fits: true, wraps: true, noGear: true }, 'context tooltip at scale ' + scale);
   }
-  await window.webContents.executeJavaScript(`(async () => {
-    document.documentElement.style.setProperty('--font-scale', '1.3');
-    const usage = document.querySelector('#usage');
-    usage.dataset.saved = JSON.stringify([usage.hidden, usage.textContent]);
-    usage.hidden = false; usage.textContent = '322.4K input · 3% cached · 1.8K output';
-    await new Promise(r => setTimeout(r, 100));
-  })()`);
-  fs.writeFileSync(path.resolve(__dirname, '../.scratch/options-panel-130.png'), (await window.webContents.capturePage()).toPNG());
-  await window.webContents.executeJavaScript(`(() => {
-    const usage = document.querySelector('#usage'), [hidden, text] = JSON.parse(usage.dataset.saved);
-    usage.hidden = hidden; usage.textContent = text; delete usage.dataset.saved;
-    document.documentElement.style.setProperty('--font-scale', (state.settings.fontScale || 100) / 100);
-    return true;
-  })()`);
-  fs.writeFileSync(path.resolve(__dirname, '../.scratch/options-panel.png'), (await window.webContents.capturePage()).toPNG());
-  // The context ring's tooltip opens inside the Options panel instead of being clipped by it.
-  const tip = await window.webContents.executeJavaScript(`(async () => {
-    // The ring is disabled without usage here, so show its tooltip the way hover would.
-    document.querySelector('#context-meter-tip').style.display = 'block';
-    await new Promise(r => setTimeout(r, 100));
-    const panel = document.querySelector('.chat-options-panel').getBoundingClientRect();
-    const box = document.querySelector('#context-meter-tip').getBoundingClientRect();
-    return { shown: box.width > 0, inside: box.left >= panel.left && box.right <= panel.right && box.top >= panel.top };
-  })()`);
-  fs.writeFileSync(path.resolve(__dirname, '../.scratch/options-tooltip.png'), (await window.webContents.capturePage()).toPNG());
-  assert.deepEqual(tip, { shown: true, inside: true }, 'context tooltip stays inside the Options panel');
-  await window.webContents.executeJavaScript("document.querySelector('#context-meter-tip').style.display = ''; true");
-  await window.webContents.executeJavaScript('document.querySelector("#chat-options").open = false; true');
   console.log('Effort cap passed');
   // Compare with Jev: shown only with a Jev key while Smart routes, with the agreement so far.
   await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').close(); true");
@@ -1225,8 +1292,36 @@ app.whenReady().then(async () => {
   const [hidden, detail] = await compareRow();
   assert.equal(hidden, false);
   assert.match(detail, /^Log only\. When on, .*do not change\. 4 compared: same model 50% \(and effort 25%\), same provider 75%; your manual picks 50% same model · Jev cost \$0\.0004 · 1 failed\.$/);
-  await window.webContents.executeJavaScript("document.querySelector('#settings-routing').value = 'jev'; document.querySelector('#settings-routing').onchange(); true");
+  await window.webContents.executeJavaScript("document.querySelector('#settings-router-preset').value = 'jev'; document.querySelector('#settings-router-preset').onchange(); true");
   assert.equal((await compareRow())[0], true, 'hidden while Jev is the router');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-routing') === null"), true, 'only one Routing model control remains');
+  assert.deepEqual(await window.webContents.executeJavaScript(`(() => {
+    const label = document.querySelector('#settings-router-preset').closest('label');
+    return { title: label.firstChild.textContent, quickAnswersNext: !!label.nextElementSibling.querySelector('#settings-quick'),
+      explanationRemoved: !document.querySelector('#router-detail') };
+  })()`), { title: 'Routing model (Auto)', quickAnswersNext: true, explanationRemoved: true });
+  assert.match(await window.webContents.executeJavaScript("document.querySelector('#settings-router-preset option[value=jev]').textContent"), /version pending/);
+  controller.smartRouter.jev.model = 'jev-9.8.7';
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); true');
+  assert.match(await window.webContents.executeJavaScript("document.querySelector('#settings-router-preset option[value=jev]').textContent"), /jev-9\.8\.7/);
+  await window.webContents.executeJavaScript("document.querySelector('#settings-router-preset').value = 'jev'; true");
+  const priorRoutingModel = controller.data.settings.routerPreset;
+  await window.webContents.executeJavaScript("document.querySelector('#settings-router-preset').dispatchEvent(new Event('change', { bubbles: true })); new Promise(r => setTimeout(r, 200))");
+  assert.equal(controller.data.settings.routing, 'jev', 'Jev selection saves the routing method');
+  assert.equal(controller.data.settings.routerPreset, priorRoutingModel, 'Jev retains the last model for fallback');
+  const chosenRoutingModel = await window.webContents.executeJavaScript(`(async () => {
+    const select = document.querySelector('#settings-router-preset');
+    const option = [...select.options].find(option => option.value && option.value !== 'jev' && !option.disabled);
+    if (!option) throw new Error('Fixture needs an available routing model');
+    select.value = option.value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 200));
+    return option.value;
+  })()`);
+  assert.equal(controller.data.settings.routing, 'smart', 'model selection switches routing in the same save');
+  assert.equal(controller.data.settings.routerPreset, chosenRoutingModel);
+  assert.equal((await compareRow())[0], false);
+
   await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').close(); true");
   // The log-only wiki check: shown with a Jev key, whatever the router, with the verdicts so far.
   controller.trace = { record() {}, summary: () => ({ turns: 3, wiki: { additions: 5, assessed: 3, unassessable: 2, support: { supported: 2, partial: 1 }, novelty: { addition: 2, covered: 1 }, jevCalls: 1, jevCostUsd: 0.0002 } }) };
@@ -1317,8 +1412,9 @@ app.whenReady().then(async () => {
   // The batch worker's Save above still reloads state after the server saves; let it finish so it cannot apply an older name.
   await until(async () => await window.webContents.executeJavaScript("!document.querySelector('#agent-save').disabled"), 'the batch worker Save finished');
   await window.webContents.executeJavaScript(`document.querySelector('#agents-overview').click();
-    document.querySelector('#agent-cards [data-agent="main"][data-action="rename"]').click();
-    document.querySelector('#hub-name').value = 'Atlas'; new Promise(r => setTimeout(r, 100))`);
+    document.querySelector('#agent-cards [data-agent="main"][data-action="edit"]').click();
+    document.querySelector('#hub-name').value = 'Atlas';
+    document.querySelector('#hub-model').value = [...document.querySelector('#hub-model').options].find(option => option.value).value; new Promise(r => setTimeout(r, 100))`);
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/hub-rename.png'), (await window.webContents.capturePage()).toPNG());
   await window.webContents.executeJavaScript("document.querySelector('#hub-form').dispatchEvent(new Event('submit', { cancelable: true })); true");
   await until(async () => await window.webContents.executeJavaScript(`(() => {
@@ -1327,7 +1423,15 @@ app.whenReady().then(async () => {
   })()`), 'the renamed Hub shows its name and initial in the sidebar');
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#hub-dialog').open"), false);
   assert.equal(agents.hubName(), 'Atlas');
-  agents.renameHub('Hub');
+  assert.equal(controller.data.settings.mode, await window.webContents.executeJavaScript("document.querySelector('#hub-model').value"));
+  const editedMainMode = controller.data.settings.mode;
+  const workerModeBeforeHubEdit = agents.controller(profile.id).data.settings.mode;
+  await window.webContents.executeJavaScript('selectAgent(' + JSON.stringify(profile.id) + ')');
+  await window.webContents.executeJavaScript(`document.querySelector('#agent-cards [data-agent="main"][data-action="edit"]').click(); true`);
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#hub-model').value"), editedMainMode);
+  await window.webContents.executeJavaScript("document.querySelector('#hub-name').value = 'Hub'; document.querySelector('#hub-form').requestSubmit(); true");
+  await until(() => agents.hubName() === 'Hub', 'Main edit saves while a worker is selected');
+  assert.equal(agents.controller(profile.id).data.settings.mode, workerModeBeforeHubEdit);
   await window.webContents.executeJavaScript('document.querySelector("#agents-dialog").close(); applyState(' + JSON.stringify(agents.snapshot()) + '); true');
   console.log('Hub rename from Overview passed');
   // Update reads the fleet state, so it still shows with a worker selected.
@@ -1405,27 +1509,11 @@ app.whenReady().then(async () => {
   assert.equal(await activeChatState(), beforeAppearanceChange, 'changing appearance preserves active jobs, draft and selection');
   await chooseAppearance('system');
   stoppedAgent = null;
-  const optionsOpen = () => window.webContents.executeJavaScript('document.querySelector("#chat-options").open');
-  await window.webContents.executeJavaScript(`(() => {
-    const options = document.querySelector('#chat-options');
-    options.querySelector('summary').click();
-    options.querySelector('#preset').click();
-  })()`);
-  assert.equal(await optionsOpen(), true, 'clicking a control inside Options keeps it open');
-  await window.webContents.executeJavaScript('document.querySelector("#prompt").focus(); document.querySelector("#prompt").click(); true');
-  assert.equal(await optionsOpen(), false, 'clicking outside Options dismisses it');
-  await window.webContents.executeJavaScript(`(() => {
-    const summary = document.querySelector('#chat-options > summary');
-    summary.click();
-    summary.focus();
-  })()`);
-  window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
-  window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
-  await until(async () => !await optionsOpen(), 'Escape dismisses Options');
-  assert.equal(await window.webContents.executeJavaScript('document.activeElement.matches("#chat-options > summary")'), true,
-    'Escape restores focus to the Options trigger');
-  assert.equal(await activeChatState(), beforeAppearanceChange, 'dismissing Options preserves the active job and draft');
-  assert.equal(stoppedAgent, null, 'dismissing Options must not stop the running task');
+  await window.webContents.executeJavaScript(`document.querySelector('#context-meter').focus(); document.querySelector('#context-meter').click(); true`);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#context-meter").getAttribute("aria-disabled")'), 'true');
+  assert.equal(await activeChatState(), beforeAppearanceChange, 'viewing context preserves the active job and draft');
+  assert.equal(stoppedAgent, null, 'viewing context does not stop the running task');
+
   console.log('Options inside click, outside click and Escape dismissal passed');
   await window.webContents.executeJavaScript('document.querySelector(\'#agent-list [data-agent="' + profile.id + '"]\').dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true })); true');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#agent-menu [data-action=delete]").disabled'), true, 'Busy agents cannot be deleted from the menu');
@@ -1612,7 +1700,7 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#slash-menu").hidden'), true, 'arguments are not command completions');
   await typeCommand('/');
   // Hidden offscreen windows change activeElement without emitting native blur events.
-  await window.webContents.executeJavaScript('document.querySelector("#commands-help").focus(); document.querySelector("#prompt").dispatchEvent(new FocusEvent("blur")); true');
+  await window.webContents.executeJavaScript('document.querySelector("#context-meter").focus(); document.querySelector("#prompt").dispatchEvent(new FocusEvent("blur")); true');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#slash-menu").hidden'), true, 'leaving the composer dismisses suggestions');
   controller.data.settings.fontScale = 150; window.setSize(840, 640);
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
@@ -1666,23 +1754,15 @@ app.whenReady().then(async () => {
   controller.models = [{ model: 'gpt-6-sol', supportedReasoningEfforts: [{ reasoningEffort: 'low' }, { reasoningEffort: 'high' }] }];
   for (const c of agents.controllers.values()) { c.models = controller.models; c.account = controller.account; }
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
-  await openCommand('model');
-  assert.deepEqual(await filterChoices('GPT-6-SOL'), ['codex|gpt-6-sol'], 'models are searchable and grouped across efforts');
-  await pickChoice('codex|gpt-6-sol');
-  assert.equal(commandWorker.data.settings.mode, 'codex:gpt-6-sol:low');
-  assert.equal(controller.data.settings.mode, originalMainMode, 'model command changes only the selected agent');
-  await openCommand('effort');
-  await window.webContents.executeJavaScript('document.querySelector("#command-dialog").dispatchEvent(new Event("close")); true');
-  assert.deepEqual(await filterChoices(''), ['codex:gpt-6-sol:low', 'codex:gpt-6-sol:high'], 'effort choices match model support');
-  await pickChoice('codex:gpt-6-sol:high');
-  assert.equal(commandWorker.data.settings.mode, 'codex:gpt-6-sol:high');
-  await openCommand('model');
-  await filterChoices('auto');
-  await window.webContents.executeJavaScript(`document.querySelector('#command-search').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); true`);
-  await until(() => commandWorker.data.settings.mode === 'auto', 'Enter selects a filtered model');
-  await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 20))');
-  await openCommand('effort'); await pickChoice('medium');
-  assert.equal(controller.data.settings.effortCap, 'medium', 'Auto uses the existing shared effort cap');
+  for (const [command, mode] of [['model', 'codex:gpt-6-sol:low'], ['effort', 'codex:gpt-6-sol:high'], ['model', 'auto']]) {
+    await openCommand(command);
+    assert.equal(await window.webContents.executeJavaScript('document.querySelector("#command-dialog").open'), false);
+    assert.deepEqual(await window.webContents.executeJavaScript('[document.querySelector("#agent-dialog").open, document.querySelector("#agent-dialog").dataset.agentId]'), [true, commandAgent]);
+    await window.webContents.executeJavaScript(`document.querySelector('#agent-model').value = ${JSON.stringify(mode)}; document.querySelector('#agent-save').click(); true`);
+    await until(() => commandWorker.data.settings.mode === mode, 'Edit saves the worker model and effort');
+    assert.equal(controller.data.settings.mode, originalMainMode, 'Edit changes only the selected agent');
+    await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 20))');
+  }
   await openCommand('access'); await pickChoice('read-only');
   assert.equal(oldConversation.access, 'read-only');
   assert.equal(agents.conversation(controller).access, originalMainAccess, 'access command leaves Main unchanged');
@@ -1695,6 +1775,12 @@ app.whenReady().then(async () => {
   assert.match(await window.webContents.executeJavaScript('document.querySelector("#command-error").textContent'), /unavailable/);
   await closeCommand(); commandWorker.busy = null;
   oldConversation.usage = { modelContextWindow: 1000, last: { inputTokens: 350, outputTokens: 50 } };
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
+  assert.deepEqual(await window.webContents.executeJavaScript(`({
+    fill: document.querySelector('#context-meter').style.getPropertyValue('--context-used'),
+    known: !document.querySelector('#context-meter').classList.contains('unknown'),
+    label: document.querySelector('#context-detail').textContent.includes('40% context used')
+  })`), { fill: '40%', known: true, label: true });
   oldConversation.lastCompactedAt = Date.UTC(2026, 9, 9, 12);
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
   await openCommand('context');
@@ -1772,13 +1858,15 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('selectAgent("main").then(() => selectAgent(' + JSON.stringify(emptyAgent.agentId) + '))');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#permissions").value'), 'read-only');
   await window.webContents.executeJavaScript('selectAgent(' + JSON.stringify(commandAgent) + ')');
+  await window.webContents.executeJavaScript('selectAgent("main")');
   await openCommand('model');
   controller.data.settings.fontScale = 150; window.setSize(840, 640);
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
-  assert.equal(await window.webContents.executeJavaScript(`(() => { const box = document.querySelector('#command-dialog').getBoundingClientRect(); return box.top >= 0 && box.bottom <= innerHeight && box.left >= 0 && box.right <= innerWidth; })()`), true, 'picker fits the minimum window with large text');
+  assert.equal(await window.webContents.executeJavaScript(`(() => { const box = document.querySelector('#hub-dialog').getBoundingClientRect(); return box.top >= 0 && box.bottom <= innerHeight && box.left >= 0 && box.right <= innerWidth; })()`), true, 'picker fits the minimum window with large text');
   await new Promise(resolve => setTimeout(resolve, 100));
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/command-model.png'), (await window.webContents.capturePage()).toPNG());
-  await closeCommand(); controller.data.settings.fontScale = 100; window.setSize(1320, 900);
+  await window.webContents.executeJavaScript('document.querySelector("#hub-dialog").close(); true'); controller.data.settings.fontScale = 100; window.setSize(1320, 900);
+  await window.webContents.executeJavaScript('selectAgent(' + JSON.stringify(commandAgent) + ')');
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
   assert.equal(sent.length, sentBeforeCommands);
   console.log('Context, model, effort, access, switch, export and status commands passed');
@@ -2569,14 +2657,14 @@ app.whenReady().then(async () => {
     assert.ok(Math.abs(window.webContents.getZoomFactor() - percent / 100) < .001);
     await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
     const zoomLayout = await window.webContents.executeJavaScript(`(() => {
-      const icons = ['.composer-access svg', '#chat-options summary svg', '#dictate svg', '#send svg']
+      const icons = ['.composer-access svg', '.context-ring', '#dictate svg', '#send svg']
         .map(selector => document.querySelector(selector).getBoundingClientRect().width);
       const send = document.querySelector('#send').getBoundingClientRect();
-      const gear = document.querySelector('#chat-options summary svg').getBoundingClientRect();
+      const ring = document.querySelector('.context-ring').getBoundingClientRect();
       const microphone = document.querySelector('#dictate svg').getBoundingClientRect();
       const attach = document.querySelector('#attach-files').getBoundingClientRect();
       const shield = document.querySelector('.composer-access').getBoundingClientRect();
-      const rightGapDifference = Math.abs((microphone.left - gear.right) - (send.left - microphone.right));
+      const rightGapDifference = Math.abs((microphone.left - ring.right) - (send.left - microphone.right));
       const leftGap = shield.left - attach.right;
       const sizeRatio = send.width / attach.width;
       const plus = document.querySelector('#attach-files svg').getBoundingClientRect().width;
@@ -2587,7 +2675,7 @@ app.whenReady().then(async () => {
     assert.ok(zoomLayout.icons.every(size => Math.abs(size - 15) < .1), 'other composer icons have equal CSS size at every zoom: ' + JSON.stringify(zoomLayout));
     assert.ok(Math.abs(zoomLayout.plus - zoomLayout.plusFont * .75) < .1, 'plus icon is 25% smaller');
     assert.equal(zoomLayout.fits, true, 'composer controls remain inside the zoomed window');
-    assert.ok(zoomLayout.rightGapDifference < 1, 'visible gaps between gear, microphone and Send are equal');
+    assert.ok(zoomLayout.rightGapDifference < 1, 'visible gaps between context ring, microphone and Send are equal');
     assert.ok(Math.abs(zoomLayout.leftGap) < 1, 'shield sits next to plus without extra gap');
     assert.ok(Math.abs(zoomLayout.sizeRatio - 5 / 6) < .01, 'other buttons shrink by one-sixth while plus stays unchanged');
     assert.equal(zoomLayout.fontScale, '1', 'whole-page zoom does not also multiply text size');

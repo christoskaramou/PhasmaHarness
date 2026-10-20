@@ -158,14 +158,15 @@ function presetGroups() {
 }
 function currentMode() {
   const group = presetGroups().find(g => g.key === $('#preset').value);
-  if (!group) return 'auto';
+  if (!group) return state.coordinator ? null : 'auto';
   return (group.variants.find(p => (p.effort || '') === $('#effort').value) || group.variants[0]).id;
 }
-// Show a worker ID in the two selects; unknown or auto shows Auto.
+// Hub shows its pinned model; workers retain the Auto choice.
 function showMode(id) {
   const groups = presetGroups();
+  if (state.coordinator && id === 'auto') id = state.hubMode;
   const group = groups.find(g => g.variants.some(p => p.id === id));
-  $('#preset').value = group ? group.key : 'auto';
+  $('#preset').value = group ? group.key : state.coordinator ? '' : 'auto';
   const effort = $('#effort');
   const variants = group?.variants || [];
   const values = variants.map(p => p.effort || '');
@@ -239,7 +240,7 @@ const measure = document.createElement('canvas').getContext('2d');
 function fitSelect(select) {
   if (select.hidden || !select.selectedOptions.length) return;
   // Panel selects fill their container; the access select fills its icon button.
-  if (select.id === 'permissions' || select.closest('.chat-options-panel')) {
+  if (select.id === 'permissions') {
     select.style.width = '';
     return;
   }
@@ -588,12 +589,20 @@ function showImage(image, url, sessionId, itemId, index) {
   });
 }
 
+var reportedSettingsChanges = new Set();
 function applyState(next) {
+  reportedSettingsChanges ||= new Set();
+  for (const change of next.settingsChanges || []) {
+    if (!['applied', 'failed', 'declined'].includes(change.status) || reportedSettingsChanges.has(change.id)) continue;
+    reportedSettingsChanges.add(change.id);
+    notify(change.status === 'failed' ? `Could not change ${change.name}: ${change.error}` : `${change.name}: ${change.status}.`);
+    if ($('#settings-dialog').open) { loadRunnerSettings(); loadRemoteSettings(); }
+  }
   const loginFinished = fleetState?.chatgptLoginPending && !next.chatgptLoginPending;
   fleetState = next;
   const removed = next.agentStates && !next.agentStates[selectedAgent];
   if (removed) { selectedAgent = 'main'; selectedId = null; $('#prompt').value = ''; }
-  state = next.agentStates ? { ...next.agentStates[selectedAgent], agents: next.agents, anyAgentBusy: next.anyAgentBusy } : next;
+  state = next.agentStates ? { ...next.agentStates[selectedAgent], agents: next.agents, anyAgentBusy: next.anyAgentBusy, updateBlockedReason: next.updateBlockedReason } : next;
   const selectedGroup = selectedAgent === 'main' && state.sessions.find(session => session.id === selectedId && session.group && !session.archived);
   const conversationId = selectedGroup?.id || state.conversationId;
   if (next.agentStates && selectedId !== conversationId) {
@@ -713,8 +722,15 @@ function editAgent(profile) {
   $('#agent-access').value = conversation?.access || profile?.access || 'read-only';
   $('#agent-error').textContent = ''; dialog.showModal(); $('#agent-name').focus();
 }
-function renameHub(profile) {
+function editHub(profile) {
   $('#hub-name').value = profile.name;
+  const main = fleetState?.agentStates?.main || state;
+  const models = main.presets.filter(p => p.available && providerCaps(p.provider || 'codex').structured !== false);
+  const placeholder = new Option('Choose a model', '');
+  placeholder.disabled = true;
+  $('#hub-model').replaceChildren(placeholder, ...models.map(p => new Option(p.label, p.id)));
+  const mode = main.settings.mode === 'auto' ? main.hubMode : main.settings.mode;
+  $('#hub-model').value = models.some(p => p.id === mode) ? mode : '';
   $('#hub-error').textContent = '';
   $('#hub-dialog').showModal();
   $('#hub-name').select();
@@ -723,7 +739,7 @@ $('#hub-form').onsubmit = async event => {
   event.preventDefault();
   $('#hub-save').disabled = true;
   try {
-    await api.renameHub($('#hub-name').value);
+    await api.renameHub({ name: $('#hub-name').value, mode: $('#hub-model').value });
     $('#hub-dialog').close();
     applyState(await api.bootstrap());
   } catch (error) {
@@ -747,8 +763,7 @@ async function agentAction(event) {
   if (!button || button.disabled) return;
   const id = button.dataset.agent, profile = state.agents.find(a => a.id === id);
   try {
-    if (button.dataset.action === 'edit') return editAgent(profile);
-    if (button.dataset.action === 'rename') return renameHub(profile);
+    if (button.dataset.action === 'edit') return id === 'main' ? editHub(profile) : editAgent(profile);
     if (button.dataset.action === 'delete') {
       window.getSelection()?.removeAllRanges();
       $('#delete-dialog').dataset.agentId = id; $('#delete-title').textContent = profile.name;
@@ -896,7 +911,7 @@ function renderAgents() {
     const actions = element('div', 'agent-card-actions');
     actions.append(button('Open', row, 'open', switching));
     if (row.id === 'main')
-      actions.append(button('Rename', row, 'rename'));
+      actions.append(button('Edit', row, 'edit'));
     else
       actions.append(button('Edit', row, 'edit', !!row.busy || row.queued), button('Delete', row, 'delete', !!row.busy || row.queued || deletingAgent));
     if (row.busy || row.queued) { const stop = button('Stop', row, 'stop'); stop.className = 'stop'; actions.append(stop); }
@@ -1097,8 +1112,7 @@ function render() {
   $('#group-mention').disabled = submitting || readingImages || changingPermissions;
   $('#session-path').textContent = session?.workspace || state.settings.workspace;
   const compactable = state.coordinator ? !!session?.items.length : providerCaps(session?.activeProvider).compact && (session?.activeProvider === 'claude-cli' ? !!session.claudeSessionId : !!session?.threadId);
-  $('#context-meter').disabled = !compactable || !ready || !session?.items.some(item => item.type === 'userMessage') || !!state.busy || submitting;
-  $('#clear-conversation').disabled = !session || !!state.busy || submitting || readingImages || changingPermissions || !!state.waitingForAgents?.length;
+  $('#context-meter').setAttribute('aria-disabled', String(!compactable || !ready || !session?.items.some(item => item.type === 'userMessage') || !!state.busy || submitting));
   $('#context-search').disabled = !!state.busy || !state.contextRoot;
   const permission = state.accessModes.find(mode => mode.id === (session?.access || draftAccess || state.settings.access));
   for (const select of [$('#permissions'), $('#settings-access')]) {
@@ -1110,11 +1124,6 @@ function render() {
   $('#permissions').disabled = changingPermissions || submitting || !!(session && state.busy === session.id);
   $('#permissions').classList.toggle('full-access', permission.id === 'danger-full-access');
   $('#browse-session').disabled = !selectedId;
-  $('#quick-routing').title = state.coordinator ? 'Automatic model routing for workers. Hub keeps its chat model.' : 'Choose Smart or Jev routing';
-  $('#quick-routing').value = state.routingProvider || state.settings.routing;
-  $('#quick-routing').disabled = !!state.planRouting;
-  $('#quick-routing').title = state.planRouting ? state.planRouting.reason : state.jev.configured ? 'Choose Smart or Jev routing' : 'Enable Jev with a saved API key in Providers to use Jev routing.';
-  $('#quick-routing option[value="jev"]').disabled = !state.jev.configured;
   const jevIssue = jevHealth();
   const jevKeySaved = state.jev.keySaved ?? state.jev.configured;
   const jevBusy = !!(state.anyAgentBusy || state.busy || testingJev);
@@ -1125,7 +1134,7 @@ function render() {
   $('#jev-plug').setAttribute('aria-label', $('#jev-plug').title);
   $('#jev-plug').setAttribute('aria-pressed', String(!!state.jev.configured));
   $('#jev-health').textContent = jevIssue;
-  $('#settings-routing').onchange();
+  renderRoutingDetail();
   $('#jev-test').disabled = !state.jev.configured || jevBusy;
   $('#jev-remove').disabled = !jevKeySaved || jevBusy;
   $('#jev-save').disabled = jevBusy;
@@ -1146,9 +1155,11 @@ function render() {
   $('#banner').hidden = !$('#banner').textContent;
   const preset = $('#preset');
   const groups = presetGroups();
-  const signature = groups.map(g => `${g.provider}|${providerTitle(g.provider)}|${g.key}|${g.label}`).join('\n');
+  const signature = `${!!state.coordinator}\n` + groups.map(g => `${g.provider}|${providerTitle(g.provider)}|${g.key}|${g.label}`).join('\n');
   if (preset.dataset.signature !== signature) {
-    preset.replaceChildren(new Option('Auto · choose for me', 'auto'));
+    const defaultOption = state.coordinator ? new Option('Choose a model', '') : new Option('Auto', 'auto');
+    defaultOption.disabled = !!state.coordinator;
+    preset.replaceChildren(defaultOption);
     let section = null;
     for (const g of groups) {
       if (section?.dataset.provider !== g.provider) {
@@ -1203,7 +1214,7 @@ function render() {
     }
     $('#message-queue').append(row);
   }
-  $('#send').disabled = (!ready && !slashCommand($('#prompt').value)) || !!session?.queueSending || !!session?.compacting || (state.busy && state.busy !== selectedId && !state.coordinator) || changingPermissions || submitting || readingImages || (!$('#prompt').value.trim() && !attachedImages().length && !attachedFiles().length);
+  $('#send').disabled = ((!ready || (state.coordinator && !currentMode())) && !slashCommand($('#prompt').value)) || !!session?.queueSending || !!session?.compacting || (state.busy && state.busy !== selectedId && !state.coordinator) || changingPermissions || submitting || readingImages || (!$('#prompt').value.trim() && !attachedImages().length && !attachedFiles().length);
   renderImages();
   $('#working').hidden = !state.busy || state.busy !== selectedId || !!session?.pendingMessage;
   const turnError = state.busy === selectedId ? '' : session?.error || '';
@@ -1220,7 +1231,7 @@ function render() {
   $('#context-meter').style.setProperty('--context-used', `${contextPercent}%`);
   $('#context-meter').classList.toggle('unknown', !contextKnown);
   $('#context-meter').setAttribute('aria-label', `${contextLabel}. Compact context`);
-  $('#context-meter-tip').textContent = state.coordinator ? (session?.compacting ? 'Compacting Hub context…' : 'Hub summarizes older context automatically. Click to compact now; visible history is kept.') : !providerCaps(session?.activeProvider).usage ? `${providerTitle(session?.activeProvider)} does not report token usage here.` : contextLabel + (session?.compacting ? '\nCompacting context…' : providerCaps(session?.activeProvider).compact ? '\nClick to compact context.' : '');
+  $('#context-detail').textContent = state.coordinator ? contextLabel + '\n' + (session?.compacting ? 'Compacting Hub context…' : 'Hub summarizes older context automatically. Click to compact now; visible history is kept.') : !providerCaps(session?.activeProvider).usage ? `${providerTitle(session?.activeProvider)} does not report token usage here.` : contextLabel + (session?.compacting ? '\nCompacting context…' : providerCaps(session?.activeProvider).compact ? '\nClick to compact context.' : '');
   const compact = n => new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(n);
   const hasBreakdown = !usage?.cacheUnknown && Number.isFinite(total?.inputTokens) && Number.isFinite(total?.cachedInputTokens) && Number.isFinite(total?.outputTokens);
   const providerHover = providerConnectionSummary();
@@ -1647,6 +1658,24 @@ function writer(item, session) {
   return WRITERS[route?.provider || 'codex'] || 'Codex CLI';
 }
 
+function elapsedMessageTime(timestamp, now = Date.now()) {
+  const seconds = Math.max(0, Math.floor((now - timestamp) / 1000));
+  if (seconds < 60) return 'Just now';
+  const [unit, size] = [['year', 31536000], ['month', 2592000], ['day', 86400], ['hour', 3600], ['minute', 60]]
+    .find(([, size]) => seconds >= size);
+  const count = Math.floor(seconds / size);
+  return `${count} ${unit}${count === 1 ? '' : 's'} ago`;
+}
+function refreshMessageTimes() {
+  if (document.hidden) return;
+  const now = Date.now();
+  for (const time of document.querySelectorAll('#messages .message-actions time')) {
+    time.textContent = elapsedMessageTime(new Date(time.dateTime).getTime(), now);
+  }
+}
+setInterval(refreshMessageTimes, 30000);
+document.addEventListener('visibilitychange', refreshMessageTimes);
+
 function renderMessages(session) {
   const container = $('#conversation');
   const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
@@ -1696,6 +1725,7 @@ function renderMessages(session) {
     } else if (item.type === 'userMessage' || item.type === 'agentMessage' || item.type === 'plan') {
       const user = item.type === 'userMessage';
       node.className = `message ${user ? 'user' : item.phase === 'commentary' ? 'commentary' : 'assistant'}`;
+      node.tabIndex = 0;
       const label = element('div', 'message-label', who);
       const routeLabel = selected?.label || item.routeLabel;
       if (routeLabel && !user) label.append(element('span', 'model-label', routeLabel));
@@ -1704,11 +1734,12 @@ function renderMessages(session) {
       const sourceText = user ? item.content.filter(c => c.type === 'text').map(c => c.text).join('\n') : reply.text;
       const attachment = user ? HarnessFiles.unpack(sourceText, item.fileMessage) : null;
       const text = attachment?.displayText ?? sourceText;
-      if (TASK_STATUS_LABELS[reply?.status] && item.phase !== 'commentary') label.append(element('span', 'task-status', TASK_STATUS_LABELS[reply.status]));
+      const taskStatus = TASK_STATUS_LABELS[reply?.status] && item.phase !== 'commentary'
+        ? element('span', 'task-status', TASK_STATUS_LABELS[reply.status]) : null;
       const actions = element('div', 'message-actions');
       const timestamp = item.createdAt || selected?.at;
       if (timestamp) {
-        const time = element('time', '', new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+        const time = element('time', '', elapsedMessageTime(timestamp));
         time.dateTime = new Date(timestamp).toISOString(); time.title = new Date(timestamp).toLocaleString();
         actions.append(time);
       }
@@ -1723,6 +1754,7 @@ function renderMessages(session) {
         };
         actions.append(copy);
       }
+      if (!user || item.routineRun) actions.append(label);
       body.innerHTML = DOMPurify.sanitize(marked.parse(text, { breaks: true }), {
         FORBID_TAGS: ['img', 'style', 'iframe', 'form', 'input', 'button', 'video', 'audio', 'svg', 'math'],
         FORBID_ATTR: ['style'],
@@ -1737,11 +1769,15 @@ function renderMessages(session) {
           details.append(element('summary', '', file.name + (file.format ? ' · extracted text' : '')), element('pre', '', file.text));
           body.append(details);
         }
-        const bubble = element('div', 'message-bubble');
-        bubble.append(body);
-        node.replaceChildren(label, bubble, actions);
-        if (batch) node.append(renderBatchReport(batch, batchOpened));
-      } else node.replaceChildren(label, body, actions);
+      }
+      const bubble = element('div', 'message-bubble');
+      bubble.append(body);
+      if (taskStatus) bubble.append(taskStatus);
+      bubble.onclick = event => {
+        if (!event.target.closest('a, button, summary, input, select, textarea')) node.focus({ preventScroll: true });
+      };
+      node.replaceChildren(bubble, actions);
+      if (user && batch) node.append(renderBatchReport(batch, batchOpened));
       if (user) {
         const images = item.content.filter(part => part.type === 'image');
         images.forEach((part, index) => {
@@ -1752,12 +1788,10 @@ function renderMessages(session) {
         });
       }
       entry.routeNode?.remove(); entry.routeNode = null;
-      if (item.pending || selected) {
+      if (item.pending || (selected && !['manual', 'hub-auto'].includes(selected.source))) {
         const row = element('div', 'routing-row');
         entry.routeNode = row; node.after(row);
         if (item.pending) row.append(element('p', 'routing-status', item.error ? `Not sent: ${item.error}` : state.planRouting ? state.planRouting.reason : `Choosing a model with ${routerName(state.routerModel)}…`));
-        else if (selected.source === 'manual') row.append(element('p', 'muted', `Model: ${selected.label} · manual selection`));
-        else if (selected.source === 'hub-auto') row.append(element('p', 'muted', `Model: ${selected.label} · Auto-selected for Hub`));
       }
       if (selected && selected.source !== 'manual' && selected.source !== 'hub-auto') {
         const details = element('details', 'activity');
@@ -1941,7 +1975,7 @@ const COMMANDS = {
   agents: { description: 'Open the agent overview.', run: () => $('#agents-overview').click() },
   settings: { description: 'Open Harness settings.', run: () => $('#settings').onclick() },
   context: { description: 'Show context usage, remaining capacity and last compaction.', run: () => openCommandPanel('context') },
-  model: { description: 'Choose Auto or an available model for this agent.', run: () => openCommandPanel('model') },
+  model: { description: 'Choose a model for this agent.', run: () => openCommandPanel('model') },
   effort: { description: 'Choose model effort, or the shared effort cap for Auto.', run: () => openCommandPanel('effort') },
   access: { description: 'Change access for this agent’s conversation.', run: () => openCommandPanel('access') },
   switch: { description: 'Find and switch to another agent.', run: () => openCommandPanel('switch') },
@@ -1955,6 +1989,14 @@ const COMMANDS = {
 };
 let commandPanel = null, commandPicking = false;
 function openCommandPanel(name) {
+  if (['model', 'effort'].includes(name)) {
+    const profile = state.agents?.find(agent => agent.id === selectedAgent);
+    if (!profile) throw new Error('Select a bot to edit its model.');
+    if (selectedAgent === 'main') editHub(profile);
+    else editAgent(profile);
+    $(selectedAgent === 'main' ? '#hub-model' : '#agent-model').focus();
+    return;
+  }
   commandPanel = { name, agent: selectedAgent, session: selectedId };
   $('#command-title').textContent = ({ context: 'Context usage', model: 'Choose model', effort: 'Choose effort', access: 'Conversation access', switch: 'Switch agent', status: 'Agent status' })[name];
   $('#command-description').textContent = COMMANDS[name].description;
@@ -1965,15 +2007,6 @@ function openCommandPanel(name) {
   ($('#command-search').hidden ? $('#command-dialog .close-dialog') : $('#command-search')).focus();
 }
 function commandChoices(name) {
-  const mode = state.settings.mode, groups = presetGroups();
-  const group = groups.find(g => g.variants.some(p => p.id === mode));
-  if (name === 'model') return [
-    { id: 'auto', label: 'Auto', detail: 'Choose a model automatically for each request.', selected: mode === 'auto' },
-    ...groups.map(g => ({ id: g.key, label: g.label, detail: providerTitle(g.provider), selected: g === group })),
-  ];
-  if (name === 'effort') return mode === 'auto'
-    ? Object.entries(EFFORT_CAP_TEXT).map(([id, detail]) => ({ id, label: id === 'max' ? 'No cap' : `Up to ${id}`, detail, selected: id === (state.settings.effortCap || 'high'), disabled: !!state.anyAgentBusy || !!state.busy }))
-    : (group?.variants || []).map(p => ({ id: p.id, label: p.effort || 'Default', detail: group.label, selected: p.id === mode }));
   if (name === 'access') return state.accessModes.map(a => ({ id: a.id, label: a.label, detail: a.description, selected: a.id === (current()?.access || draftAccess || state.settings.access), disabled: !!state.busy || !!state.waitingForAgents?.length }));
   if (name === 'switch') return (state.agents || [{ id: 'main', name: 'Hub' }]).map(a => ({ id: a.id, label: a.name, detail: a.workspace || '', selected: a.id === selectedAgent }));
   return [];
@@ -2001,7 +2034,7 @@ function commandDetails(name) {
     ['Agent', agentName], ['Connection', state.connection],
     ['Activity', session?.compacting ? 'Compacting' : session?.waitingForAgent || (state.waitingForAgents?.length ? 'Waiting for child agents' : state.busy ? 'Working' : session?.delegation?.state === 'queued' ? 'Queued' : 'Idle')],
     ['Current task', task ? `${task.goal}\n${task.state}` : session?.pendingMessage ? 'Sending message…' : 'No tracked task'],
-    ['Model', state.presets.find(p => p.id === state.settings.mode)?.label || (state.settings.mode === 'auto' ? 'Auto' : state.settings.mode)],
+    ['Model', state.presets.find(p => p.id === currentMode())?.label || (state.coordinator ? 'Choose a model' : state.settings.mode)],
     ['Access', state.accessModes.find(a => a.id === (session?.access || draftAccess || state.settings.access))?.label || 'Unknown'],
     ['Queued work', queue.length ? queue.map((m, i) => `${i + 1}. ${m.text || 'Image attachment'}${m.error ? ` — ${m.error}` : ''}`).join('\n') : 'None'],
     ['Child agents with pending work', children.join('\n') || 'None'],
@@ -2044,11 +2077,6 @@ async function pickCommandChoice(id) {
     if (agent !== selectedAgent || session !== selectedId) throw new Error('The conversation changed. Open the command again.');
     const choice = commandChoices(name).find(row => row.id === id);
     if (!choice || choice.disabled) throw new Error('This choice is unavailable while work is pending.');
-    if (name === 'model') await changeMode(id === 'auto' ? 'auto' : preferredMode(presetGroups().find(g => g.key === id)));
-    if (name === 'effort') {
-      if (state.settings.mode === 'auto') { applyState(await api.settings({ effortCap: id })); updatePreview(); }
-      else await changeMode(id);
-    }
     if (name === 'access') {
       if (selectedId) await changeAccess(id);
       else { applyState(await api.settings({ access: id })); draftAccess = null; render(); }
@@ -2135,8 +2163,6 @@ for (const [name, command] of Object.entries(COMMANDS)) {
   button.onclick = () => { $('#commands-dialog').close(); runCommand(name); };
   $('#commands-list').append(button);
 }
-$('#commands-help').onclick = () => runCommand('help');
-$('#clear-conversation').onclick = () => runCommand('clear');
 $('#composer').addEventListener('pointerdown', event => {
   if (event.button !== 0 || event.target.closest('button, input, textarea, select, label, details, a, #slash-menu, .image-preview')) return;
   event.preventDefault();
@@ -2156,6 +2182,7 @@ $('#composer').addEventListener('submit', async event => {
   if (text.length > $('#prompt').maxLength) { notify(new Error('Your draft is over the message limit. Shorten it before sending.')); return; }
   const command = slashCommand(text);
   if (command) { await runCommand(command, text); return; }
+  if (state.coordinator && !currentMode()) { notify(new Error('Choose a model in the main Bot’s Edit options.')); return; }
   const images = attachedImages().slice();
   const files = attachedFiles().slice();
   if ((!text && !images.length && !files.length) || readingImages || submitting || changingPermissions || state.connection !== 'ready') return;
@@ -2237,12 +2264,13 @@ $('#prompt').addEventListener('keydown', event => {
   }
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); $('#composer').requestSubmit(); }
 });
+
 const changeMode = async mode => { applyState(await api.settings({ mode })); updatePreview(); };
 const saveMode = async mode => { try { await changeMode(mode); } catch (error) { notify(error); showMode(state.settings.mode); } };
 // A new model keeps the current effort when it supports it, else medium, else its lowest effort.
 $('#preset').onchange = () => {
   const group = presetGroups().find(g => g.key === $('#preset').value);
-  if (!group) return saveMode('auto');
+  if (!group) return state.coordinator ? undefined : saveMode('auto');
   const mode = preferredMode(group);
   showMode(mode); saveMode(mode);
 };
@@ -2344,28 +2372,30 @@ $('#settings-browse').onclick = async () => {
     await saveSetting($('#settings-workspace'), 'workspace', folder, agentId);
   } catch (error) { notify(error); }
 };
-function renderRoutingModels(selected = $('#settings-router-preset').value || state.settings.routerPreset) {
+function renderRoutingModels(selected = state.settings.routing === 'jev' ? 'jev' : state.settings.routerPreset) {
   const select = $('#settings-router-preset');
   select.replaceChildren(...state.routerPresets.map(p => {
     const option = new Option(`${p.label} · ${p.provider}${!p.available ? ' · unavailable' : ''}`, p.id);
     option.disabled = !p.available;
     return option;
   }));
-  if (!state.routerPresets.some(p => p.id === selected)) {
+  const jev = new Option('Jev', 'jev');
+  select.prepend(jev);
+  if (selected !== 'jev' && !state.routerPresets.some(p => p.id === selected)) {
     const placeholder = new Option(state.routerPresets.length ? 'Choose an enabled routing model' : 'Enable a routing model in Providers', '');
     placeholder.disabled = true;
     select.prepend(placeholder);
     selected = '';
   }
   select.value = selected;
+  renderRoutingDetail();
 }
 $('#settings').onclick = async () => {
   try { applyState(await api.bootstrap()); }
   catch (error) { notify(error); return; }
   $('#settings-workspace').value = current()?.workspace || state.settings.workspace; $('#settings-access').value = current()?.access || state.settings.access;
   $('#settings-access').onchange();
-  $('#settings-routing').value = state.settings.routing;
-  renderRoutingModels(state.settings.routerPreset);
+  renderRoutingModels();
   $('#settings-effort-cap').value = state.settings.effortCap || 'high';
   $('#settings-effort-cap').onchange();
   $('#settings-context').value = state.settings.contextRanking || 'local';
@@ -2375,7 +2405,7 @@ $('#settings').onclick = async () => {
   $('#settings-wiki-check').value = state.settings.wikiAssessment === true ? 'on' : 'off';
   $('#settings-reply-suggestions').value = state.settings.replySuggestions === true ? 'on' : 'off';
   $('#settings-background-usage').value = String(state.settings.backgroundUsageLimit || 90);
-  $('#settings-routing').onchange();
+  renderRoutingDetail();
   $('#jev-key').value = '';
   $('#jev-result').textContent = '';
   $('#jev-provider').open = false;
@@ -2496,7 +2526,9 @@ $('#open-release').onclick = () => { if (releaseURL) api.openLink(releaseURL).ca
 // Automatic update (installed app): the main process checks, the banner offers it, and nothing installs until clicked.
 var update = { status: 'idle' }, updateHidden = null, updateConfirmation = null; // var: applyState may render before this line has run
 function renderUpdate() {
-  const u = update || { status: 'idle' }, busy = !!(state?.anyAgentBusy || state?.busy);
+  const u = update || { status: 'idle' };
+  const blocked = state?.updateBlockedReason || ((state?.anyAgentBusy || state?.busy)
+    ? 'Finish or stop the current turn first; updating restarts the app.' : null);
   if (u.confirmationRequest && u.confirmationRequest !== updateConfirmation) {
     updateConfirmation = u.confirmationRequest;
     updateHidden = null;
@@ -2513,9 +2545,10 @@ function renderUpdate() {
     : u.confirmationRequest ? `Download and install Phasma Harness ${u.latest}? The app will restart.`
     : `Phasma Harness ${u.latest} is available.`;
   const idle = u.status === 'available' || u.status === 'error';
+  if (idle && blocked) $('#update-text').textContent += ` ${blocked}`;
   for (const id of ['#update-install', '#install-update']) {
-    $(id).disabled = busy || !idle;
-    $(id).title = busy ? 'Finish or stop the current turn first; updating restarts the app.' : '';
+    $(id).disabled = !!blocked || !idle;
+    $(id).title = blocked || '';
   }
   $('#update-install').hidden = !idle;
   $('#update-install').textContent = u.status === 'error' ? 'Try again' : u.confirmationRequest ? 'Download and install' : 'Update and restart';
@@ -2614,7 +2647,7 @@ $('#benchmark-refresh').onclick = async () => {
 };
 // Shown with a saved Jev key while Smart routes; the result is only a log next to the model that ran.
 function renderJevCompare() {
-  const shown = !!state.jev?.configured && $('#settings-routing').value === 'smart';
+  const shown = !!state.jev?.configured && $('#settings-router-preset').value !== 'jev';
   $('#jev-compare-row').hidden = $('#jev-compare-detail').hidden = !shown;
   if (!shown) return;
   const s = state.jev.compare;
@@ -2633,16 +2666,22 @@ function renderWikiCheck() {
   const stats = !w?.additions ? '' : ` ${w.additions} additions: ${w.assessed} judged${w.assessed ? ` (${parts(w.support)}; ${parts(w.novelty)})` : ''}, ${w.unassessable} not assessable · Jev cost $${w.jevCostUsd.toFixed(4)}.`;
   $('#wiki-check-detail').textContent = 'Log only. When on, after an automatic wiki update Jev judges each small addition that cites a file:line source: does the source support it, and did the wiki already have it? The addition, the cited source lines and related wiki passages are sent to Jev and billed by Jev; nothing in the wiki changes. Results are in decisions.jsonl in the logs folder.' + stats;
 }
-$('#settings-routing').onchange = () => {
+function renderRoutingDetail() {
+  const jev = $('#settings-router-preset option[value=jev]');
+  if (jev) {
+    jev.textContent = `Jev · ${state.jev?.model || 'version pending'}${!state.jev?.configured ? ' · unavailable' : ''}`;
+    jev.title = state.jev?.model ? 'Model reported by the last successful Jev response.' : 'The provider reports the exact version after a successful Jev request.';
+    jev.disabled = !state.jev?.configured;
+  }
   renderJevCompare();
   renderWikiCheck();
-  const provider = $('#settings-routing').value;
-  $('#settings-router-preset').disabled = provider !== 'smart' || !!state.planRouting;
-  $('#router-detail').textContent = state.planRouting ? state.planRouting.reason + ' This overrides the saved routing preference.' : provider === 'jev' && state.jev.enabled === false ? 'Jev is disabled in Providers. Auto uses Smart until you enable Jev again.' : provider === 'jev' && !state.jev.configured ? 'Save your Jev API key in Providers to enable this routing option.'
-
-    : provider === 'jev' ? 'Jev picks the model and effort for each Auto prompt.'
-    : 'The routing model picks the model and effort for each Auto prompt.';
-};
+  const provider = $('#settings-router-preset').value === 'jev' ? 'jev' : 'smart';
+  $('#settings-router-preset').disabled = !!state.planRouting;
+  $('#settings-router-preset').title = state.planRouting ? state.planRouting.reason + ' This overrides the saved routing preference.'
+    : provider === 'jev' && state.jev.enabled === false ? 'Jev is disabled in Providers. Auto uses Smart until you enable Jev again.'
+    : provider === 'jev' && !state.jev.configured ? 'Save your Jev API key in Providers to enable this routing option.' : '';
+}
+$('#settings-router-preset').onchange = renderRoutingDetail;
 $('#jev-plug').onclick = async event => {
   event.preventDefault(); event.stopPropagation();
   if (!(state.jev.keySaved ?? state.jev.configured)) { $('#jev-provider').open = true; $('#jev-key').focus(); return; }
@@ -2666,7 +2705,7 @@ $('#jev-test').onclick = async () => {
   finally { testingJev = false; render(); }
 };
 $('#jev-remove').onclick = async () => {
-  try { applyState(await withProviderAction('jev', 'Removing key…', () => api.jevRemoveKey())); $('#settings-routing').value = state.settings.routing; $('#settings-context').value = state.settings.contextRanking || 'local'; $('#settings-tools').value = state.settings.toolSelection || 'off'; $('#settings-jev-compare').value = 'off'; $('#settings-wiki-check').value = 'off'; $('#settings-routing').onchange(); $('#jev-result').textContent = 'Saved key removed.'; }
+  try { applyState(await withProviderAction('jev', 'Removing key…', () => api.jevRemoveKey())); renderRoutingModels(); $('#settings-context').value = state.settings.contextRanking || 'local'; $('#settings-tools').value = state.settings.toolSelection || 'off'; $('#settings-jev-compare').value = 'off'; $('#settings-wiki-check').value = 'off'; renderRoutingDetail(); $('#jev-result').textContent = 'Saved key removed.'; }
   catch (error) { notify(error); }
 };
 let settingsWrites = Promise.resolve();
@@ -2679,14 +2718,15 @@ async function saveSetting(control, key, value, agentId = selectedAgent) {
   $('#settings-save-status').textContent = 'Saving…';
   try {
     if (key === 'workspace' && checksDirty) await saveChecks();
-    applyState(await queueSettingsWrite(() => window.router.settings({ [key]: value }, agentId)));
+    const values = key === 'routingModel' ? (value === 'jev' ? { routing: 'jev' } : { routing: 'smart', routerPreset: value }) : { [key]: value };
+    applyState(await queueSettingsWrite(() => window.router.settings(values, agentId)));
     if (agentId === selectedAgent) control.value = typeof value === 'boolean' ? (value ? 'on' : 'off') : String(value);
     updatePreview();
     if (key === 'workspace' && agentId === selectedAgent) renderChecks();
     $('#settings-save-status').textContent = 'Saved';
   } catch (error) {
     if (agentId === selectedAgent) {
-      const saved = ((key === 'workspace' || key === 'access') ? current()?.[key] ?? state.settings[key] : state.settings[key])
+      const saved = key === 'routingModel' ? (state.settings.routing === 'jev' ? 'jev' : state.settings.routerPreset) : ((key === 'workspace' || key === 'access') ? current()?.[key] ?? state.settings[key] : state.settings[key])
         ?? { backgroundUsageLimit: 90, effortCap: 'high', contextRanking: 'local', toolSelection: 'off', jevQuickAnswers: true, jevCompare: false, wikiAssessment: false }[key];
       control.value = typeof value === 'boolean' ? (saved ? 'on' : 'off') : String(saved ?? '');
       control.onchange?.();
@@ -2695,13 +2735,13 @@ async function saveSetting(control, key, value, agentId = selectedAgent) {
     notify(error);
   } finally {
     control.disabled = false;
-    $('#settings-routing').onchange();
+    renderRoutingDetail();
   }
 }
 const settingsFields = {
   'settings-background-usage': 'backgroundUsageLimit',
-  'settings-access': 'access', 'settings-routing': 'routing',
-  'settings-router-preset': 'routerPreset', 'settings-effort-cap': 'effortCap',
+  'settings-access': 'access',
+  'settings-router-preset': 'routingModel', 'settings-effort-cap': 'effortCap',
   'settings-context': 'contextRanking', 'settings-tools': 'toolSelection',
   'settings-quick': 'jevQuickAnswers', 'settings-jev-compare': 'jevCompare', 'settings-wiki-check': 'wikiAssessment',
   'settings-reply-suggestions': 'replySuggestions',
@@ -2726,7 +2766,9 @@ async function closeSettings() {
 }
 $('#settings-close').onclick = closeSettings;
 $('#settings-dialog').addEventListener('cancel', event => { event.preventDefault(); closeSettings(); });
-$('#context-meter').onclick = () => runCommand('compact');
+$('#context-meter').onclick = () => {
+  if ($('#context-meter').getAttribute('aria-disabled') !== 'true') runCommand('compact');
+};
 $('#context-search').onclick = () => {
   contextVersion++;
   contextSessionId = selectedId; contextResult = null;
@@ -2852,32 +2894,19 @@ $('#job-update-form').onsubmit = async event => {
   finally { selected.pending = false; if (viewedJob === selected) renderJobDetails(); }
 };
 document.querySelectorAll('[data-prompt]').forEach(button => { button.onclick = () => { $('#prompt').value = button.dataset.prompt; $('#prompt').focus(); updatePreview(); }; });
-const chatOptions = $('#chat-options');
 document.addEventListener('click', event => {
-  if (chatOptions.open && !chatOptions.contains(event.target)) chatOptions.open = false;
   const link = event.target.closest('a');
   if (link) { event.preventDefault(); if (/^https?:\/\//i.test(link.href)) api.openLink(link.href).catch(notify); }
 });
 document.addEventListener('keydown', event => {
   if (event.defaultPrevented) return;
-  if (event.key === 'Escape' && chatOptions.open && !document.querySelector('dialog[open]')) {
-    event.preventDefault();
-    chatOptions.open = false;
-    chatOptions.querySelector('summary').focus();
-    return;
-  }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'n' && !document.querySelector('dialog[open]')) { event.preventDefault(); editAgent(); }
   if (event.key === 'Escape' && state?.busy && state.busy === selectedId && !document.querySelector('dialog[open]')) api.stop(state.busy).catch(notify);
 });
 api.onState(applyState);
 api.bootstrap().then(applyState).catch(notify);
 
-$('#quick-routing').onchange = async () => {
-  const selector = $('#quick-routing'); selector.disabled = true;
-  try { applyState(await api.settings({ routing: selector.value })); updatePreview(); }
-  catch (error) { selector.value = state.settings.routing; notify(error); }
-  finally { selector.disabled = !!state.planRouting; }
-};
+
 
 function renderProviders() {
   const accounts = $('#provider-accounts');

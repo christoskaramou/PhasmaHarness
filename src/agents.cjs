@@ -249,18 +249,29 @@ class Agents extends EventEmitter {
   }
 
   renameHub(value) {
-    const name = typeof value === 'string' ? value.trim() : '';
+    const input = typeof value === 'string' ? { name: value } : value;
+    const name = typeof input?.name === 'string' ? input.name.trim() : '';
     if (!name || name.length > 60)
       throw new Error('Enter a name for the Hub (up to 60 characters).');
     if (name.toLowerCase() === 'main' || this.primary.data.agents.some(agent => agent.name.toLowerCase() === name.toLowerCase()))
       throw new Error('Choose a name no other bot uses.');
 
+    const mode = input.mode;
+    if (mode !== undefined) {
+      const choice = this.primary.resolveWorker(mode);
+      if (!choice || !this.primary.available(choice) || capabilities(choice.provider).structured === false)
+        throw new Error('Choose an available model supported by the main Bot.');
+    }
+
     const previous = this.primary.data.hubName;
+    const previousSettings = this.primary.data.settings;
     this.primary.data.hubName = name;
+    if (mode !== undefined) this.primary.data.settings = { ...previousSettings, mode };
     try {
       this.primary.save();
     } catch (error) {
       this.primary.data.hubName = previous;
+      this.primary.data.settings = previousSettings;
       throw error;
     }
 
@@ -560,7 +571,7 @@ class Agents extends EventEmitter {
     const jobVerification = Object.fromEntries(assignments.map(({ session, job }) => [job.id,
       reports.verification((session.tasks || []).findLast(task => task.assignmentId === job.id), job)]));
     const batchReports = reports.batchReports({ sessions, assignments, names, budgets: jobBudgets, copies: this.workspaces.records });
-    return { ...this.primary.snapshot(), anyAgentBusy: this.busy, artifactRuns: this.artifactRuns.snapshot(), downloads: this.downloads.snapshot(), jobBudgets, batchReports, jobVerification,
+    return { ...this.primary.snapshot(), settingsChanges: this.settingsTools?.snapshot() || [], anyAgentBusy: this.busy, updateBlockedReason: this.updateBlockedReason?.() || null, artifactRuns: this.artifactRuns.snapshot(), downloads: this.downloads.snapshot(), jobBudgets, batchReports, jobVerification,
       agents: [{ id: 'main', name: this.hubName(), workspace: this.primary.data.settings.workspace }, ...this.primary.data.agents].map(profile => ({ ...profile,
         busy: this.controller(profile.id).busy || this.executions.get(profile.id)?.busy || null })),
       agentStates: Object.fromEntries([...this.controllers].map(([id, controller]) => [id, snapshot(controller)])),
@@ -1790,6 +1801,10 @@ class Agents extends EventEmitter {
     if (session.delegation?.cancelled && !session.delegation.delivered && !['agents_list', 'agent_models', 'agent_read_context'].includes(name)) throw new Error('This assignment was stopped. Wait for a new user request.');
     if (session.agentReplyCancelledActive && !['agents_list', 'agent_models', 'agent_read_context'].includes(name)) throw new Error('A cancelled result cannot start or change work. Wait for a new user request.');
     if (session.delegation && ['revising', 'revision-blocked'].includes(session.delegation.state) && !['agents_list', 'agent_models', 'agent_read_context', 'agent_stop'].includes(name)) throw new Error('Wait for the accepted assignment change before taking another action.');
+    if (name === 'read_settings' || name === 'write_settings') {
+      if (!this.settingsTools) throw new Error('The settings service is unavailable.');
+      return name === 'read_settings' ? this.settingsTools.read(controller, args) : this.settingsTools.write(controller, args);
+    }
     if (name === 'harness_check_update') {
       if (Object.keys(args).length) throw new Error('The update check takes no arguments; installation requires user confirmation in the app.');
       if (!this.checkUpdate) throw new Error('The update service is unavailable.');

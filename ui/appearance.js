@@ -18,6 +18,13 @@
 
   document.addEventListener('DOMContentLoaded', () => {
     const control = document.querySelector('#settings-appearance');
+    globalThis.router?.onAppearance?.(mode => {
+      if (!modes.includes(mode)) return;
+      appearance = mode;
+      root.dataset.appearance = mode;
+      control.value = mode;
+      try { localStorage.setItem('appearance', mode); } catch { /* Keep the visible selection. */ }
+    });
     control.value = appearance;
     share(appearance);
     control.addEventListener('change', () => {

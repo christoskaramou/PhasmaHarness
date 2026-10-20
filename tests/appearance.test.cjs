@@ -88,3 +88,17 @@ test('appearance is shared with the desktop window so its launch background matc
   assert.deepEqual(calls, ['light', 'dark']);
   launch('dark', false, { setAppearance: () => Promise.reject(new Error('Window closed')) });
 });
+
+
+test('agent-confirmed appearance changes update the control and persistent theme without an IPC loop', () => {
+  let receive;
+  const shared = [];
+  const page = launch('light', false, { onAppearance: callback => { receive = callback; }, setAppearance: mode => { shared.push(mode); } });
+  receive('dark');
+  assert.equal(page.root.dataset.appearance, 'dark');
+  assert.equal(page.control.value, 'dark');
+  assert.equal(page.store.get('appearance'), 'dark');
+  assert.deepEqual(shared, ['light']);
+  receive('invalid');
+  assert.equal(page.root.dataset.appearance, 'dark');
+});

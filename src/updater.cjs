@@ -41,7 +41,8 @@ class Updater extends EventEmitter {
     if (!this.installable) return Promise.reject(new Error('Automatic updates work in the installed app. Update the source folder with git instead.'));
     if (this.installing) return this.installing;
     if (!this.release) return Promise.reject(new Error('No update is ready. Check for updates first.'));
-    if (this.busy()) return Promise.reject(new Error('Finish or stop the current turn first; updating restarts the app.'));
+    const blocked = this.busy();
+    if (blocked) return Promise.reject(new Error(typeof blocked === 'string' ? blocked : 'Finish or stop the current turn first; updating restarts the app.'));
     const release = this.release;
     this.installing = (async () => {
       let resume, launched = false;
@@ -53,7 +54,8 @@ class Updater extends EventEmitter {
           if (percent !== shown) { shown = percent; this.set({ progress: percent }); }
         } });
         // A turn that started during the download keeps running; the verified installer is reused next time.
-        if (this.busy()) throw new Error('A turn started during the download. Choose Update and restart again when it finishes.');
+        const blocked = this.busy();
+        if (blocked) throw new Error(typeof blocked === 'string' ? blocked : 'A turn started during the download. Choose Update and restart again when it finishes.');
         resume = this.pause();
         this.set({ status: 'installing', progress: 100 });
         if (this.launch) await this.launch(file);

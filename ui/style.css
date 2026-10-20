@@ -743,24 +743,28 @@ h2 {
 }
 
 .message {
-  margin:23px 0 29px
+  width:fit-content;
+  max-width:88%;
+  margin:8px 0
 }
 
 .message.user {
-  margin-left:12%
+  margin-left:auto
 }
 
 .message-bubble {
-  background:var(--panel);
-  border:1px solid var(--border);
-  border-radius:14px;
-  padding:15px 19px
+  background:light-dark(#efefef, #292929);
+  border:1px solid transparent;
+  border-radius:18px;
+  padding:5.5px 13px;
+  width:fit-content;
+  max-width:100%
 }
 
 .message-label {
   font-size:calc(10px * var(--font-scale,1));
   color:var(--muted);
-  margin-bottom:9px;
+  margin:0;
   display:flex;
   align-items:center;
   gap:10px
@@ -775,7 +779,8 @@ h2 {
 }
 
 .message.user .message-label {
-  color:var(--muted)
+  color:var(--muted);
+  justify-content:flex-end
 }
 
 .message-body {
@@ -1458,8 +1463,8 @@ dialog {
 
 .context-ring {
   display:block;
-  width:14px;
-  height:14px;
+  width:15px;
+  height:15px;
   border-radius:50%;
   background:conic-gradient(var(--accent) var(--context-used,0%),var(--hover) 0);
   mask:radial-gradient(circle,transparent 52%,#000 55%)
@@ -1834,12 +1839,31 @@ dialog {
 
 .message-actions {
   display:flex;
-  justify-content:flex-end;
+  justify-content:flex-start;
   align-items:center;
+  flex-wrap:wrap;
   gap:6px;
-  margin-top:6px;
+  margin-top:2px;
+  opacity:0;
+  pointer-events:none;
   color:var(--muted);
   font-size:calc(10px * var(--font-scale,1))
+}
+
+.message.user .message-actions {
+  justify-content:flex-end;
+}
+
+.message:hover > .message-actions,
+.message:focus-within > .message-actions {
+  opacity:1;
+  pointer-events:auto;
+}
+
+.message:focus-visible {
+  outline:2px solid var(--border-strong);
+  outline-offset:3px;
+  border-radius:18px;
 }
 
 .message-copy {
@@ -1856,18 +1880,6 @@ dialog {
 
 .message-copy svg {
   display:block
-}
-
-#quick-routing {
-  width:auto;
-  cursor:pointer;
-  background:transparent;
-  line-height:1.2
-}
-
-#quick-routing option {
-  background:var(--panel);
-  color:var(--text)
 }
 
 #browse-session,#browse-files,#browse-changes {
@@ -2498,7 +2510,9 @@ select:focus-visible {
   justify-content:flex-end
 }
 
-.message-label .task-status {
+.message-bubble .task-status {
+  display:inline-block;
+  margin-top:4px;
   font-size:calc(9px * var(--font-scale,1));
   color:var(--muted);
   border:1px solid var(--border);
@@ -3073,15 +3087,6 @@ button,button *,[role=button],[role=button] *,input[type=button],input[type=subm
   display:none
 }
 
-#commands-help,#clear-conversation {
-  font:inherit;
-  padding:2px 6px;
-  color:var(--text);
-  background:transparent;
-  border:1px solid var(--border);
-  border-radius:5px
-}
-
 #commands-dialog {
   width:520px;
   max-width:calc(100vw - 48px)
@@ -3576,9 +3581,13 @@ main > header {
 }
 
 .message.user .message-bubble {
-  background: var(--soft);
-  border-color: transparent;
-  border-radius: 18px;
+  --text: #ffffff;
+  --muted: #aaaaaa;
+  --panel: #292929;
+  --code-bg: #242424;
+  color: var(--text);
+  background: light-dark(#1c1c1c, #191919);
+  margin-left: auto;
 }
 
 .message-body a {
@@ -3645,99 +3654,6 @@ main > header {
   box-shadow: 0 0 0 2px light-dark(#22c55e26, #22c55e40);
 }
 
-.chat-options {
-  position: relative;
-  margin-left: auto;
-}
-
-.chat-options > summary {
-  cursor: pointer;
-  font-size: calc(11px * var(--font-scale, 1));
-  color: var(--muted);
-  padding: 6px;
-}
-
-.chat-options-panel {
-  position: absolute;
-  bottom: calc(100% + 14px);
-  right: 0;
-  z-index: 5;
-  width: min(360px, calc(100vw - 64px));
-  max-height: min(400px, 50vh);
-  overflow: auto;
-  display: grid;
-  gap: 12px;
-  padding: 16px;
-  background: var(--raised);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  box-shadow: 0 8px 30px #0002;
-}
-
-/* One shrinkable column: a select is otherwise as wide as its longest option and pushes the panel into a sideways scroll. */
-.chat-options-panel {
-  grid-template-columns: minmax(0, 1fr);
-}
-
-.chat-options-panel > * {
-  margin: 0;
-  min-width: 0;
-}
-
-.options-label {
-  color: var(--muted);
-  font-size: calc(10px * var(--font-scale, 1));
-  font-weight: 600;
-  letter-spacing: .06em;
-  text-transform: uppercase;
-}
-
-/* Each label sits right above its controls; the panel gap separates the sections. */
-.chat-options-panel .options-label + .composer-model {
-  margin-top: -6px;
-}
-
-.chat-options-panel .routing-choice {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 6px;
-  margin: 0 0 4px;
-}
-
-.chat-options-panel .composer-model,
-.chat-options-panel .preset-control {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  justify-content: stretch;
-  gap: 6px;
-  margin: 0;
-  max-width: 100%;
-}
-
-.chat-options-panel select,
-.chat-options-panel #quick-routing {
-  display: block;
-  box-sizing: border-box;
-  width: 100%;
-  max-width: 100%;
-  margin: 0;
-  padding: 6px 24px 6px 9px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background-color: var(--panel);
-  color: var(--text);
-  font-size: calc(12px * var(--font-scale, 1));
-  letter-spacing: 0;
-}
-
-/* An older #quick-routing rule clears the composer chevron; restore it here. */
-.chat-options-panel #quick-routing {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238b949b' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 9px center;
-  background-size: 9px 5px;
-}
-
 @media (max-width: 1050px) {
   .sidebar {
     width: 225px;
@@ -3751,58 +3667,6 @@ main > header {
     padding-bottom: 18px;
     margin-bottom: 18px;
   }
-}
-
-/* Footer toolbar: icon actions on the left, usage in the middle, the context ring last so its tooltip opens inside the panel. */
-.chat-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 0;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-}
-
-.chat-actions {
-  display: flex;
-  gap: 4px;
-  margin: 0;
-}
-
-#chat-options .chat-actions button {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  color: var(--muted);
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  cursor: pointer;
-}
-
-#chat-options .chat-actions button:hover:not(:disabled) {
-  color: var(--text);
-  background: var(--hover);
-}
-
-#chat-options .chat-actions button:disabled {
-  opacity: .45;
-  cursor: default;
-}
-
-.chat-toolbar #usage {
-  flex: 1;
-  min-width: 0;
-  overflow-wrap: anywhere;
-  white-space: normal;
-  color: var(--muted);
-  font-size: calc(11px * var(--font-scale, 1));
-}
-
-.chat-toolbar .context-meter-wrap {
-  margin-left: auto;
 }
 
 #job-dialog {
@@ -4021,7 +3885,7 @@ main > header {
   --composer-control-size: max(32px, calc(30px * var(--font-scale, 1)));
 }
 
-#attach-files, #dictate, #send, #stop {
+#attach-files, #context-meter, #dictate, #send, #stop {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -4038,16 +3902,9 @@ main > header {
   flex: none;
 }
 
-#permissions, .chat-options > summary {
+#permissions, #context-meter {
   height: var(--composer-control-size);
   box-sizing: border-box;
-}
-
-.chat-options > summary {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  list-style: none;
 }
 
 
@@ -4075,17 +3932,6 @@ main > header {
   min-width: 0;
   width: 0;
   margin: 0;
-}
-
-.chat-options {
-  flex: none;
-  margin: 0;
-}
-
-.chat-options > summary {
-  width: var(--composer-control-size);
-  justify-content: center;
-  padding: 0;
 }
 
 .composer-access {
@@ -4126,10 +3972,6 @@ main > header {
   background: var(--bg);
 }
 
-.chat-actions, .chat-toolbar .context-meter-wrap {
-  flex-shrink: 0;
-}
-
 .composer-bottom {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) repeat(4, auto);
@@ -4142,7 +3984,6 @@ main > header {
 
 .composer-controls { grid-column: 1; }
 .composer textarea { grid-column: 2; width: 100%; align-self: center; }
-.chat-options { grid-column: 3; }
 #dictate { grid-column: 4; }
 #send { grid-column: 5; }
 #stop { grid-column: 6; }
@@ -4161,7 +4002,7 @@ main > header {
   height: .75em;
 }
 
-.composer-access svg, .chat-options > summary svg, #dictate svg, #send svg, #stop svg {
+.composer-access svg, .context-ring, #dictate svg, #send svg, #stop svg {
   width: 15px;
   height: 15px;
 }
@@ -4178,15 +4019,10 @@ main > header {
   align-items: center;
 }
 
-.composer-access, .chat-options > summary, #dictate, #send, #stop {
+.composer-access, #context-meter, #dictate, #send, #stop {
   width: var(--composer-small-control-size);
   height: var(--composer-small-control-size);
   min-height: var(--composer-small-control-size);
-}
-
-/* Match visible gaps to the filled Send circle, rather than just the hit boxes. */
-.chat-options > summary {
-  transform: translateX(calc((var(--composer-small-control-size) - 15px) / 2));
 }
 
 .composer-access svg {
@@ -4196,6 +4032,30 @@ main > header {
 .update-available {
   color: #2684ff;
   flex-shrink: 0;
+}
+
+.composer-bottom > .context-meter-wrap {
+  grid-column: 3;
+  flex: none;
+}
+
+/* Match the visible gaps between context, microphone and Send. */
+#context-meter {
+  transform: translateX(calc((var(--composer-small-control-size) - 15px) / 2));
+}
+
+#context-meter-tip {
+  pointer-events: none;
+  overflow-wrap: anywhere;
+}
+
+#context-detail, #usage {
+  display: block;
+}
+
+#usage {
+  margin-top: 8px;
+  color: var(--muted);
 }
 
 /* Reply suggestion grey text, laid over the composer by showSuggestion(). */

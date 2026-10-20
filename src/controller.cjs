@@ -241,8 +241,8 @@ class Controller extends EventEmitter {
       chatgptLoginPending: this.chatgptLoginPending,
       ...visibleData, settings: { ...this.data.settings, mode: this.planPreset() ? 'auto' : this.data.settings.mode }, planRouting: this.planPreset(), connection: this.connection, error: this.error, account: this.account, busy: this.busy,
       sessions: this.data.sessions.map(session => withoutImages({ ...session, tasks: (session.tasks || []).map(({ inputImages, ...task }) => task) })),
-      routing: this.routing, routingProvider: this.routingProvider, routerModel: this.routingProvider === 'jev' ? JEV_MODEL : this.routerChoices().find(p => p.id === this.data.settings.routerPreset)?.model || null,
-      jev: { configured: !!this.smartRouter.jev?.configured, keySaved: !!(this.smartRouter.jev?.keyStore?.configured ?? this.smartRouter.jev?.configured), enabled: this.data.settings.jevEnabled !== false, model: JEV_MODEL, compare: this.jevCompare?.summary() || null, health: this.smartRouter.jev?.health || null },
+      routing: this.routing, routingProvider: this.routingProvider, routerModel: this.routingProvider === 'jev' ? this.smartRouter.jev?.model || JEV_MODEL : this.routerChoices().find(p => p.id === this.data.settings.routerPreset)?.model || null,
+      jev: { configured: !!this.smartRouter.jev?.configured, keySaved: !!(this.smartRouter.jev?.keyStore?.configured ?? this.smartRouter.jev?.configured), enabled: this.data.settings.jevEnabled !== false, model: this.smartRouter.jev?.model || null, requestedModel: JEV_MODEL, compare: this.jevCompare?.summary() || null, health: this.smartRouter.jev?.health || null },
       decisions: this.trace.summary(),
       contextRoot: this.contextSearch?.root || null,
       helperCapabilities: {

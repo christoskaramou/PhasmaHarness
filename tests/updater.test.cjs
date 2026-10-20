@@ -202,3 +202,17 @@ test('agent checks do not offer installation for source runs or current versions
   assert.match(result.message, /up to date/);
   assert.equal(log.downloads, 0);
 });
+
+
+test('the updater reports the specific blocker and rechecks it after downloading', async t => {
+  let reason = 'Resolve the pending permission request before updating.';
+  const { updater, log } = setup(t, { busy: () => reason });
+  await updater.check();
+  await assert.rejects(updater.install(), /pending permission request/);
+  assert.equal(log.downloads, 0);
+  reason = null;
+  updater.on('state', state => { if (state.status === 'downloading') reason = 'Wait for process cleanup before updating.'; });
+  await assert.rejects(updater.install(), /process cleanup/);
+  assert.equal(log.quit, 0);
+  assert.equal(log.spawned.length, 0);
+});
