@@ -272,6 +272,25 @@ Verified 2026-10-20:
   - **Unexplained failure (`gIeZex`):** one run failed at dispatch with "Sent 0/4 agent tasks. Model unavailable" (`agent_create` → `primary.available`). The start-of-run availability assert had passed. Hub calls use ephemeral or kept router threads, so a missing rollout does not mean no Hub turn. The cause is still unverified; see the Hub coordination section for the logging and the one retry added afterwards.
 - **Not verified:** workspace-write access, which asks "without the Codex sandbox" approval for each recipe check; a packaged install; and a project whose `agent_config.json` already existed, live (unit-tested only).
 
+## Setup fingerprint
+
+Built 2026-10-20 (harness2 item 1 in the plan). `src/setup-fingerprint.cjs`: what shaped a worker run, as readable parts plus `hash` (16 hex of SHA-256 over canonical JSON with sorted keys). It makes no model calls and starts no processes.
+- **Parts (`v: 1`):**
+  - `harness` version;
+  - `provider`, `providerVersion` (cached only: Codex `client.version`, native CLI `status.version`; null for Claude, Cursor and API providers), `model`, `effort`, `access`;
+  - `instructions` (separate hashes of the Harness defaults, the project's `INSTRUCTIONS.md` content and the bot's own instructions);
+  - `lessons` (the lesson block, only on the task's first uncorrected run, matching `withTaskLessons`);
+  - `skills` (each `skills/<name>/` folder's files by content, cached by size and modification time);
+  - `tools` (helpers, context search, Jev tool selection, large responses);
+  - `checks` (the task's frozen check commands, with workspace paths made relative).
+- **Left out on purpose:** per-job context (batch copy paths, resume notes, the project file's path), so identical setups match across copies. A resumed API chat keeps the system message it started with, so its instruction hashes are the ones saved then (`session.apiSetupInstructions`), or null for older chats. Codex reloads its thread whenever the worker instructions change, so the current ones are what it runs with.
+- **Saved on:**
+  - each worker route (`Controller.runSetup`, in the Codex `turn/start` path and `sendCLI`);
+  - the task attempt of that turn (`runGate`);
+  - each delivered `agentResult` item: the last route with a setup, so after a failover it is the provider that finished.
+- **Not covered:** Hub turns and Jev quick answers. Records from before this change have no `setup`; treat that as unknown. There is no UI yet; the data is in the stores.
+- **Tests:** `tests/setup-fingerprint.test.cjs` (key order, a skill-file edit, checks in two copies, and a project-path check remapped by the real `Agents.copyChecks` into two copies giving one hash), the "saves its setup fingerprint" test in `tests/core.test.cjs` (route and attempt), and the four-reviewer batch test in `tests/coordinator.test.cjs` (four copies, one hash).
+
 ## Release review since v0.2.0
 
 Gate 24 code review (2026-10-20): four read-only reviewers covered every commit from `8c38c59` to `a3fcbb5`. The reply-suggestion and game-check commits had their own review earlier.

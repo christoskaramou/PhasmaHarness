@@ -1128,6 +1128,8 @@ class Agents extends EventEmitter {
         deliveryId, agentId: controller.agentId, agentName: this.agentName(controller.agentId), sessionId: session.id,
         ownerId: sourceController.agentId, ownerName: this.agentName(sourceController.agentId),
         title: session.title, status: job.cancelled ? 'cancelled' : session.status, error: session.error || null,
+        // The setup of the run that produced this result (after a failover, the provider that finished).
+        setup: session.routes?.findLast(route => route.setup)?.setup || null,
         text: stripTaskStatus(result) || 'No final answer was produced.', truncated: report.length > 16000,
         revision: job.revision || 1, amendments: job.amendments || [], superseded: !!superseded,
         artifacts: job.artifacts || [], workspaceCopy: job.workspaceCopy || null,

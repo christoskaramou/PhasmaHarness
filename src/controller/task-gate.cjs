@@ -257,7 +257,8 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
   async runGate(session, task, submission, outcome, stopping) {
     const workerOutcome = outcome.status === 'completed' ? 'completed' : outcome.status === 'interrupted' ? 'interrupted' : 'failed';
     const attempt = { token: submission.token, turnId: submission.turnId, workerOutcome, results: [], at: Date.now(), evidence: null,
-      assignmentId: submission.assignmentId || null, assignmentRevision: submission.assignmentRevision || null };
+      assignmentId: submission.assignmentId || null, assignmentRevision: submission.assignmentRevision || null,
+      setup: session.routes?.findLast(route => route.turnId === submission.turnId)?.setup || null };
     task.attempts.push(attempt);
     if (outcome.reason === 'connection lost') {
       task.state = 'needs-you'; task.reason = 'connection lost'; task.summary = summaryLine(task);

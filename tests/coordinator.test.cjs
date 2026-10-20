@@ -1187,6 +1187,11 @@ test('Hub dispatches four configured reviewers in two background slots and waits
   const receipts = session.items.filter(item => item.type === 'agentResult');
   assert.equal(receipts.length, 4);
   assert.ok(receipts.every(item => item.workspaceCopy?.source === project));
+  // Four copies, one setup: per-job context (copy paths) is not part of the fingerprint.
+  assert.equal(new Set(receipts.map(item => item.workspaceCopy.workspace)).size, 4);
+  assert.equal(new Set(receipts.map(item => item.setup?.hash)).size, 1);
+  assert.deepEqual([receipts[0].setup.model, receipts[0].setup.effort], ['gpt-5.6-sol', 'xhigh']);
+  assert.ok(receipts[0].setup.instructions.bot, 'the workers\' bot instructions are part of their setup');
   const exported = require('../src/conversation-export.cjs').conversationMarkdown(session);
   assert.match(exported, /Project copy:/);
   assert.ok(receipts.every(item => exported.includes(item.workspaceCopy.workspace)));

@@ -32,4 +32,4 @@ const WORKER_INSTRUCTIONS = `Harness defaults (active unless the user or project
 Harness skills (read one only when its topic applies, via router_read_output with {"skill": "<name>"} or the file):
 ${DEFAULT_SKILLS.map(name => `- ${name}: ${SKILLS[name]} (${path.join(skillDir(name), 'SKILL.md').replace(/\\/g, '/')})`).join('\n')}`;
 
-module.exports = { WORKER_INSTRUCTIONS, DEFAULT_SKILLS, readSkill };
+module.exports = { WORKER_INSTRUCTIONS, DEFAULT_SKILLS, readSkill, skillDir };

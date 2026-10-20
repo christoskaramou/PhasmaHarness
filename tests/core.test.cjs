@@ -2341,6 +2341,26 @@ test('Send now steers where the provider can, uses its own queue otherwise, and 
   assert.equal(session.queue.length, 1);
 });
 
+test('a tracked worker run saves its setup fingerprint on its route and on its task attempt', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  controller.checks(session.workspace, [{ name: 'one', argv: ['one'], cwd: session.workspace, timeoutMs: 5000, readOnlySafe: true }]);
+  fake.onExec = () => ({ exitCode: 0, stdout: 'ok', stderr: '' });
+  await controller.send({ id: session.id, text: 'implement', mode: 'terra-light', task: 'on' });
+  complete(controller, session, fake.turnIds.at(-1));
+  await controller.gateDone;
+  const attempt = session.tasks[0].attempts[0];
+  assert.deepEqual(attempt.setup, session.routes.at(-1).setup);
+  assert.match(attempt.setup.hash, /^[0-9a-f]{16}$/);
+  assert.deepEqual([attempt.setup.v, attempt.setup.provider, attempt.setup.model, attempt.setup.effort, attempt.setup.access],
+    [1, 'codex', 'gpt-5.6-terra', 'low', session.access]);
+  assert.ok(attempt.setup.checks, 'the frozen checks are part of the setup');
+  assert.ok(attempt.setup.instructions.harness.hash);
+  assert.equal(attempt.setup.instructions.bot, null, 'the main agent has no bot instructions');
+  assert.ok(Object.values(attempt.setup.skills).every(Boolean), 'every bundled skill is hashed');
+});
+
 test('Send now on a Claude turn that is finishing keeps the message queued instead of stopping the turn', async t => {
   const { controller } = await setup(t);
   const session = controller.create();

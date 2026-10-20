@@ -23,6 +23,7 @@ const { INSTRUCTIONS: HELPER_INSTRUCTIONS, TOOLS: HELPER_TOOLS, ToolHelpers } = 
 const { RouterBridge } = require('./tools/router-bridge.cjs');
 const { FINAL, canProposeWiki, hasProjectWiki, restartReason, summaryLine } = require('./tasks.cjs');
 const { WORKER_INSTRUCTIONS } = require('./worker-instructions.cjs');
+const { setupFingerprint, textHash, skillHashes, checksHash } = require('./setup-fingerprint.cjs');
 const { projectInstructions } = require('./workspace/project-instructions.cjs');
 const { stripTaskStatus } = require('./routing/task-state.cjs');
 const { withoutImages } = require('./image-input.cjs');
@@ -757,7 +758,8 @@ class Controller extends EventEmitter {
         ...(task?.corrections > 0 ? { routeLabel: 'Router' } : {}),
       });
       session.pendingMessage = null;
-      session.routes.push({ ...selected, access: permissions.id, at: Date.now(), messageId: clientId });
+      session.routes.push({ ...selected, access: permissions.id, at: Date.now(), messageId: clientId,
+        setup: this.runSetup(session, selected, permissions.id, task) });
       session.updated = Date.now(); this.save(); this.changed();
       submission = this.beginSubmission(session, {
         kind: 'turn', backend: selected.provider || 'codex', model: selected.model, threadId: session.threadId, messageId: clientId, taskId: task?.id,
@@ -864,7 +866,12 @@ class Controller extends EventEmitter {
     this.cliAbort = abort;
     if (!session.items.some(i => i.type === 'userMessage')) session.title = text.trim().replace(/\s+/g, ' ').slice(0, 65);
     session.items.push({ ...session.pendingMessage, pending: false, localOnly: true }); session.pendingMessage = null;
-    session.routes.push({ ...selected, at: Date.now(), messageId: clientId, turnId, budget: submission.budget });
+    // A resumed API chat keeps the system message it started with; its hashes were saved then (unknown for older chats).
+    const keptApi = api && session[sessionKey] ? session.apiSetupInstructions ?? null : undefined;
+    const setup = this.runSetup(session, selected, session.agentReplyCancelledActive ? 'read-only' : session.access, task, keptApi);
+    if (api && keptApi === undefined)
+      session.apiSetupInstructions = setup.instructions;
+    session.routes.push({ ...selected, at: Date.now(), messageId: clientId, turnId, budget: submission.budget, setup });
     const assistantIds = new Set(); let current, lastUsage = null;
     const assistant = id => {
       let item = session.items.find(i => i.id === id);
@@ -1080,6 +1087,31 @@ class Controller extends EventEmitter {
     if (!message || message.error || message.uncertain || message.agentReply || message.routineRun || message.wikiTaskId ||
         (message.mode && message.mode !== this.liveInputMode)) return;
     this.queuedMessage(session.id, message.id, 'live').catch(() => {});
+  }
+
+  // What shaped this worker run (src/setup-fingerprint.cjs), from the values this turn actually hands the provider.
+  // `kept` overrides the instruction hashes when the provider keeps an earlier set (a resumed API chat), or is null when
+  // that earlier set is unknown. Per-job context (copy paths, resume notes) is left out so identical setups match.
+  runSetup(session, selected, access, task, kept) {
+    const provider = selected.provider || 'codex';
+    let project = null;
+    try {
+      project = fs.readFileSync(path.join(session.workspace, 'INSTRUCTIONS.md'), 'utf8');
+    } catch { /* no project entry */ }
+    const profile = this.agents && this.agentId && this.agentId !== 'main' ? this.agents.profile(this.agentId) : null;
+    const instructions = kept !== undefined ? kept
+      : { harness: textHash(WORKER_INSTRUCTIONS), project: textHash(project), bot: textHash(profile?.instructions) };
+    // withTaskLessons prepends the lesson block only to a task's first, uncorrected run.
+    const lessons = task?.lessonBlock && !task.corrections && !task.attempts?.length ? textHash(task.lessonBlock) : null;
+    const helpers = session.helperTools !== false;
+    return setupFingerprint({
+      provider, model: selected.model || null, effort: selected.effort || null, access,
+      providerVersion: (provider === 'codex' ? this.client.version : this.nativeCLIs.get(provider)?.status?.version) || null,
+      instructions, lessons, skills: skillHashes(),
+      tools: { helpers, context: helpers && (session.contextTool ?? !!this.contextSearch?.supports(session.workspace)),
+        toolSelection: this.data.settings.toolSelection || 'off', largeResponses: this.data.settings.largeResponses !== false },
+      checks: task ? checksHash(task.checks, session.workspace) : null,
+    });
   }
 
   // Saved once the slot is granted, before routing or any provider call, on worker and Hub turns alike: after a crash
