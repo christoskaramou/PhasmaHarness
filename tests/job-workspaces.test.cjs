@@ -6,6 +6,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 const { JobWorkspaces } = require('../src/workspace/job-workspaces.cjs');
+const { STARTER } = require('../src/workspace/project-instructions.cjs');
 
 function git(cwd, ...args) {
   return execFileSync('git', ['-c', 'core.fsmonitor=false', '-c', 'user.name=Harness fixture',
@@ -321,4 +322,110 @@ test('an untracked nested repository is copied like a submodule and a case-dupli
   assert.equal(git(copied, 'remote'), '');
   assert.deepEqual(fs.readdirSync(copy.workspace).filter(name => name.toLowerCase() === 'agents.md').length, 1);
   assert.equal(fs.readFileSync(path.join(copy.workspace, 'Agents.md'), 'utf8'), 'Project rules');
+});
+
+// Apply: a copy's own changes against its snapshot, written back into the project only where the project is unchanged.
+async function applyFixture(t, repository) {
+  const value = fixture(t, { repository });
+  const { source, workspaces } = value;
+  fs.writeFileSync(path.join(source, 'other.txt'), 'other');
+  if (repository) {
+    git(source, 'add', 'other.txt');
+    git(source, 'commit', '-qm', 'Other file');
+  }
+  fs.writeFileSync(path.join(source, 'dirty.txt'), 'dirty before the snapshot');
+  fs.writeFileSync(path.join(source, 'later.txt'), 'before');
+  const copy = await workspaces.prepare(source, { id: randomUUID(), index: 1 });
+  return { ...value, copy };
+}
+
+test('Apply writes a copy\'s own edits, additions in new folders and deletions into an unchanged project, once', async t => {
+  for (const repository of [true, false]) await t.test(repository ? 'git' : 'plain folder', async t => {
+    const { source, workspaces, copy } = await applyFixture(t, repository);
+    const read = file => fs.readFileSync(path.join(source, file), 'utf8');
+    fs.writeFileSync(path.join(copy.workspace, 'source.txt'), 'edited by the bot');
+    fs.mkdirSync(path.join(copy.workspace, 'src', 'new'), { recursive: true });
+    fs.writeFileSync(path.join(copy.workspace, 'src', 'new', 'added.txt'), 'added by the bot');
+    fs.rmSync(path.join(copy.workspace, 'other.txt'));
+    fs.mkdirSync(path.join(copy.workspace, 'build'));
+    fs.writeFileSync(path.join(copy.workspace, 'build', 'out.exe'), 'ignored output');
+    // A different project file changed since the snapshot is no conflict.
+    fs.writeFileSync(path.join(source, 'later.txt'), 'changed in the project meanwhile');
+
+    const preview = await workspaces.changes(copy.workspace);
+    assert.deepEqual(preview.changes.map(change => `${change.kind} ${change.path}`),
+      ['deleted other.txt', 'modified source.txt', 'added src/new/added.txt'], 'no dirty snapshot input, ignored output or later project edit');
+    assert.deepEqual(preview.conflicts, []);
+    assert.equal(preview.source, fs.realpathSync(source));
+
+    const result = await workspaces.apply(copy.workspace, preview);
+    assert.deepEqual(result.applied.sort(), ['other.txt', 'source.txt', 'src/new/added.txt']);
+    assert.equal(read('source.txt'), 'edited by the bot');
+    assert.equal(read('src/new/added.txt'), 'added by the bot');
+    assert.equal(fs.existsSync(path.join(source, 'other.txt')), false);
+    assert.equal(read('dirty.txt'), 'dirty before the snapshot');
+    assert.equal(read('later.txt'), 'changed in the project meanwhile');
+    assert.equal(fs.existsSync(path.join(source, 'build')), false);
+    assert.deepEqual((await workspaces.changes(copy.workspace)).changes, [], 'applying again finds nothing to apply');
+  });
+});
+
+test('Apply refuses project files changed since the copy, and skips an addition the project already has', async t => {
+  for (const repository of [true, false]) await t.test(repository ? 'git' : 'plain folder', async t => {
+    const { source, workspaces, copy } = await applyFixture(t, repository);
+    fs.writeFileSync(path.join(copy.workspace, 'source.txt'), 'edited by the bot');
+    fs.writeFileSync(path.join(source, 'source.txt'), 'edited by the user');
+    fs.writeFileSync(path.join(copy.workspace, 'both.txt'), 'bot version');
+    fs.writeFileSync(path.join(source, 'both.txt'), 'user version');
+    fs.writeFileSync(path.join(copy.workspace, 'same.txt'), 'identical');
+    fs.writeFileSync(path.join(source, 'same.txt'), 'identical');
+
+    const preview = await workspaces.changes(copy.workspace);
+    assert.deepEqual(preview.conflicts, ['both.txt', 'source.txt']);
+    assert.deepEqual(preview.changes, [], 'an identical addition is already there');
+    await assert.rejects(workspaces.apply(copy.workspace, { ...preview, changes: [] }), /changed since the preview/);
+    assert.equal(fs.readFileSync(path.join(source, 'source.txt'), 'utf8'), 'edited by the user');
+    assert.equal(fs.readFileSync(path.join(source, 'both.txt'), 'utf8'), 'user version');
+  });
+});
+
+test('Apply leaves out Harness\'s own files: the job wiki, the starter entry and a comparison\'s instructions', async t => {
+  const { directory, source, primary, workspaces } = fixture(t, { repository: false });
+  const wiki = path.join(directory, 'wiki');
+  fs.mkdirSync(wiki);
+  fs.writeFileSync(path.join(wiki, 'index.md'), 'Project decisions.');
+  primary.wikiStore = { location: () => ({ root: wiki }), setLocation() {} };
+  const id = randomUUID();
+  const first = await workspaces.prepare(source, { id, index: 1 });
+  fs.writeFileSync(path.join(first.workspace, '.phasma-job-wiki', 'index.md'), 'Edited by wiki upkeep.');
+  fs.writeFileSync(path.join(first.workspace, 'INSTRUCTIONS.md'), STARTER);
+  assert.deepEqual((await workspaces.changes(first.workspace)).changes, []);
+
+  fs.writeFileSync(path.join(first.workspace, 'INSTRUCTIONS.md'), '# Rules written by the bot');
+  assert.deepEqual((await workspaces.changes(first.workspace)).changes.map(change => change.path), ['INSTRUCTIONS.md']);
+  const second = await workspaces.prepare(source, { id, index: 2 });
+  workspaces.records[second.workspace].comparisonId = randomUUID();
+  fs.writeFileSync(path.join(second.workspace, 'INSTRUCTIONS.md'), 'A comparison change.');
+  assert.deepEqual((await workspaces.changes(second.workspace)).changes, []);
+});
+
+test('Apply refuses while a bot works in the copy, after the copy changes past its preview, and through a link', async t => {
+  const { directory, source, agents, workspaces, copy } = await applyFixture(t, true);
+  fs.writeFileSync(path.join(copy.workspace, 'source.txt'), 'edited by the bot');
+  agents.pendingJobs = () => [{ job: { workspaceCopy: { workspace: copy.workspace } } }];
+  await assert.rejects(workspaces.changes(copy.workspace), /still working in this project copy/);
+  agents.pendingJobs = () => [];
+
+  const preview = await workspaces.changes(copy.workspace);
+  fs.writeFileSync(path.join(copy.workspace, 'source.txt'), 'edited again after the preview');
+  await assert.rejects(workspaces.apply(copy.workspace, preview), /changed since the preview/);
+  assert.equal(fs.readFileSync(path.join(source, 'source.txt'), 'utf8'), 'committed source');
+
+  const outside = path.join(directory, 'outside');
+  fs.mkdirSync(outside);
+  fs.symlinkSync(outside, path.join(source, 'linked'), 'junction');
+  fs.mkdirSync(path.join(copy.workspace, 'linked'));
+  fs.writeFileSync(path.join(copy.workspace, 'linked', 'escape.txt'), 'must not leave the project');
+  await assert.rejects(workspaces.changes(copy.workspace), /cannot write through a link/);
+  assert.deepEqual(fs.readdirSync(outside), []);
 });

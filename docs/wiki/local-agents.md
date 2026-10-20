@@ -627,6 +627,22 @@ Built 2026-10-20 (harness2 item 3; design approved by the user that day: instruc
   - The fingerprint hashes the saved instruction text, not what the provider received; delivery is covered by the end-to-end test, which reads each worker's `thread/start` developer instructions.
   - A real Hub turn (`.scratch/hub-schema-live.cjs`, Terra low) accepted the strict response schema with `compare` in it and replied normally.
 
+## Apply a project copy's changes
+
+Built 2026-10-21 (first half of "suggested comparisons", requested by the user so a comparison or batch run's result can reach the real project; tests and smoke only, no live run yet):
+- **Where:** an "Apply changes to my project…" button in job details (once the job is delivered) and an Apply button per run on a comparison card after reveal. Both call the `applyCopy` runner command, which is also on Remote Control.
+- **What counts as a change (`JobWorkspaces.changes`):** the copy's current files (`inventory`, so ignore rules apply) against its batch snapshot manifest (`input.json`, content hashes of every working file, git and plain folders alike). So a file that was already dirty at snapshot time is not a change, and ignored build outputs are never applied. Left out: the copied external wiki (`.phasma-job-wiki/`), an added `INSTRUCTIONS.md` equal to the starter Harness writes into every writable workspace, and `INSTRUCTIONS.md` in a comparison copy (a comparison's rule is adopted separately).
+- **Conflicts:** a change applies only where the project's file still equals the snapshot (or is absent for an addition). Any other difference refuses the whole apply and names the files. A file the project already has with the copy's content is skipped. A different project file edited since the snapshot is no conflict.
+- **Safety:**
+  - the dialog lists up to 30 files and says the changes land uncommitted (nothing staged or committed), that ignored files are not applied, and where the previous versions stay (the batch snapshot's `input` folder);
+  - `apply` re-runs the preview after the dialog and writes nothing unless it matches exactly;
+  - each file is checked again just before its own write; deletions go first (a case-only rename is one file on Windows);
+  - writes go to a temp file renamed into place;
+  - paths follow `scoped()`'s rules (`resolveInside`), and an existing link on the way is refused;
+  - refused while a bot still works in the copy (an undelivered job with this copy or scope, or a running chat turn there).
+- **Target:** the snapshot's `source`, checked against the copy record; a copy of a copy applies into its parent copy.
+- **Tests:** four "Apply …" tests in `tests/job-workspaces.test.cjs` (git and plain folder: edits, additions in new folders, deletions, rerun finds nothing, dirty and ignored files left out, conflicts, identical additions, Harness files, busy copy, copy changed after preview, a junction in the project); "Apply shows the files…" in `tests/runner-commands.test.cjs` (dialog text, 30-file cap, Cancel and conflicts write nothing, exactly the preview is applied); the UI smoke checks the job-details button (hidden while running) and the card's Apply buttons (only after reveal).
+
 ## Provider panel and Options menu UI
 
 Verified 2026-10-19 in the UI smoke (screenshots in `.scratch/`):

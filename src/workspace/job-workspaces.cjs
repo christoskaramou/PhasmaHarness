@@ -7,11 +7,25 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { createHash } = require('node:crypto');
 const { PRIVATE_PATH } = require('../tasks.cjs');
+const { STARTER } = require('./project-instructions.cjs');
 const run = promisify(execFile);
 const MAX_FILES = 50000, MAX_BYTES = 8 * 1024 ** 3;
 const INSTRUCTIONS = ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md', 'HERMES.md', 'INSTRUCTIONS.md', '.github/copilot-instructions.md'];
 const identity = filename => process.platform === 'win32' ? filename.toLowerCase() : filename;
 const inside = (root, filename) => { const relative = path.relative(root, filename); return !path.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..' + path.sep); };
+// A project-relative path with no empty, dot or .git parts, no drive and no absolute form, resolved inside root.
+function resolveInside(root, relative) {
+  if (typeof relative !== 'string' || !relative || relative.includes('\0') || relative.includes(':') ||
+      path.isAbsolute(relative) || relative.split(/[\\/]/).some(part => !part || part === '.' || part === '..' || part.toLowerCase() === '.git'))
+    throw new Error('Invalid project input path.');
+  const filename = path.resolve(root, relative);
+  if (!inside(root, filename)) throw new Error('Project input escapes its workspace.');
+  return filename;
+}
+// Harness's own files in a copy, never applied back: the copied external wiki, and the starter entry Harness writes
+// into every writable workspace.
+const JOB_WIKI = '.phasma-job-wiki';
+const STARTER_HASH = createHash('sha256').update(STARTER).digest('hex');
 // BigInt inodes: a 64-bit NTFS file id loses its low bits as a Number, so unrelated files could compare equal.
 async function sameFile(a, b) {
   const [left, right] = await Promise.all([a, b].map(file => fs.stat(file, { bigint: true })));
@@ -223,11 +237,7 @@ class JobWorkspaces {
   }
 
   async scoped(root, relative) {
-    if (typeof relative !== 'string' || !relative || relative.includes('\0') || relative.includes(':') ||
-        path.isAbsolute(relative) || relative.split(/[\\/]/).some(part => !part || part === '.' || part === '..' || part.toLowerCase() === '.git'))
-      throw new Error('Invalid project input path.');
-    const filename = path.resolve(root, relative);
-    if (!inside(root, filename)) throw new Error('Project input escapes its workspace.');
+    const filename = resolveInside(root, relative);
     let current = root;
     for (const part of relative.split(/[\\/]/)) {
       current = path.join(current, part);
@@ -370,6 +380,130 @@ class JobWorkspaces {
     try { this.agents.primary.save(); }
     catch (error) { delete this.records[workspace]; throw error; }
     return record;
+  }
+
+  // A bot still working in the copy (an undelivered job there, or a chat turn running in it) could change it mid-apply.
+  inUse(workspace) {
+    const same = folder => !!folder && identity(path.resolve(folder)) === identity(workspace);
+    const jobs = this.agents.pendingJobs?.() || [];
+    const controllers = [...(this.agents.allControllers?.() || [])];
+    return jobs.some(({ job }) => same(job.workspaceCopy?.workspace) || same(job.projectScope)) ||
+      controllers.some(controller => controller.busy && same(controller.data.sessions.find(session => session.id === controller.busy)?.workspace));
+  }
+
+  // Apply, step 1: what a ready copy changed against its batch snapshot (input.json), and which of those files the
+  // project it came from has changed since. Ignored files and Harness's own files are left out.
+  async changes(workspace) {
+    const record = this.record(workspace);
+    if (!record) throw new Error('This folder is not a project copy.');
+    if (record.state !== undefined && record.state !== 'ready') throw new Error('This project copy is not ready.');
+    if (this.inUse(record.workspace)) throw new Error('A bot is still working in this project copy. Apply its changes once it has finished.');
+
+    const snapshot = path.join(this.batchDirectory(record.batchId), 'input');
+    const input = JSON.parse(await fs.readFile(path.join(this.batchDirectory(record.batchId), 'input.json'), 'utf8'));
+    const source = await fs.realpath(input.source);
+    if (identity(source) !== identity(record.source)) throw new Error('This project copy and its snapshot name different projects.');
+
+    let current;
+    try { current = await this.inventory(record.workspace); }
+    catch (error) { throw new Error(`Apply needs ordinary files in the project copy. ${error.message}`); }
+
+    const skipped = file => file.split('/')[0] === JOB_WIKI || (file === 'INSTRUCTIONS.md' && !!record.comparisonId);
+    const before = new Map(input.files.map(file => [file.path, file]));
+    const after = new Map(current.files.map(file => [file.path, file]));
+    const changes = [];
+    for (const [file, entry] of after) {
+      const base = before.get(file);
+      const starter = !base && file === 'INSTRUCTIONS.md' && entry.hash === STARTER_HASH;
+      if (!skipped(file) && !starter && base?.hash !== entry.hash)
+        changes.push({ path: file, kind: base ? 'modified' : 'added', base: base?.hash || null, copy: entry.hash, mode: entry.mode });
+    }
+    for (const [file, base] of before) {
+      // A file the copy now ignores is still there; only a missing one was deleted.
+      if (!after.has(file) && !skipped(file) && !await this.present(path.join(record.workspace, file)))
+        changes.push({ path: file, kind: 'deleted', base: base.hash, copy: null });
+    }
+
+    const conflicts = [], pending = [];
+    for (const change of changes) {
+      const now = await this.fileHash(await this.target(source, change.path));
+      if (now === change.copy)
+        continue;
+
+      if (now === change.base)
+        pending.push(change);
+      else
+        conflicts.push(change.path);
+    }
+    return { workspace: record.workspace, source, snapshot, changes: pending.sort((a, b) => a.path.localeCompare(b.path)), conflicts: conflicts.sort() };
+  }
+
+  // Apply, step 2: writes exactly the previewed changes, or nothing if the copy or the project moved on since. Each
+  // file is checked again just before its own write; deletions go first, since a case-only rename is one file on Windows.
+  async apply(workspace, preview) {
+    const fresh = await this.changes(workspace);
+    const key = list => JSON.stringify(list.map(change => [change.path, change.kind, change.base, change.copy]));
+    if (fresh.conflicts.length || key(fresh.changes) !== key(preview.changes))
+      throw new Error('The project copy or your project changed since the preview. Nothing was applied; open Apply again to review it.');
+
+    const applied = [];
+    const order = [...fresh.changes].sort((a, b) => (b.kind === 'deleted') - (a.kind === 'deleted'));
+    for (const change of order) {
+      const target = await this.target(fresh.source, change.path);
+      const from = path.join(fresh.workspace, change.path);
+      if (await this.fileHash(target) !== change.base || (change.copy && await this.fileHash(from) !== change.copy))
+        throw new Error(`${change.path} changed while applying. Applied before it: ${applied.join(', ') || 'nothing'}.`);
+
+      if (change.kind === 'deleted') {
+        await fs.rm(target);
+      } else {
+        await fs.mkdir(path.dirname(target), { recursive: true });
+        const temporary = `${target}.harness-apply-${process.pid}`;
+        try {
+          await fs.copyFile(from, temporary);
+          await fs.chmod(temporary, change.mode);
+          await fs.rename(temporary, target);
+        } catch (error) {
+          await fs.rm(temporary, { force: true });
+          throw new Error(`${change.path} could not be written (${error.message}). Applied before it: ${applied.join(', ') || 'nothing'}.`);
+        }
+      }
+      applied.push(change.path);
+    }
+    return { source: fresh.source, applied };
+  }
+
+  // Like scoped(), but trailing folders may not exist yet; an existing link on the way is refused.
+  async target(root, relative) {
+    const filename = resolveInside(root, relative);
+    let current = root;
+    for (const part of relative.split(/[\\/]/)) {
+      current = path.join(current, part);
+      const stat = await fs.lstat(current).catch(error => {
+        if (error.code === 'ENOENT') return null;
+        throw error;
+      });
+      if (!stat) break;
+      if (stat.isSymbolicLink()) throw new Error('Apply cannot write through a link: ' + relative);
+    }
+    return filename;
+  }
+
+  async present(filename) {
+    return !!await fs.lstat(filename).catch(error => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+  }
+
+  // A file's content hash, null when it is missing, or a marker no hash equals when it is not an ordinary file.
+  async fileHash(filename) {
+    const stat = await fs.lstat(filename).catch(error => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (!stat) return null;
+    return stat.isFile() ? this.hash(filename) : 'not-a-file';
   }
 }
 

@@ -1317,7 +1317,9 @@ function renderJobDetails() {
     : worker.requests.length ? 'Needs input' : ({ queued: 'Queued', running: 'Working', revising: 'Updating' })[job.state] || 'Needs review';
   const access = state.accessModes.find(mode => mode.id === job.access)?.label || 'Unknown access';
   $('#job-copy-location').hidden = !copy;
-  $('#job-copy-location').textContent = copy ? `Project copy: ${copy.workspace}\nChanges remain here; no automatic merge.` : '';
+  $('#job-copy-location').textContent = copy ? `Project copy: ${copy.workspace}\nChanges stay here until you apply them.` : '';
+  $('#job-copy-apply').hidden = !copy || !job.delivered;
+  $('#job-copy-apply').onclick = () => applyCopy(copy.workspace);
   const verification = fleetState?.jobVerification?.[job.id] || receipt?.verification;
   const verificationKey = JSON.stringify(verification || null);
   if ($('#job-verification').dataset.key !== verificationKey) {
@@ -1627,6 +1629,11 @@ function renderComparison(view, sessionId, opened = true) {
         element('td', '', result ? (Number.isFinite(result.tokens) ? result.tokens.toLocaleString() : 'Not fully reported') : ''),
         element('td', '', Number.isFinite(result?.activeMs) ? `${Math.round(result.activeMs / 1000)} s` : ''));
       const action = element('td');
+      if (view.revealed && result?.workspace) {
+        const apply = element('button', 'compact-action', 'Apply'); apply.type = 'button';
+        apply.setAttribute('aria-label', `Apply run ${run.label}'s changes to my project`);
+        apply.onclick = () => applyCopy(result.workspace); action.append(apply);
+      }
       if (run.jobId) {
         const button = element('button', 'compact-action', 'Details'); button.type = 'button';
         button.setAttribute('aria-label', `Details for run ${run.label}`);
@@ -2329,6 +2336,20 @@ function scrollChatToEnd() {
       rollingToEnd = false;
   };
   requestAnimationFrame(step);
+}
+
+// Brings a project copy's changes into the project it came from; the runner shows the files and asks first.
+async function applyCopy(workspace) {
+  try {
+    const result = await api.applyCopy(workspace);
+    if (result.cancelled)
+      return;
+
+    const count = result.applied.length;
+    notify(count ? `Applied ${count} file${count === 1 ? '' : 's'} to ${result.source}.` : result.message);
+  } catch (error) {
+    notify(error);
+  }
 }
 
 // A message that could not be sent goes back to its chat's composer, unless something new was typed there meanwhile.

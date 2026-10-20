@@ -93,3 +93,41 @@ test('normalized images cannot exceed the message bound even when small sources 
   await assert.rejects(f.call('send', { id: 'chat', images: [image, image] }), /decoded images are too large/);
   assert.deepEqual(f.sent, []);
 });
+
+test('Apply shows the files and its safety notes before writing, and writes nothing on a conflict or Cancel', async () => {
+  const commands = new Map(), asked = [], applied = [];
+  let answer = false;
+  let preview = { workspace: 'C:/jobs/1', source: 'C:/project', snapshot: 'C:/jobs/input', conflicts: [], changes: [] };
+  const workspaces = {
+    changes: async () => preview,
+    apply: async (workspace, seen) => {
+      applied.push(seen);
+      return { source: preview.source, applied: seen.changes.map(change => change.path) };
+    },
+  };
+  const runner = { agents: { closing: false, workspaces }, controller: {}, updater: { state: { status: 'idle' } } };
+  registerRunnerCommands((name, handler) => commands.set(name, handler), { runner, ask: async options => {
+    asked.push(options);
+    return answer;
+  } });
+  const apply = () => commands.get('applyCopy')('C:/jobs/1');
+
+  assert.match((await apply()).message, /Nothing to apply/);
+  preview = { ...preview, conflicts: ['a.txt', 'b.txt'] };
+  await assert.rejects(apply(), /You changed a\.txt, b\.txt in C:\/project since this copy was made\. Nothing was applied\./);
+  assert.equal(asked.length, 0, 'no dialog for nothing or a conflict');
+
+  preview = { ...preview, conflicts: [], changes: Array.from({ length: 32 }, (_, index) => ({ path: `f${index}.txt`, kind: index ? 'modified' : 'added' })) };
+  assert.equal((await apply()).cancelled, true);
+  assert.equal(applied.length, 0);
+  const dialog = asked.at(-1);
+  assert.equal(dialog.title, 'Apply 32 files to your project?');
+  assert.deepEqual(dialog.details[0], { label: 'Add', text: 'f0.txt' });
+  assert.equal(dialog.details.length, 31);
+  assert.deepEqual(dialog.details.at(-1), { label: 'More', text: 'and 2 more files' });
+  assert.match(dialog.note, /uncommitted changes; nothing is staged or committed[\s\S]*Ignored files[\s\S]*C:\/jobs\/input/);
+
+  answer = true;
+  assert.equal((await apply()).applied.length, 32);
+  assert.equal(applied[0], preview, 'exactly the previewed changes go to apply');
+});

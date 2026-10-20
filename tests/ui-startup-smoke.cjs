@@ -2408,10 +2408,28 @@ app.whenReady().then(async () => {
   })()`);
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-dialog").open'), true);
   assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-details-status").textContent'), /Preparing workspace/);
-  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-copy-location").textContent'), /preview-project-copy.*no automatic merge/s);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-copy-location").textContent'), /preview-project-copy.*Changes stay here until you apply them/s);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-copy-apply").hidden'), true, 'no Apply while the job runs');
   assert.equal(await sendIsReachable(), true);
   await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/isolated-job-workspace.png'), (await window.webContents.capturePage()).toPNG());
+  // A returned job offers Apply; the runner shows the files and asks (stubbed here), and the toast reports the result.
+  const applyCalls = [];
+  ipcMain.handle('applyCopy', (_event, workspace) => {
+    applyCalls.push(workspace);
+    return { source: root, applied: ['greet.js'] };
+  });
+  previewJob.delivered = true;
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(preparedView) + '); true');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-copy-apply").hidden'), false);
+  await window.webContents.executeJavaScript('document.querySelector("#job-copy-apply").click(); true');
+  await until(() => applyCalls.length === 1, 'Apply reaches the runner with the copy');
+  assert.equal(applyCalls[0], previewCopy.workspace);
+  await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 50))');
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#toast").textContent'), /^Applied 1 file to /);
+  await window.webContents.executeJavaScript('document.querySelector("#toast").hidden = true; true');
+  previewJob.delivered = false;
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(preparedView) + '); true');
   previewCopy.state = 'failed'; previewCopy.error = previewJob.error = 'Missing project inputs. No worker was started.';
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(preparedView) + '); true');
   assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-details-status").textContent'), /Needs review/);
@@ -2497,7 +2515,8 @@ app.whenReady().then(async () => {
   const compareSetup = bot => ({ hash: `setup-${bot}`, provider: 'codex', model: 'gpt-5.6-terra', effort: 'low', instructions: { bot: { hash: bot } } });
   const compareRun = (label, variant, extra) => ({ index: label === 'A' ? 1 : 2, pair: 1, label, variant, name: `Compare ${label === 'A' ? 1 : 2}`,
     result: { status: 'completed', checks: { 'greet check': 'passed' }, corrections: 0, setups: [compareSetup(variant ? 'changed' : 'base')],
-      restored: [], diff: ' greet.js | 2 +-', text: `Run ${label} updated greet.js.`, tokens: 120000, activeMs: 21000, ...extra } });
+      restored: [], diff: ' greet.js | 2 +-', text: `Run ${label} updated greet.js.`, tokens: 120000, activeMs: 21000,
+      workspace: path.join(root, `compare-copy-${label}`), ...extra } });
   const compareRecord = { id: 'ui-compare', version: 1, at: Date.now(), project: root, task: "Change greet.js so greet('Ann') returns 'Hello, Ann!'.",
     change: "Greeting functions must return 'Hello, stranger!' for an empty name.", target: 'bot', pairs: 1, model: 'gpt-5.6-terra · low',
     threshold: comparisons.THRESHOLD, picks: {}, runs: [compareRun('A', false, { corrections: 1, restored: ['check.cjs'], tokens: 155000, activeMs: 30000 }), compareRun('B', true)] };
@@ -2527,6 +2546,9 @@ app.whenReady().then(async () => {
     'the card sits under Bot\'s message');
   assert.doesNotMatch(card, /with the change|current setup|Verdict/, 'nothing tells the runs apart before the pick');
   assert.match(card, /restored before its checks: check\.cjs/);
+  const applyButtons = () => window.webContents.executeJavaScript(`[...document.querySelectorAll('.comparison-card button')]
+    .filter(button => button.textContent === 'Apply').map(button => button.getAttribute('aria-label'))`);
+  assert.deepEqual(await applyButtons(), [], 'Apply waits for the reveal');
   await window.webContents.executeJavaScript(`document.querySelector('.comparison-card').scrollIntoView({ block: 'start', behavior: 'instant' });
     new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/comparison-blind.png'), (await window.webContents.capturePage()).toPNG());
@@ -2537,6 +2559,11 @@ app.whenReady().then(async () => {
   card = await cardText();
   assert.match(card, /Revealed.*Verdict: helped, low confidence.*A · current setup.*B · with the change.*Your pick: the change/s);
   assert.equal(controller.data.comparisons['ui-compare'], undefined);
+  assert.deepEqual(await applyButtons(), ["Apply run A's changes to my project", "Apply run B's changes to my project"]);
+  await window.webContents.executeJavaScript(`[...document.querySelectorAll('.comparison-card button')]
+    .find(button => button.getAttribute('aria-label') === "Apply run B's changes to my project").click(); true`);
+  await until(() => applyCalls.length === 2, 'the winning run applies through the same runner command');
+  assert.equal(applyCalls[1], path.join(root, 'compare-copy-B'));
   await window.webContents.executeJavaScript(`document.querySelector('.comparison-card').scrollIntoView({ block: 'start', behavior: 'instant' });
     new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/comparison-revealed.png'), (await window.webContents.capturePage()).toPNG());

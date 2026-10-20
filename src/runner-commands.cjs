@@ -107,6 +107,29 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
   });
   handle('acknowledgeTask', (id, taskId) => agents.owner(id).acknowledgeTask(id, taskId));
   handle('comparisonPick', (id, comparisonId, pair, pick) => agents.owner(id).comparisonPick(id, comparisonId, pair, pick));
+  // Brings a project copy's own changes into the project it came from, after the user reviews the file list.
+  handle('applyCopy', async workspace => {
+    const preview = await agents.workspaces.changes(workspace);
+    const list = files => files.slice(0, 5).join(', ') + (files.length > 5 ? ` and ${files.length - 5} more` : '');
+    if (preview.conflicts.length)
+      throw new Error(`You changed ${list(preview.conflicts)} in ${preview.source} since this copy was made. Nothing was applied.`);
+    if (!preview.changes.length)
+      return { source: preview.source, applied: [], message: 'Nothing to apply: this copy has no changes your project lacks.' };
+
+    const count = preview.changes.length, labels = { added: 'Add', modified: 'Change', deleted: 'Delete' };
+    const details = preview.changes.slice(0, 30).map(change => ({ label: labels[change.kind], text: change.path }));
+    if (count > 30)
+      details.push({ label: 'More', text: `and ${count - 30} more files` });
+    const accepted = await ask({ title: `Apply ${count} file${count === 1 ? '' : 's'} to your project?`,
+      message: `From ${preview.workspace} into ${preview.source}.`, details,
+      note: 'Written as uncommitted changes; nothing is staged or committed. Only files you have not changed since the copy was made. ' +
+        `Ignored files, such as build outputs, are not applied. Previous versions stay in the batch snapshot at ${preview.snapshot}.`,
+      confirmLabel: 'Apply changes', cancelLabel: 'Cancel' });
+    if (!accepted)
+      return { source: preview.source, applied: [], cancelled: true };
+
+    return agents.workspaces.apply(workspace, preview);
+  });
   handle('proposeWiki', (id, taskId) => agents.owner(id).proposeWiki(id, taskId));
   handle('answer', (id, answer, agentId, contextId) => {
     const target = contextId ? agents.owner(contextId) : agents.controller(agentId);
