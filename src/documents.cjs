@@ -49,10 +49,12 @@ class DocumentReader {
       // While its PID is with the limiter the worker stays alive, so the helper can never open a reused PID.
       entry.kill = () => entry.limiting ? this.limiter?.helper.kill() : child.kill();
       this.active.add(entry);
-      const timer = setTimeout(() => {
+      const timedOut = () => {
         entry.error = new Error(label + ' timed out. Try a smaller file.');
         entry.kill();
-      }, this.timeoutMs);
+      };
+      // Cold Windows hosts can take over 15 seconds to compile the memory limiter.
+      let timer = setTimeout(timedOut, process.platform === 'win32' ? 60000 : this.timeoutMs);
       timer.unref?.();
       const abort = () => { entry.error = new Error(label + ' cancelled.'); entry.kill(); };
       signal?.addEventListener('abort', abort, { once: true });
@@ -70,7 +72,10 @@ class DocumentReader {
         else resolve(entry.result);
       });
       (process.platform === 'win32' ? this.limit(entry) : Promise.resolve()).then(() => {
-        if (entry.error) return void child.kill();
+        if (entry.error || !this.active.has(entry)) return void child.kill();
+        clearTimeout(timer);
+        timer = setTimeout(timedOut, this.timeoutMs);
+        timer.unref?.();
         child.send(data, error => { if (error) { entry.error = error; child.kill(); } });
       }, error => { entry.error ??= error; child.kill(); });
     });

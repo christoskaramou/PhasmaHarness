@@ -55,6 +55,20 @@ test('a result larger than the IPC pipe buffer reaches the parent before the wor
   assert.equal(result.parts[0].xml, xml);
 });
 
+test('Windows limiter startup does not consume the parsing timeout', { skip: process.platform !== 'win32' }, async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-reader-startup-'));
+  const workerFile = path.join(directory, 'reply.cjs');
+  fs.writeFileSync(workerFile, "process.once('message', () => process.send({ text: 'ready' }));");
+  const reader = new DocumentReader({ timeoutMs: 100, workerFile });
+  t.after(async () => { await reader.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const limit = reader.limit.bind(reader);
+  reader.limit = async entry => {
+    await new Promise(resolve => setTimeout(resolve, 250));
+    await limit(entry);
+  };
+  assert.deepEqual(await reader.read({ name: 'brief.pdf', bytes: pdf() }), { text: 'ready' });
+});
+
 test('document timeout and Quit stop the owned parser before allowing another read', async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-document-stop-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -75,7 +89,9 @@ test('a decompression-bomb PDF stops at the OS memory cap and leaves the reader 
   const reader = new DocumentReader({ timeoutMs: 60000 }); t.after(() => reader.close());
   const bytes = await memoryBombPdf();
   assert.ok(bytes.length < 4096, 'a 3 KB file that expands to 1 GiB');
-  const started = Date.now();
+  let started = Date.now();
+  const limit = reader.limit.bind(reader);
+  reader.limit = async entry => { await limit(entry); started = Date.now(); };
   // Uncapped, pdf.js committed about 2 GB here and then reported no text; the cap stops it near 768 MiB.
   await assert.rejects(reader.read({ name: 'bomb.pdf', bytes }), /more memory than Harness allows/);
   assert.ok(Date.now() - started < 30000, 'the memory cap, not the timeout, ended the read');
