@@ -20,6 +20,8 @@ const SPECIAL = {
 };
 const MANUAL = new Set(['access', 'workspace', 'browserAccess', 'providers', 'providerConnection', 'providerKey', 'jevKey', 'checks', 'wikiFolder', 'startAtSignIn']);
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
+// How long an agent's settings request waits for the user before it counts as declined.
+const CONFIRM_MS = 120000;
 
 class SettingsTools {
   constructor({ agents, controller, wikiStore }) {
@@ -47,7 +49,7 @@ class SettingsTools {
       else if (Object.hasOwn(GENERAL, name)) value = primary.data.settings[name] ?? null;
       else if (Object.hasOwn(LOCAL, name)) value = target.data.settings[name];
       else if (name === 'checks') value = primary.data.settings.checks?.[target.data.settings.workspace] || [];
-      else if (name === 'wikiFolder') value = this.wikiStore.ensure(target.data.settings.workspace).root;
+      else if (name === 'wikiFolder') value = this.wikiFolder(target.data.settings.workspace);
       else if (name === 'models') value = primary.catalog();
       else if (name === 'providers' || name === 'providerKey') value = (primary.data.settings.providers || []).map(({ id, name: label, baseUrl, enabled }) =>
         ({ id, name: label, ...(name === 'providerKey' ? {} : { baseUrl, enabled }), configured: !!primary.providers?.configured(id) }));
@@ -66,6 +68,15 @@ class SettingsTools {
     }
     return { agentId: target.agentId, settings, routerChoices: primary.routerChoices(), changes: this.snapshot(),
       note: 'Security settings are manual-only. Secrets are never returned. Write one setting per call; queued changes apply after active work finishes. Queued requests are cancelled on app restart.' };
+  }
+
+  // Reading where the wiki lives creates nothing and never fails the whole read (a moved workspace reports null).
+  wikiFolder(workspace) {
+    try {
+      return this.wikiStore.location(workspace).root;
+    } catch {
+      return null;
+    }
   }
 
   async write(caller, args) {
@@ -90,20 +101,37 @@ class SettingsTools {
       ['confirming', 'queued', 'applying'].includes(item.status) || index >= this.requests.length - 19);
     this.requests.push(record);
     this.changed();
+    // The confirmation belongs to the turn that asked: it expires, and an answer after that turn ended applies nothing.
+    const sessionId = caller.busy, turnId = sessionId ? caller.activeTurns.get(sessionId) : null;
+    let timer;
     try {
-      const accepted = await this.host.ask?.({ title: 'Allow settings change?', message: `${this.agents.agentName(caller.agentId)} wants to change ${name}.`,
-        details: [{ label: 'Agent', text: this.agents.agentName(target.agentId) },
-          { label: 'New value', text: json }],
-        confirmLabel: 'Apply change', cancelLabel: 'Keep setting' });
-      if (!accepted) { record.status = 'declined'; delete record.value; this.changed(); return this.snapshot().find(item => item.id === record.id); }
+      const accepted = await Promise.race([
+        this.host.ask?.({ title: 'Allow settings change?', message: `${this.agents.agentName(caller.agentId)} wants to change ${name}.`,
+          details: [{ label: 'Agent', text: this.agents.agentName(target.agentId) },
+            { label: 'New value', text: json }],
+          confirmLabel: 'Apply change', cancelLabel: 'Keep setting' }),
+        new Promise(resolve => { timer = setTimeout(() => resolve(false), CONFIRM_MS); timer.unref?.(); }),
+      ]);
+      const live = !turnId || (caller.busy === sessionId && caller.activeTurns.get(sessionId) === turnId);
+      if (!accepted || !live) {
+        record.status = accepted ? 'cancelled' : 'declined';
+        delete record.value;
+        this.changed();
+        return this.snapshot().find(item => item.id === record.id);
+      }
     } catch (error) {
       record.status = 'failed';
       record.error = 'Could not obtain user confirmation.';
       delete record.value;
       this.changed();
       throw error;
+    } finally { clearTimeout(timer); }
+    if (this.agents.closing) {
+      record.status = 'cancelled';
+      delete record.value;
+      this.changed();
+      return this.snapshot().find(item => item.id === record.id);
     }
-    if (this.agents.closing) { record.status = 'cancelled'; delete record.value; return this.snapshot().find(item => item.id === record.id); }
     record.status = 'queued';
     this.changed();
     setImmediate(() => this.flush());
@@ -141,7 +169,7 @@ class SettingsTools {
       this.agents.settings(values, agentId);
       primary.warmRouter();
     } else if (name === 'models') {
-      const actions = ['toggle', 'toggleCodexModel', 'enableDiscovered', 'model'];
+      const actions = ['toggle', 'toggleCodexModel', 'enableDiscovered'];
       if (!object(value) || !actions.includes(value.action)) throw new Error('Invalid provider/model action.');
       primary.providerSettings(value);
       await this.agents.refresh();

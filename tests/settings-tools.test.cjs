@@ -19,7 +19,7 @@ function setup() {
     agentName: () => 'Bot', settings(values, id) { saved.push({ values, id }); Object.assign(worker.data.settings, values); },
     refresh: async () => {},
   });
-  const service = new SettingsTools({ agents, controller: worker, wikiStore: { ensure: () => ({ root: '/wiki' }) } });
+  const service = new SettingsTools({ agents, controller: worker, wikiStore: { location: workspace => { if (workspace !== '/project') throw new Error('ENOENT'); return { root: '/wiki' }; }, ensure: () => assert.fail('a read must not create the wiki') } });
   service.host = { ask: async request => { prompts.push(request); return true; }, write: async (name, value) => saved.push({ name, value }), read: () => null };
   return { agents, worker, service, saved, prompts };
 }
@@ -122,4 +122,40 @@ test('Routing model changes method and model together while retaining the Jev fa
   await service.flush();
   assert.deepEqual(saved[1].values, { routing: 'smart', routerPreset: 'router' });
   assert.equal(service.read(worker, { names: ['routingModel'] }).settings.routingModel.value, 'router');
+});
+
+test('reading the wiki folder creates nothing, and a moved workspace reads as null instead of failing', () => {
+  const { service, worker } = setup();
+  assert.equal(service.read(worker, { names: ['wikiFolder'] }).settings.wikiFolder.value, '/wiki');
+  worker.data.settings.workspace = '/moved';
+  assert.equal(service.read(worker, {}).settings.wikiFolder.value, null);
+});
+
+test('a confirmation answered after its turn ended, or never answered, applies nothing', async t => {
+  const { service, worker, saved } = setup();
+  worker.busy = 'chat';
+  worker.activeTurns.set('chat', 'turn-1');
+  let answer;
+  service.host.ask = () => new Promise(resolve => { answer = resolve; });
+  const late = service.write(worker, { name: 'effortCap', value: 'medium' });
+  worker.activeTurns.set('chat', 'turn-2');
+  answer(true);
+  assert.equal((await late).status, 'cancelled');
+
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const unanswered = service.write(worker, { name: 'effortCap', value: 'low' });
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(120000);
+  assert.equal((await unanswered).status, 'declined');
+  assert.equal(saved.length, 0);
+});
+
+test('agents cannot add or rewrite model entries through the models setting', async () => {
+  const { service, worker, agents, saved } = setup();
+  await service.write(worker, { name: 'models', value: { action: 'model', provider: 'local', model: { id: 'x' } } });
+  agents.busy = false;
+  await service.flush();
+  assert.equal(service.snapshot().at(-1).status, 'failed');
+  assert.match(service.snapshot().at(-1).error, /Invalid provider\/model action/);
+  assert.equal(saved.length, 0);
 });
