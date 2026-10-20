@@ -1054,6 +1054,9 @@ class Controller extends EventEmitter {
         // Send now applies within the turn where the provider can (liveSteer); otherwise it joins the provider's own queue.
         await this.liveInput(message, { steer: action === 'steer' && !!this.liveInputCaps?.liveSteer });
         this.recordLiveMessage(session, message, activeTask);
+      } else if (action === 'steer' && session.activeProvider === 'claude-cli' && !this.isCoordinator()) {
+        // Claude without live input is finishing its turn; a restart would drop its saved session. The message sends next.
+        return;
       } else if (action === 'steer' && (!capabilities(session.activeProvider).steer || this.isCoordinator())) {
         await this.restartWithMessage(session, message, activeTask);
       } else if (action === 'steer') {

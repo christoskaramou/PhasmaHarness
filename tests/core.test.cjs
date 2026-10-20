@@ -2341,6 +2341,23 @@ test('Send now steers where the provider can, uses its own queue otherwise, and 
   assert.equal(session.queue.length, 1);
 });
 
+test('Send now on a Claude turn that is finishing keeps the message queued instead of stopping the turn', async t => {
+  const { controller } = await setup(t);
+  const session = controller.create();
+  session.activeProvider = 'claude-cli';
+  session.claudeSessionId = 'kept-claude-session';
+  controller.busy = session.id;
+  controller.activeTurns.set(session.id, 'finishing-turn');
+  session.queue = [{ id: 'late', text: 'One more thing', images: [] }];
+  // The final result arrived: Claude no longer accepts live input while its process closes.
+  controller.liveInput = null;
+  controller.stop = async () => { assert.fail('must not stop a finishing turn'); };
+  await controller.queuedMessage(session.id, 'late', 'steer');
+  assert.deepEqual(session.queue.map(message => message.id), ['late'], 'it sends next, once the turn ends');
+  assert.equal(session.queue[0].error, undefined);
+  assert.equal(session.claudeSessionId, 'kept-claude-session');
+});
+
 test('Send now preserves the queued message if another Stop cancels restart', async t => {
   const { controller } = await setup(t);
   const session = controller.create();

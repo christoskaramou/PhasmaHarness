@@ -10,6 +10,8 @@ const os = require('node:os');
 const { createHash } = require('node:crypto');
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+// How long a live follow-up waits for Claude to echo it back before it counts as uncertain.
+const DELIVERY_MS = 30000;
 // Ask mode keeps a small tool set (smaller prompts, no subagents); anything beyond reading inside the workspace asks.
 const ASK_TOOLS = ['Read', 'Glob', 'Grep', 'Bash', 'Edit', 'Write', 'WebFetch', 'WebSearch'];
 // Tools that only work with an interactive Claude Code user; in the Harness they would show as unanswerable prompts.
@@ -348,10 +350,20 @@ class ClaudeCLI {
         const content = [{ type: 'text', text }, ...images.map(imageData).map(({ mime, data }) =>
           ({ type: 'image', source: { type: 'base64', media_type: mime, data } }))];
         return new Promise((resolve, reject) => {
-          const timer = setTimeout(() => reject(new Error('Claude message delivery timed out. Check the conversation before resending.')), 30000);
+          // A delivery that fails or times out is dropped, so a turn that already finished still closes Claude's input.
+          const drop = error => {
+            clearTimeout(timer);
+            deliveries.delete(id);
+            reject(error);
+            if (result && !deliveries.size && child.stdin.writable && !child.stdin.writableEnded) {
+              onInput(null);
+              child.stdin.end();
+            }
+          };
+          const timer = setTimeout(() => drop(new Error('Claude message delivery timed out. Check the conversation before resending.')), DELIVERY_MS);
           deliveries.set(id, {
             resolve: () => { clearTimeout(timer); resolve(); },
-            reject: error => { clearTimeout(timer); reject(error); },
+            reject: drop,
           });
           child.stdin.write(JSON.stringify({ type: 'user', uuid: id,
             message: { role: 'user', content }, parent_tool_use_id: null }) + '\n', error => {

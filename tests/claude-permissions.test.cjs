@@ -196,6 +196,25 @@ test('Claude streams follow-ups during full-access work and waits for acknowledg
   assert.equal(input, null);
 });
 
+test('a live follow-up Claude never echoes times out without keeping a finished turn open', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { cli, state, send } = fake();
+  let input;
+  const run = cli.run({ model: 'claude-opus-5-5', prompt: 'first', access: 'danger-full-access',
+    onInput: value => { input = value; } });
+  const delivery = input({ id: 'never-echoed', text: 'one more thing', images: [] });
+  const timedOut = assert.rejects(delivery, /timed out/);
+  send({ type: 'result', result: 'first finished' });
+  await new Promise(setImmediate);
+  assert.equal(state.ended, false, 'the pending follow-up keeps the pipe open at first');
+  t.mock.timers.tick(30000);
+  await timedOut;
+  await new Promise(setImmediate);
+  assert.equal(state.ended, true, 'the turn closes Claude input once the follow-up is given up');
+  assert.equal(input, null);
+  assert.equal((await run).result, 'first finished');
+});
+
 test('Claude retains uncertainty when its process closes before acknowledging live input', async () => {
   const { cli, state } = fake();
   let input;
