@@ -1081,6 +1081,7 @@ app.whenReady().then(async () => {
   assert.equal((await banner())[0], false);
   await window.webContents.executeJavaScript("document.querySelector('#update-install').click(); new Promise(r => setTimeout(r, 100))");
   assert.equal(installs, 2, 'only the user click installs');
+  await push({ status: 'current', latest: '0.2.0', installable: false });
   console.log('Update banner passed');
   // Effort cap next to Auto: saved as a setting, max marked with a warning, hidden for a manual model, mirrored in Settings.
   const cap = () => window.webContents.executeJavaScript("[document.querySelector('#effort-cap').hidden, document.querySelector('#effort-cap').value, document.querySelector('#effort-cap').selectedOptions[0].textContent, document.querySelector('#effort-cap').classList.contains('max-cap')]");
