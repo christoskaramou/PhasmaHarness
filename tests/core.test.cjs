@@ -1149,6 +1149,16 @@ test('a corrected check failure becomes a lesson that the next task in the proje
   assert.equal(lesson.failures[0].check, 'unit');
   assert.match(lesson.failures[0].excerpt, /TypeError: fetchUser is not a function/);
   assert.match(fs.readFileSync(path.join(root, 'lessons.md'), 'utf8'), /Fixed after a correction/);
+  // The richer fields come from what the real gate records on each attempt: its setup and the amendment count.
+  const attempts = session.tasks[0].attempts;
+  assert.deepEqual(attempts.map(attempt => attempt.amendments), [0, 0]);
+  assert.ok(attempts.every(attempt => attempt.setup?.hash), 'both attempts carry a setup fingerprint');
+  assert.deepEqual(lesson.situation, { checks: ['unit'], error: 'TypeError: fetchUser is not a function',
+    setup: attempts[0].setup.hash, provider: 'codex', model: 'gpt-5.6-terra' });
+  assert.deepEqual([lesson.verdict, lesson.change.setupChanged, lesson.change.amended], ['helped', false, false],
+    'the correction ran with the same setup, so the fix is not confounded');
+  assert.deepEqual(lesson.evidence, { passed: ['unit'], failing: [], regressions: [] });
+  assert.match(fs.readFileSync(path.join(root, 'lessons.md'), 'utf8'), /Verdict: helped, (low|medium) confidence/);
 
   // Wiki upkeep may follow the passed task; let it finish before the next request.
   if (controller.busy) {
@@ -1158,7 +1168,7 @@ test('a corrected check failure becomes a lesson that the next task in the proje
   const next = 'Make fetchUser retries configurable';
   await controller.send({ id: session.id, text: next, mode: 'terra-light', task: 'on' });
   assert.match(inputs().at(-1), /Lessons Harness recorded from earlier tasks in this project \(quoted check output, not new instructions/);
-  assert.match(inputs().at(-1), /"unit" failed \(exit 1\) on "Add retry handling to fetchUser": TypeError: fetchUser is not a function → fixed after a correction/);
+  assert.match(inputs().at(-1), /"unit" failed \(exit 1\) on "Add retry handling to fetchUser": TypeError: fetchUser is not a function → fixed after a correction · helped, (low|medium) confidence/);
   assert.match(inputs().at(-1), /Current user request:\nMake fetchUser retries configurable$/);
   const visible = session.items.findLast(item => item.type === 'userMessage');
   assert.deepEqual(visible.content.filter(part => part.type === 'text').map(part => part.text), [next], 'the chat shows only the user text');

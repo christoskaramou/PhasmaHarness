@@ -11,7 +11,7 @@ const { FINAL, OUTPUT_CAP, canProposeWiki, capStream, childBlocksClear, confirmT
 const { accessMode, sameEffort, treeEntries } = require('./shared.cjs');
 const { stripTaskStatus } = require('../routing/task-state.cjs');
 const { readWiki, assessWikiUpdate } = require('../workspace/wiki-assess.cjs');
-const { lessonFromTask, recordLesson, readLessons, relevantLessons, lessonsBlock } = require('../lessons.cjs');
+const { lessonFromTask, recordLesson, readLessons, relevantLessons, lessonsBlock, diffHashes } = require('../lessons.cjs');
 
 module.exports = {
   openTask(session, selected, text, clientId, taskMode) {
@@ -258,7 +258,9 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
     const workerOutcome = outcome.status === 'completed' ? 'completed' : outcome.status === 'interrupted' ? 'interrupted' : 'failed';
     const attempt = { token: submission.token, turnId: submission.turnId, workerOutcome, results: [], at: Date.now(), evidence: null,
       assignmentId: submission.assignmentId || null, assignmentRevision: submission.assignmentRevision || null,
-      setup: session.routes?.findLast(route => route.turnId === submission.turnId)?.setup || null };
+      setup: session.routes?.findLast(route => route.turnId === submission.turnId)?.setup || null,
+      // Amendments carry no time; their count per attempt tells a lesson whether the assignment changed in between.
+      amendments: task.amendments.length };
     task.attempts.push(attempt);
     if (outcome.reason === 'connection lost') {
       task.state = 'needs-you'; task.reason = 'connection lost'; task.summary = summaryLine(task);
@@ -580,12 +582,18 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
     const result = spawnSync('git', ['--no-optional-locks', '-c', 'core.fsmonitor=false', 'diff', '--stat'], {
       cwd: root, encoding: 'utf8', timeout: 4000, windowsHide: true, maxBuffer: 64 * 1024,
     });
+    const privatePath = /(^|[\\/])(\.env(?:\..*)?|auth\.json|credentials[^\\/]*|secrets?[^\\/]*|id_rsa|id_ed25519)([\\/]|$)|\.(pem|key|pfx|p12)$/i;
     if (result.error || result.status !== 0) snapshot.limitations.push('Diff unavailable.');
     else {
-      const privatePath = /(^|[\\/])(\.env(?:\..*)?|auth\.json|credentials[^\\/]*|secrets?[^\\/]*|id_rsa|id_ed25519)([\\/]|$)|\.(pem|key|pfx|p12)$/i;
       const lines = String(result.stdout || '').split(/\r?\n/).filter(line => line && !privatePath.test(line));
       if (lines.length !== String(result.stdout || '').split(/\r?\n/).filter(Boolean).length) snapshot.limitations.push('Private paths omitted from the diff excerpt.');
       snapshot.diff = lines.join('\n').slice(0, 8000);
+      // Per-file hashes of the full diff (no content kept), so a lesson can tell an edit that leaves --stat unchanged.
+      const patch = spawnSync('git', ['--no-optional-locks', '-c', 'core.fsmonitor=false', 'diff', '--no-ext-diff', '--no-color'], {
+        cwd: root, encoding: 'utf8', timeout: 4000, windowsHide: true, maxBuffer: 16 * 1024 * 1024,
+      });
+      if (!patch.error && patch.status === 0)
+        snapshot.files = diffHashes(patch.stdout, privatePath);
     }
     return snapshot;
   },

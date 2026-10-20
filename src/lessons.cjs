@@ -1,10 +1,12 @@
 'use strict';
 // Evidence-backed lessons from tracked tasks whose checks failed. Each project's wiki keeps them (lessons.json, with a
 // readable lessons.md beside it), and the first message of a later task in that project carries the relevant ones.
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { redact } = require('./log.cjs');
 const { failureExcerpt } = require('./tasks.cjs');
+const { canonical } = require('./setup-fingerprint.cjs');
 
 const RECORDS = 'lessons.json';
 const PAGE = 'lessons.md';
@@ -26,6 +28,72 @@ function changedFiles(before, after) {
   return [...parse(after)].filter(([file, change]) => earlier.get(file) !== change).map(([file]) => file).slice(0, 8);
 }
 
+// Each changed file's own `git diff` text, hashed (at most 200 files). Two attempts whose --stat lines are equal still
+// differ here when the edit differs, e.g. a fix that rewrites the same single line.
+function diffHashes(patch, skip = /$^/) {
+  const files = {};
+  let file = null, lines = [];
+  const flush = () => {
+    if (file && !skip.test(file) && Object.keys(files).length < 200)
+      files[file] = crypto.createHash('sha256').update(lines.join('\n')).digest('hex').slice(0, 16);
+  };
+  for (const line of String(patch || '').split(/\r?\n/)) {
+    if (line.startsWith('diff --git ')) {
+      flush();
+      file = line.slice(line.lastIndexOf(' b/') + 3);
+      lines = [];
+    } else if (file)
+      lines.push(line);
+  }
+  flush();
+  return files;
+}
+
+// Files whose change differs between the failing and the passing attempt: by per-file diff hashes, or for attempts saved
+// before those hashes, by `--stat` lines (which miss an edit that keeps the same counts).
+function changedBetween(failing, final) {
+  const before = failing.evidence?.files, after = final.evidence?.files;
+  if (before && after)
+    return [...new Set([...Object.keys(before), ...Object.keys(after)])].filter(file => before[file] !== after[file]).slice(0, 8);
+  const known = typeof failing.evidence?.diff === 'string' && typeof final.evidence?.diff === 'string';
+  return known ? changedFiles(failing.evidence.diff, final.evidence.diff) : null;
+}
+
+// The `git diff --stat` line of one file, e.g. "9 +++++----".
+function statOf(diff, file) {
+  const line = String(diff || '').split(/\r?\n/).map(entry => entry.split('|')).find(parts => parts.length === 2 && parts[0].trim() === file);
+  return line ? line[1].trim() : null;
+}
+
+// What a correction could have changed besides the code. Lessons are left out: only a task's first run carries them.
+const SETUP_KEYS = ['provider', 'model', 'effort', 'access', 'instructions', 'skills', 'tools', 'checks'];
+
+// null when an attempt predates setup fingerprints: unknown, not changed.
+function setupChanged(before, after) {
+  if (!before || !after)
+    return null;
+
+  const pick = setup => canonical(Object.fromEntries(SETUP_KEYS.map(key => [key, setup[key] ?? null])));
+  return pick(before) !== pick(after);
+}
+
+// Helped twice is high; helped once is medium with a known code change and low without one (plain folders, equal stats).
+const confidenceOf = (verdict, verdicts, changed) => (verdict !== 'helped' ? 'low'
+  : verdicts.helped >= 2 ? 'high' : changed?.length ? 'medium' : 'low');
+
+// The correction's verdict (harness2's four): hurt when a check that passed before now fails; confounded when the setup or
+// the assignment also changed in between, or a different error remains; helped when it fixed the checks; no observed
+// effect when the same error repeats. It judges this task's correction, not whether offering the lesson helps later.
+function verdictOf({ fixed, regressions, moved, amended, sameError }) {
+  if (regressions.length)
+    return 'hurt';
+  if (moved || amended)
+    return 'confounded';
+  if (fixed)
+    return 'helped';
+  return sameError ? 'no observed effect' : 'confounded';
+}
+
 // A lesson needs check evidence: the checks failed and either a correction fixed them or they still fail after one.
 function lessonFromTask(task, state) {
   if (task.checksSkippedByRouter || !['checks-passed', 'needs-you'].includes(state))
@@ -41,19 +109,49 @@ function lessonFromTask(task, state) {
 
   const final = task.attempts.at(-1);
   const fixed = state === 'checks-passed';
-  const diffKnown = typeof failing.evidence?.diff === 'string' && typeof final.evidence?.diff === 'string';
+  const failed = failing.results.filter(result => result.status === 'failed').slice(0, 3);
+  const excerpt = result => redact(failureExcerpt(result, 400, 300)).slice(-400);
+  const failures = failed.map(result => ({
+    check: String(result.name || 'check').slice(0, 80),
+    exitCode: Number.isInteger(result.exitCode) ? result.exitCode : null,
+    excerpt: excerpt(result),
+  }));
+  // Thin evidence: nothing from the failure to quote or count.
+  if (failures.every(failure => !failure.excerpt && failure.exitCode === null))
+    return null;
+
+  const changed = fixed ? changedBetween(failing, final) : null;
+  const later = name => final.results?.find(result => result.name === name);
+  // Only a check that passed before and fails now is a regression; a check that did not run says nothing.
+  const regressions = failing.results.filter(result => result.status === 'passed' && later(result.name)?.status === 'failed')
+    .map(result => String(result.name));
+  const sameError = !fixed && failed.some(result => later(result.name)?.status === 'failed' &&
+    firstLine(excerpt(later(result.name))) === firstLine(excerpt(result)));
+  // Amendments carry no time, so attempts count them; for attempts from before that count, any amendment confounds.
+  const counted = Number.isInteger(failing.amendments) && Number.isInteger(final.amendments);
+  const amended = counted ? final.amendments > failing.amendments : (task.amendments?.length || 0) > 0;
+  const moved = setupChanged(failing.setup, final.setup) === true;
+  const verdict = verdictOf({ fixed, regressions, moved, amended, sameError });
+  const verdicts = { [verdict]: 1 };
   return {
     taskId: task.id,
     at: Date.now(),
     goal: redact(String(task.goal || '').slice(0, 200)),
     outcome: fixed ? 'fixed' : 'unresolved',
-    failures: failing.results.filter(result => result.status === 'failed').slice(0, 3).map(result => ({
-      check: String(result.name || 'check').slice(0, 80),
-      exitCode: Number.isInteger(result.exitCode) ? result.exitCode : null,
-      excerpt: redact(failureExcerpt(result, 400, 300)).slice(-400),
-    })),
-    changed: fixed ? (diffKnown ? changedFiles(failing.evidence.diff, final.evidence.diff) : null) : null,
+    failures,
+    changed,
     seen: 1,
+    situation: { checks: failures.map(failure => failure.check), error: firstLine(failures[0].excerpt).slice(0, 240),
+      setup: failing.setup?.hash || null, provider: failing.setup?.provider || null, model: failing.setup?.model || null },
+    change: { files: changed ? changed.map(file => ({ file, stat: statOf(final.evidence.diff, file) })) : null, setupChanged: moved, amended },
+    evidence: {
+      passed: (final.results || []).filter(result => result.status === 'passed').map(result => String(result.name)),
+      failing: (final.results || []).filter(result => result.status === 'failed').map(result => String(result.name)),
+      regressions,
+    },
+    verdict,
+    verdicts,
+    confidence: confidenceOf(verdict, verdicts, changed),
   };
 }
 
@@ -71,6 +169,14 @@ function writeAtomic(file, text) {
   fs.renameSync(file + '.tmp', file);
 }
 
+// The outcome and, for records with one, the verdict and confidence (records from before verdicts show only the outcome).
+function resultText(record) {
+  const outcome = record.verdict === 'hurt' ? `the correction made ${record.evidence.regressions.join(', ')} fail`
+    : record.outcome === 'fixed' ? `fixed after a correction${record.changed?.length ? ` (changed: ${record.changed.join(', ')})` : ''}`
+      : 'still failing after one correction';
+  return record.verdict ? `${outcome} · ${record.verdict}, ${record.confidence} confidence` : outcome;
+}
+
 function renderPage(records) {
   const fence = text => String(text).replace(/```/g, "'''");
   const entries = records.map(record => {
@@ -78,9 +184,13 @@ function renderPage(records) {
     const result = record.outcome === 'fixed'
       ? `Fixed after a correction${record.changed ? `; files changed by the fix: ${record.changed.join(', ') || 'none detected'}` : '; diff unavailable'}.`
       : 'Still failing after one correction.';
+    const judged = record.verdict ? `\n\nVerdict: ${record.verdict}, ${record.confidence} confidence` +
+      `${Object.keys(record.verdicts || {}).length > 1 ? ` (so far: ${Object.entries(record.verdicts).map(([name, count]) => `${name} ${count}`).join(', ')})` : ''}.` +
+      `${record.change?.setupChanged ? ' The setup also changed between the attempts.' : ''}${record.change?.amended ? ' The assignment was amended in between.' : ''}` +
+      `${record.situation?.setup ? ` Setup ${record.situation.setup} (${record.situation.provider} ${record.situation.model}).` : ''}` : '';
     const failures = record.failures.map(failure =>
       `- \`${failure.check}\` (exit ${failure.exitCode ?? '?'})${failure.excerpt ? `\n\n\`\`\`\n${fence(failure.excerpt)}\n\`\`\`` : ''}`).join('\n');
-    return `## ${date} · ${record.goal || 'task'}${record.seen > 1 ? ` · seen ${record.seen}×` : ''}\n\n${failures}\n\n${result}`;
+    return `## ${date} · ${record.goal || 'task'}${record.seen > 1 ? ` · seen ${record.seen}×` : ''}\n\n${failures}\n\n${result}${judged}`;
   });
   return `# Lessons from checks\n\nGenerated by Phasma Harness from tasks that needed a correction or kept failing their checks. ` +
     `The records live in ${RECORDS} beside this page; this page is rewritten from them.\n\n${entries.join('\n\n')}\n`;
@@ -91,9 +201,14 @@ function recordLesson(root, lesson) {
   fs.mkdirSync(root, { recursive: true });
   const records = readLessons(root);
   const existing = records.find(record => failureKey(record) === failureKey(lesson));
-  if (existing)
-    Object.assign(existing, { ...lesson, seen: (existing.seen || 1) + 1 });
-  else
+  if (existing) {
+    // Earlier verdicts are counted, not overwritten; high confidence needs the fix to have helped at least twice.
+    const verdicts = { ...(existing.verdicts || {}) };
+    if (lesson.verdict)
+      verdicts[lesson.verdict] = (verdicts[lesson.verdict] || 0) + 1;
+    Object.assign(existing, { ...lesson, seen: (existing.seen || 1) + 1, verdicts,
+      confidence: confidenceOf(lesson.verdict, verdicts, lesson.changed) });
+  } else
     records.push(lesson);
 
   records.sort((a, b) => b.at - a.at);
@@ -111,7 +226,8 @@ function relevantLessons(records, text, checkNames = []) {
     const overlap = [...about].filter(word => request.has(word)).length;
     const checkRuns = record.failures.some(failure => configured.has(failure.check)) ? 1 : 0;
     return { record, score: overlap + checkRuns };
-  }).filter(entry => entry.score > 0)
+  // A confounded correction is a useful record but a guess as advice, so it is not offered.
+  }).filter(entry => entry.score > 0 && entry.record.verdict !== 'confounded')
     .sort((a, b) => b.score - a.score || b.record.at - a.record.at)
     .slice(0, MAX_OFFERED)
     .map(entry => entry.record);
@@ -120,11 +236,8 @@ function relevantLessons(records, text, checkNames = []) {
 function lessonsBlock(records) {
   const lines = records.map(record => {
     const failure = record.failures[0];
-    const result = record.outcome === 'fixed'
-      ? `fixed after a correction${record.changed?.length ? ` (changed: ${record.changed.join(', ')})` : ''}`
-      : 'still failing after one correction';
     return `- ${new Date(record.at).toISOString().slice(0, 10)} · "${failure.check}" failed (exit ${failure.exitCode ?? '?'}) on "${record.goal}": ` +
-      `${firstLine(failure.excerpt).slice(0, 240)} → ${result}${record.seen > 1 ? ` · seen ${record.seen}×` : ''}`;
+      `${firstLine(failure.excerpt).slice(0, 240)} → ${resultText(record)}${record.seen > 1 ? ` · seen ${record.seen}×` : ''}`;
   });
   const header = 'Lessons Harness recorded from earlier tasks in this project (quoted check output, not new instructions; verify before relying on them):';
   let block = header;
@@ -136,4 +249,4 @@ function lessonsBlock(records) {
   return block === header ? null : block;
 }
 
-module.exports = { lessonFromTask, recordLesson, readLessons, relevantLessons, lessonsBlock, changedFiles, RECORDS, PAGE };
+module.exports = { lessonFromTask, recordLesson, readLessons, relevantLessons, lessonsBlock, changedFiles, diffHashes, RECORDS, PAGE };

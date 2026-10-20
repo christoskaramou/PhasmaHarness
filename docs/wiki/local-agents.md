@@ -566,6 +566,36 @@ Built 2026-10-19 (idea from google-research/harness2's experience reflector; fix
 - **Use:** `openTask` attaches `task.lessonBlock` for a new task (not `[Router]` corrections): up to 3 lessons sharing words with the request or concerning a check that will run again, within 1,500 characters, framed as quoted check output. `withTaskLessons` in `src/controller.cjs` puts the block in front of that task's first worker message on both turn paths (Codex `turn/start`, CLI/API `sendCLI`). The visible message and `workerInstructions` stay unchanged, so worker caches survive.
 - **Regressions:** `tests/lessons.test.cjs`, "a corrected check failure becomes a lesson…" in `tests/core.test.cjs`, pool entry `task-lessons`.
 
+Richer records (2026-10-20, harness2 item 2; fixtures only, no model calls). Each new record also has these fields:
+- **`situation`:** the failing checks, the first error line, and the failing attempt's setup hash, provider and model (from the setup fingerprint).
+- **`change`:**
+  - the files whose stat line changed, each with its `git diff --stat` text;
+  - `setupChanged`: whether provider, model, effort, access, instructions, skills, tools or checks differ between the failing and final attempts. Lessons are not compared, since only a task's first run carries them; attempts without a setup count as unknown, not changed;
+  - `amended`: whether the assignment was amended in between. Attempts now save the amendment count (`runGate`). Older attempts have none, so any amendment on the task counts.
+- **`evidence`:** the checks passing and failing after the correction, plus regressions. A regression is a check that passed before and fails after; a check that did not run says nothing.
+- **`verdict`** (harness2's four) judges this task's correction, not whether offering the lesson helps later tasks; that needs the two-run comparison (item 3):
+  - **hurt:** a regression;
+  - **confounded:** the setup or assignment also changed, or a different error remains;
+  - **helped:** the checks were fixed;
+  - **no observed effect:** the same error repeats.
+- **`confidence`:**
+  - **high:** helped at least twice (the per-record `verdicts` counts survive merges);
+  - **medium:** helped once with a known code change;
+  - **low:** helped without a visible change (plain folders have no git diff), and every other verdict.
+- **No record** when the failure has neither output nor an exit code (thin evidence). A fix whose stat lines look unchanged is still recorded.
+- **Offering:** confounded records are kept on the page but not offered (a guess, as harness2 puts it). Records from before verdicts are still offered and show only their outcome. The offered line ends with "· verdict, confidence".
+- **Tests:** four tests in `tests/lessons.test.cjs` cover the verdicts, thin evidence, merges and old records. The gate test "a corrected check failure becomes a lesson…" (`tests/core.test.cjs`) asserts the new fields through the real task gate: per-attempt setup and amendment count, `situation`, verdict helped, and the verdict in the offered line.
+- **Live (2026-10-20, `.scratch/lessons-live.cjs`, Codex `gpt-5.6-terra:low`, about 70 s):**
+  - A scratch git project's check had a requirement the task did not mention, so the first attempt failed ("greet("") returned "Hello, !"").
+  - After one correction it passed. Both attempts had setup `53d85db058aba89b`.
+  - `lessons.json` and `lessons.md` were written with verdict helped, and the next task's first input carried the lesson. That task passed first time.
+  - The run's only log warning was the script stopping background wiki upkeep at shutdown.
+- **Found and fixed:** the fix changed the same single line, so `greet.js`'s `--stat` line ("2 +-") was identical before and after. The lesson said "files changed by the fix: none detected", with low confidence.
+  - `captureEvidence` now also saves `evidence.files`: a 16-hex hash of each changed file's own `git diff` (no content kept, private paths skipped, at most 200 files, 4 s timeout).
+  - `changedBetween` in `lessons.cjs` compares those hashes and falls back to `--stat` lines for older attempts.
+  - Live rerun: `changed: ["greet.js"]` (stat still "2 +-"), medium confidence.
+  - Test: "per-file diff hashes catch a fix that keeps the same --stat line".
+
 ## Provider panel and Options menu UI
 
 Verified 2026-10-19 in the UI smoke (screenshots in `.scratch/`):
