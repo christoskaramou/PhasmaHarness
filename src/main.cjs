@@ -101,7 +101,7 @@ async function start() {
   voice.on('event', event => {
     if (!window.isDestroyed()) window.webContents.send('voice', event);
   });
-  desktop = new RunnerWindow({ app, window, Tray, Menu, icon: path.join(__dirname, '..', 'ui', 'icon.ico'),
+  desktop = new RunnerWindow({ app, window, Tray, Menu, icon: path.join(__dirname, '..', 'ui', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
     settingsFile: path.join(app.getPath('userData'), 'runner-window.json'),
     isQuitting: () => quitting || !!closing, quit: () => app.quit(),
     status: () => agents.allControllers().some(worker => worker.requests.size) ? 'Needs attention'

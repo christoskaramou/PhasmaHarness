@@ -43,6 +43,9 @@ const main = require('../src/main.cjs');
 const recorded = () => (fs.existsSync(pidsFile) ? fs.readFileSync(pidsFile, 'utf8').trim().split('\n').filter(Boolean) : []);
 const fail = message => {
   console.error(`Quit test failed: ${message}`);
+  const logFile = path.join(app.getPath('userData'), 'logs', 'harness.log');
+  if (fs.existsSync(logFile)) console.error(fs.readFileSync(logFile, 'utf8').slice(-12000));
+  console.error('Codex startup:', main.controller()?.codex, main.controller()?.error);
   for (const pid of recorded().flatMap(line => line.split(' ').map(Number))) try { process.kill(pid, 'SIGKILL'); } catch {}
   fs.rmSync(root, { recursive: true, force: true });
   app.exit(1);

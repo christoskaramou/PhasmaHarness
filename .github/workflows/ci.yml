@@ -37,7 +37,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $testTemp = node -p "require('fs').realpathSync(require('os').tmpdir())"
+          $testTemp = node -p "require('fs').realpathSync.native(require('os').tmpdir())"
           "TEMP=$testTemp" >> $env:GITHUB_ENV
           "TMP=$testTemp" >> $env:GITHUB_ENV
       - run: npm test
