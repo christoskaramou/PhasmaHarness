@@ -51,6 +51,7 @@ app.whenReady().then(async () => {
   }));
   const savedChecks = [];
   ipcMain.handle('checks', (_event, workspace, list) => { savedChecks.push(list); return controller.checks(workspace, list); });
+  ipcMain.handle('phasmaGameChecks', () => null);
   ipcMain.handle('settings', (_event, values) => controller.settings(values));
   let chosenWorkspace = root;
   ipcMain.handle('chooseWorkspace', () => chosenWorkspace);
@@ -902,6 +903,22 @@ app.whenReady().then(async () => {
   assert.deepEqual(savedChecks.at(-1), [], 'the removal was saved');
   assert.deepEqual(controller.data.settings.checks[controller.data.settings.workspace], []);
   console.log('Removed checks save immediately passed');
+  // A Phasma game workspace offers its built-in checks; they save through the normal checks path and are not offered twice.
+  const recipe = ['build', 'launch', 'gameplay'].map(kind => ({ name: kind, kind, timeoutMs: 30000,
+    argv: [process.execPath, 'C:\\Program Files\\Phasma Harness\\resources\\app\\src\\phasma-game-checks.cjs', kind] }));
+  ipcMain.removeHandler('phasmaGameChecks');
+  ipcMain.handle('phasmaGameChecks', (_event, workspace) => recipe.map(check => ({ ...check, cwd: workspace })));
+  await window.webContents.executeJavaScript('renderChecks(); new Promise(r => setTimeout(r, 100))');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#checks-phasma').hidden"), false, 'the recipe is offered');
+  await window.webContents.executeJavaScript("document.querySelector('#checks-phasma').click(); new Promise(r => setTimeout(r, 300))");
+  assert.deepEqual(savedChecks.at(-1).map(check => [check.kind, check.argv]), recipe.map(check => [check.kind, check.argv]), 'the recipe saves its exact commands');
+  await window.webContents.executeJavaScript('renderChecks(); new Promise(r => setTimeout(r, 100))');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#checks-phasma').hidden"), true, 'added checks are not offered twice');
+  ipcMain.removeHandler('phasmaGameChecks');
+  ipcMain.handle('phasmaGameChecks', () => null);
+  controller.checks(controller.data.settings.workspace, []);
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderChecks(); true');
+  console.log('Phasma game checks are offered once and save their commands passed');
   await window.webContents.executeJavaScript("document.querySelector('#settings').click(); new Promise(r => setTimeout(r, 100))");
   const dialogSize = () => window.webContents.executeJavaScript(`(() => {
     const dialog = document.querySelector('#settings-dialog'), box = dialog.getBoundingClientRect();

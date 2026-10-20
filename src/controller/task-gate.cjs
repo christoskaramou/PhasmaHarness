@@ -6,6 +6,7 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 const { TAG: PROCESS_TAG, Watch, stopLeftovers, spawnOwned } = require('../process-tree.cjs');
+const { CHECKER: PHASMA_GAME_CHECKS, restoreMcpOptIn } = require('../phasma-game-checks.cjs');
 const { FINAL, OUTPUT_CAP, canProposeWiki, capStream, childBlocksClear, confirmTermination, correctionText, createTask, gateOutcome, hasProjectWiki, identityFromProbe, lookupState, parentExitReaps, parseChecklist, resolveCitations, shouldTrack, summaryLine, validateChecks } = require('../tasks.cjs');
 const { accessMode, sameEffort, treeEntries } = require('./shared.cjs');
 const { stripTaskStatus } = require('../routing/task-state.cjs');
@@ -374,7 +375,8 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
     const blocked = (detail, status = 'blocked') => ({ id: check.id, name: check.name, status, detail, stdout: '', stderr: '', exitCode: null, durationMs: 0, truncated: false });
     if (this.connection !== 'ready') return blocked('no provider connected');
     if (task.access === 'read-only' && !check.readOnlySafe) return blocked('not read-only safe');
-    const local = !this.codex.connected;
+    // Codex command/exec takes no environment, so a check that runs Harness's own executable always runs here.
+    const local = !this.codex.connected || check.argv[0] === process.execPath;
     if (accessMode(task.access).approvalPolicy !== 'never') {
       const approved = await this.approveCheck(session, check, gate, local);
       if (!this.ownsGate(gate)) return null;
@@ -452,9 +454,13 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
     this.data.executionBlock = block;
     try { this.save(); } catch { this.data.executionBlock = previous; return blocked('could not persist the execution block'); }
     let child;
+    // A check that runs Harness's own executable (the built-in Phasma game checks) runs it as Node, not as a second app,
+    // and learns the timeout so it can clean up before it is stopped.
+    const own = check.argv[0] === process.execPath ? { ELECTRON_RUN_AS_NODE: '1', HARNESS_CHECK_TIMEOUT_MS: String(check.timeoutMs) } : {};
+    const env = { ...process.env, [PROCESS_TAG]: processId, ...own };
     try {
       child = spawnOwned(spawn, check.argv[0], check.argv.slice(1), {
-        cwd: check.cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32', env: { ...process.env, [PROCESS_TAG]: processId },
+        cwd: check.cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32', env,
       });
     } catch (error) {
       this.clearExecutionBlock(processId);
@@ -513,6 +519,9 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
       return blocked('check execution unconfirmed', 'unknown');
     }
     this.clearExecutionBlock(processId);
+    // A stopped or timed-out Phasma game check never reaches its own cleanup: put the Player's MCP opt-in back.
+    if (check.argv[1] === PHASMA_GAME_CHECKS)
+      await restoreMcpOptIn(check.cwd).catch(error => this.log?.warn('Phasma game check cleanup failed', { message: error.message }));
     if (!this.ownsGate(gate)) return null;
     if (result.error) return notFound();
     const row = this.classifyExec(check, { stdout: result.stdout, stderr: result.stderr, exitCode: result.timedOut ? 124 : result.code ?? 1 }, Date.now() - started);

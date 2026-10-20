@@ -162,6 +162,38 @@ test('a check that exits while a detached child keeps running does not pass sile
   assert.ok(!controller.data.executionBlock);
 });
 
+test('a check that runs Harness’s own runtime runs it as Node, so the app never opens a second window', async t => {
+  const inherited = process.env.ELECTRON_RUN_AS_NODE;
+  delete process.env.ELECTRON_RUN_AS_NODE;
+  t.after(() => { if (inherited !== undefined) process.env.ELECTRON_RUN_AS_NODE = inherited; });
+  const controller = await start(t, { claude: true });
+  const { check, runOne } = localRunner(controller);
+  const probe = 'console.log("as node " + process.env.ELECTRON_RUN_AS_NODE + " timeout " + process.env.HARNESS_CHECK_TIMEOUT_MS)';
+  const result = await runOne('danger-full-access', check(probe));
+  assert.equal(result.status, 'passed');
+  assert.match(result.stdout, /as node 1 timeout 20000/);
+
+  // A Phasma game check that ends early (stopped, timed out, failed) still leaves the Player's MCP opt-in restored.
+  const { CHECKER, enableMcpOptIn, assetsRoot } = require('../src/phasma-game-checks.cjs');
+  const game = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-phasma-restore-'));
+  t.after(() => fs.rmSync(game, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(game, 'runtime'));
+  fs.writeFileSync(path.join(game, 'phasma_project.json'), JSON.stringify({ version: 1, name: 'Game', assets: 'Assets' }));
+  fs.writeFileSync(path.join(game, 'runtime', 'phasma_settings.json'), JSON.stringify({ project_path: '..' }));
+  await enableMcpOptIn(game, assetsRoot(game), 4321);
+  const failed = await runOne('danger-full-access', { id: 'g', name: 'build', argv: [process.execPath, CHECKER, 'build'], cwd: game, timeoutMs: 20000, readOnlySafe: false });
+  assert.equal(failed.status, 'failed');
+  assert.match(failed.stdout, /no Scripts folder/);
+  assert.equal(fs.existsSync(path.join(game, 'Assets', 'Agent', 'agent_config.json')), false, 'the opt-in is gone again');
+
+  // Codex command/exec takes no environment, so even with Codex connected these checks run locally.
+  controller.codex.connected = true;
+  controller.client.call = async method => { throw new Error(`unexpected ${method}`); };
+  const connected = await runOne('danger-full-access', check(probe));
+  assert.equal(connected.status, 'passed');
+  assert.match(connected.stdout, /as node 1 timeout 20000/);
+});
+
 test('check ownership is saved before the command starts; a failed save starts nothing', async t => {
   const controller = await start(t, { claude: true });
   const { workspace, check, runOne } = localRunner(controller);

@@ -216,6 +216,50 @@ Native cross-provider coordination (verified 2026-10-18): the native-only integr
 
 Native CLI safety fixes (verified 2026-10-19, fixtures only): Gemini CLI 0.49.0 sends no `rawInput` in permission requests, so every call of one kind shared a session-allow key and "Allow for this session" on `npm test` also approved later `rm -rf`. `src/providers/gemini.cjs` now sends no tool name without concrete input, so such calls are approved once at a time. `ELECTRON_RUN_AS_NODE` is no longer set on the native `muse`, `agy` or `gemini` executables (only Gemini's `process.execPath` script fallback keeps it), so Electron apps started by an agent run normally. Muse stdin write errors now fail the turn ("Muse Code disconnected") instead of crashing the runner. Regressions: `tests/gemini.test.cjs`, `tests/muse.test.cjs`, `tests/antigravity.test.cjs`, pool `native-cli`.
 
+## Built-in Phasma game checks
+
+Built 2026-10-20 for the game-verification gate. `src/phasma-game-checks.cjs` is both the recipe and the checker it runs.
+
+- **Offered when:** on Windows, the workspace has `runtime/PhasmaPlayer.exe` and `runtime/minilua.exe`, and `runtime/phasma_settings.json` points that Player at this workspace's `phasma_project.json` (`project_manifest`, or `project_path` plus the default manifest). Resolution follows the engine's `ProjectSelection.cpp`: paths are relative to `runtime/`, and the manifest's `assets` field is relative to the project. `assetsRoot()` returns null when the Player would open some other project. This is the layout Harness game batches use (`.scratch/phasma-acceptance-prep.cjs`). The game itself need not exist yet, since workers write it. PhasmaProjects games that run the engine's shared Player (`run.ps1`) are not covered.
+- **Offered how:** Settings → Checks shows "Add Phasma game checks" for such a workspace (IPC `phasmaGameChecks`, host only, never on browser access). It adds three ordinary checks through the normal save path, never automatically, and is not offered again once they are saved.
+- **Commands:** `[process.execPath, <src/phasma-game-checks.cjs>, build|launch|gameplay]`, with timeouts of 30/90/120 s. These are absolute paths: moving the install or checkout breaks them loudly ("was not found"). How `task-gate.cjs` runs a check whose `argv[0]` is Harness's own executable:
+  - It always runs it locally (`runCheck`), because Codex `command/exec` takes no environment. Under workspace-write access, that means the honest "without the Codex sandbox" approval prompt.
+  - It sets `ELECTRON_RUN_AS_NODE=1`, so a packaged app never starts a second instance. That second instance would quit with exit 0 and falsely pass the check.
+  - It passes `HARNESS_CHECK_TIMEOUT_MS`. The checker stops 15 s before that timeout, so it can stop the Player and clean up, even if the user edits the timeout.
+- **Build:** compiles every `<assets>/Scripts/**/*.lua` with `runtime/minilua.exe`. The file list goes through a list file, not the command line. Shortcut: minilua is plain Lua 5.1, so LuaJIT-only syntax (`goto`, labels) fails falsely. Gamekit has none (checked 2026-10-20).
+- **Launch:** starts the Player and waits for live frames over its MCP server. `game_describe` must report protocol 1 and a game id. When `<assets>/game.json` exists (batch games write one), its `gameId` must match.
+- **Gameplay:** generic gamekit play (`verifyGameplay`, `driver.lua` semantics):
+  - the game starts unfinished with legal actions, from a reset or, when `reset_supported` is false, from an observe;
+  - up to 50 first-legal-action moves, each in the same session with a higher `state_id`, waiting out `busy`;
+  - a reset (when supported) starts a new session;
+  - an action against the first state is rejected `stale_state` and changes neither the session nor the game. For `state_tracking: game_epoch` games, a stable `state_id` counts as unchanged, since their view keeps moving. Other games must keep the same observation.
+  - a PNG screenshot is taken.
+  Game rules (solving a board) belong to the game's own tests.
+- **MCP opt-in:** the Player starts MCP (which runs any Lua) only from `<assets>/Agent/agent_config.json` (`PlayerHost.cpp` `ReadPlayerMcpPort`; no CLI or environment switch, checked 2026-10-20). The checker backs that file up to `runtime/harness-checks/agent_config.backup.json`, opts in on a free port, and restores it afterwards. Harness also calls `restoreMcpOptIn` after every recipe check whose process tree is confirmed gone, so a Stop or timeout that hard-kills the checker still restores it. A Harness crash mid-check leaves the opt-in until the next recipe run, which restores it first. Shortcut: two recipe checks running at once on the same workspace can race on the backup; batches give each job its own copy.
+- **Evidence:** one JSON line on stdout, kept by the check result. Scratch files and `gameplay.png` stay in `runtime/harness-checks/`, out of the game's source.
+
+Verified 2026-10-20:
+- **Unit tests:** `tests/phasma-game-checks.test.cjs` covers:
+  - detection, including a Player pointed elsewhere and a manifest with another assets folder;
+  - opt-in backup/restore, with and without an existing config;
+  - a fake gamekit game: busy, real-time (`game_epoch`), no reset, a stale action accepted, and a state that does not advance.
+- **Runner test:** `tests/providers-optional.test.cjs` "own runtime" checks the env, local routing with Codex connected, and Harness's restore after a failed recipe check.
+- **UI smoke:** a "Phasma game checks" phase. Full suite: 748 pass, 0 fail.
+- **Live, free:** all three modes passed on the six batch games from two runs (`.scratch/recipe-live.cjs`). No Player was left, `agent_config.json` was byte-identical afterwards, and the Player logs had no warnings or errors.
+  - The gameplay check also passed under `electron.exe` with `ELECTRON_RUN_AS_NODE=1`.
+  - `.scratch/recipe-restore-live.cjs` covered running out of time ("did not render frames in time", Player stopped, file restored) and a hard kill (opt-in and backup left behind, then restored by the next run).
+- **Live batch with recipe checks:** `.scratch/phasma-game-acceptance-recipe.cjs`, four Codex `gpt-6.1-sol:low` workers, a fresh seed each time, engine Player `a421ec3d`.
+  - **Final code (`%TEMP%\phasma-harness-games-YSh06v`) passed:**
+    - Every build, launch and gameplay check came from the recipe and ran through the local runner, in 2.3–4.5 s each.
+    - The morning summary read "3 returned, checks passed · 1 cancelled".
+    - The title correction applied, the side question was answered ("391"), and the cancelled witness's process was gone.
+    - At most two background slots were in use, cleanup was confirmed, and the source was unchanged.
+    - Every job folder ended with no opt-in and no backup, and the Player logs had no warnings or errors.
+    - The script's game-specific rules (solved boards, the corrected title) passed on all three games after the batch.
+    - An earlier pass (`MtbH4k`) used the pre-review recipe.
+  - **Unexplained failure (`gIeZex`):** one run failed at dispatch with "Sent 0/4 agent tasks. Model unavailable" (`agent_create` → `primary.available`). The start-of-run availability assert had passed, and no Codex rollout exists for that run. Cause unverified. The script now records the model list, account and availability when a run fails.
+- **Not verified:** workspace-write access, which asks "without the Codex sandbox" approval for each recipe check; a packaged install; and a project whose `agent_config.json` already existed, live (unit-tested only).
+
 ## Concurrent host checks
 
 Verified 2026-10-19: a healthy host check in another controller no longer rejects queued assignments or unrelated foreground chat. Its execution block is exempted from cross-context admission only while the same live gate owns the matching process id, the provider connection is ready and the command still has an active check lease. The checking bot keeps its existing background slot and refuses competing work of its own. Completion, failure, timeout, Stop or loss of the gate ends that lease; persisted or unconfirmed execution still blocks new admission globally. No lease survives restart. The live Phasma run exposed this failure when two game checks caused the third and fourth queued jobs to fail before submission. A deterministic regression now holds a native check, keeps the third job queued, admits it when the second slot frees, allows a foreground question and then proves failed termination reinstates the global fence. Sources: `src/agents.cjs` (`acquireReady`, `updateCapacity`), `src/controller.cjs` (`blockedReason`), `src/controller/task-gate.cjs` (`runCheck`, `runLocalCheck`), `tests/agents.test.cjs`.

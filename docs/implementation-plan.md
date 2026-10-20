@@ -16,14 +16,14 @@ The requested end state includes every phase below, followed by a review and a r
 - [ ] Muse Code, Antigravity and DeepSeek Harness adapters with native setup, permissions, tools and protocol checks (Gemini CLI removed 2026-10-19; Antigravity serves Gemini models).
 - [ ] Always-on runner, reconnect, start at sign-in, safe restart reconciliation and update coordination.
 - [x] Shared job budgets, validated artifact actions and independent Git batch project copies.
-- [ ] Verified game builds, launch/gameplay checks and morning summaries.
+- [x] Verified game builds, launch/gameplay checks and morning summaries (built-in Phasma game checks, live 2026-10-20).
 - [x] Groups and explicit @mentions without broadcast or permission escalation.
 - [x] Durable timezone-aware routines (repeating, one-time and Git triggers), missed-run deduplication, managed only by asking in chat.
 - [x] Text/code, images, extracted PDF/DOCX text and local Windows voice input; human microphone acceptance remains open.
 - [ ] Authenticated remote runner deployment and phone access.
 - [ ] Full acceptance scenarios, code review, relevant checks and launch for user inspection.
 
-Acceptance progress (20 October 2026, live with Codex): the design's scenario passed on v0.2.0 — three games built, launched and played, a separate question answered mid-batch, the correction applied, the third job stopped, morning summary "3 returned, checks passed · 1 cancelled". A live forced restart now resumes a job that was still waiting for a background slot exactly once and holds admitted jobs for review (fixed the same day; it was held before). Still open: product verification recipes (gate 19 checks still come from the acceptance script), Send now beyond Codex and Claude (gate 15), hosted/server recovery and the remote host (gates 17 and 23), and the final review (gate 24). See [local agents](wiki/local-agents.md).
+Acceptance progress (20 October 2026, live with Codex): the design's scenario passed on v0.2.0 — three games built, launched and played, a separate question answered mid-batch, the correction applied, the third job stopped, morning summary "3 returned, checks passed · 1 cancelled". A live forced restart now resumes a job that was still waiting for a background slot exactly once and holds admitted jobs for review (fixed the same day; it was held before). Send now beyond Codex and Claude (gate 15) is built (`ca06226`) and live-verified on DeepSeek only. Gate 19 is met: the built-in Phasma game checks (`src/phasma-game-checks.cjs`, Settings → Checks) ran a live four-worker batch to "3 returned, checks passed · 1 cancelled" (one other run failed at dispatch with an unexplained "Model unavailable", see the wiki). Still open: hosted/server recovery and the remote host (gates 17 and 23), and the final review (gate 24). See [local agents](wiki/local-agents.md).
 
 Native provider sign-in and an actual remote host may require user action. Finish all independent implementation and verification before requesting that input. Live paid inference remains separate from deterministic checks; no subscription capacity or API budget is increased implicitly.
 

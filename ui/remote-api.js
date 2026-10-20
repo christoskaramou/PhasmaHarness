@@ -156,7 +156,7 @@
     'runnerAutostart', 'quitRunner', 'exportConversation', 'chooseWorkspaceWiki', 'openWorkspaceWiki', 'cursorLogin',
     'cursorRefresh', 'cursorLogout', 'claudeLogin', 'claudeRefresh', 'claudeLogout', 'connectChatGPT', 'logoutChatGPT',
     'installProvider', 'providerSettings', 'providerKey', 'localModel', 'jevSaveKey',
-    'jevRemoveKey', 'jevTest', 'checks', 'diagnostics', 'openLogs', 'checkUpdates', 'installUpdate', 'chooseWorkspace',
+    'jevRemoveKey', 'jevTest', 'checks', 'phasmaGameChecks', 'diagnostics', 'openLogs', 'checkUpdates', 'installUpdate', 'chooseWorkspace',
     'remoteInfo', 'remoteStart', 'remoteStop', 'remoteDisconnectAll', 'remoteResetLink'])
     api[method] = async () => { throw new Error('Use the runner host for this action.'); };
   api.nativeProviderAction = (id, action) => call('providerConnection', [id, action]);

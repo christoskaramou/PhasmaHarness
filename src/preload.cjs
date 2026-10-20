@@ -35,6 +35,7 @@ api.onConfirmation = callback => {
 };
 api.queuedMessage = (...args) => ipcRenderer.invoke('queuedMessage', ...args);
 api.replySuggestion = id => ipcRenderer.invoke('replySuggestion', id);
+api.phasmaGameChecks = workspace => ipcRenderer.invoke('phasmaGameChecks', workspace);
 api.reviseJob = args => ipcRenderer.invoke('reviseJob', args);
 api.reconcileJob = args => ipcRenderer.invoke('reconcileJob', args);
 api.artifactAction = args => ipcRenderer.invoke('artifactAction', args);

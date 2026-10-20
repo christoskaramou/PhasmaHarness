@@ -3270,7 +3270,28 @@ function renderChecks() {
   checksWorkspace = workspace;
   $('#checks-workspace').textContent = workspace || 'No workspace selected';
   $('#checks-status').textContent = '';
+  showPhasmaChecks(workspace);
 }
+
+// Built-in build, launch and gameplay checks, offered when the workspace is a Phasma game with its own Player build.
+let phasmaChecks = [];
+function showPhasmaChecks(workspace) {
+  $('#checks-phasma').hidden = true;
+  if (!workspace)
+    return;
+
+  api.phasmaGameChecks(workspace).then(checks => {
+    const have = new Set((state.settings.checks?.[workspace] || []).map(check => check.argv.join('\n')));
+    phasmaChecks = (checks || []).filter(check => !have.has(check.argv.join('\n')));
+    $('#checks-phasma').hidden = checksWorkspace !== workspace || !phasmaChecks.length;
+  }).catch(() => {});
+}
+$('#checks-phasma').onclick = () => {
+  $('#checks-list').append(...phasmaChecks.map(checkRow));
+  $('#checks-phasma').hidden = true;
+  markChecksDirty();
+  saveChecks().catch(() => {});
+};
 
 $('#checks-add').onclick = () => {
   const row = checkRow(); $('#checks-list').append(row); markChecksDirty();

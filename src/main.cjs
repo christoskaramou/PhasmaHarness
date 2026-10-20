@@ -425,6 +425,8 @@ async function start() {
     return require('./conversation-export.cjs').exportConversation(window, agents.owner(id).session(id), agents.snapshot().batchReports);
   });
   handle('checks', (workspace, list) => controller.checks(workspace, list));
+  handle('phasmaGameChecks', workspace => (typeof workspace === 'string' && path.isAbsolute(workspace)
+    ? require('./phasma-game-checks.cjs').phasmaGameChecks(workspace) : null));
   handle('chooseWorkspace', async () => {
     const selection = await dialog.showOpenDialog(window, { title: 'Choose workspace', properties: ['openDirectory'], defaultPath: controller.data.settings.workspace });
     if (selection.canceled) return null;
