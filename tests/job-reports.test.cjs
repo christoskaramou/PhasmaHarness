@@ -83,9 +83,22 @@ test('the batch summary counts checks-passed, unverified, failed, interrupted, c
     job: { id: 'job-5', owner: 'owner', budgetId: 'limit', state: 'running', originalRequest: { batch: { id: 'batch', index: 5 } } } });
   const report = batchReports(data).batch;
   assert.deepEqual(report.entries.map(entry => entry.state), ['returned', 'returned', 'returned', 'cancelled', 'paused', 'needs-review', 'interrupted']);
-  assert.deepEqual(report.outcomes, { passed: 1, unverified: 1, failed: 1, interrupted: 1, cancelled: 1, waiting: 2, 'not-dispatched': 0 });
-  assert.equal(report.summary, '1 returned, checks passed · 1 returned, not verified · 1 failed · 1 interrupted · 1 cancelled · 2 waiting');
-  assert.match(require('../src/job-reports.cjs').batchText(report), /^\n\n### Batch report — 7 jobs: 1 returned, checks passed · 1 returned, not verified · 1 failed · 1 interrupted · 1 cancelled · 2 waiting\n/);
+  assert.deepEqual(report.outcomes, { passed: 1, unverified: 1, failed: 1, interrupted: 1, cancelled: 1, review: 1, waiting: 1, 'not-dispatched': 0 });
+  assert.equal(report.summary, '1 returned, checks passed · 1 returned, not verified · 1 failed · 1 interrupted · 1 cancelled · 1 need review · 1 waiting');
+  assert.match(require('../src/job-reports.cjs').batchText(report), /^\n\n### Batch report — 7 jobs: 1 returned, checks passed · 1 returned, not verified · 1 failed · 1 interrupted · 1 cancelled · 1 need review · 1 waiting\n/);
+});
+
+test('jobs held after a restart count as needing review, even under their budget review hold', () => {
+  const { owner, data } = reportFixture();
+  Object.assign(owner.items[0].hubBatch, { count: 2, dispatched: 2, error: null });
+  data.budgets.held = { state: 'paused', reason: 'Execution was interrupted by a restart.' };
+  for (const index of [1, 2]) {
+    data.assignments.push({ session: { id: 'held-' + index, tasks: [] }, agentId: 'worker',
+      job: { id: 'held-job-' + index, owner: 'owner', budgetId: 'held', state: 'interrupted', originalRequest: { batch: { id: 'batch', index } } } });
+  }
+  const report = batchReports(data).batch;
+  assert.deepEqual(report.entries.map(entry => entry.state), ['needs-review', 'needs-review']);
+  assert.equal(report.summary, '2 need review', 'a crash leaves no job described as merely waiting');
 });
 
 test('pending follow-ups supersede earlier results and survive paused review or worker reuse', () => {
@@ -127,7 +140,7 @@ test('Markdown export retains the batch, commands, paths and incomplete provider
   receipt.artifacts = [{ path: 'game.exe' }];
   receipt.budgetSummary = { providerEstimateUsd: 0.003, costComplete: false };
   const markdown = require('../src/conversation-export.cjs').conversationMarkdown(owner, batchReports(data));
-  assert.match(markdown, /Batch report — 4 jobs: 1 returned, not verified · 2 waiting · 1 not dispatched/, 'unrun launch and gameplay checks keep it unverified');
+  assert.match(markdown, /Batch report — 4 jobs: 1 returned, not verified · 2 need review · 1 not dispatched/, 'unrun launch and gameplay checks keep it unverified');
   assert.match(markdown, /Published files: game.exe/);
   assert.match(markdown, /Provider estimate: \$0.003 \(incomplete\)/);
   assert.match(markdown, /Command: \["build"\].*Directory: \/copy.*Exit: 0/s);

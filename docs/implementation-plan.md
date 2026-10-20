@@ -13,15 +13,17 @@ The requested end state includes every phase below, followed by a review and a r
 - [x] Explicit result ownership transfer with durable acceptance, stable retries and original cancellation ancestry.
 - [x] Content revisions, bounded background slots and separate foreground chat contexts; deterministic checks pass.
 - [ ] Applied steering, safe replacement execution and cancellation of the selected job subtree.
-- [ ] Muse Code, Antigravity and Gemini adapters with native setup, permissions, tools and protocol checks.
+- [ ] Muse Code, Antigravity and DeepSeek Harness adapters with native setup, permissions, tools and protocol checks (Gemini CLI removed 2026-10-19; Antigravity serves Gemini models).
 - [ ] Always-on runner, reconnect, start at sign-in, safe restart reconciliation and update coordination.
 - [x] Shared job budgets, validated artifact actions and independent Git batch project copies.
 - [ ] Verified game builds, launch/gameplay checks and morning summaries.
 - [x] Groups and explicit @mentions without broadcast or permission escalation.
-- [x] Durable timezone-aware routines, missed-run deduplication and Git triggers.
+- [x] Durable timezone-aware routines (repeating, one-time and Git triggers), missed-run deduplication, managed only by asking in chat.
 - [x] Text/code, images, extracted PDF/DOCX text and local Windows voice input; human microphone acceptance remains open.
 - [ ] Authenticated remote runner deployment and phone access.
 - [ ] Full acceptance scenarios, code review, relevant checks and launch for user inspection.
+
+Acceptance progress (20 October 2026, live with Codex): the design's scenario passed on v0.2.0 — three games built, launched and played, a separate question answered mid-batch, the correction applied, the third job stopped, morning summary "3 returned, checks passed · 1 cancelled". A live forced restart now resumes a job that was still waiting for a background slot exactly once and holds admitted jobs for review (fixed the same day; it was held before). Still open: product verification recipes (gate 19 checks still come from the acceptance script), Send now beyond Codex and Claude (gate 15), hosted/server recovery and the remote host (gates 17 and 23), and the final review (gate 24). See [local agents](wiki/local-agents.md).
 
 Native provider sign-in and an actual remote host may require user action. Finish all independent implementation and verification before requesting that input. Live paid inference remains separate from deterministic checks; no subscription capacity or API budget is increased implicitly.
 
@@ -173,7 +175,7 @@ Current group slice: groups are durable Hub-owned conversations with existing me
 
 Add a small durable routine scheduler inside the runner. Persist owner, workflow reference, timezone, next run, limits, and occurrence identity. Deduplicate restarts, prevent self-overlap, and coalesce missed runs. Schedule creation/edit/pause happens through chat with a clear next-run summary. Add event triggers only after scheduled execution is reliable.
 
-Current routine slice: the runner persists versioned workflows, owners, frozen workspace/model/access/checks, per-occurrence limits and stable assignment identities. Calendar schedules use local times, weekdays and explicit timezones; spring gaps are skipped and autumn folds run once. Missed runs coalesce and outstanding worker work, input, budget holds and owner reviews prevent self-overlap. Git triggers establish a local HEAD baseline before acknowledgment, poll without model calls and coalesce changes. Interrupted admissions reuse an existing saved assignment or stop for review without replay. User chat and Options → Routines support creation, next-run summaries, Pause, Resume, Edit and Remove; a returned result can prefill Repeat. Worker reports cannot change schedules. Routine input caches stay out of renderer snapshots. Restricted workers can retrieve their full assigned input without gaining access to a broader owner chat; current occurrence references survive source-chat archival. Clear moves ownership atomically; future routines protect their owner chat and worker, and ordinary Stop remains scoped to current jobs. Real timer admission, real local Git changes, lifecycle races, timezone transitions and UI controls pass checks; the editor remains usable at 840×640 with enlarged text. These use fake model inference. Native-provider recurring-workflow acceptance remains part of the overall acceptance gate.
+Current routine slice (redesigned 2026-10-20 at the user's request; supersedes the workflow-replay slice): a routine is saved text that Harness sends back to the agent, in the chat where it was saved, on a schedule (local weekdays, time and timezone), once at a date and time (it then removes itself) or on each new local Git commit. Routines are created, changed, paused, resumed, removed and reported only by asking in chat through the `routine` and `routines_report` tools; there is no routine UI or IPC. Hub sees and changes every routine; a bot sees only its own, and a bot's routines are deleted with it. Only a message the user typed in that chat can change routines: assignments, automatic results and mail, routine runs, wiki proposals and Harness correction turns cannot. A run waits while its message is queued or running, also across a restart; an unready agent keeps the occurrence; raised chat access holds the routine until it is saved again; a Git run's own commits become the new baseline. Spring gaps are skipped, autumn folds run once and missed runs coalesce. Fixture tests cover these paths; a live recurring run remains part of the acceptance gate.
 
 Then add voice input, remote runner deployment, and phone access. Remote execution requires authenticated transport, secure credential provisioning, artifact transfer, and a suitable runtime host; it is not merely opening the local port to the internet. Preserve the same chat and asynchronous protocol across hosts.
 
@@ -182,6 +184,42 @@ Current file-input slice: the composer selects/pastes up to four text/code files
 Current voice slice: a small microphone control uses the installed Windows speech recognizer, with its language shown in the tooltip and a visible listening state. No microphone starts at launch. Words enter the originating draft; Send stops recognition and includes its final words once. Navigation, dialogs, window hiding/focus loss and Quit stop the owned speech process. Failed cleanup blocks another recording. A five-minute limit bounds each recording, and oversized drafts retain their words for editing. Missing speech support is explicit, with no transcription API fallback. Native recognition passed with a generated English WAV; UI/process tests use fake audio and cover final words, double Send, late output, original-chat binding and cleanup. Human microphone quality remains unverified.
 
 Current browser-access slice: the same runner exposes an opt-in loopback HTTP listener, authenticated command dispatch, revocable persisted sessions and reconnecting snapshots. A configured external origin requires HTTPS through a private proxy; its Host and Authorization headers must be preserved. Native IPC keeps its sender checks, and both paths reuse existing controller validation and job ownership. Settings controls start/stop, connection links and revocation. The shared frontend now works at phone width, including a held fake-model request, independent typing/Stop, request-scoped confirmation, actual local PDF extraction, UTF-8 streaming, enlarged Settings and local appearance. Browser keys never become provider credentials or child environment variables; reset invalidates prior connection links. Native account setup and Windows microphone controls stay on the desktop. Published files and ZIP folder snapshots now download through bounded private staging and one-use file capabilities; expiry, revocation, Stop and Quit release staged files. File fingerprints and receipt versions are rechecked, and active Harness writers block preparation. An actual browser download verifies included assets with fake model inference. Private Linux service recovery is verified with fake native inference. Public-host deployment and real phone/network acceptance remain unfinished, so the full remote gate stays open.
+
+## After the first release
+
+Recorded 20 October 2026, after v0.2.0. These are planned, not built. The first release still closes with the acceptance scenario in the design, a full review and a running preview.
+
+### From the 17 October roadmap
+
+The original twelve-step roadmap (Usage question session, 17 October) maps onto this plan as follows. Built in v0.2.0: always-on runner, Hub as the one front door, morning report, quota guard, routines, files/voice input and group chats; the simpler app is partly done (chat-first UI, one-click CLI install/update, provider settings tucked away). Deferred by the design and still wanted:
+
+1. **Bot computers.** Each bot works in its own WSL/Linux box with a terminal, files and signed-in CLIs; PhasmaEngine builds and starts there at low FPS to check that it compiles and runs. Performance tests stay on the real GPU. The design deliberately kept one shared host with separate job folders for the first release; this adds real isolation. Open question: whether Claude Code with a Max login inside such boxes, and later on a server, is within Anthropic's terms.
+2. **Lead and sidekick pairs.** A big job runs as a strong lead that plans and reviews the diff plus a cheaper sidekick that explores and writes. Optional per job, never a mandatory reviewer loop.
+3. **Rented server and phone access.** The same runner and bot boxes on a VPS, reached from a phone (the remote gate above).
+
+### From harness2 (google-research/harness2 at `1cfe254`)
+
+Codex compared harness2 with PhasmaHarness on 20 October; its claims about our code and the cited harness2 lines were spot-checked (no harness fingerprint exists here; their selection pool excludes the baseline; each mode schedules 4k rollouts and 3k improvement stages; lesson verdicts are helped, hurt, no observed effect and confounded). Borrow the method, not their Python framework.
+
+1. **Setup fingerprint (first).** Save with every task and job result a hash, plus readable parts, of what shaped the run: bot instructions, selected skills, tool configuration, provider CLI and its version, model and effort. Cheap, no model calls. Makes "the same setup worked yesterday" checkable and is the precondition for comparisons.
+2. **Richer lessons.** Extend `src/lessons.cjs` records, not a new memory system: the situation where the lesson applies, the actual change that fixed it, the supporting evidence, a confidence, and a verdict of helped, hurt, no observed effect or confounded. Record no lesson when evidence is thin.
+3. **Opt-in two-run comparison.** Same task, identical project copies, same model and checks: one run with the current instructions, one with a single changed instruction or skill. Compare correctness, cost, time and corrections needed. One baseline and one candidate, never recursive experiments on every request. The baseline always may win: keep the current setup unless improvement is shown. Candidates cannot weaken permissions or change acceptance checks. Blind the comparison to reduce preference bias.
+4. **Proven setups.** Keep a small versioned, approved setup per recurring kind of work (for example Vulkan debugging, document generation) with its evidence and a rollback path. Extends bot instructions and skills; never rewrites the project wiki or rules automatically.
+5. **Earlier harness2 ideas (offered 19 October).** Best-of-N runs with a composed answer; per-agent harness pieces; tuning suggestions from recorded outcomes; a dry-run preview of what a request would do; a viewer for saved lessons.
+
+Their reported gains are not evidence for PhasmaHarness until measured here. Every experiment is opt-in, bounded and paid only when the user asks.
+
+### Requested features
+
+1. **Reply suggestions (requested 2026-10-20).** A Settings toggle enables or disables AI reply suggestions. When on, the composer shows a suggested next message as grey ghost text after the draft, produced by the model the chat is already using; the Right arrow key accepts it when the caret is at the end of the draft, and typing anything else replaces it. Off by default because each suggestion costs a model call. Suggestions never send anything by themselves, never appear while a turn is running or the composer is disabled, and keep drafts unchanged until accepted.
+2. **Send now for every provider (2026-10-20).** v0.2.1 delivers Codex steering natively, Claude follow-ups through its live stream-json input, and a stop-and-resume fallback for the rest. Replace the fallback where the provider allows it: Muse `turn/start` with `ifBusy: queue | steer`; Antigravity and DeepSeek keep their session open between turns (DeepSeek: `session/cancel`, confirmed completion, then prompt again); the API/local loop adds a correction at the next model-call boundary; Cursor keeps ACP (`session/cancel` then resume) unless its SDK can be used without changing sign-in, billing or permissions. Validate Claude's acknowledgement timing live before relying on it.
+
+### Known limits to revisit
+
+- Kept Hub Codex threads are not released when a chat is cleared or deleted; thread reuse is Codex-only.
+- DeepSeek Harness `initialize` takes about 7.7 s warm against a 15 s deadline; a cold start can fail.
+- Muse turns are blocked by the account's Meta billing (402); Muse stays worker-only.
+- Lessons, routines and the setup above have fixture tests only until a live run uses them.
 
 ## Validation and documentation
 

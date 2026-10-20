@@ -79,7 +79,9 @@ function batchReports({ sessions, assignments, names, budgets, copies }) {
     const budget = budgets[job.budgetId], copy = job.workspaceCopy && copies[job.workspaceCopy.workspace];
     const owner = sessions.find(session => session.id === (job.owner || job.source));
     const task = (session.tasks || []).findLast(task => task.assignmentId === job.id);
-    const state = job.cancelled ? 'stopping' : budget?.state === 'paused' ? budget.stopping ? 'pausing' : 'paused' : job.quotaPause ? 'paused'
+    // A job held after a restart needs the user's Return or Start decision before its budget review hold matters.
+    const state = job.cancelled ? 'stopping' : job.state === 'interrupted' ? 'needs-review'
+      : budget?.state === 'paused' ? budget.stopping ? 'pausing' : 'paused' : job.quotaPause ? 'paused'
       : copy?.state === 'preparing' ? 'preparing' : ['interrupted', 'revision-blocked', 'delivery-pending'].includes(job.state) || copy?.state === 'failed' ? 'needs-review'
         : needsInput ? 'needs-input' : waiting ? 'waiting' : session.capacityWaiting || job.state === 'queued' ? 'queued'
           : job.state === 'revising' ? 'updating' : job.state === 'running' ? 'running' : 'needs-review';
@@ -116,10 +118,11 @@ function batchReports({ sessions, assignments, names, budgets, copies }) {
 
 // The batch summary counts each outcome separately; a returned job counts as passed only when every configured host check passed.
 const OUTCOMES = { passed: 'returned, checks passed', unverified: 'returned, not verified', failed: 'failed', interrupted: 'interrupted', cancelled: 'cancelled',
-  waiting: 'waiting', 'not-dispatched': 'not dispatched' };
+  review: 'need review', waiting: 'waiting', 'not-dispatched': 'not dispatched' };
 
 function outcome(entry) {
   if (['failed', 'interrupted', 'cancelled', 'not-dispatched'].includes(entry.state)) return entry.state;
+  if (entry.state === 'needs-review') return 'review';
   if (entry.state !== 'returned') return 'waiting';
   const groups = KINDS.map(kind => entry.verification?.[kind]).filter(group => group?.checks?.length);
   if (groups.some(group => group.status === 'failed')) return 'failed';

@@ -2964,6 +2964,56 @@ test('contained restart resumes never-submitted assignments once and retains the
   assert.equal(chat.delegation.executionAttempts, 1);
 });
 
+test('a job still waiting for a background slot at a crash resumes once; admitted or older records stay held', async t => {
+  for (const variant of ['tracked', 'legacy', 'admitted']) {
+    const { agents, primary, addWorker, factory, workspace } = await setup(t);
+    primary.runnerRecoverySafe = true;
+    const source = primary.create();
+    const workers = [await addWorker('First'), await addWorker('Second'), await addWorker('Third')];
+    const accepted = workers.map((worker, index) => agents.delegate(primary, source, worker.agentId, `Inspection ${index + 1}`));
+    const chats = workers.map((worker, index) => worker.session(accepted[index].sessionId));
+    await until(() => workers[0].activeTurns.has(chats[0].id) && workers[1].activeTurns.has(chats[1].id) && chats[2].capacityWaiting);
+    assert.ok(chats[0].delegation.admittedAt && chats[1].delegation.admittedAt, 'admission is saved before the provider call');
+    assert.equal(chats[2].delegation.admittedAt, undefined, 'a job waiting for a slot has not been admitted');
+    assert.equal(chats[2].delegation.state, 'running');
+    if (variant === 'legacy') delete chats[2].delegation.admissionTracked;
+    if (variant === 'admitted') chats[2].delegation.admittedAt = Date.now();
+    for (const worker of workers) worker.save();
+
+    // The crash: a new runner reads the same stores while the old one is gone.
+    const root = factory(primary.filename, workspace);
+    root.runnerRecoverySafe = true;
+    const restored = new Agents(root, async () => {}, factory);
+    t.after(() => { restored.closing = true; for (const c of restored.allControllers()) c.close(); });
+    const job = index => restored.owner(chats[index].id).session(chats[index].id).delegation;
+    for (const index of [0, 1]) {
+      assert.equal(job(index).state, 'interrupted', `${variant}: an admitted job is never replayed`);
+      assert.equal(job(index).recovery.kind, 'uncertain');
+    }
+    if (variant !== 'tracked') {
+      assert.equal(job(2).state, 'interrupted', `${variant}: stays held for review`);
+      assert.equal(job(2).recovery.kind, 'uncertain');
+      continue;
+    }
+
+    const target = restored.owner(chats[2].id), chat = target.session(chats[2].id);
+    assert.equal(chat.delegation.state, 'queued');
+    assert.equal(chat.delegation.recovery.resumed, true);
+    assert.equal(chat.delegation.executionAttempts, 0);
+    assert.equal(chat.status, 'idle');
+    assert.equal((chat.tasks || []).filter(task => task.assignmentId === chat.delegation.id).length, 0, 'the unchecked start leaves no stale task');
+    await root.initialize();
+    await restored.initialize();
+    await until(() => target.activeTurns.has(chat.id));
+    assert.equal(target.client.calls.filter(call => call.method === 'turn/start').length, 1);
+    assert.ok(chat.delegation.admittedAt);
+    complete(target, chat);
+    const owner = restored.owner(source.id).session(source.id);
+    await until(() => chat.delegation.delivered);
+    assert.equal(owner.items.filter(item => item.type === 'agentResult' && item.deliveryId === accepted[2].jobId).length, 1, 'delivered once');
+  }
+});
+
 test('restart refuses attempted, paused or permission-changed assignments even with containment', async t => {
   for (const reason of ['attempted', 'paused', 'permissions', 'owner permissions', 'parent revision', 'workspace', 'uncontained']) {
     const { agents, primary, addWorker, factory, workspace } = await setup(t);

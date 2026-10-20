@@ -81,6 +81,21 @@ class Agents extends EventEmitter {
     }
     // Only a never-submitted assignment from a contained runner can resume automatically.
     for (const controller of this.allControllers()) for (const session of controller.data.sessions) {
+      // A tracked job that was still waiting for a background slot never reached a provider. Undo the start the
+      // controller load marked as interrupted (and its unchecked task) so the job resumes as never started.
+      for (const job of [session.delegation, ...(session.delegationQueue || [])]) {
+        if (!job || job.delivered || !job.admissionTracked || job.admittedAt || job.state !== 'running' || job.recovery)
+          continue;
+
+        job.state = 'queued';
+        job.executionAttempts = 0;
+        if (job === session.delegation && session.status === 'interrupted') {
+          session.status = 'idle';
+          session.queuePaused = false;
+          session.tasks = (session.tasks || []).filter(task => task.assignmentId !== job.id || task.attempts?.length);
+        }
+      }
+
       delete session.waitingForAgent;
       delete session.capacityWaiting;
       delete session.quotaWaiting;
@@ -1036,7 +1051,8 @@ class Agents extends EventEmitter {
       resumeAmendments: (resumeTask.amendments || []).map(change => ({ text: change.text,
         imageNumbers: (change.images || []).map(image => images.indexOf(image) + 1) })),
       resumeCheckSummary: resumeTask.attempts.flatMap(attempt => (attempt.results || []).map(result => ({ name: result.name, status: result.status, exitCode: result.exitCode }))) });
-    if (this.primary.runnerRecoverySafe) Object.assign(job, { recoveryVersion: 1, executionAttempts: 0, recoveryWorkspace: canonical(workspace) });
+    // admissionTracked: Controller.send saves admittedAt before anything reaches a provider; older records lack it.
+    if (this.primary.runnerRecoverySafe) Object.assign(job, { recoveryVersion: 1, executionAttempts: 0, recoveryWorkspace: canonical(workspace), admissionTracked: true });
     job.ancestorJobIds = resuming ? [resumeTask.id] : source.delegation && !source.delegation.delivered
       ? [...(source.delegation.ancestorJobIds || []), source.delegation.id].filter(Boolean) : source.activeTaskId ? [source.activeTaskId] : [];
     if (source.delegation && !source.delegation.delivered) job.parentRevision = source.delegation.revision || 1;
