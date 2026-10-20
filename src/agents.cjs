@@ -604,7 +604,7 @@ class Agents extends EventEmitter {
         values[key] !== controller.data.settings[key])) this.requireIdle(execution);
     if (conversation && ['workspace', 'access'].some(key => values[key] !== undefined && values[key] !== conversation[key]) &&
         (controller.busy || controller.loading.size || conversation.queue?.length || conversation.delegationQueue?.some(job => !job.delivered) || this.pendingDelegations(conversation.id) || (conversation.delegation && !conversation.delegation.delivered))) throw new Error('Stop this agent before changing its workspace or access.');
-    const local = Object.keys(values).every(key => ['workspace', 'mode', 'access', 'backgroundUsageLimit'].includes(key));
+    const local = Object.keys(values).every(key => ['workspace', 'mode', 'access', 'backgroundUsageLimit', 'replySuggestions'].includes(key));
     if (!local && this.busy) throw new Error('Stop all agents before changing shared settings.');
     if (agentId === 'main') this.primary.settings(values);
     else {
@@ -615,7 +615,11 @@ class Agents extends EventEmitter {
       if (Object.keys(shared).length) this.primary.settings(shared);
       this.primary.save();
     }
-    for (const c of this.allControllers()) if (!c.busy) this.sync(c);
+    for (const c of this.allControllers()) {
+      if (!c.busy) this.sync(c);
+      // A busy agent keeps its turn's settings; reply suggestions only affect the composer, so they apply at once.
+      else if (values.replySuggestions !== undefined) c.data.settings.replySuggestions = this.primary.data.settings.replySuggestions;
+    }
     this.updateConversation(controller, values);
     if (execution) this.updateConversation(execution, values);
     this.primary.changed(); return this.snapshot();

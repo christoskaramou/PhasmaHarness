@@ -4197,3 +4197,21 @@ main > header {
   color: #2684ff;
   flex-shrink: 0;
 }
+
+/* Reply suggestion grey text, laid over the composer by showSuggestion(). */
+#prompt-ghost {
+  position: fixed;
+  z-index: 1;
+  box-sizing: border-box;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  border-style: solid;
+  border-color: transparent;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+#prompt-ghost span {
+  color: transparent;
+}

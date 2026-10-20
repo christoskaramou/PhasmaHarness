@@ -2435,6 +2435,108 @@ app.whenReady().then(async () => {
     'Cancel the current step, then send this in the same session', 'Cancel the current step, then send this in the same session',
     'Add this to the running turn now', 'Add this to the running turn now', 'Stop the current turn, then send this message with conversation context']);
   console.log('Send now describes each provider’s delivery passed');
+  phase = 'reply suggestions';
+  // One call per answer; grey text while the draft matches its start; Right arrow at the end accepts; off hides it.
+  const suggestionCalls = [];
+  ipcMain.handle('replySuggestion', (_event, id) => { suggestionCalls.push(id); return { itemId: 'suggest-answer', text: 'Now add tests for it.' }; });
+  const suggestionUi = await window.webContents.executeJavaScript(`(async () => {
+    document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
+    const settle = () => new Promise(resolve => setTimeout(resolve, 50));
+    window.painted = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const session = current() || state.sessions.find(entry => !entry.archived);
+    window.suggestionSaved = { session, selectedId, busy: state.busy, queue: session.queue };
+    session.queue = [];
+    selectedId = session.id;
+    session.items.push({ id: 'suggest-answer', type: 'agentMessage', phase: 'final_answer', text: 'Here is the parser.' });
+    state.busy = null;
+    state.settings.replySuggestions = true;
+    const prompt = document.querySelector('#prompt'), ghost = document.querySelector('#prompt-ghost');
+    prompt.value = '';
+    render(); render();
+    await settle();
+    const empty = { hidden: ghost.hidden, text: ghost.textContent, placeholder: prompt.placeholder, described: prompt.getAttribute('aria-description') };
+    prompt.value = 'now add';
+    prompt.dispatchEvent(new Event('input', { bubbles: true }));
+    const typed = { hidden: ghost.hidden, grey: ghost.lastChild?.textContent };
+    const box = prompt.getBoundingClientRect(), overlay = ghost.getBoundingClientRect();
+    const aligned = Math.abs(box.left - overlay.left) < 1 && Math.abs(box.top - overlay.top) < 1;
+    await painted();
+    const rect = document.querySelector('#composer').getBoundingClientRect();
+    return { empty, typed, aligned, rect: { x: Math.floor(rect.x), y: Math.floor(rect.y), width: Math.ceil(rect.width), height: Math.ceil(rect.height) } };
+  })()`);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/reply-suggestion-typed.png'), (await window.webContents.capturePage(suggestionUi.rect)).toPNG());
+  Object.assign(suggestionUi, await window.webContents.executeJavaScript(`(async () => {
+    const prompt = document.querySelector('#prompt'), ghost = document.querySelector('#prompt-ghost');
+    prompt.setSelectionRange(prompt.value.length, prompt.value.length);
+    prompt.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+    const accepted = { value: prompt.value, hidden: ghost.hidden };
+    prompt.value = 'something else';
+    prompt.dispatchEvent(new Event('input', { bubbles: true }));
+    const diverged = ghost.hidden;
+    prompt.value = '';
+    prompt.dispatchEvent(new Event('input', { bubbles: true }));
+    // A long suggestion wraps with the draft and grows the composer instead of being cut off.
+    suggestion = { itemId: 'suggest-answer', text: 'Please add tests for the parser that cover empty input, nested brackets, unicode names, very long lines, and the error messages users see when a file is broken.' };
+    prompt.value = 'Please add';
+    prompt.dispatchEvent(new Event('input', { bubbles: true }));
+    await painted();
+    const promptBox = prompt.getBoundingClientRect(), ghostBox = ghost.getBoundingClientRect();
+    const long = { hidden: ghost.hidden, lines: Math.round(promptBox.height / parseFloat(getComputedStyle(prompt).lineHeight)),
+      sameBox: Math.abs(promptBox.top - ghostBox.top) < 1 && Math.abs(promptBox.height - ghostBox.height) < 1, clipped: ghost.scrollHeight > ghost.clientHeight + 1 };
+    const rect = document.querySelector('#composer').getBoundingClientRect();
+    return { accepted, diverged, long, rect: { x: Math.floor(rect.x), y: Math.floor(rect.y), width: Math.ceil(rect.width), height: Math.ceil(rect.height) } };
+  })()`));
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/reply-suggestion-long.png'), (await window.webContents.capturePage(suggestionUi.rect)).toPNG());
+  const suggestionOff = await window.webContents.executeJavaScript(`(async () => {
+    state.settings.replySuggestions = false;
+    render();
+    const hidden = document.querySelector('#prompt-ghost').hidden;
+    const saved = window.suggestionSaved;
+    saved.session.items.pop();
+    saved.session.queue = saved.queue;
+    state.settings.replySuggestions = undefined;
+    selectedId = saved.selectedId;
+    state.busy = saved.busy;
+    document.querySelector('#prompt').value = '';
+    render();
+    return hidden;
+  })()`);
+  // A suggestion that arrives after the user sent (the chat is busy) is dropped.
+  ipcMain.removeHandler('replySuggestion');
+  ipcMain.handle('replySuggestion', async () => {
+    await new Promise(resolve => setTimeout(resolve, 200));
+    return { itemId: 'suggest-late', text: 'Now add tests for it.' };
+  });
+  const lateHidden = await window.webContents.executeJavaScript(`(async () => {
+    const session = current() || state.sessions.find(entry => !entry.archived), saved = { selectedId, busy: state.busy, queue: session.queue };
+    selectedId = session.id;
+    session.queue = [];
+    session.items.push({ id: 'suggest-late', type: 'agentMessage', phase: 'final_answer', text: 'Done.' });
+    state.busy = null;
+    state.settings.replySuggestions = true;
+    render();
+    state.busy = session.id;
+    await new Promise(resolve => setTimeout(resolve, 400));
+    const hidden = document.querySelector('#prompt-ghost').hidden && suggestion === null;
+    session.items.pop();
+    session.queue = saved.queue;
+    state.settings.replySuggestions = undefined;
+    selectedId = saved.selectedId;
+    state.busy = saved.busy;
+    render();
+    return hidden;
+  })()`);
+  assert.equal(lateHidden, true, 'a suggestion that arrives after sending is not shown');
+  ipcMain.removeHandler('replySuggestion');
+  assert.equal(suggestionCalls.length, 1, 'the same answer asks for a suggestion once');
+  assert.deepEqual(suggestionUi.empty, { hidden: false, text: 'Now add tests for it.', placeholder: '', described: 'Suggested reply, Right arrow accepts: Now add tests for it.' });
+  assert.deepEqual(suggestionUi.typed, { hidden: false, grey: ' tests for it.' });
+  assert.equal(suggestionUi.aligned, true, 'the grey text sits over the composer');
+  assert.deepEqual(suggestionUi.accepted, { value: 'now add tests for it.', hidden: true });
+  assert.equal(suggestionUi.diverged, true, 'a different draft hides the suggestion');
+  assert.deepEqual({ ...suggestionUi.long, lines: suggestionUi.long.lines >= 2 }, { hidden: false, lines: true, sameBox: true, clipped: false }, 'a long suggestion grows the composer and stays aligned');
+  assert.equal(suggestionOff, true, 'turning the setting off hides the suggestion');
+  console.log('Reply suggestions show, follow the draft and accept with Right arrow passed');
   await documents.close();
   await window.webContents.executeJavaScript(`document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
     document.documentElement.style.setProperty('--font-scale', '1');

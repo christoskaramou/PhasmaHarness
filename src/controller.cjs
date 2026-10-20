@@ -334,6 +334,10 @@ class Controller extends EventEmitter {
       if (![85, 100, 115, 130, 150].includes(values.fontScale)) throw new Error('Invalid font scale.');
       next.fontScale = values.fontScale;
     }
+    if (values.replySuggestions !== undefined) {
+      if (typeof values.replySuggestions !== 'boolean') throw new Error('Invalid reply suggestions setting.');
+      next.replySuggestions = values.replySuggestions;
+    }
     if (values.backgroundUsageLimit !== undefined) {
       if (!Number.isInteger(values.backgroundUsageLimit) || values.backgroundUsageLimit < 1 || values.backgroundUsageLimit > 100)
         throw new Error('Background usage threshold must be a whole percentage from 1 to 100.');
@@ -1426,6 +1430,7 @@ for (const methods of [
   require('./controller/turns.cjs'),
   require('./controller/helpers.cjs'),
   require('./controller/task-gate.cjs'),
+  require('./controller/suggestions.cjs'),
 ]) {
   for (const [name, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(methods))) {
     if (Object.hasOwn(Controller.prototype, name)) throw new Error(`Controller.${name} is defined twice.`);

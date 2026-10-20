@@ -1238,6 +1238,7 @@ function render() {
   renderMessages(session);
   renderRequest();
   renderCommandPanel();
+  renderSuggestion();
 }
 
 let jobActivityKey = '';
@@ -2263,6 +2264,76 @@ async function changeAccess(access) {
 }
 $('#permissions').onchange = () => changeAccess($('#permissions').value).catch(notify);
 $('#stop').onclick = () => api.stop().catch(notify);
+
+// Reply suggestions (Settings → General): after the AI answers, its suggested next message shows as grey text in the
+// composer and stays grey while the draft matches its start. Right arrow at the end of the draft accepts it.
+let suggestion = null, suggestionAsked = '';
+const promptGhost = Object.assign(document.createElement('div'), { id: 'prompt-ghost', hidden: true });
+promptGhost.setAttribute('aria-hidden', 'true');
+document.body.append(promptGhost);
+function lastMessage(session) {
+  return session?.items.findLast(item => !item.pending &&
+    (item.type === 'userMessage' || (item.type === 'agentMessage' && item.phase !== 'commentary')));
+}
+// The answer a suggestion may follow: the chat's last message, from the AI, while nothing is running or waiting.
+function suggestionTarget(session) {
+  const last = lastMessage(session);
+  const idle = session && state.busy !== session.id && !session.pendingMessage && !session.queue?.length && !session.compacting;
+  return state.settings.replySuggestions === true && idle && last?.type === 'agentMessage' ? last : null;
+}
+function renderSuggestion() {
+  const session = current(), target = suggestionTarget(session);
+  if (suggestion?.itemId !== target?.id) suggestion = null;
+  const key = target ? `${session.id}:${target.id}` : '';
+  if (key && key !== suggestionAsked) {
+    suggestionAsked = key;
+    api.replySuggestion(session.id).then(result => {
+      // Checked again on arrival: the user may have sent, switched chats or turned suggestions off meanwhile.
+      if (result && current()?.id === session.id && suggestionTarget(current())?.id === result.itemId) {
+        suggestion = result;
+        showSuggestion();
+      }
+    }).catch(() => {});
+  }
+  showSuggestion();
+}
+function showSuggestion() {
+  const prompt = $('#prompt'), typed = prompt.value, text = suggestion?.text || '';
+  const matches = text.length > typed.length && text.toLowerCase().startsWith(typed.toLowerCase());
+  const visible = matches && prompt.offsetParent !== null;
+  promptGhost.hidden = !visible;
+  prompt.style.minHeight = '';
+  if (visible) prompt.setAttribute('aria-description', `Suggested reply, Right arrow accepts: ${text}`);
+  else prompt.removeAttribute('aria-description');
+  if (!visible) return;
+
+  const style = getComputedStyle(prompt);
+  for (const key of ['font', 'letterSpacing', 'lineHeight', 'padding', 'borderWidth']) promptGhost.style[key] = style[key];
+  // Wrap at the same width as the draft when the textarea shows a scrollbar.
+  const scrollbar = prompt.offsetWidth - prompt.clientWidth - parseFloat(style.borderLeftWidth) - parseFloat(style.borderRightWidth);
+  promptGhost.style.paddingRight = `${parseFloat(style.paddingRight) + scrollbar}px`;
+  promptGhost.style.width = `${prompt.getBoundingClientRect().width}px`;
+  promptGhost.style.height = '';
+  promptGhost.replaceChildren(Object.assign(document.createElement('span'), { textContent: typed }), text.slice(typed.length));
+  // Grow the composer to fit the grey text; the CSS max height still caps it.
+  prompt.style.minHeight = `${Math.min(promptGhost.offsetHeight, parseFloat(style.maxHeight) || Infinity)}px`;
+  if (!typed) prompt.placeholder = '';
+
+  const box = prompt.getBoundingClientRect();
+  Object.assign(promptGhost.style, { left: `${box.left}px`, top: `${box.top}px`, height: `${box.height}px` });
+  promptGhost.scrollTop = prompt.scrollTop;
+}
+$('#prompt').addEventListener('input', showSuggestion);
+$('#prompt').addEventListener('scroll', () => { promptGhost.scrollTop = $('#prompt').scrollTop; });
+window.addEventListener('resize', showSuggestion);
+$('#prompt').addEventListener('keydown', event => {
+  const prompt = $('#prompt'), atEnd = prompt.selectionStart === prompt.value.length && prompt.selectionEnd === prompt.value.length;
+  const plain = !event.isComposing && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey;
+  if (event.key !== 'ArrowRight' || promptGhost.hidden || !atEnd || !plain) return;
+  event.preventDefault();
+  prompt.value += suggestion.text.slice(prompt.value.length);
+  prompt.dispatchEvent(new Event('input', { bubbles: true }));
+});
 $('#settings-browse').onclick = async () => {
   const agentId = selectedAgent;
   try {
@@ -2302,6 +2373,7 @@ $('#settings').onclick = async () => {
   $('#settings-quick').value = state.settings.jevQuickAnswers === false ? 'off' : 'on';
   $('#settings-jev-compare').value = state.settings.jevCompare === true ? 'on' : 'off';
   $('#settings-wiki-check').value = state.settings.wikiAssessment === true ? 'on' : 'off';
+  $('#settings-reply-suggestions').value = state.settings.replySuggestions === true ? 'on' : 'off';
   $('#settings-background-usage').value = String(state.settings.backgroundUsageLimit || 90);
   $('#settings-routing').onchange();
   $('#jev-key').value = '';
@@ -2632,12 +2704,13 @@ const settingsFields = {
   'settings-router-preset': 'routerPreset', 'settings-effort-cap': 'effortCap',
   'settings-context': 'contextRanking', 'settings-tools': 'toolSelection',
   'settings-quick': 'jevQuickAnswers', 'settings-jev-compare': 'jevCompare', 'settings-wiki-check': 'wikiAssessment',
+  'settings-reply-suggestions': 'replySuggestions',
 };
 $('#settings-form').addEventListener('change', event => {
   const control = event.target, key = settingsFields[control.id];
   if (!key) return;
   const value = key === 'backgroundUsageLimit' ? Number(control.value)
-    : ['jevQuickAnswers', 'jevCompare', 'wikiAssessment'].includes(key) ? control.value === 'on' : control.value;
+    : ['jevQuickAnswers', 'jevCompare', 'wikiAssessment', 'replySuggestions'].includes(key) ? control.value === 'on' : control.value;
   saveSetting(control, key, value);
 });
 $('#settings-form').onsubmit = event => event.preventDefault();

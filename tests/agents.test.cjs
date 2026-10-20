@@ -3465,3 +3465,12 @@ test('agents can check app updates but cannot supply installation consent', asyn
   assert.equal(checks, 1);
   assert.ok(MCP_TOOLS.some(tool => tool.name === 'harness_check_update'));
 });
+
+test('turning reply suggestions on reaches a bot that is mid-turn', async t => {
+  const { agents, add } = await setup(t);
+  const bot = await add('Writer');
+  bot.busy = bot.create().id;
+  agents.settings({ replySuggestions: true }, 'main');
+  bot.busy = null;
+  assert.equal(bot.data.settings.replySuggestions, true, 'the bot asks for a suggestion as soon as its turn ends');
+});

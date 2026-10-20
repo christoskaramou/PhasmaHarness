@@ -240,6 +240,8 @@
       </label>
     <label id="runner-exit-row">On Exit<select id="settings-runner-exit" disabled><option value="close">Close App</option><option value="tray" selected>Stay on Tray</option></select></label>
     <label id="runner-start-row">Start at sign-in<select id="settings-runner-start" disabled><option value="off">Off</option><option value="on">On</option></select></label>
+    <label>Reply suggestions<select id="settings-reply-suggestions" aria-describedby="reply-suggestions-detail"><option value="off">Off</option><option value="on">On</option></select></label>
+    <p id="reply-suggestions-detail" class="hint">After each answer, the model that wrote it suggests your next message as grey text. Right arrow accepts it. One extra model call per answer.</p>
     <details id="remote-settings"><summary>Browser access</summary>
       <p class="muted" id="remote-status">Off. Jobs stay on this runner.</p>
       <label>Local port<input id="remote-port" type="number" min="1" max="65535" value="8788"></label>

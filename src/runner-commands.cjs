@@ -95,6 +95,7 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
   handle('updateStatus', () => updater.state);
   handle('queuedMessage', (id, messageId, action) => agents.owner(id).queuedMessage(id, messageId, action));
   handle('compact', id => agents.owner(id).compact(id));
+  handle('replySuggestion', id => agents.owner(id).replySuggestion(id));
   handle('clearConversation', async (agentId, groupId) => {
     const session = await agents.clearConversation(agentId, name => ask({
       title: 'Start a fresh conversation?', message: `Clear the current context for ${name} and start with a blank chat.`,
