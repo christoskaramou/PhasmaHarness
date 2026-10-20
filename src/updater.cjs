@@ -19,10 +19,14 @@ class Updater extends EventEmitter {
   async check() {
     if (this.installing) return this.result;
     const result = await checkForUpdate({ current: this.current, fetch: this.fetch });
+    // An install that started while this check was fetching owns the banner and the release it downloads.
+    if (this.installing) return this.result;
     const installable = this.installable && result.newer && !!result.asset;
     this.result = { ...result, installable };
     this.release = installable ? result : null;
-    this.set({ status: result.newer ? 'available' : 'current', latest: result.latest, url: result.url, installable, progress: null, error: null });
+    // An agent's request to confirm was for the version it saw; a different release starts without one.
+    const request = this.state.confirmationRequest && result.latest !== this.state.latest ? { confirmationRequest: 0 } : {};
+    this.set({ status: result.newer ? 'available' : 'current', latest: result.latest, url: result.url, installable, progress: null, error: null, ...request });
     return this.result;
   }
 
@@ -32,7 +36,7 @@ class Updater extends EventEmitter {
     if (confirmationRequired) this.set({ confirmationRequest: (this.state.confirmationRequest || 0) + 1 });
     return { current: this.current, latest: result.latest, newer: result.newer, url: result.url,
       confirmationRequired, message: this.installing ? 'An update is already in progress.'
-        : confirmationRequired ? 'Ask the user to confirm downloading and installing with the Download and install button in the desktop update banner. Finish this reply first; installation waits for active work to finish. This check did not download an installer.'
+        : confirmationRequired ? 'Ask the user to confirm downloading and installing with the Download and install button in the desktop update banner. Finish this reply first; the button works once active work has finished. This check did not download an installer.'
         : result.newer ? 'A newer release is available. Automatic installation is unavailable in this run; use the official release link to update manually.'
         : 'Phasma Harness is up to date.' };
   }

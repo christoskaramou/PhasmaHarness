@@ -192,6 +192,45 @@ test('agent checks request user confirmation without downloading or bypassing ac
   assert.equal(log.downloads, 1);
 });
 
+test('a check that finishes during a download keeps the download state; a new version clears the agent request', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-updater-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  let release = RELEASE, holdCheck = false, releaseCheck = null, releaseDownload = null;
+  const fetch = async url => {
+    if (url === LATEST_URL) {
+      if (holdCheck) await new Promise(resolve => { releaseCheck = resolve; });
+      return { status: 200, ok: true, json: async () => release };
+    }
+    await new Promise(resolve => { releaseDownload = resolve; });
+    return new Response(DATA);
+  };
+  const spawn = () => {
+    const child = new EventEmitter(); child.unref = () => {};
+    setImmediate(() => child.emit('spawn'));
+    return child;
+  };
+  const updater = new Updater({ current: '0.1.0', fetch, directory, installable: true, quit: () => {}, spawn });
+
+  await updater.checkFromAgent();
+  assert.equal(updater.state.confirmationRequest, 1);
+  release = { ...RELEASE, tag_name: 'v0.3.0' };
+  await updater.check();
+  assert.equal(updater.state.confirmationRequest, 0, 'the agent request was for another version');
+  release = RELEASE;
+  await updater.check();
+
+  holdCheck = true;
+  const checking = updater.check();
+  holdCheck = false;
+  const installing = updater.install();
+  for (let i = 0; i < 100 && !(releaseCheck && releaseDownload); i++) await new Promise(resolve => setImmediate(resolve));
+  releaseCheck();
+  await checking;
+  assert.equal(updater.state.status, 'downloading', 'a late check result does not reset the download banner');
+  releaseDownload();
+  await installing;
+});
+
 test('agent checks do not offer installation for source runs or current versions', async t => {
   const { updater, log } = setup(t, { installable: false });
   assert.equal((await updater.checkFromAgent()).confirmationRequired, false);

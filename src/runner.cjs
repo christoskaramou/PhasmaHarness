@@ -124,9 +124,9 @@ function updateBlockedReason(agents) {
       return 'Wait for active work or process cleanup to finish before updating.';
     for (const session of controller.data.sessions) {
       const failedDraft = session.status === 'failed' && session.pendingMessage?.error && !session.submission;
-      const cancelledDraft = session.status === 'interrupted' && session.delegation?.cancelled &&
-        session.delegation.delivered && !session.submission;
-      if (session.submission || session.queueSending || (session.pendingMessage && !failedDraft && !cancelledDraft))
+      // Stopped or crashed before sending (cancelled assignments included): restart keeps the draft for retry.
+      const stoppedDraft = session.status === 'interrupted' && !session.submission;
+      if (session.submission || session.queueSending || (session.pendingMessage && !failedDraft && !stoppedDraft))
         return 'Resolve the pending message submission before updating.';
       // Paused messages and saved reports survive restart and cannot start work on their own.
       if (!session.queuePaused && (session.queue?.length || session.items?.some(item => item.pendingReply)))

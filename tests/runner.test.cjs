@@ -158,6 +158,31 @@ test('a failed unsent draft does not block updates or lose its retry content', (
   session.status = 'failed';
   delete session.pendingMessage.error;
   assert.equal(hasPendingWork(agents), true, 'a pending message without a confirmed failure remains protected');
+  // Stopped (or crashed) before sending: restart keeps the draft, so it no longer blocks the update.
+  session.status = 'interrupted';
+  assert.equal(hasPendingWork(agents), false);
+  session.submission = { state: 'unconfirmed' };
+  assert.equal(hasPendingWork(agents), true, 'a stopped turn whose delivery is uncertain still blocks updates');
+});
+
+test('a restart keeps a draft that was stopped or cut off before sending, so the update exemption cannot lose it', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-draft-restart-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const file = path.join(directory, 'sessions.json');
+  const draft = id => ({ id, clientId: id, type: 'userMessage', pending: true, content: [{ type: 'text', text: 'Keep this draft' }] });
+  fs.writeFileSync(file, JSON.stringify({ version: 1, settings: { workspace: directory, access: 'workspace-write' }, sessions: [
+    { id: 'stopped', workspace: directory, status: 'interrupted', pendingMessage: draft('one'), submission: null, items: [], queue: [], routes: [] },
+    { id: 'crashed', workspace: directory, status: 'running', pendingMessage: draft('two'), submission: { state: 'sending' }, items: [], queue: [], routes: [] },
+  ] }));
+  const { Controller } = require('../src/controller.cjs');
+  const client = Object.assign(new EventEmitter(), { start: async () => {}, call: async () => ({}), close() {} });
+  const controller = new Controller(file, directory, client, { cancel() {}, close() {}, jev: null });
+  t.after(() => controller.close());
+  for (const session of controller.data.sessions) {
+    assert.equal(session.status, 'interrupted', session.id);
+    assert.equal(session.submission, null, session.id);
+    assert.equal(session.pendingMessage.content[0].text, 'Keep this draft', session.id);
+  }
 });
 
 test('runner recovery keeps verified original stores once and refuses a broken backup', t => {
