@@ -1073,15 +1073,42 @@ test('Hub starts reviews in the requested repository and enforces workspace acce
 });
 
 test('Hub honors explicit worker model and effort without changing its chat model', async t => {
-  const { hub, session, replies, send } = await setup(t);
+  const { hub, session, replies, calls, send } = await setup(t);
   replies.push(action('agent_work', { name: 'Specific', task: 'Review the project.', mode: 'terra-light', effort: 'low' }));
   await send('Use Terra with low effort for the review');
   const worker = hub.resolveWorker(hub.data.agents[0].mode);
   assert.equal(worker.model, 'gpt-5.6-terra'); assert.equal(worker.effort, 'low');
   assert.equal(hub.data.settings.mode, 'terra-light'); assert.equal(session.hubWorker, hub.data.agents[0].id);
-  replies.push(action('agent_work', { name: 'Invalid', task: 'Review.', mode: 'terra-light', effort: 'unsupported' }));
-  await assert.rejects(send('Another review'), /Unsupported effort/);
-  assert.equal(hub.data.agents.length, 1);
+  // A rejected model choice goes back to Hub once, with the choices; nothing is created until a valid one arrives.
+  replies.push(action('agent_work', { name: 'Invalid', task: 'Review.', mode: 'terra-light', effort: 'unsupported' }),
+    action('agent_work', { name: 'Corrected', task: 'Review.', mode: 'terra-light', effort: 'low' }));
+  await send('Another review');
+  const retry =JSON.parse(calls.find(call => call.request.prompt?.includes('Unsupported effort')).request.prompt).toolResults.at(-1);
+  assert.match(retry.result.error, /Unsupported effort/);
+  assert.ok(retry.result.choices.some(choice => choice.mode !== 'auto'), 'Hub sees the available models');
+  assert.deepEqual(hub.data.agents.map(profile => profile.name), ['Specific', 'Corrected']);
+  assert.equal(session.error, null);
+
+  // A second rejection ends the turn with a reply instead of failing it or trying again.
+  replies.push(action('agent_work', { name: 'Invalid', task: 'Review.', mode: 'terra-light', effort: 'unsupported' }),
+    action('agent_work', { name: 'Missing', task: 'Review.', mode: 'codex:no-such-model:low' }));
+  await send('A third review');
+  assert.match(session.items.at(-1).text, /^Model unavailable\..*Nothing was sent\.$/);
+  assert.equal(hub.data.agents.length, 2);
+  assert.equal(session.error, null);
+});
+
+test('a batch with an unavailable model reserves nothing; Hub corrects it once and exactly one batch is sent', async t => {
+  const { root, hub, session, agents, replies, send } = await setup(t);
+  projectFixture(root, session);
+  session.access = 'danger-full-access';
+  replies.push(action('agent_work', { name: 'Reviewer', count: 2, task: 'Review.', mode: 'codex:no-such-model:low' }),
+    action('agent_work', { name: 'Reviewer', count: 2, task: 'Review.' }));
+  await send('Two independent reviews');
+  assert.equal(hub.data.agents.length, 2);
+  const batches = new Set(Object.values(agents.workspaces.records).map(record => record.batchId));
+  assert.equal(batches.size, 1, 'the rejected batch reserved no project copies');
+  assert.equal(session.items.find(item => item.hubBatch)?.hubBatch.dispatched, 2);
 });
 
 test('Hub dispatches four configured reviewers in two background slots and waits for every result', async t => {

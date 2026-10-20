@@ -1796,6 +1796,33 @@ class Agents extends EventEmitter {
     return { agentId: target.agentId, name, access: args.access, status: 'updated' };
   }
 
+  // The exact worker mode for a requested model and effort. Its errors are marked retryable: nothing has been created or
+  // sent when they are thrown, so Hub may correct the request.
+  agentMode(mode, effort) {
+    const retry = message => Object.assign(new Error(message), { retryable: true });
+    if (typeof mode !== 'string' || !mode)
+      throw retry('Unknown model selection. Use agent_models for available choices.');
+    if (mode === 'auto') {
+      if (effort !== undefined)
+        throw retry('Auto chooses its own effort. Select a model from agent_models to set an exact effort.');
+      return 'auto';
+    }
+
+    let worker = this.primary.resolveWorker(mode);
+    if (!worker || !this.primary.available(worker)) {
+      this.primary.log.warn('Requested agent model is unavailable', { mode, resolved: worker?.id || null, enabled: worker?.enabled ?? null,
+        codexModels: this.primary.models.length, account: !!this.primary.account });
+      throw retry('Model unavailable. Use agent_models for available choices.');
+    }
+    if (effort !== undefined) {
+      worker = this.primary.catalog().find(p => p.worker && p.provider === worker.provider && p.model === worker.model &&
+        (p.effort || 'default') === effort && this.primary.available(p));
+      if (!worker)
+        throw retry('Unsupported effort for this model. Use agent_models for supported efforts.');
+    }
+    return worker.id;
+  }
+
   tool(controller, session, name, args, temporaryBatch = null) {
     if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Invalid agent arguments.');
     if (session.delegation?.cancelled && !session.delegation.delivered && !['agents_list', 'agent_models', 'agent_read_context'].includes(name)) throw new Error('This assignment was stopped. Wait for a new user request.');
@@ -1842,19 +1869,7 @@ class Agents extends EventEmitter {
     }
     if (name === 'agent_create' && Object.keys(args).every(key => ['name', 'instructions', 'mode', 'effort'].includes(key))) {
       if (this.closing) throw new Error('The app is closing.');
-      let mode = args.mode === undefined ? 'auto' : args.mode;
-      if (typeof mode !== 'string' || !mode) throw new Error('Unknown model selection. Use agent_models for available choices.');
-      if (mode === 'auto') {
-        if (args.effort !== undefined) throw new Error('Auto chooses its own effort. Select a model from agent_models to set an exact effort.');
-      } else {
-        let worker = this.primary.resolveWorker(mode);
-        if (!worker || !this.primary.available(worker)) throw new Error('Model unavailable. Use agent_models for available choices.');
-        if (args.effort !== undefined) {
-          worker = this.primary.catalog().find(p => p.worker && p.provider === worker.provider && p.model === worker.model && (p.effort || 'default') === args.effort && this.primary.available(p));
-          if (!worker) throw new Error('Unsupported effort for this model. Use agent_models for supported efforts.');
-        }
-        mode = worker.id;
-      }
+      const mode = this.agentMode(args.mode === undefined ? 'auto' : args.mode, args.effort);
       const batch = temporaryBatch || (session.delegation && this.workspaces.record(session.delegation.projectScope || session.workspace)?.batchId) || null;
       return this.saveAgent({ ...args, mode, workspace: session.workspace, access: session.access }, batch);
     }

@@ -108,7 +108,10 @@ module.exports = {
           cursor = page.nextCursor || null;
         } while (cursor && models.length < 500);
         delete this.codex.error;
-      } catch (error) { account = null; models = []; this.codex.error = error.message; }
+      } catch (error) {
+        account = null; models = []; this.codex.error = error.message;
+        this.log.warn('Codex account or model load failed; Codex models are unavailable until the next refresh', { message: error.message });
+      }
     } else if (this.codex) this.codex.signedIn = false;
     // ChatGPT usage windows (best effort; other account types report none).
     if (account?.type === 'chatgpt') {

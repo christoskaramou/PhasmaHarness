@@ -181,6 +181,9 @@ module.exports = {
     if ((request.attempts || 0) >= 3) throw new Error('This request has already sent three agent tasks. Review the remaining work before continuing.');
     const count = args.count ?? 1;
     if (!Number.isInteger(count) || count < 1 || count > 10) throw new Error('Choose between one and ten workers.');
+    // A model or effort for new workers is checked before anything is reserved, created or sent.
+    if (!args.agentId && (args.mode !== undefined || args.effort !== undefined))
+      this.agents.agentMode(args.mode === undefined ? 'auto' : args.mode, args.effort);
     this.agents.checkDelegationCapacity(this, session, count);
     if (count > 1) {
       if (args.agentId || request.batch) throw new Error('A batch needs new workers; a returned result cannot start another batch.');
@@ -285,7 +288,7 @@ module.exports = {
         note: 'Answer as the Hub unless a task needs a helper. Group membership grants no additional access. Do not broadcast messages to every member.' };
       context.timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
       let reply;
-      let continued = false;
+      let continued = false, modelRetried = false;
       if (agentReply && agentResult && !agentReplyCancelled) {
         const { decision, usage } = await this.smartRouter.complete({ instructions: COMPLETION_INSTRUCTIONS,
           prompt: JSON.stringify({ originalRequest: context.originalRequest, ...(request.batch ? { assignment: 'This worker owes one full independent instance of the requested task. Harness handles creating the other workers and checking their results; do not require this worker to create or complete its peers.' } : {}), workerStatus: agentResult.status, workerResult: text, verification: agentResult.verification, resultTruncated: !!agentResult.truncated }), schema: COMPLETION_SCHEMA, timeoutMs: 120000 }, choice, abort);
@@ -347,7 +350,21 @@ module.exports = {
         const args = actionArguments(decision.action), tool = decision.action.tool;
         if (agentReplyCancelled && tool === 'agent_work') throw new Error('The cancelled task will not restart automatically. Send a new request to resume it.');
         if (context.batchResults && tool === 'agent_work') throw new Error('This batch has returned all results. Send a new request to start more work.');
-        const result = await this.coordinatorTool(session, tool, args, images, abort, request, pendingAgents);
+        let result;
+        try {
+          result = await this.coordinatorTool(session, tool, args, images, abort, request, pendingAgents);
+        } catch (error) {
+          // A rejected model choice sent nothing: Hub gets the error and the choices once; a second rejection ends the turn.
+          if (!error.retryable || abort.signal.aborted)
+            throw error;
+          if (modelRetried) {
+            reply = `${error.message} Nothing was sent.`;
+            break;
+          }
+          modelRetried = true;
+          context.toolResults.push({ tool, result: { error: error.message, choices: this.agents.tool(this, session, 'agent_models', {}) } });
+          continue;
+        }
         abort.signal.throwIfAborted();
         context.toolResults.push({ tool, result });
         if (tool === 'routine') { reply = result.summary; break; }
