@@ -2503,18 +2503,28 @@ app.whenReady().then(async () => {
     threshold: comparisons.THRESHOLD, picks: {}, runs: [compareRun('A', false, { corrections: 1, restored: ['check.cjs'], tokens: 155000, activeMs: 30000 }), compareRun('B', true)] };
   comparisons.finish(compareRecord);
   controller.data.comparisons = { [compareRecord.id]: compareRecord };
-  ownerChat.items.push({ id: 'compare-request', type: 'userMessage', content: [{ type: 'text', text: 'Compare that instruction change.' }],
-    hubComparison: comparisons.publicView(compareRecord) });
+  ownerChat.items.push({ id: 'compare-request', type: 'userMessage', content: [{ type: 'text', text: 'yes' }], comparisonId: compareRecord.id,
+    hubBatch: { id: 'ui-compare-batch', count: 2, dispatched: 2 } });
+  ownerChat.items.push({ id: 'compare-finished', type: 'agentMessage', phase: 'final_answer', localOnly: true,
+    text: 'Both runs are back. Which did better? Pick below, or reveal.', hubComparison: comparisons.publicView(compareRecord) });
   const pickCalls = [];
   ipcMain.handle('comparisonPick', (_event, ...args) => {
     pickCalls.push(args);
     return controller.comparisonPick(...args);
   });
-  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
+  // The comparison's own batch report stays out of the chat and the activity bar; the card replaces it.
+  const compareView = agents.snapshot();
+  compareView.batchReports['ui-compare-batch'] = { id: 'ui-compare-batch', sessionId: ownerChat.id, requestId: 'compare-request', requested: 2,
+    dispatched: 2, returned: 2, summary: 'COMPARISON BATCH', entries: [] };
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(compareView) + '); true');
+  assert.equal(await window.webContents.executeJavaScript('!!document.querySelector(\'.batch-report[data-batch-id="ui-compare-batch"]\')'), false);
+  assert.doesNotMatch(await window.webContents.executeJavaScript('document.querySelector("#job-activity-summary").textContent'), /COMPARISON BATCH/);
   const cardText = () => window.webContents.executeJavaScript('document.querySelector(".comparison-card")?.textContent || ""');
   let card = await cardText();
-  assert.match(card, /Comparison · 2 runs on gpt-5\.6-terra · low · Finished · pick the better run or reveal/);
-  assert.match(card, /A is better.*B is better.*No preference.*Reveal without picking/s);
+  assert.match(card, /Comparison · 2 runs on gpt-5\.6-terra · low · Waiting for your pick/);
+  assert.match(card, /Which run did better\? The change is revealed after your pick\.A is better.*B is better.*No preference.*Reveal without picking/s);
+  assert.equal(await window.webContents.executeJavaScript('!!document.querySelector(".comparison-card")?.closest(".assistant")'), true,
+    'the card sits under Bot\'s message');
   assert.doesNotMatch(card, /with the change|current setup|Verdict/, 'nothing tells the runs apart before the pick');
   assert.match(card, /restored before its checks: check\.cjs/);
   await window.webContents.executeJavaScript(`document.querySelector('.comparison-card').scrollIntoView({ block: 'start', behavior: 'instant' });

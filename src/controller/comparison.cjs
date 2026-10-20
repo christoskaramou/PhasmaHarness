@@ -76,7 +76,8 @@ module.exports = {
       lessonBlock: this.lessonsFor(args.workspace, args.task, checks),
       runs: comparisons.planRuns(args.pairs), picks: {}, sessionId: session.id, requestId: request.id };
     (this.data.comparisons ||= {})[record.id] = record;
-    message.hubComparison = comparisons.publicView(record);
+    // Marks the confirming message, so the chat hides this batch's report: the comparison card replaces it.
+    message.comparisonId = record.id;
     this.save();
 
     let result;
@@ -85,44 +86,50 @@ module.exports = {
       result = await this.coordinatorTool(session, 'agent_work', { task: args.task, count: args.pairs * 2, name: 'Compare',
         mode: args.mode, workspace: args.workspace }, images, abort, { ...request, text: args.task, comparison: { id: record.id } });
     } catch (error) {
-      Object.assign(record, { state: 'failed', error: error.message });
-      message.hubComparison = comparisons.publicView(record);
+      delete this.data.comparisons[record.id];
       this.save();
       throw error;
     }
 
     record.runs.forEach((run, index) => Object.assign(run, { name: result.agents[index]?.agent || null, jobId: result.agents[index]?.jobId || null }));
     record.batchId = message.hubBatch?.id || null;
-    message.hubComparison = comparisons.publicView(record);
     this.save();
-    return { reply: `Started the comparison: ${args.pairs * 2} runs on ${record.model}. Each run reports back here; ` +
-      'then pick the better run in the comparison card, or reveal the result.' };
+    return { reply: `Started the comparison: ${args.pairs * 2} runs on ${record.model}. The card below updates as they finish.`, comparisonId: record.id };
   },
 
-  // A returned run is measured without a model call; the last one finishes the comparison.
+  // A returned run is measured without a model call. Until the last one the card updates quietly; the last one
+  // finishes the comparison and asks for the pick. `quiet` replies are not shown in the chat.
   collectComparison(session, request, cancelled) {
     const record = this.data.comparisons?.[request.comparison.id];
     const run = record?.runs.find(entry => entry.index === request.batch?.index);
     if (!record || !run || record.state !== 'running')
-      return 'A run returned for a comparison that is no longer running; it was not compared.';
+      return { reply: 'A run returned for a comparison that is no longer running; it was not compared.' };
 
     const item = session.items.findLast(entry => entry.type === 'agentResult' && entry.requestId === request.id && entry.batch?.index === run.index);
     run.result = comparisons.runResult(item, cancelled);
-    const message = session.items.find(entry => entry.id === request.id);
     const returned = record.runs.filter(entry => entry.result).length;
     if (returned < record.runs.length) {
-      if (message)
-        message.hubComparison = comparisons.publicView(record);
+      this.comparisonCard(session, record);
       this.save();
-      return `Comparison: ${returned}/${record.runs.length} runs returned. Waiting for the rest.`;
+      return { reply: `Comparison: ${returned}/${record.runs.length} runs returned.`, quiet: true };
     }
 
     comparisons.finish(record);
     this.saveComparisonRecord(record);
-    if (message)
-      message.hubComparison = comparisons.publicView(record);
     this.save();
-    return 'The comparison finished. Pick the better run in its card, or reveal the result.';
+    const ask = record.pairs > 1 ? `All ${record.runs.length} runs are back. Which did better in each pair?` : 'Both runs are back. Which did better?';
+    return { reply: `${ask} Pick below, or reveal.`, comparisonId: record.id };
+  },
+
+  // The card lives under the newest comparison message: given a new message it moves there, otherwise it updates in place.
+  comparisonCard(session, record, target = null) {
+    const holder = session.items.find(item => item.hubComparison?.id === record.id);
+    if (holder && target && holder !== target)
+      delete holder.hubComparison;
+
+    const item = target || holder;
+    if (item)
+      item.hubComparison = comparisons.publicView(record);
   },
 
   saveComparisonRecord(record) {

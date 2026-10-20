@@ -1786,6 +1786,10 @@ test('Hub compare asks first, runs both copies from one snapshot with only the c
     const record = Object.values(hub.data.comparisons)[0];
     assert.equal(record.state, 'running');
     assert.equal(hub.data.agents.length, 2);
+    const started = session.items.at(-1);
+    assert.match(started.text, /^Started the comparison: 2 runs on .+\. The card below updates as they finish\.$/);
+    assert.equal(started.hubComparison.state, 'running', 'the card sits under the start message');
+    assert.ok(session.items.find(item => item.text === 'yes' || item.content?.[0]?.text === 'yes').comparisonId, 'its batch report is replaced by the card');
     assert.equal(JSON.stringify(agents.snapshot()).includes('"variant"'), false, 'the change mapping stays out of the renderer state');
     const runs = record.runs.map(run => {
       const profile = hub.data.agents.find(agent => agent.name === run.name), worker = agents.execution(profile.id);
@@ -1818,6 +1822,9 @@ test('Hub compare asks first, runs both copies from one snapshot with only the c
     const changed = runs.find(({ run }) => run.variant), current = runs.find(({ run }) => !run.variant);
     fs.writeFileSync(path.join(agents.conversation(changed.worker).workspace, 'done.txt'), 'done');
     await finish(changed.worker, 'Created done.txt.');
+    await until(() => started.hubComparison.runs.some(run => run.result) && !hub.busy, 20000);
+    assert.equal(session.items.filter(item => item.hubComparison).length, 1, 'progress updates the card in place');
+    assert.equal(session.items.filter(item => !item.internal && /runs returned/.test(item.text || '')).length, 0);
     const currentWork = agents.conversation(current.worker);
     fs.writeFileSync(path.join(currentWork.workspace, 'check.cjs'), 'process.exit(0);');
     const turns = await finish(current.worker, 'Made the check pass.');
@@ -1826,10 +1833,15 @@ test('Hub compare asks first, runs both copies from one snapshot with only the c
     await finish(current.worker, 'Created done.txt.');
     await until(() => record.state === 'finished' && !hub.busy, 20000);
 
-    const card = session.items.find(item => item.hubComparison).hubComparison;
+    const holders = session.items.filter(item => item.hubComparison);
+    assert.deepEqual(holders, [session.items.at(-1)], 'the card moved down to the newest comparison message');
+    assert.equal(session.items.at(-1).text, 'Both runs are back. Which did better? Pick below, or reveal.');
+    const visible = session.items.filter(item => !item.internal);
+    assert.equal(visible.filter(item => item.type === 'agentResult' || item.agentReply).length, 0, 'no per-run receipts or handoffs in the chat');
+    assert.equal(visible.filter(item => /runs returned/.test(item.text || '')).length, 0);
+    const card = holders[0].hubComparison;
     assert.equal(card.revealed, false);
     assert.equal(card.verdict, undefined);
-    assert.match(session.items.at(-1).text, /comparison finished/i);
     const shown = label => card.runs.find(run => run.label === label).result;
     assert.deepEqual(shown(current.run.label).restored, ['check.cjs']);
     assert.equal(shown(current.run.label).corrections, 1);

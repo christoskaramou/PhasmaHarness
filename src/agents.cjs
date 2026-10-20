@@ -1140,8 +1140,9 @@ class Agents extends EventEmitter {
         budgetSummary, verification, workspace: session.workspace,
         requestId: request.id,
         batch: job.originalRequest?.batch || null, batchAttempt: job.originalRequest?.attempts || 1,
-        // A comparison measures corrections and checks every attempt's setup (src/comparisons.cjs).
-        ...(job.originalRequest?.comparison ? { corrections: task?.corrections ?? null,
+        // A comparison measures corrections and checks every attempt's setup (src/comparisons.cjs); its card shows
+        // the run, so this receipt stays out of the chat.
+        ...(job.originalRequest?.comparison ? { internal: true, corrections: task?.corrections ?? null,
           attempts: (task?.attempts || []).map(attempt => ({ setup: attempt.setup || null, restored: attempt.restored || [], diff: attempt.evidence?.diff || null })) } : {}),
         ...(hasRoom || superseded ? { notified: true } : { pendingReply: reply }) });
       if (hasRoom) (source.queue ||= []).push(reply);

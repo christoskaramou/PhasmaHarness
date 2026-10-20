@@ -1463,7 +1463,8 @@ function renderJobActivity(session) {
   const replies = queued.filter(message => message.agentReply && !message.agentMail).length;
   const mail = queued.filter(message => message.agentMail).length;
   const owner = state.agents?.find(agent => agent.id === selectedAgent)?.name || 'Hub';
-  const batch = Object.values(fleetState?.batchReports || {}).findLast(report => report.sessionId === session?.id);
+  const comparisonBatches = new Set((session?.items || []).filter(item => item.comparisonId && item.hubBatch).map(item => item.hubBatch.id));
+  const batch = Object.values(fleetState?.batchReports || {}).findLast(report => report.sessionId === session?.id && !comparisonBatches.has(report.id));
   const key = JSON.stringify([session?.id, jobs, runs, downloads, replies, mail, owner, batch?.id, batch?.summary]);
   if (key === jobActivityKey) return;
   jobActivityKey = key;
@@ -1592,7 +1593,8 @@ function renderVerification(evidence) {
 // A two-run comparison (src/comparisons.cjs): runs by label only until the user picks or reveals.
 function renderComparison(view, sessionId, opened = true) {
   const details = element('details', 'batch-report comparison-card'); details.open = opened;
-  const states = { running: 'Running', finished: view.revealed ? 'Revealed' : 'Finished · pick the better run or reveal', failed: 'Did not start' };
+  const returned = view.runs.filter(run => run.result).length;
+  const states = { running: `Running · ${returned} of ${view.runs.length} back`, finished: view.revealed ? 'Revealed' : 'Waiting for your pick', failed: 'Did not start' };
   const targets = { bot: 'worker instructions', project: 'project INSTRUCTIONS.md' };
   details.append(element('summary', '', `Comparison · ${view.pairs * 2} runs on ${view.model} · ${states[view.state] || view.state}`),
     element('p', '', `Task: ${view.task}`), element('p', '', `Change to the ${targets[view.target]}: ${view.change}`));
@@ -1649,6 +1651,7 @@ function renderComparison(view, sessionId, opened = true) {
       if (verdict)
         details.append(element('p', '', `${verdict.verdict}: ${verdict.reason}.${pick ? ` Your pick: ${pick}.` : ''}`));
     } else if (view.state === 'finished') {
+      details.append(element('p', 'comparison-ask', `${view.pairs > 1 ? `Pair ${pair}: which` : 'Which'} run did better? The change is revealed after your pick.`));
       const picks = element('div', 'comparison-picks');
       for (const [pick, label] of [['A', 'A is better'], ['B', 'B is better'], ['none', 'No preference']]) {
         const button = element('button', 'compact-action', label); button.type = 'button';
@@ -1768,7 +1771,8 @@ function renderMessages(session) {
     let entry = messageNodes.get(item.id);
     const selected = item.type === 'userMessage' ? session.routes.find(r => r.messageId === (item.clientId || item.id)) : null;
     const who = item.type === 'userMessage' ? item.routineRun ? 'Routine · ' + item.routineRun.name : 'You' : writer(item, session);
-    const batch = item.hubBatch && fleetState?.batchReports?.[item.hubBatch.id];
+    // A comparison's batch report is replaced by its comparison card.
+    const batch = item.hubBatch && !item.comparisonId && fleetState?.batchReports?.[item.hubBatch.id];
     const signature = JSON.stringify([item, selected, who, batch]);
     if (entry?.signature === signature) continue;
     if (!entry) {
@@ -1859,7 +1863,7 @@ function renderMessages(session) {
       };
       node.replaceChildren(bubble, actions);
       if (user && batch) node.append(renderBatchReport(batch, batchOpened));
-      if (user && item.hubComparison) node.append(renderComparison(item.hubComparison, session.id, comparisonOpened));
+      if (item.hubComparison) node.append(renderComparison(item.hubComparison, session.id, comparisonOpened));
       if (user) {
         const images = item.content.filter(part => part.type === 'image');
         images.forEach((part, index) => {

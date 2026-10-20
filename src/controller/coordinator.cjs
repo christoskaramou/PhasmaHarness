@@ -15,7 +15,7 @@ const HUB_CREATE = { ...CREATE,
   inputSchema: { ...CREATE.inputSchema, required: ['instructions'], properties: { ...CREATE.inputSchema.properties,
     names: { type: 'array', items: { type: 'string', minLength: 1, maxLength: 60 }, description: 'Two to ten distinct names.' } } } };
 // Hub only: workers never get it, so a comparison cannot start another one.
-const COMPARE = { name: 'compare', description: 'Only when the user explicitly asks to compare an instruction change: run the same task in identical project copies, one run with the change and one without, then Harness measures which did better. target "bot" adds the change to the worker instructions; "project" adds it to the project INSTRUCTIONS.md. Needs a pinned model from agent_models (mode, optional effort) and configured checks. pairs is 1 unless the user asks for repeats (up to 3). The first call only proposes; Harness asks the user to confirm. When pendingComparison is present and the latest user message confirms it, call compare with only confirm=true.',
+const COMPARE = { name: 'compare', description: 'Only when the user explicitly asks to compare an instruction change: run the same task in identical project copies, one run with the change and one without, then Harness measures which did better. target "bot" adds the change to the worker instructions; "project" adds it to the project INSTRUCTIONS.md. Needs a pinned model from agent_models (mode, optional effort) and configured checks. Harness always runs those checks itself to score the runs; a request that workers not run checks applies only to the workers, so pass it on in task and do not ask about it. pairs is 1 unless the user asks for repeats (up to 3). The first call only proposes; Harness asks the user to confirm. When pendingComparison is present and the latest user message confirms it, call compare with only confirm=true.',
   inputSchema: { type: 'object', properties: { task: { type: 'string', maxLength: 14000 }, change: { type: 'string', maxLength: 4000 },
     target: { type: 'string', enum: ['bot', 'project'] }, pairs: { type: 'integer', minimum: 1, maximum: 3 }, workspace: { type: 'string' },
     mode: { type: 'string' }, effort: { type: 'string' }, confirm: { type: 'boolean' } }, additionalProperties: false } };
@@ -292,6 +292,9 @@ module.exports = {
       const mailRequest = mailedJob?.ownerRequest || mailedJob?.originalRequest;
       const request = agentReply ? agentResult?.request || mailRequest || session.hubRequest : { id: message.id, text };
       if (!agentReply) session.hubRequest = request;
+      // A comparison run's handoff stays out of the chat; the comparison card shows every run.
+      if (agentReply && agentResult?.request?.comparison)
+        message.internal = true;
       // A proposed agent list can be confirmed only by the next user message; worker results neither confirm nor clear it.
       const pendingAgents = agentReply ? null : session.pendingAgents || null;
       const pendingComparison = agentReply ? null : session.pendingComparison || null;
@@ -313,11 +316,13 @@ module.exports = {
       if (session.group) context.group = { name: session.title, owner: this.agents.hubName(), members: groupChats.members(this.agents, session),
         note: 'Answer as the Hub unless a task needs a helper. Group membership grants no additional access. Do not broadcast messages to every member.' };
       context.timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      let reply;
+      let reply, comparison = null;
       let continued = false, modelRetried = false;
       // Comparison runs skip the completion check and its follow-ups, which would give one run extra turns.
-      if (agentReply && agentResult && request?.comparison)
-        reply = this.collectComparison(session, request, !!agentReplyCancelled);
+      if (agentReply && agentResult && request?.comparison) {
+        comparison = this.collectComparison(session, request, !!agentReplyCancelled);
+        reply = comparison.reply;
+      }
 
       if (agentReply && agentResult && !agentReplyCancelled && !request?.comparison) {
         const { decision, usage } = await this.smartRouter.complete({ instructions: COMPLETION_INSTRUCTIONS,
@@ -400,6 +405,7 @@ module.exports = {
         if (tool === 'routine') { reply = result.summary; break; }
         if (tool === 'compare') {
           reply = result.reply;
+          comparison = result;
           break;
         }
 
@@ -426,7 +432,14 @@ module.exports = {
           : `Sent the task to **${result.agent}**. I’ll bring the result back here.`; break; }
       }
       if (!reply) throw new Error('Hub reached its action limit. Check the agent list before continuing.');
-      session.items.push({ id: randomUUID(), turnId, type: 'agentMessage', phase: 'final_answer', text: reply, localOnly: true, routeLabel: choice.label || choice.model, createdAt: Date.now() });
+      // A comparison's progress only updates its card; its start and finish messages carry the card down with them.
+      if (!comparison?.quiet) {
+        const item = { id: randomUUID(), turnId, type: 'agentMessage', phase: 'final_answer', text: reply, localOnly: true, routeLabel: choice.label || choice.model, createdAt: Date.now() };
+        session.items.push(item);
+        const record = comparison?.comparisonId && this.data.comparisons?.[comparison.comparisonId];
+        if (record)
+          this.comparisonCard(session, record, item);
+      }
       session.status = 'completed';
     } catch (error) {
       session.status = abort.signal.aborted ? 'interrupted' : 'failed';
