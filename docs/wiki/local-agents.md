@@ -272,6 +272,40 @@ Verified 2026-10-20:
   - **Unexplained failure (`gIeZex`):** one run failed at dispatch with "Sent 0/4 agent tasks. Model unavailable" (`agent_create` → `primary.available`). The start-of-run availability assert had passed. Hub calls use ephemeral or kept router threads, so a missing rollout does not mean no Hub turn. The cause is still unverified; see the Hub coordination section for the logging and the one retry added afterwards.
 - **Not verified:** workspace-write access, which asks "without the Codex sandbox" approval for each recipe check; a packaged install; and a project whose `agent_config.json` already existed, live (unit-tested only).
 
+## Release review since v0.2.0
+
+Gate 24 code review (2026-10-20): four read-only reviewers covered every commit from `8c38c59` to `a3fcbb5`. The reply-suggestion and game-check commits had their own review earlier.
+- **Tested both ways:** each fix's new test was run against an archived copy of `HEAD` (`ee94d93`/`a3fcbb5`), where it fails, and it passes with the fix. This covers the Claude, Cursor, DeepSeek, API-loop, Hub-admission, updater, update-gate and settings-tools fixes, plus the two dispatch tests in Hub coordination.
+- **Not tested both ways:**
+  - the approval-focus smoke check was not run against `HEAD`;
+  - the updater's agent message wording and the closing-path `changed()` in settings tools have no test;
+  - the Muse fix has no test.
+- **Guard only:** "a restart keeps a draft …" (`tests/runner.test.cjs`) passes on `HEAD` too. It pins the restart behavior that the update-gate exemption relies on.
+- **Whose code:** the updater, update-gate (`src/runner.cjs`) and settings-tools (`src/settings-tools.cjs`) fixes change Codex's code, as do the approval dialog and Claude live input from the v0.2.1 work. The DeepSeek, Cursor, API-loop, Muse and Hub-admission fixes change Claude's Send now and restart commits (`ca06226`, `faadf3c`).
+- **Approvals:** a request that opens on its own focuses Decline (`ui/app.js` `renderRequest`). Opening one with Review keeps Enter-to-allow. Smoke: "Approvals that open on their own focus Decline".
+- **Claude live input:** a follow-up that is never echoed, or whose write fails, leaves `deliveries` after `DELIVERY_MS` (30 s), so a finished turn closes stdin instead of hanging with a live process. Send now on a Claude turn without live input (it is finishing) leaves the message queued instead of restarting and dropping the saved Claude session.
+- **DeepSeek and Cursor Send now:** after cleanup, `steer` refuses to prompt if the run already ended (Stop or failure during cleanup). The message then stays queued instead of counting as delivered on a closing connection.
+- **API loop:** a follow-up counts as delivered only after the model call carrying it succeeds. If that call fails it is rejected with "connection closed", so it stays queued as uncertain.
+- **Restart:** Hub-run tracked jobs now save `admittedAt` too (`Controller.markAdmitted`, called by `send` and `sendCoordinator`), so a crash cannot replay them.
+- **Muse:** a follow-up acknowledged after the run stopped watching is rejected instead of locking the chat's queue. This one has no test: the window is too narrow for the fixture.
+- **Updater:**
+  - a check that returns during a download keeps the download state;
+  - an agent's confirmation request resets when the release version changes;
+  - the agent message no longer claims installation waits for work;
+  - a draft stopped or crashed before sending no longer blocks updates (`runner.cjs` `stoppedDraft`; restart keeps it).
+- **Settings tools:**
+  - a confirmation expires after 2 minutes, and an answer after the asking turn ended applies nothing. Known limit: the desktop dialog (`confirmations.cjs`) cannot be closed per request, so after expiry it stays visible and clicking it does nothing. The browser-access confirmation (`remote.cjs` `ask`, also 120 s) behaves the same way;
+  - reading `wikiFolder` uses `location()`, which creates nothing and returns null for a moved workspace;
+  - the undocumented `models` action `model` is removed.
+
+Open, not changed:
+- **Live forwarding from the queue:** while a turn that was itself sent from the queue runs, `queueSending` stays true, so newer queued messages wait for the next turn instead of joining live. Clearing the flag early risks sending the same message twice, so it waits for a design that removes the message from the queue at acceptance.
+- **Approval dialog exits:** the "Stop task" button was removed from the approval and question dialog in `8c38c59`, and Esc is blocked there. Whether that was intended is unconfirmed.
+- **Hub Send on a fresh profile:** it can be disabled with no reason shown when no Hub model is remembered (`showMode('auto')` maps to `hubMode`).
+- **Message accessibility:** every message has `tabIndex=0` with no role, and the speaker label shows only on hover.
+- **Agent access changes:** `agent_set_access` changes another agent's access without a confirmation. It is capped (`Agents.manageAgent`, checked 2026-10-20): never above the caller's own conversation access, only during an active turn, and another workspace needs Full access. So it cannot escalate past the caller; a Full-access agent can only hand on what it already has.
+- **Claude cost:** cost may be double-counted if `total_cost_usd` is already cumulative (unverified).
+
 ## Concurrent host checks
 
 Verified 2026-10-19: a healthy host check in another controller no longer rejects queued assignments or unrelated foreground chat. Its execution block is exempted from cross-context admission only while the same live gate owns the matching process id, the provider connection is ready and the command still has an active check lease. The checking bot keeps its existing background slot and refuses competing work of its own. Completion, failure, timeout, Stop or loss of the gate ends that lease; persisted or unconfirmed execution still blocks new admission globally. No lease survives restart. The live Phasma run exposed this failure when two game checks caused the third and fourth queued jobs to fail before submission. A deterministic regression now holds a native check, keeps the third job queued, admits it when the second slot frees, allows a foreground question and then proves failed termination reinstates the global fence. Sources: `src/agents.cjs` (`acquireReady`, `updateCapacity`), `src/controller.cjs` (`blockedReason`), `src/controller/task-gate.cjs` (`runCheck`, `runLocalCheck`), `tests/agents.test.cjs`.
