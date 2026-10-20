@@ -251,6 +251,7 @@ module.exports = {
         const refusal = await this.agents.acquire(this, session);
         if (refusal) throw new Error(refusal.blocked || 'Hub stopped before routing.');
       }
+      this.markAdmitted(session);
       if (session.group && !agentReply) {
         const target = groupChats.recipient(this.agents, session, fileMessage?.displayText || text);
         if (target && target.id !== 'main') {

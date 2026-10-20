@@ -1098,6 +1098,21 @@ test('Hub honors explicit worker model and effort without changing its chat mode
   assert.equal(session.error, null);
 });
 
+test('a tracked job that runs on the Hub is marked admitted before its first model call, so a crash cannot replay it', async t => {
+  const { hub, session, send } = await setup(t);
+  session.delegation = { id: 'hub-job', admissionTracked: true, delivered: false };
+  let admittedAtFirstCall;
+  const complete = hub.smartRouter.complete;
+  hub.smartRouter.complete = async (...args) => {
+    admittedAtFirstCall ??= session.delegation.admittedAt;
+    return complete.apply(hub.smartRouter, args);
+  };
+  await send('Do the assigned work');
+  assert.equal(typeof admittedAtFirstCall, 'number');
+  const saved = JSON.parse(fs.readFileSync(hub.filename, 'utf8')).sessions.find(entry => entry.id === session.id);
+  assert.equal(saved.delegation.admittedAt, admittedAtFirstCall, 'saved to disk before the model call');
+});
+
 test('a batch with an unavailable model reserves nothing; Hub corrects it once and exactly one batch is sent', async t => {
   const { root, hub, session, agents, replies, send } = await setup(t);
   projectFixture(root, session);

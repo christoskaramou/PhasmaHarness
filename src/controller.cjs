@@ -637,12 +637,7 @@ class Controller extends EventEmitter {
       }
       if (this.stopping.has(id)) throw new Error('Turn was stopped before sending.');
 
-      // Saved before routing or any provider call: after a crash, only a job without it may resume as never started.
-      const delegation = session.delegation && !session.delegation.delivered ? session.delegation : null;
-      if (delegation?.admissionTracked && !delegation.admittedAt) {
-        delegation.admittedAt = Date.now();
-        this.save();
-      }
+      this.markAdmitted(session);
 
       if (useSmart) {
         let router = this.effectiveRouter();
@@ -1085,6 +1080,16 @@ class Controller extends EventEmitter {
     if (!message || message.error || message.uncertain || message.agentReply || message.routineRun || message.wikiTaskId ||
         (message.mode && message.mode !== this.liveInputMode)) return;
     this.queuedMessage(session.id, message.id, 'live').catch(() => {});
+  }
+
+  // Saved once the slot is granted, before routing or any provider call, on worker and Hub turns alike: after a crash
+  // only a job without it may resume as never started.
+  markAdmitted(session) {
+    const delegation = session.delegation && !session.delegation.delivered ? session.delegation : null;
+    if (delegation?.admissionTracked && !delegation.admittedAt) {
+      delegation.admittedAt = Date.now();
+      this.save();
+    }
   }
 
   recordLiveMessage(session, message, task) {
