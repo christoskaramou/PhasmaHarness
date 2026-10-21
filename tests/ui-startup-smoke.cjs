@@ -2896,6 +2896,103 @@ app.whenReady().then(async () => {
   assert.deepEqual({ ...suggestionUi.long, lines: suggestionUi.long.lines >= 2 }, { hidden: false, lines: true, sameBox: true, clipped: false }, 'a long suggestion grows the composer and stays aligned');
   assert.equal(suggestionOff, true, 'turning the setting off hides the suggestion');
   console.log('Reply suggestions show, follow the draft and accept with Right arrow passed');
+  phase = 'tips';
+  // The same tip shows on the new-chat screen and in the popup from the bulb next to Settings: arrows move between tips,
+  // "I got it" retires one, each new chat moves on, and Settings turns both off and on.
+  controller.data.settings.chatScanModel = undefined;
+  await window.webContents.executeJavaScript('localStorage.removeItem("harness.tips.gotIt"); applyState(' + JSON.stringify(agents.snapshot()) +
+    '); selectSession(null); new Promise(r => setTimeout(r, 100))');
+  const tips = () => window.webContents.executeJavaScript(`(() => {
+    const read = area => ({ hidden: area.hidden, text: area.querySelector('.tips-text')?.textContent || '', counters: area.querySelectorAll('.tips-count').length,
+      buttons: [...area.querySelectorAll('button')].map(button => button.textContent), ticks: area.querySelectorAll('input').length });
+    return { welcome: !document.querySelector('#welcome').hidden, icon: !document.querySelector('#tips-button').hidden,
+      card: read(document.querySelector('#tips')), popup: read(document.querySelector('#tips-popup')) };
+  })()`);
+  const click = selector => window.webContents.executeJavaScript(`document.querySelector(${JSON.stringify(selector)}).click(); true`);
+  const busyChat = agents.allControllers().flatMap(context => context.data.sessions).find(session => session.items.length && !session.archived);
+  // Opening a chat with messages and then a new chat moves on to another tip.
+  const seenTips = [];
+  let shownTips = await tips();
+  for (let index = 0; index < 3; index++) {
+    assert.deepEqual([shownTips.welcome, shownTips.icon, shownTips.card.hidden, shownTips.card.ticks], [true, true, false, 0]);
+    seenTips.push(shownTips.card.text);
+    await window.webContents.executeJavaScript(`selectSession(${JSON.stringify(busyChat.id)}).then(() => selectSession(null)).then(() => new Promise(r => setTimeout(r, 50)))`);
+    shownTips = await tips();
+  }
+  assert.equal(new Set(seenTips).size, seenTips.length, 'each new chat shows a different tip');
+  // The arrows go round every tip and back; with the checker off, its tip is one of them.
+  const allTips = async () => {
+    const texts = [(await tips()).card.text];
+    for (let index = 0; index < 80; index++) {
+      await click('#tips [aria-label="Next tip"]');
+      const text = (await tips()).card.text;
+      if (text === texts[0])
+        break;
+      texts.push(text);
+    }
+    return texts;
+  };
+  const everyTip = await allTips();
+  assert.ok(everyTip.length >= 40, `many tips apply (${everyTip.length})`);
+  for (let index = 0; index < everyTip.length && !/^Turn on the chat checker/.test(shownTips.card.text); index++) {
+    await click('#tips [aria-label="Next tip"]');
+    shownTips = await tips();
+  }
+  assert.match(shownTips.card.text, /^Turn on the chat checker/, 'the chat checker tip shows while the checker is off');
+  assert.deepEqual([shownTips.card.buttons, shownTips.card.counters], [['‹', '›', 'I got it'], 0], 'arrows and I got it, no counter and no Show tips tick');
+
+  // Hover shows the same tip in the popup; leaving hides it; a click keeps it open until a click outside.
+  await window.webContents.executeJavaScript("document.querySelector('#tips-button').dispatchEvent(new MouseEvent('mouseenter')); true");
+  shownTips = await tips();
+  assert.deepEqual([shownTips.popup.hidden, shownTips.popup.text, shownTips.popup.buttons], [false, shownTips.card.text, shownTips.card.buttons], 'the popup shows the same tip');
+  await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/tips.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript("document.querySelector('#tips-button').dispatchEvent(new MouseEvent('mouseleave')); new Promise(r => setTimeout(r, 350))");
+  assert.equal((await tips()).popup.hidden, true, 'leaving the bulb hides the popup');
+  await click('#tips-button');
+  await window.webContents.executeJavaScript("document.querySelector('#tips-button').dispatchEvent(new MouseEvent('mouseleave')); new Promise(r => setTimeout(r, 350))");
+  assert.equal((await tips()).popup.hidden, false, 'a click keeps it open');
+
+  // The popup's arrows move both views; I got it retires the tip everywhere.
+  await click('#tips-popup [aria-label="Next tip"]');
+  shownTips = await tips();
+  assert.ok(shownTips.popup.text && !/^Turn on the chat checker/.test(shownTips.popup.text), 'the arrow moved on');
+  assert.equal(shownTips.card.text, shownTips.popup.text, 'card and popup move together');
+  await click('#tips-popup [aria-label="Previous tip"]');
+  assert.match((await tips()).card.text, /^Turn on the chat checker/);
+  await click('#tips-popup .tips-got-it');
+  shownTips = await tips();
+  assert.ok(!/^Turn on the chat checker/.test(shownTips.card.text), 'I got it retires the tip');
+  const afterGotIt = await allTips();
+  assert.equal(afterGotIt.length, everyTip.length - 1, 'one tip fewer');
+  assert.ok(!afterGotIt.some(text => /^Turn on the chat checker/.test(text)), 'the retired tip never comes round again');
+  assert.match(await window.webContents.executeJavaScript('localStorage.getItem("harness.tips.gotIt")'), /checker/);
+  await window.webContents.executeJavaScript("document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })); true");
+  assert.equal((await tips()).popup.hidden, true, 'a click outside closes it');
+
+  // Settings → General → Show tips turns off the card and the bulb, and back on.
+  await window.webContents.executeJavaScript(`(async () => {
+    await document.querySelector('#settings').onclick();
+    const select = document.querySelector('#settings-show-tips');
+    select.value = 'off';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 200));
+  })()`);
+  assert.equal(controller.data.settings.showTips, false);
+  shownTips = await tips();
+  assert.deepEqual([shownTips.card.hidden, shownTips.icon], [true, false]);
+  await window.webContents.executeJavaScript(`(async () => {
+    const select = document.querySelector('#settings-show-tips');
+    select.value = 'on';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 200));
+    document.querySelector('#settings-dialog').close();
+    localStorage.removeItem('harness.tips.gotIt');
+  })()`);
+  assert.equal(controller.data.settings.showTips, true);
+  shownTips = await tips();
+  assert.deepEqual([shownTips.card.hidden, shownTips.icon], [false, true]);
+  console.log('Tips show on new chats and from the bulb, with arrows, I got it, hover and pinned popups, and the Settings option turns them off and on');
   await documents.close();
   await window.webContents.executeJavaScript(`document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
     document.documentElement.style.setProperty('--font-scale', '1');

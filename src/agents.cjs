@@ -620,7 +620,7 @@ class Agents extends EventEmitter {
     if (conversation && ['workspace', 'access'].some(key => values[key] !== undefined && values[key] !== conversation[key]) &&
         (controller.busy || controller.loading.size || conversation.queue?.length || conversation.delegationQueue?.some(job => !job.delivered) || this.pendingDelegations(conversation.id) || (conversation.delegation && !conversation.delegation.delivered))) throw new Error('Stop this agent before changing its workspace or access.');
     // The chat checker runs between turns, so picking it never waits for agents to stop.
-    const local = Object.keys(values).every(key => ['workspace', 'mode', 'access', 'backgroundUsageLimit', 'replySuggestions', 'chatScanModel'].includes(key));
+    const local = Object.keys(values).every(key => ['workspace', 'mode', 'access', 'backgroundUsageLimit', 'replySuggestions', 'chatScanModel', 'showTips'].includes(key));
     if (!local && this.busy) throw new Error('Stop all agents before changing shared settings.');
     if (agentId === 'main') this.primary.settings(values);
     else {
@@ -633,8 +633,13 @@ class Agents extends EventEmitter {
     }
     for (const c of this.allControllers()) {
       if (!c.busy) this.sync(c);
-      // A busy agent keeps its turn's settings; reply suggestions only affect the composer, so they apply at once.
-      else if (values.replySuggestions !== undefined) c.data.settings.replySuggestions = this.primary.data.settings.replySuggestions;
+      // A busy agent keeps its turn's settings; reply suggestions and tips only affect the window, so they apply at once.
+      else {
+        for (const key of ['replySuggestions', 'showTips']) {
+          if (values[key] !== undefined)
+            c.data.settings[key] = this.primary.data.settings[key];
+        }
+      }
     }
     this.updateConversation(controller, values);
     if (execution) this.updateConversation(execution, values);

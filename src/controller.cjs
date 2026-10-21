@@ -350,6 +350,12 @@ class Controller extends EventEmitter {
       if (typeof values.replySuggestions !== 'boolean') throw new Error('Invalid reply suggestions setting.');
       next.replySuggestions = values.replySuggestions;
     }
+    if (values.showTips !== undefined) {
+      if (typeof values.showTips !== 'boolean')
+        throw new Error('Invalid tips setting.');
+
+      next.showTips = values.showTips;
+    }
     if (values.backgroundUsageLimit !== undefined) {
       if (!Number.isInteger(values.backgroundUsageLimit) || values.backgroundUsageLimit < 1 || values.backgroundUsageLimit > 100)
         throw new Error('Background usage threshold must be a whole percentage from 1 to 100.');

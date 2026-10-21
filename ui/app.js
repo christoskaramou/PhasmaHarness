@@ -1359,6 +1359,7 @@ function render() {
     ? `\n\nSession totals: ${total.inputTokens.toLocaleString()} input (${total.cachedInputTokens.toLocaleString()} cached, ${Math.max(0, total.inputTokens - total.cachedInputTokens).toLocaleString()} uncached), ${total.outputTokens.toLocaleString()} output. Reasoning is included in output. Latest request input: ${usage.last?.inputTokens?.toLocaleString() ?? 'unknown'}. These are token counts, not dollars or allowance usage.`
     : '\n\nHover lists providers. Token totals appear after the provider reports usage.');
   renderProviderConnections();
+  window.HarnessTips?.render();
   renderJobActivity(session);
   renderMessages(session);
   renderRequest();
@@ -2738,6 +2739,7 @@ $('#settings').onclick = async () => {
   $('#settings-jev-compare').value = state.settings.jevCompare === true ? 'on' : 'off';
   $('#settings-wiki-check').value = state.settings.wikiAssessment === true ? 'on' : 'off';
   $('#settings-reply-suggestions').value = state.settings.replySuggestions === false ? 'off' : 'on';
+  $('#settings-show-tips').value = state.settings.showTips === false ? 'off' : 'on';
   renderChatScanModels();
   $('#settings-background-usage').value = String(state.settings.backgroundUsageLimit || 90);
   renderRoutingDetail();
@@ -3077,7 +3079,7 @@ async function saveSetting(control, key, value, agentId = selectedAgent) {
     if (agentId === selectedAgent) {
       const saved = key === 'routingModel' ? (state.settings.routing === 'jev' ? 'jev' : state.settings.routerPreset) : ((key === 'workspace' || key === 'access') ? current()?.[key] ?? state.settings[key] : state.settings[key])
         ?? { backgroundUsageLimit: 90, effortCap: 'high', contextRanking: 'local', toolSelection: 'off', jevQuickAnswers: true, jevCompare: false, wikiAssessment: false,
-          chatScanModel: 'off' }[key];
+          chatScanModel: 'off', showTips: true }[key];
       control.value = typeof value === 'boolean' ? (saved ? 'on' : 'off') : String(saved ?? '');
       control.onchange?.();
     }
@@ -3096,13 +3098,13 @@ const settingsFields = {
   'settings-router-preset': 'routingModel', 'settings-effort-cap': 'effortCap',
   'settings-context': 'contextRanking', 'settings-tools': 'toolSelection',
   'settings-quick': 'jevQuickAnswers', 'settings-jev-compare': 'jevCompare', 'settings-wiki-check': 'wikiAssessment',
-  'settings-reply-suggestions': 'replySuggestions', 'settings-chat-scan': 'chatScanModel',
+  'settings-reply-suggestions': 'replySuggestions', 'settings-chat-scan': 'chatScanModel', 'settings-show-tips': 'showTips',
 };
 $('#settings-form').addEventListener('change', event => {
   const control = event.target, key = settingsFields[control.id];
   if (!key) return;
   const value = key === 'backgroundUsageLimit' ? Number(control.value)
-    : ['jevQuickAnswers', 'jevCompare', 'wikiAssessment', 'replySuggestions'].includes(key) ? control.value === 'on' : control.value;
+    : ['jevQuickAnswers', 'jevCompare', 'wikiAssessment', 'replySuggestions', 'showTips'].includes(key) ? control.value === 'on' : control.value;
   saveSetting(control, key, value);
 });
 $('#settings-form').onsubmit = event => event.preventDefault();

@@ -16,6 +16,7 @@
   <script defer src="documents.js"></script>
   <script defer src="app.js"></script>
   <script defer src="dictation.js"></script>
+  <script defer src="tips.js"></script>
 </head>
 <body>
   <aside id="agents-sidebar" class="sidebar">
@@ -46,6 +47,11 @@
         <span aria-hidden="true"><svg width=".8em" height=".8em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <path d="m9 3 1-1h4l1 1 .5 2 2 1 2-.5 1.5 2.5-.5 2-1.5 1v2l1.5 1 .5 2-1.5 2.5-2-.5-2 1-.5 2-1 1h-4l-1-1-.5-2-2-1-2 .5L3 16l.5-2L5 13v-2l-1.5-1L3 8l1.5-2.5 2 .5 2-1Z"/>
           <circle cx="12" cy="12" r="3"/>
+        </svg></span>
+      </button>
+      <button id="tips-button" class="settings-button tips-button" type="button" title="Tips" aria-label="Tips">
+        <span aria-hidden="true"><svg width=".8em" height=".8em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3Z"/>
         </svg></span>
       </button>
       <button id="update-available" class="icon-button update-available" type="button" title="Update available" aria-label="Update available" hidden>
@@ -216,6 +222,8 @@
     <p id="reply-suggestions-detail" class="hint">After each answer, the model that wrote it suggests your next message as grey text. Right arrow accepts it. One extra model call per answer.</p>
     <label>Chat checker model<select id="settings-chat-scan" aria-describedby="chat-scan-detail"></select></label>
     <p id="chat-scan-detail" class="hint">Off by default. The model you pick reads each exchange you reply to and flags mistakes worth a project rule or note: one call per message you send. While it is unavailable, nothing is checked.</p>
+    <label>Show tips<select id="settings-show-tips" aria-describedby="show-tips-detail"><option value="on">On</option><option value="off">Off</option></select></label>
+    <p id="show-tips-detail" class="hint">Tips on the new-chat screen and behind the bulb next to Settings, starting with the ones that fit your setup.</p>
     <details id="remote-settings"><summary>Browser access</summary>
       <p class="muted" id="remote-status">Off. Jobs stay on this runner.</p>
       <label>Local port<input id="remote-port" type="number" min="1" max="65535" value="8788"></label>

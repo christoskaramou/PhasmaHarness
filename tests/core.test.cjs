@@ -1581,6 +1581,14 @@ test('a preset that passes a kind of work\'s checks first time more often than a
   assert.deepEqual(contexts.at(-1), {}, 'Undo drops it');
 });
 
+test('tips are on unless turned off, and the setting takes only on or off', async t => {
+  const { controller } = await setup(t);
+  assert.equal(controller.data.settings.showTips, undefined, 'on by default');
+  controller.settings({ showTips: false });
+  assert.equal(controller.data.settings.showTips, false);
+  assert.throws(() => controller.settings({ showTips: 'no' }), /Invalid tips setting/);
+});
+
 test('the chat checker is off until a model is picked, and Off turns it off again', async t => {
   const { controller, fake } = await setup(t);
   const { WikiStore } = require('../src/workspace/wiki-store.cjs');
