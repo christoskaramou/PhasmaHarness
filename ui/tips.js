@@ -26,9 +26,10 @@
 
   // `fits`: shown first while true; `when`: shown at all only while true; `text` may depend on the setup. Every tip was
   // checked against the code (2026-10-21); keep them true when the feature they name changes.
+  const checkerOff = () => !state.settings.chatScanModel || state.settings.chatScanModel === 'off';
   const TIPS = [
     // What fits this setup.
-    { id: 'checker', fits: () => !state.settings.chatScanModel || state.settings.chatScanModel === 'off',
+    { id: 'checker', fits: checkerOff,
       text: 'Turn on the chat checker so Harness learns from your corrections: when you write "no, I meant…", it saves a rule or note for next time. Settings → General → Chat checker model.' },
     { id: 'checks', fits: () => !projectChecks().length,
       text: 'Add a check, a command that says whether the work is good, such as a build or the tests. Harness then verifies each task and learns which model fits each kind of work. Settings → Checks.' },
@@ -91,8 +92,8 @@
       text: 'When a check fails, Harness asks the bot for one fix by itself before the task comes back to you.' },
     { id: 'read-only-checks', when: () => projectChecks().length > 0,
       text: 'Tick Read-only on checks that change nothing, so they also run when a bot has Ask access.' },
-    { id: 'proven', when: () => projectChecks().length > 0,
-      text: 'In projects with checks, Auto learns which model passes each kind of work first time and prefers it. A line in the chat tells you, with an Undo.' },
+    { id: 'proven', when: () => projectChecks().length > 0 || !checkerOff(),
+      text: 'Auto learns which model gets each kind of work right first time, by your checks or, without them, by how the chat checker reads your replies, and prefers it. A line in the chat tells you, with an Undo.' },
     { id: 'compare', when: () => projectChecks().length > 0,
       text: () => `Not sure a rule helps? Ask ${hub()} to compare: it runs the task twice, with and without the rule, and keeps the better result.` },
 

@@ -35,6 +35,9 @@ test('the scanner sees the exchange redacted, the next message and the carried c
   assert.equal(chatScan.checkScan({ ...flag, problem: '' }, plain, []).worthy, false, 'no problem named');
   const verdicts = chatScan.checkScan({ ...flag, carried: [{ id: 'r1', verdict: 'recurred' }, { id: 'other', verdict: 'avoided' }, { id: 'r1', verdict: 'maybe' }] }, plain, ['r1']).verdicts;
   assert.deepEqual(verdicts, [{ id: 'r1', verdict: 'recurred' }], 'verdicts only for rules it was shown, with a known answer');
+  const outcome = value => chatScan.checkScan({ ...flag, outcome: value }, plain, []).outcome;
+  assert.deepEqual([outcome('accepted'), outcome('corrected'), outcome('unclear'), outcome('toString'), outcome(undefined)],
+    ['clean', 'corrected', null, null, null], 'how the user took the work, in proven-setup terms; anything else says nothing');
 });
 
 test('the strongest model writes a rule, a note or nothing, through the reflection guard', () => {
@@ -78,6 +81,7 @@ test('a Bot exchange belongs to the one job it delegated; none or several are sk
   const bot = { items: [user('old', 'Earlier'), user('u1', 'Please rename the loader'), result('job-1'), { type: 'agentMessage', text: 'It is renamed.' }] };
   const exchange = methods.exchangeOf.call(hub, bot);
   assert.deepEqual([exchange.id, exchange.task.id, exchange.workspace, exchange.request], ['u1', 'task-w', 'C:/project', 'Please rename the loader']);
+  assert.equal(exchange.taskSession, worker, 'the task is recorded against the worker\'s chat');
   assert.deepEqual(exchange.items.map(item => item.type), ['userMessage', 'userMessage', 'agentMessage', 'agentResult', 'agentMessage'],
     'the request, the worker run, then the result and Bot\'s reply');
   assert.equal(methods.exchangeOf.call(hub, { items: [...bot.items, result('job-2')] }), null, 'two jobs: no single project');
@@ -93,4 +97,32 @@ test('a delegated job, a comparison run and a router correction are never scanne
   assert.deepEqual(calls, []);
   methods.scanAfterUserTurn.call(self, {}, 'Rename it');
   assert.deepEqual(calls, ['exchange']);
+});
+
+test('how the user took a task without checks becomes its proven-setup record, from its own chat or Bot\'s', t => {
+  const root = tempRoot(t);
+  const recorded = [];
+  let decision;
+  const self = { agents: null, chatScanner: () => ({ id: 'checker', provider: 'codex' }), available: () => true, lessonWorkspace: workspace => workspace,
+    wikiStore: { ensure: () => ({ root }) }, learnedRules: () => '', backgroundCall: (owner, preset, request, then) => then(decision),
+    recordSetup: (...args) => recorded.push(args) };
+  const worker = { id: 'w', workspace: 'C:/project' };
+  let next = 0;
+  const scan = (task, outcome, session = worker, request = user('u', 'Fix the crash')) => {
+    decision = { worthy: false, problem: '', moment: '', carried: [], outcome };
+    const exchange = { id: `x${next++}`, items: [request, { type: 'agentMessage', text: 'Fixed.' }], task, taskSession: worker, workspace: 'C:/project' };
+    methods.runScan.call(self, session, exchange, 'Thanks');
+  };
+
+  scan({ id: 't1', state: 'not-checked' }, 'accepted', { id: 'hub' });
+  assert.deepEqual(recorded.map(([session, task, chat]) => [session.id, task.id, chat.outcome, chat.noticeIn.id]), [['w', 't1', 'clean', 'hub']],
+    'recorded against the chat that ran the task, with its notices where the user wrote');
+  scan({ id: 't2', state: 'checks-passed' }, 'corrected');
+  scan({ id: 't3', state: 'running' }, 'corrected');
+  scan({ id: 't4', state: 'not-checked', sameTask: true }, 'accepted');
+  scan({ id: 't5', state: 'not-checked' }, 'unclear');
+  scan({ id: 't7', state: 'not-checked' }, 'accepted', worker, user('r', 'Summarise new commits', { routineRun: { id: 'routine' } }));
+  assert.equal(recorded.length, 1, 'never a task with checks, an unsettled one, a same-task follow-up, an unclear reply or a routine run');
+  scan({ id: 't6', state: 'not-checked' }, 'corrected');
+  assert.deepEqual(recorded.map(([, task, chat]) => [task.id, chat.outcome]), [['t1', 'clean'], ['t6', 'corrected']]);
 });

@@ -62,10 +62,12 @@ module.exports = {
       provider: selected.provider || 'codex', model: selected.model, effort: selected.effort,
       label: selected.label, id: selected.id, images: selected.images !== false,
     };
-    // Auto's kind of work and difficulty, for proven setups (src/setups.cjs); a manual pick has none.
+    // Auto's kind of work and difficulty, and whether it continued the previous task, for proven setups
+    // (src/setups.cjs); a manual pick has none.
     if (selected?.assessment?.taskKind) {
       task.kind = selected.assessment.taskKind;
       task.difficulty = selected.assessment.difficulty || null;
+      task.sameTask = selected.sameTask === true;
     }
     task.summary = summaryLine(task);
     return task;

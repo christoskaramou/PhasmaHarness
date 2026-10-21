@@ -2237,7 +2237,7 @@ const COMMANDS = {
   settings: { description: 'Open Harness settings.', run: () => $('#settings').onclick() },
   context: { description: 'Show context usage, remaining capacity and last compaction.', run: () => openCommandPanel('context') },
   model: { description: 'Choose a model for this agent.', run: () => openCommandPanel('model') },
-  effort: { description: 'Choose model effort, or the shared effort cap for Auto.', run: () => openCommandPanel('effort') },
+  effort: { description: 'Choose this agent’s model and effort in its Edit dialog.', run: () => openCommandPanel('effort') },
   access: { description: 'Change access for this agent’s conversation.', run: () => openCommandPanel('access') },
   switch: { description: 'Find and switch to another agent.', run: () => openCommandPanel('switch') },
   export: { description: 'Save conversation messages and plans as Markdown; images are noted as attachments.', run: async () => {
@@ -3042,7 +3042,7 @@ $('#jev-plug').onclick = async event => {
 };
 $('#jev-save').onclick = async () => {
   const key = $('#jev-key').value; $('#jev-key').value = '';
-  try { applyState(await withProviderAction('jev', 'Saving key…', () => api.jevSaveKey(key))); renderJevCompare(); renderWikiCheck(); $('#jev-result').textContent = state.jev.enabled === false ? 'Key saved. Use the plug to enable Jev.' : 'Key saved. Test the connection, then select Jev under General → Router.'; }
+  try { applyState(await withProviderAction('jev', 'Saving key…', () => api.jevSaveKey(key))); renderJevCompare(); renderWikiCheck(); $('#jev-result').textContent = state.jev.enabled === false ? 'Key saved. Use the plug to enable Jev.' : 'Key saved. Test the connection, then pick Jev as General → Routing model (Auto).'; }
   catch (error) { notify(error); }
 };
 $('#jev-test').onclick = async () => {

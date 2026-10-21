@@ -221,7 +221,7 @@
     <label>Reply suggestions<select id="settings-reply-suggestions" aria-describedby="reply-suggestions-detail"><option value="off">Off</option><option value="on">On</option></select></label>
     <p id="reply-suggestions-detail" class="hint">After each answer, the model that wrote it suggests your next message as grey text. Right arrow accepts it. One extra model call per answer.</p>
     <label>Chat checker model<select id="settings-chat-scan" aria-describedby="chat-scan-detail"></select></label>
-    <p id="chat-scan-detail" class="hint">Off by default. The model you pick reads each exchange you reply to and flags mistakes worth a project rule or note: one call per message you send. While it is unavailable, nothing is checked.</p>
+    <p id="chat-scan-detail" class="hint">Off by default. The model you pick reads each exchange you reply to and flags mistakes worth a project rule or note; for tasks without checks, whether you accepted or corrected the work also teaches Auto which model fits. One call per message you send. While it is unavailable, nothing is checked.</p>
     <label>Show tips<select id="settings-show-tips" aria-describedby="show-tips-detail"><option value="on">On</option><option value="off">Off</option></select></label>
     <p id="show-tips-detail" class="hint">Tips on the new-chat screen and behind the bulb next to Settings, starting with the ones that fit your setup.</p>
     <details id="remote-settings"><summary>Browser access</summary>
@@ -299,7 +299,7 @@
       </div>
       <details id="api-providers" class="api-providers">
         <summary>Add provider</summary>
-        <p class="muted">LM Studio, Ollama, OpenRouter or any endpoint with the OpenAI Responses API. They run through Codex (install it; no ChatGPT sign-in needed). Enable their models under Models below.</p>
+        <p class="muted">LM Studio, Ollama, OpenRouter or any OpenAI-compatible endpoint (chat completions). Harness runs them itself; Codex is not needed. Enable their models under Models below.</p>
         <div class="api-provider-form">
           <label>Name<input id="api-name" placeholder="e.g. LM Studio" maxlength="80"></label>
           <label>Base URL<input id="api-url" placeholder="http://localhost:1234/v1"></label>

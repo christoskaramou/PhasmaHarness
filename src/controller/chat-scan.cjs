@@ -42,6 +42,7 @@ module.exports = {
 
   // The exchange the new message reacts to: in a worker chat, the last task's run; in Bot's chat, the last request with
   // the run of the one job it delegated (none or several: skipped, since the rule would have no single project).
+  // `taskSession` is the chat that holds the task.
   exchangeOf(session) {
     if (!this.isCoordinator()) {
       const task = (session.tasks || []).at(-1);
@@ -49,7 +50,7 @@ module.exports = {
       if (!items.some(item => item.type === 'agentMessage'))
         return null;
 
-      return { id: task.id, items, task, workspace: session.workspace, request: task.goal || textOf(items[0]) };
+      return { id: task.id, items, task, taskSession: session, workspace: session.workspace, request: task.goal || textOf(items[0]) };
     }
 
     const start = session.items.findLastIndex(item => item.type === 'userMessage' && !item.agentReply && !item.routineRun);
@@ -62,11 +63,13 @@ module.exports = {
     const worker = this.agents?.owner(result.sessionId).session(result.sessionId);
     const task = (worker?.tasks || []).findLast(entry => entry.assignmentId === result.deliveryId) || null;
     const run = task && Number.isInteger(task.startIndex) ? worker.items.slice(task.startIndex) : [];
-    return { id: items[0].id, items: [items[0], ...run, ...items.slice(1)], task, workspace: result.workspace, request: textOf(items[0]) };
+    return { id: items[0].id, items: [items[0], ...run, ...items.slice(1)], task, taskSession: worker, workspace: result.workspace,
+      request: textOf(items[0]) };
   },
 
-  // The chat checker reads the exchange: its verdicts decide the chat rules the task carried, and a worthy mistake goes
-  // to the strongest model. Each exchange once, within the background usage limit.
+  // The chat checker reads the exchange: its verdicts decide the chat rules the task carried, how the user took a task
+  // without checks becomes its proven-setup record, and a worthy mistake goes to the strongest model. Each exchange once,
+  // within the background usage limit.
   runScan(session, exchange, reaction) {
     const owner = this.agents?.primary || this;
     const scanner = this.chatScanner();
@@ -92,6 +95,13 @@ module.exports = {
         for (const record of trials.recordChatVerdicts(root, exchange.task, scan.verdicts))
           this.settleTrial(session, root, project, record);
       }
+
+      // Only a task that settled without checks: one with check results has its record from them already. A follow-up
+      // Auto kept on the same task would score the earlier mistake's fix as right first time, and a routine run is
+      // "accepted" by any next message, since the user did not ask for it then.
+      const unchecked = exchange.task?.state === 'not-checked' && !exchange.task.sameTask && !exchange.items[0]?.routineRun;
+      if (unchecked && scan.outcome)
+        this.recordSetup(exchange.taskSession, exchange.task, { outcome: scan.outcome, noticeIn: session });
 
       return scan.worthy ? this.escalateExchange(session, exchange, reaction, root, rules, scan) : null;
     });

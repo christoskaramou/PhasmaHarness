@@ -1443,7 +1443,7 @@ test('an on-demand rule whose target failure comes back stops riding tasks, and 
 
 // The chat scanner's fake models: the scan answers by its schema, the strongest model by its own. The checker is off until
 // a model is picked in Settings.
-function chatModels(controller, { flagFirst = true, verdict = 'avoided', escalation, checker = 'codex:gpt-5.6-sol:high' }) {
+function chatModels(controller, { flagFirst = true, verdict = 'avoided', escalation, checker = 'codex:gpt-5.6-sol:high', outcome = () => 'unclear' }) {
   const chatScan = require('../src/chat-scan.cjs');
   const calls = [];
   controller.effectiveRouter = () => controller.resolveWorker('terra-light');
@@ -1457,15 +1457,16 @@ function chatModels(controller, { flagFirst = true, verdict = 'avoided', escalat
     const scans = calls.filter(call => call.schema === chatScan.SCAN_SCHEMA).length;
     const worthy = flagFirst && scans === 1;
     const carried = JSON.parse(request.prompt).carriedRules.map(rule => ({ id: rule.id, verdict }));
-    return { decision: { worthy, problem: worthy ? 'Renamed a public export the user wanted kept' : '', moment: worthy ? 'keep the exported name fetchUser' : '', carried } };
+    return { decision: { worthy, problem: worthy ? 'Renamed a public export the user wanted kept' : '', moment: worthy ? 'keep the exported name fetchUser' : '', carried,
+      outcome: outcome(scans) } };
   };
   return calls;
 }
 
 // One exchange in the chat: the user's message, the worker's reply, and the turn's end with its checks. Returns the
 // worker's first message.
-async function chatExchange(controller, fake, session, text, reply) {
-  await controller.send({ id: session.id, text, mode: 'terra-light', task: 'on' });
+async function chatExchange(controller, fake, session, text, reply, mode = 'terra-light') {
+  await controller.send({ id: session.id, text, mode, task: 'on' });
   const input = fake.calls.filter(call => call.method === 'turn/start').at(-1).params.input[0].text;
   const turn = fake.turnIds.at(-1);
   controller.notification({ method: 'item/completed', params: { threadId: session.threadId, turnId: turn,
@@ -1579,6 +1580,36 @@ test('a preset that passes a kind of work\'s checks first time more often than a
   controller.undoRule(session.id, notice.id);
   await task('Fix one more crash', { on: 'terra-light' });
   assert.deepEqual(contexts.at(-1), {}, 'Undo drops it');
+});
+
+test('without checks, the chat checker reading your replies teaches Auto which preset gets a kind of work right first time', async t => {
+  const { controller, fake, smartRouter } = await setup(t);
+  const { WikiStore } = require('../src/workspace/wiki-store.cjs');
+  const setups = require('../src/setups.cjs');
+  controller.wikiStore = new WikiStore(path.join(path.dirname(controller.filename), 'wiki-store'));
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  arm(controller, fake);
+  // Each scan reads the exchange before it: terra's three are accepted, sol's first is corrected.
+  const replies = ['accepted', 'corrected', 'accepted', 'accepted', 'accepted', 'accepted'];
+  chatModels(controller, { flagFirst: false, escalation: null, outcome: scans => replies[scans - 1] || 'unclear' });
+  let preset;
+  smartRouter.choose = async () => ({ ...controller.resolveWorker(preset), source: 'model', reason: 'test', assessment: { taskKind: 'debugging', difficulty: 'low' } });
+
+  for (let i = 0; i < 3; i++) {
+    preset = 'terra-light';
+    await chatExchange(controller, fake, session, `Fix crash ${i}`, 'Fixed it.', 'auto');
+    preset = 'codex:gpt-5.6-sol:high';
+    await chatExchange(controller, fake, session, `Fix bug ${i}`, 'Fixed it.', 'auto');
+  }
+  await chatExchange(controller, fake, session, 'Thanks, all good', 'Glad to help.', 'auto');
+  await until(() => session.items.some(item => item.ruleNotice?.kind === 'setupPreferred'));
+
+  const root = controller.wikiStore.ensure(session.workspace).root;
+  assert.deepEqual(setups.readSetups(root).records.slice(0, 2).map(record => [record.preset, record.outcome, record.source]),
+    [['terra-light', 'clean', 'chat'], ['codex:gpt-5.6-sol:high', 'corrected', 'chat']]);
+  const notice = session.items.findLast(item => item.ruleNotice?.kind === 'setupPreferred');
+  assert.match(notice.text, /^Auto now uses .+ for debugging work in this project: 3 of 3 tasks needed no correction from you/);
 });
 
 test('tips are on unless turned off, and the setting takes only on or off', async t => {

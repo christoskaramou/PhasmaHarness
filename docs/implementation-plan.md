@@ -251,7 +251,8 @@ The library feeds the improver, never the workers. Always-on text is capped (8,0
    - Each task Auto routes in a project with checks records its kind of work, preset and how its checks went. When one preset passes a kind of work's checks first time more often than another that also ran it at least 3 times, Auto prefers it there on low and medium difficulty (Smart and Jev routing alike), with a chat line and Undo.
    - The next task of that kind it does not pass first time drops the preference; Undo drops it for good.
    - Rules are handled by trials (steps 2 to 4), so this step is about the model only.
-   - Limits: it learns only in projects with checks, and only where Auto already used several setups for the same kind of work (no exploration while a preference holds).
+   - Without checks (added 2026-10-21 at the user's request: learning should not need checks), the chat checker judges each task from the user's next message: accepted counts as first time, corrected as needing a correction. It needs the chat checker on.
+   - Limits: without checks it learns only while the chat checker is on, and only where Auto already used several setups for the same kind of work (no exploration while a preference holds).
 7. **Skills in comparisons** (the earlier v2), once rules work end to end.
 
 Not adopted from harness2: repeated rollouts per task, the blind LLM selector, parallel improver fan-out, an append-only library without pruning, and unsandboxed workers.

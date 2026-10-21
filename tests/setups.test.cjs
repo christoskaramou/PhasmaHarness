@@ -87,3 +87,38 @@ test('Auto, through Smart or Jev, takes the proven preset on low and medium diff
   assert.equal((await router.choose('fix the crash', { ...session, routingCatalog: [picked] }, [], 'jev')).id, 'picked', 'only while the preset is offered');
   assert.equal((await router.choose('fix the crash', { ...session, provenSetups: {} }, [])).id, 'picked');
 });
+
+test('a task is recorded once, and records the chat checker judged say so on the page', t => {
+  const root = tempRoot(t);
+  const record = run('terra', 'clean', { source: 'chat' });
+  setups.recordSetup(root, record);
+  assert.deepEqual(setups.recordSetup(root, { ...record, outcome: 'corrected' }), {}, 'reached again from Bot\'s chat');
+  setups.recordSetup(root, run('terra', 'corrected'));
+  assert.deepEqual(setups.readSetups(root).records.map(entry => entry.outcome), ['clean', 'corrected']);
+  const [stats] = setups.statsFor(setups.readSetups(root).records, 'debugging');
+  assert.deepEqual([stats.runs, stats.clean, stats.corrected, stats.chat], [2, 1, 1, 1]);
+  assert.match(fs.readFileSync(path.join(root, setups.PAGE), 'utf8'), /- debugging: terra 1 of 2 first time, 1 corrected, 0 failed \(1 judged from your replies\)/);
+});
+
+test('a chat-judged task is recorded in the project that ran it, with its notice in the chat the user wrote in', t => {
+  const root = tempRoot(t);
+  const methods = require('../src/controller/setups.cjs');
+  const notices = [];
+  const self = { ...methods, lessonWorkspace: workspace => workspace, comparisonOf: () => null,
+    wikiStore: { ensure: workspace => (workspace === 'C:/project' ? { root } : assert.fail(`wrong project ${workspace}`)) },
+    ruleNotice: (session, notice) => notices.push([session.id, notice.kind, notice.text]), log: { warn: (message, detail) => assert.fail(`${message}: ${detail.error}`) } };
+  const worker = { id: 'w', workspace: 'C:/project', routes: [{ turnId: 'turn', turnUsage: { inputTokens: 900, outputTokens: 100 } }] };
+  const task = (preset, extra = {}) => ({ id: `t${next++}`, goal: 'Fix the crash', state: 'not-checked', kind: 'debugging', difficulty: 'low',
+    route: { id: preset, label: preset, provider: 'codex' }, attempts: [{ turnId: 'turn' }], ...extra });
+  const hub = { id: 'hub' };
+  for (let i = 0; i < 3; i++) {
+    self.recordSetup(worker, task('terra', { checksSkippedByRouter: i === 0 }), { outcome: 'clean', noticeIn: hub });
+    self.recordSetup(worker, task('sol'), { outcome: i === 0 ? 'corrected' : 'clean', noticeIn: hub });
+  }
+  assert.deepEqual(setups.readSetups(root).records.map(record => [record.preset, record.source, record.tokens]).slice(0, 2),
+    [['terra', 'chat', 1000], ['sol', 'chat', 1000]], 'a task the router skipped checks for counts too');
+  assert.deepEqual(notices, [['hub', 'setupPreferred', 'Auto now uses terra for debugging work in this project: 3 of 3 tasks needed no correction from you, about 1k tokens each (sol: 2 of 3).']]);
+
+  self.recordSetup(worker, task('terra'), { outcome: 'corrected', noticeIn: hub });
+  assert.deepEqual(notices.at(-1), ['hub', 'setupDropped', 'Auto stopped preferring terra for debugging work in this project: you corrected it on "Fix the crash".']);
+});
