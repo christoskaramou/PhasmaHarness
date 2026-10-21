@@ -64,5 +64,11 @@
       "deleteAppDataOnUninstall": false,
       "artifactName": "Phasma-Harness-Setup-${version}.exe"
     }
+  },
+  "optionalDependencies": {
+    "@fugood/node-whisper-linux-x64": "1.1.3",
+    "@fugood/node-whisper-linux-x64-vulkan": "1.1.3",
+    "@fugood/node-whisper-win32-x64": "1.1.3",
+    "@fugood/node-whisper-win32-x64-vulkan": "1.1.3"
   }
 }

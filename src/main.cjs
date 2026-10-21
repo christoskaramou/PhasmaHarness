@@ -13,6 +13,7 @@ const { AsyncLocalStorage } = require('node:async_hooks');
 const { RemoteRunner } = require('./remote.cjs');
 const { registerRunnerCommands, assertRunnerOpen } = require('./runner-commands.cjs');
 const { RemoteSettings } = require('./remote-settings.cjs');
+const { microphoneAllowed } = require('./dictation.cjs');
 
 // Workers and helpers inherit this, so bundled rtk/rg win over any system copies.
 process.env.PATH = path.join(__dirname, '..', 'tools', 'bin') + path.delimiter + process.env.PATH;
@@ -94,10 +95,20 @@ async function start() {
   window.once('closed', () => nativeTheme.removeListener('updated', updateWindowAppearance));
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
-  window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+  // Only the microphone, for the app's own page, while a dictation is recording; everything else stays denied.
+  const microphone = (contents, permission, url, mediaTypes) => microphoneAllowed({ permission, mediaTypes, url, rendererURL,
+    fromWindow: contents === window.webContents, recording: voice.recording });
+  window.webContents.session.setPermissionRequestHandler((contents, permission, callback, details) =>
+    callback(microphone(contents, permission, details?.requestingUrl, details?.mediaTypes)));
+  // Permission checks other than the microphone keep Electron's default answer.
+  window.webContents.session.setPermissionCheckHandler((contents, permission, _origin, details) =>
+    permission !== 'media' || microphone(contents, permission, details?.requestingUrl, [details?.mediaType]));
+  // Hiding or leaving the window asks the page to hand over what it recorded; a closed or crashed page loses it.
   const stopVoice = () => voice.stop().catch(error => log.warn('Dictation cleanup failed', { error: error.message }));
-  for (const event of ['hide', 'blur', 'minimize', 'closed']) window.on(event, stopVoice);
-  window.webContents.on('render-process-gone', stopVoice);
+  const dropVoice = () => voice.stop(undefined, { discard: true }).catch(error => log.warn('Dictation cleanup failed', { error: error.message }));
+  for (const event of ['hide', 'blur', 'minimize']) window.on(event, stopVoice);
+  window.on('closed', dropVoice);
+  window.webContents.on('render-process-gone', dropVoice);
   voice.on('event', event => {
     if (!window.isDestroyed()) window.webContents.send('voice', event);
   });
@@ -203,12 +214,14 @@ async function start() {
     if (!value || !window.isVisible() || !window.isFocused()) throw new Error('Open Harness to dictate a message.');
     const session = agents.owner(value.sessionId).session(value.sessionId);
     if (session.archived) throw new Error('Choose an active chat.');
-    return voice.start({ id: value.id, sessionId: session.id, recognizerId: value.recognizerId });
+    return voice.start({ id: value.id, sessionId: session.id });
   });
   handle('voiceStop', id => {
     if (typeof id !== 'string' || !/^[a-f0-9-]{36}$/.test(id)) throw new Error('Choose the current dictation.');
-    return voice.stop(id);
+    return voice.stop(id, { discard: true });
   });
+  // The recorded audio; Dictation checks it is the open recording's and valid PCM before it reaches the engine.
+  handle('voiceTranscribe', (id, audio) => voice.transcribe(id, audio));
   handle('chooseWorkspaceWiki', async (id, reset = false, agentId) => {
     const workspace = id ? agents.owner(id).session(id).workspace : agents.controller(agentId).data.settings.workspace;
     if (reset === true) {

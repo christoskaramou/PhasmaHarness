@@ -25,6 +25,7 @@ api.voiceInfo = () => ipcRenderer.invoke('voiceInfo');
 api.readDocument = value => ipcRenderer.invoke('readDocument', value);
 api.voiceStart = value => ipcRenderer.invoke('voiceStart', value);
 api.voiceStop = id => ipcRenderer.invoke('voiceStop', id);
+api.voiceTranscribe = (id, audio) => ipcRenderer.invoke('voiceTranscribe', id, audio);
 api.onVoice = callback => {
   const listener = (_event, value) => callback(value);
   ipcRenderer.on('voice', listener);

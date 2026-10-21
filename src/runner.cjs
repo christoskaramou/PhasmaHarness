@@ -58,7 +58,7 @@ async function createRunner({ app, data = app?.getPath('userData'), safeStorage,
     throw error;
   }
   agents.settingsTools = new (require('./settings-tools.cjs').SettingsTools)({ agents, controller, wikiStore });
-  const voice = new Dictation();
+  const voice = new Dictation({ modelDirectory: path.join(data, 'speech-models'), fetch });
   const documents = new DocumentReader();
   agents.updateBlockedReason = () => voice.busy ? 'Finish dictation before updating.'
     : documents.busy ? 'Wait for document processing before updating.' : updateBlockedReason(agents);

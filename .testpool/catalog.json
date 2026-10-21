@@ -558,11 +558,12 @@
     },
     {
       "id": "dictation",
-      "name": "Local voice input and confirmed speech-process cleanup",
-      "covers": "Local recognition never starts during language discovery, uses one owned hidden process with bounded output, retains ordered UTF-8 and final words, binds every event to its original chat, rejects stale Stop, and blocks another recording until cleanup is confirmed. Unsupported platforms and malformed events fail explicitly without API fallback.",
+      "name": "Local Whisper voice input",
+      "covers": "Recorded audio is checked before the engine (open recording, even byte length, five-minute cap), silence never reaches the model, Whisper tags and noise are filtered, words bind to the original chat, the pinned model download is checksum-verified, the worker keeps a stripped environment, a GPU machine upgrades to the small model, and the microphone is granted only to the app page while recording.",
       "paths": [
         "src/dictation.cjs",
-        "src/dictation.ps1",
+        "src/whisper-worker.cjs",
+        "ui/pcm-capture.js",
         "src/artifacts.cjs",
         "src/runner.cjs",
         "src/main.cjs",
@@ -577,9 +578,9 @@
       "cost": "cheap",
       "timeoutSec": 15,
       "origin": {
-        "problem": "Voice input was absent and asynchronous dictation could lose final words or place them in another chat.",
-        "fix": "Use installed Windows speech recognition with explicit recording, original-chat drafts, final-word Send and confirmed process cleanup.",
-        "date": "2026-10-18"
+        "problem": "Windows' built-in speech recognizer turned the user's speech into mumbling (English only, untrained).",
+        "fix": "Record in the app page and transcribe locally with Whisper (whisper.cpp, GPU when available), pinned models, original-chat drafts and final-word Send.",
+        "date": "2026-10-21"
       }
     },
     {

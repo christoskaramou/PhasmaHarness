@@ -34,17 +34,20 @@ app.whenReady().then(async () => {
   const sent = [];
   let failSend = false;
   ipcMain.handle('create', (_event, workspace, access) => controller.create(workspace, access));
-  let voiceRequest = null, finishVoice = null;
-  ipcMain.handle('voiceInfo', () => ({ supported: true, languages: [{ id: 'offline', name: 'English' }] }));
+  let voiceRequest = null, finishVoice = null, voiceAudio = null;
+  ipcMain.handle('voiceInfo', () => ({ supported: true, language: 'Greek and English, detected each time', firstUse: false }));
   ipcMain.handle('voiceStart', (_event, request) => {
     voiceRequest = request;
     window.webContents.send('voice', { ...request, type: 'state', state: 'listening' });
     return { ...request, state: 'listening' };
   });
-  ipcMain.handle('voiceStop', (_event, id) => new Promise(resolve => {
+  ipcMain.handle('voiceStop', (_event, id) => ({ id, state: 'idle' }));
+  // The page's recorded audio arrives here on Stop; the words come back once the test releases them.
+  ipcMain.handle('voiceTranscribe', (_event, id, audio) => new Promise(resolve => {
     assert.equal(id, voiceRequest.id);
+    voiceAudio = audio;
     finishVoice = text => {
-      window.webContents.send('voice', { ...voiceRequest, type: 'text', state: 'stopping', sequence: 1, text });
+      window.webContents.send('voice', { ...voiceRequest, type: 'text', state: 'transcribing', sequence: 1, text });
       window.webContents.send('voice', { ...voiceRequest, type: 'state', state: 'idle' });
       resolve({ ...voiceRequest, state: 'idle' });
     };
@@ -453,14 +456,29 @@ app.whenReady().then(async () => {
   })()`);
   const until = async (condition, what) => { for (let i = 0; i < 100 && !condition(); i++) await new Promise(r => setTimeout(r, 20)); assert.ok(condition(), what); };
   phase = 'dictation checks';
+  // A tone stands in for the microphone, so the page's real capture path (worklet, resampling, PCM) runs.
+  await window.webContents.executeJavaScript(`navigator.mediaDevices.getUserMedia = async () => {
+    const context = new AudioContext();
+    const tone = context.createOscillator();
+    const output = context.createMediaStreamDestination();
+    tone.connect(output);
+    tone.start();
+    return output.stream;
+  }; true`);
   await window.webContents.executeJavaScript('document.querySelector("#dictate").click(); true');
   await until(() => voiceRequest, 'dictation binds to the original chat');
-  await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 20))');
+  // "Starting…" until the microphone really records, then "Listening…".
+  await window.webContents.executeJavaScript(`new Promise(resolve => { const wait = () => document.querySelector('#dictation-status').textContent === 'Listening…'
+    ? resolve() : setTimeout(wait, 20); wait(); })`);
+  await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 400))');
   const beforeVoice = sent.length;
   await submit('typed before speaking', false);
   await until(() => finishVoice, 'Send stops the microphone before reading its final words');
   await window.webContents.executeJavaScript('document.querySelector("#composer").dispatchEvent(new Event("submit", { cancelable: true })); true');
   assert.equal(sent.length, beforeVoice, 'dictation does not send before Stop completes');
+  const audioBytes = voiceAudio?.byteLength || 0;
+  // How much depends on the machine's audio clock (a Bluetooth headset in call mode runs it slowly), so only that audio arrived.
+  assert.ok(audioBytes > 1000 && audioBytes % 2 === 0, `the page recorded 16-bit audio (${audioBytes} bytes)`);
   finishVoice('final dictated words');
   await until(() => sent.length === beforeVoice + 1, 'Send includes the final recognized words exactly once');
   assert.equal(sent.at(-1).text, 'typed before speaking final dictated words');
@@ -476,7 +494,7 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), '');
   assert.equal(await window.webContents.executeJavaScript('drafts.get(' + JSON.stringify(voiceSource) + ')'), 'words for the original chat');
   await window.webContents.executeJavaScript('selectedId = ' + JSON.stringify(voiceSource) + '; drafts.delete(selectedId); document.querySelector("#prompt").value = ""; render(); updatePreview();');
-  console.log('Local dictation indicator, final-word Send, duplicate Send guard and original-chat draft preservation passed (fake audio)');
+  console.log(`Local dictation records audio in the page (${audioBytes} bytes), final-word Send, duplicate Send guard and original-chat drafts passed`);
   phase = 'composer checks';
   let before = sent.length;
   await submit('test message');
