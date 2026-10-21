@@ -14,11 +14,11 @@ function visibleText(item) {
   return '';
 }
 
-// Reply suggestions (Settings → General, off by default): after the model answers, one structured call to the model that
+// Reply suggestions (Settings → General, on unless turned off): after the model answers, one structured call to the model that
 // wrote that answer suggests the user's next message. The UI shows it as grey text; nothing is sent until the user does.
 module.exports = {
   async replySuggestion(id) {
-    if (this.data.settings.replySuggestions !== true)
+    if (this.data.settings.replySuggestions === false)
       return null;
 
     const session = this.session(id);

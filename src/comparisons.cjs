@@ -211,26 +211,30 @@ function finish(record) {
     const base = runs.find(run => !run.variant), change = runs.find(run => run.variant);
     pairVerdicts.push({ pair, ...pairVerdict(base, change, record.target, record.threshold) });
   }
-  Object.assign(record, { state: 'finished', finishedAt: Date.now(), pairVerdicts, ...overallVerdict(pairVerdicts) });
+  // Nothing waits on the user: the verdict and which run had the change show as soon as the last run is back.
+  Object.assign(record, { state: 'finished', finishedAt: Date.now(), revealedAt: Date.now(), pairVerdicts, ...overallVerdict(pairVerdicts) });
 }
 
-const preference = (record, pair) => {
-  const pick = record.picks?.[pair];
-  if (!pick || pick === 'none')
-    return pick ? 'no preference' : null;
-  return record.runs.find(run => run.pair === pair && run.label === pick)?.variant ? 'the change' : 'the current setup';
-};
+// The run whose result lands in the project: one that passed every check, then fewer corrections, then fewer tokens;
+// a full tie goes to the current setup. None when no run passed every check.
+function bestRun(record) {
+  const passed = run => run.result?.status === 'completed' && Object.keys(run.result.checks).length > 0 &&
+    Object.values(run.result.checks).every(status => status === 'passed');
+  const tokens = run => run.result.tokens ?? Number.MAX_SAFE_INTEGER;
+  return record.runs.filter(passed).sort((a, b) => a.result.corrections - b.result.corrections || tokens(a) - tokens(b) ||
+    Number(a.variant) - Number(b.variant))[0] || null;
+}
 
-// What the chat card shows: no change mapping or verdict until the user reveals them.
+// What the chat card shows; the change mapping and verdict appear once the comparison is finished.
 function publicView(record) {
   const revealed = !!record.revealedAt;
   const runs = record.runs.map(run => ({ index: run.index, pair: run.pair, label: run.label, name: run.name || null, jobId: run.jobId || null,
     ...(run.result ? { result: { ...run.result, setups: undefined, setup: run.result.setups[0]?.hash || null } } : {}),
     ...(revealed ? { changed: run.variant } : {}) }));
   return { id: record.id, number: record.number || null, state: record.state, project: record.project, task: excerpt(record.task, 400), target: record.target,
-    change: excerpt(record.change, 600), model: record.model, pairs: record.pairs, picks: { ...record.picks }, revealed, error: record.error || null,
+    change: record.change, model: record.model, pairs: record.pairs, revealed, error: record.error || null, suggested: !!record.suggested,
     runs, ...(revealed ? { verdict: record.verdict, confidence: record.confidence, pairVerdicts: record.pairVerdicts,
-      preferences: Object.fromEntries(Object.keys(record.picks || {}).map(pair => [pair, preference(record, Number(pair))])) } : {}) };
+      applied: record.applied || null, adopted: record.adopted || null } : {}) };
 }
 
 function readComparisons(root) {
@@ -257,22 +261,33 @@ function runLine(run) {
     `${result.restored?.length ? `; check files restored: ${result.restored.join(', ')}` : ''}; setup ${result.setups?.[0]?.hash || 'unknown'}.`;
 }
 
+// What happened to the project afterwards, in one line each.
+function outcomeLines(record) {
+  const lines = [];
+  if (record.applied?.files?.length)
+    lines.push(`Applied run ${record.applied.label}'s changes to the project: ${record.applied.files.join(', ')}.`);
+  else if (record.applied?.error)
+    lines.push(record.applied.error);
+  if (record.adopted?.file)
+    lines.push(`Added the rule to ${record.adopted.file}.`);
+  else if (record.adopted?.error)
+    lines.push(`The rule was not added: ${record.adopted.error}`);
+  return lines;
+}
+
 function renderPage(records) {
   const entries = records.map(record => {
     const head = `## ${new Date(record.at).toISOString().slice(0, 10)} · ${excerpt(record.task.split(/\r?\n/)[0], 100)}\n\n` +
-      `Change to the ${TARGETS[record.target]}:\n\n> ${excerpt(record.change, 1000).replace(/\r?\n/g, '\n> ')}\n\n` +
-      `Model ${record.model}; ${record.pairs} pair${record.pairs > 1 ? 's' : ''}.`;
-    if (!record.revealedAt)
-      return `${head}\n\nFinished; the result stays hidden until it is revealed in Harness.`;
-
+      `Change to the ${TARGETS[record.target]}${record.suggested ? ' (started by Harness: a lesson did not stick)' : ''}:\n\n` +
+      `> ${excerpt(record.change, 1000).replace(/\r?\n/g, '\n> ')}\n\nModel ${record.model}; ${record.pairs} pair${record.pairs > 1 ? 's' : ''}.`;
     const pairs = record.pairVerdicts.map(pair => {
       const runs = record.runs.filter(run => run.pair === pair.pair).map(run => `  - ${runLine(run)}`).join('\n');
-      const pick = preference(record, pair.pair);
-      return `- Pair ${pair.pair}: ${pair.verdict}; ${pair.reason}.${pick ? ` Blind pick: ${pick}.` : ''}\n${runs}`;
+      return `- Pair ${pair.pair}: ${pair.verdict}; ${pair.reason}.\n${runs}`;
     }).join('\n');
-    return `${head}\n\nVerdict: ${record.verdict}, ${record.confidence} confidence.\n\n${pairs}`;
+    const outcome = outcomeLines(record).join(' ');
+    return `${head}\n\nVerdict: ${record.verdict}, ${record.confidence} confidence.${outcome ? ' ' + outcome : ''}\n\n${pairs}`;
   });
-  return `# Setup comparisons\n\nGenerated by Phasma Harness from comparisons the user asked for. The records live in ${RECORDS} beside this page; ` +
+  return `# Setup comparisons\n\nGenerated by Phasma Harness from two-run comparisons. The records live in ${RECORDS} beside this page; ` +
     `this page is rewritten from them. One pair is weak evidence.\n\n${entries.join('\n\n')}\n`;
 }
 
@@ -285,19 +300,5 @@ function saveComparison(root, record) {
   writeAtomic(path.join(root, PAGE), renderPage(records));
 }
 
-function confirmText(summary) {
-  const runs = `${summary.runs} paid runs (${summary.runs / 2} pair${summary.runs > 2 ? 's' : ''})`;
-  return `Start this comparison?\n\n` +
-    `- Task: ${excerpt(summary.task, 300)}\n` +
-    `- Change to the ${TARGETS[summary.target]}: ${excerpt(summary.change, 500)}\n` +
-    `- Runs: ${runs} on ${summary.model}, pinned for every run.\n` +
-    `- Budget: up to ${summary.budgetMinutes} minutes and ${summary.budgetAttempts} attempts per run, the default job budget.\n` +
-    `- Judged by checks: ${summary.checks.join(', ')}.\n` +
-    `- Restored from the snapshot before each check run: ${summary.protectedFiles.join(', ') || 'no check files are named in the check commands'}. ` +
-    'Files a test runner loads by itself are not protected.\n' +
-    '- Lesson recording and wiki upkeep are off for these runs; both get the same lessons.\n\n' +
-    'Reply yes to start.';
-}
-
 module.exports = { RECORDS, PAGE, THRESHOLD, TARGETS, planRuns, protectedFiles, restoreCheckFiles, prepareCopy, runResult,
-  pairVerdict, overallVerdict, finish, publicView, readComparisons, saveComparison, confirmText };
+  pairVerdict, overallVerdict, finish, bestRun, outcomeLines, publicView, readComparisons, saveComparison };

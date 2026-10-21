@@ -2513,23 +2513,30 @@ app.whenReady().then(async () => {
   phase = 'comparison card';
   const comparisons = require('../src/comparisons.cjs');
   const compareSetup = bot => ({ hash: `setup-${bot}`, provider: 'codex', model: 'gpt-5.6-terra', effort: 'low', instructions: { bot: { hash: bot } } });
-  const compareRun = (label, variant, extra) => ({ index: label === 'A' ? 1 : 2, pair: 1, label, variant, name: `Compare ${label === 'A' ? 1 : 2}`,
+  const compareRun = (label, variant, extra) => ({ index: label === 'A' ? 1 : 2, pair: 1, label, variant, name: `Comparison 1 · ${label}`,
     result: { status: 'completed', checks: { 'greet check': 'passed' }, corrections: 0, setups: [compareSetup(variant ? 'changed' : 'base')],
       restored: [], diff: ' greet.js | 2 +-', text: `Run ${label} updated greet.js.`, tokens: 120000, activeMs: 21000,
       workspace: path.join(root, `compare-copy-${label}`), ...extra } });
   const compareRecord = { id: 'ui-compare', version: 1, at: Date.now(), project: root, task: "Change greet.js so greet('Ann') returns 'Hello, Ann!'.",
-    change: "Greeting functions must return 'Hello, stranger!' for an empty name.", target: 'bot', pairs: 1, model: 'gpt-5.6-terra · low',
-    threshold: comparisons.THRESHOLD, picks: {}, runs: [compareRun('A', false, { corrections: 1, restored: ['check.cjs'], tokens: 155000, activeMs: 30000 }), compareRun('B', true)] };
+    change: "Greeting functions must return 'Hello, stranger!' for an empty name.", target: 'bot', pairs: 1, model: 'gpt-5.6-terra · low', number: 1,
+    threshold: comparisons.THRESHOLD, runs: [compareRun('A', false, { corrections: 1, restored: ['check.cjs'], tokens: 155000, activeMs: 30000 }), compareRun('B', true)] };
   comparisons.finish(compareRecord);
-  controller.data.comparisons = { [compareRecord.id]: compareRecord };
-  ownerChat.items.push({ id: 'compare-request', type: 'userMessage', content: [{ type: 'text', text: 'yes' }], comparisonId: compareRecord.id,
-    hubBatch: { id: 'ui-compare-batch', count: 2, dispatched: 2 } });
+  // Nothing landed by itself here (say the project changed meanwhile), so each run offers Apply by hand.
+  compareRecord.applied = { label: 'B', workspace: path.join(root, 'compare-copy-B'), error: 'Run B was not applied: you changed greet.js since the copy was made.' };
+  ownerChat.items.push({ id: 'compare-request', type: 'userMessage', content: [{ type: 'text', text: 'Compare that instruction change.' }],
+    comparisonId: compareRecord.id, hubBatch: { id: 'ui-compare-batch', count: 2, dispatched: 2 } });
   ownerChat.items.push({ id: 'compare-finished', type: 'agentMessage', phase: 'final_answer', localOnly: true,
-    text: 'Both runs are back. Which did better? Pick below, or reveal.', hubComparison: comparisons.publicView(compareRecord) });
-  const pickCalls = [];
-  ipcMain.handle('comparisonPick', (_event, ...args) => {
-    pickCalls.push(args);
-    return controller.comparisonPick(...args);
+    text: 'The change helped (the change needed fewer corrections (0 instead of 1)).', hubComparison: comparisons.publicView(compareRecord) });
+  // A project rule that helped: the better run landed and the rule was added, each with an Undo.
+  const ruleRecord = { ...compareRecord, id: 'ui-rule', number: 2, target: 'project',
+    applied: { label: 'B', workspace: path.join(root, 'compare-copy-B'), files: ['greet.js'], changes: [] },
+    adopted: { file: path.join(root, 'INSTRUCTIONS.md'), rule: compareRecord.change } };
+  ownerChat.items.push({ id: 'rule-finished', type: 'agentMessage', phase: 'final_answer', localOnly: true, text: 'The change helped.',
+    hubComparison: comparisons.publicView(ruleRecord) });
+  const undoCalls = [];
+  ipcMain.handle('undoComparison', (_event, ...args) => {
+    undoCalls.push(args);
+    return {};
   });
   // The comparison's own batch report stays out of the chat and the activity bar; the card replaces it.
   const compareView = agents.snapshot();
@@ -2538,36 +2545,38 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(compareView) + '); true');
   assert.equal(await window.webContents.executeJavaScript('!!document.querySelector(\'.batch-report[data-batch-id="ui-compare-batch"]\')'), false);
   assert.doesNotMatch(await window.webContents.executeJavaScript('document.querySelector("#job-activity-summary").textContent'), /COMPARISON BATCH/);
-  const cardText = () => window.webContents.executeJavaScript('document.querySelector(".comparison-card")?.textContent || ""');
-  let card = await cardText();
-  assert.match(card, /Comparison · 2 runs on gpt-5\.6-terra · low · Waiting for your pick/);
-  assert.match(card, /Which run did better\? The change is revealed after your pick\.A is better.*B is better.*No preference.*Reveal without picking/s);
+  const cardText = index => window.webContents.executeJavaScript(`document.querySelectorAll(".comparison-card")[${index}]?.textContent || ""`);
+  const cardButtons = index => window.webContents.executeJavaScript(`[...document.querySelectorAll(".comparison-card")[${index}].querySelectorAll('button')]
+    .map(button => button.getAttribute('aria-label') || button.textContent)`);
+  let card = await cardText(0);
+  assert.match(card, /Comparison 1 · 2 runs on gpt-5\.6-terra · low · The change helped.*Verdict: helped, low confidence/s, 'no pick: the verdict shows at once');
+  assert.match(card, /A · current setup.*B · with the change.*Run B was not applied: you changed greet\.js/s);
+  assert.doesNotMatch(card, /is better|Reveal|Waiting for your pick/);
   assert.equal(await window.webContents.executeJavaScript('!!document.querySelector(".comparison-card")?.closest(".assistant")'), true,
     'the card sits under Bot\'s message');
-  assert.doesNotMatch(card, /with the change|current setup|Verdict/, 'nothing tells the runs apart before the pick');
   assert.match(card, /restored before its checks: check\.cjs/);
-  const applyButtons = () => window.webContents.executeJavaScript(`[...document.querySelectorAll('.comparison-card button')]
-    .filter(button => button.textContent === 'Apply').map(button => button.getAttribute('aria-label'))`);
-  assert.deepEqual(await applyButtons(), [], 'Apply waits for the reveal');
-  await window.webContents.executeJavaScript(`document.querySelector('.comparison-card').scrollIntoView({ block: 'start', behavior: 'instant' });
-    new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
-  fs.writeFileSync(path.resolve(__dirname, '../.scratch/comparison-blind.png'), (await window.webContents.capturePage()).toPNG());
-  await window.webContents.executeJavaScript(`[...document.querySelectorAll('.comparison-card button')].find(button => button.textContent === 'B is better').click(); true`);
-  await until(() => pickCalls.length === 1, 'the pick reaches the runner');
-  assert.deepEqual(pickCalls[0], [ownerChat.id, 'ui-compare', 1, 'B']);
-  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
-  card = await cardText();
-  assert.match(card, /Revealed.*Verdict: helped, low confidence.*A · current setup.*B · with the change.*Your pick: the change/s);
-  assert.equal(controller.data.comparisons['ui-compare'], undefined);
-  assert.deepEqual(await applyButtons(), ["Apply run A's changes to my project", "Apply run B's changes to my project"]);
+  assert.deepEqual((await cardButtons(0)).filter(label => label.startsWith('Apply')), ["Apply run A's changes to my project", "Apply run B's changes to my project"],
+    'nothing landed by itself, so Apply is offered');
   await window.webContents.executeJavaScript(`[...document.querySelectorAll('.comparison-card button')]
     .find(button => button.getAttribute('aria-label') === "Apply run B's changes to my project").click(); true`);
-  await until(() => applyCalls.length === 2, 'the winning run applies through the same runner command');
+  await until(() => applyCalls.length === 2, 'Apply by hand goes through the same runner command');
   assert.equal(applyCalls[1], path.join(root, 'compare-copy-B'));
-  await window.webContents.executeJavaScript(`document.querySelector('.comparison-card').scrollIntoView({ block: 'start', behavior: 'instant' });
+  await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 50))');
+  await window.webContents.executeJavaScript('document.querySelector("#toast").hidden = true; true');
+
+  card = await cardText(1);
+  assert.match(card, /Comparison 2 · .*Applied run B's changes to your project: greet\.js\. ?Undo.*Added the rule to INSTRUCTIONS\.md\. ?Undo/s);
+  const ruleButtons = await cardButtons(1);
+  assert.equal(ruleButtons.some(label => label.startsWith('Apply')), false, 'what already landed is not offered again');
+  assert.ok(ruleButtons.includes('Undo the applied changes') && ruleButtons.includes('Undo the added rule'));
+  await window.webContents.executeJavaScript(`document.querySelectorAll('.comparison-card')[1].scrollIntoView({ block: 'start', behavior: 'instant' });
     new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
-  fs.writeFileSync(path.resolve(__dirname, '../.scratch/comparison-revealed.png'), (await window.webContents.capturePage()).toPNG());
-  console.log('Comparison cards stay blind until a pick, then reveal the change and the verdict');
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/comparison-finished.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript(`[...document.querySelectorAll('.comparison-card button')]
+    .find(button => button.getAttribute('aria-label') === 'Undo the added rule').click(); true`);
+  await until(() => undoCalls.length === 1, 'Undo reaches the runner');
+  assert.deepEqual(undoCalls[0], [ownerChat.id, 'ui-rule', 'rule']);
+  console.log('Comparison cards show the verdict at once, what landed with Undo, and Apply only when nothing landed');
   phase = 'send scrolls to the newest message';
   await window.webContents.executeJavaScript(`document.querySelector('#conversation').scrollTo({ top: 0, behavior: 'instant' });
     new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);

@@ -1129,6 +1129,14 @@ test('a corrected check failure becomes a lesson that the next task in the proje
   controller.permissions(session.id, 'danger-full-access');
   arm(controller, fake);
   addCheck(controller, session, ['unit']);
+  // The reflection after each lesson runs on the router's model; answer it, and only it.
+  const reflections = [];
+  controller.effectiveRouter = () => controller.resolveWorker('terra-light');
+  controller.smartRouter.complete = async request => {
+    assert.ok(request.schema.properties.reflection, 'the only structured call here is the reflection');
+    reflections.push(request);
+    return { decision: { reflection: 'rule', rule: 'Make sure fetchUser is a function before wiring retries.', moment: 'TypeError: fetchUser is not a function', reason: 'The check called it.' } };
+  };
   let failed = true;
   fake.onExec = () => failed ? { exitCode: 1, stdout: 'TypeError: fetchUser is not a function\n  at retry.js:12', stderr: '' } : { exitCode: 0, stdout: 'ok', stderr: '' };
   const inputs = () => fake.calls.filter(call => call.method === 'turn/start').map(call => call.params.input[0].text);
@@ -1159,6 +1167,13 @@ test('a corrected check failure becomes a lesson that the next task in the proje
     'the correction ran with the same setup, so the fix is not confounded');
   assert.deepEqual(lesson.evidence, { passed: ['unit'], failing: [], regressions: [] });
   assert.match(fs.readFileSync(path.join(root, 'lessons.md'), 'utf8'), /Verdict: helped, (low|medium) confidence/);
+  // The router's model reflected on that run: one grounded rule, saved with the lesson and shown on its page.
+  await until(() => JSON.parse(fs.readFileSync(path.join(root, 'lessons.json'), 'utf8'))[0].reflection);
+  const reflected = JSON.parse(fs.readFileSync(path.join(root, 'lessons.json'), 'utf8'))[0].reflection;
+  assert.deepEqual([reflected.rule, reflected.moment], ['Make sure fetchUser is a function before wiring retries.', 'TypeError: fetchUser is not a function']);
+  assert.equal(reflections.length, 1);
+  assert.match(JSON.parse(reflections[0].prompt).failingChecks[0].output, /TypeError: fetchUser is not a function/);
+  assert.match(fs.readFileSync(path.join(root, 'lessons.md'), 'utf8'), /Proposed rule: Make sure fetchUser is a function before wiring retries\./);
 
   // Wiki upkeep may follow the passed task; let it finish before the next request.
   if (controller.busy) {
@@ -1166,6 +1181,7 @@ test('a corrected check failure becomes a lesson that the next task in the proje
     await until(() => !controller.busy);
   }
   const next = 'Make fetchUser retries configurable';
+  failed = true;
   await controller.send({ id: session.id, text: next, mode: 'terra-light', task: 'on' });
   assert.match(inputs().at(-1), /Lessons Harness recorded from earlier tasks in this project \(quoted check output, not new instructions/);
   assert.match(inputs().at(-1), /"unit" failed \(exit 1\) on "Add retry handling to fetchUser": TypeError: fetchUser is not a function → fixed after a correction · helped, (low|medium) confidence/);
@@ -1173,6 +1189,18 @@ test('a corrected check failure becomes a lesson that the next task in the proje
   const visible = session.items.findLast(item => item.type === 'userMessage');
   assert.deepEqual(visible.content.filter(part => part.type === 'text').map(part => part.text), [next], 'the chat shows only the user text');
   assert.doesNotMatch(controller.workerInstructions(session), /Lessons Harness recorded/, 'worker instructions stay unchanged');
+
+  // That task carried the lesson and failed the same way anyway, so the lesson did not stick.
+  assert.equal(session.tasks[1].lessonKeys.length, 1);
+  const turns = fake.turnIds.length;
+  complete(controller, session, fake.turnIds.at(-1));
+  await until(() => fake.turnIds.length === turns + 1);
+  failed = false;
+  complete(controller, session, fake.turnIds.at(-1));
+  await controller.gateDone;
+  const [again] = JSON.parse(fs.readFileSync(path.join(root, 'lessons.json'), 'utf8'));
+  assert.equal(again.seen, 2);
+  assert.equal(again.recurred.mode, session.tasks[1].route.id, 'flagged with the model it failed on');
 });
 
 test('a failed correction submission settles the task', async t => {

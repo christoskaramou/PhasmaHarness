@@ -429,3 +429,27 @@ test('Apply refuses while a bot works in the copy, after the copy changes past i
   await assert.rejects(workspaces.changes(copy.workspace), /cannot write through a link/);
   assert.deepEqual(fs.readdirSync(outside), []);
 });
+
+test('Undo puts applied files back from the snapshot, and refuses when one changed after it was applied', async t => {
+  for (const repository of [true, false]) await t.test(repository ? 'git' : 'plain folder', async t => {
+    const { source, workspaces, copy } = await applyFixture(t, repository);
+    const read = file => fs.readFileSync(path.join(source, file), 'utf8');
+    fs.writeFileSync(path.join(copy.workspace, 'source.txt'), 'edited by the bot');
+    fs.mkdirSync(path.join(copy.workspace, 'src'));
+    fs.writeFileSync(path.join(copy.workspace, 'src', 'added.txt'), 'added by the bot');
+    fs.rmSync(path.join(copy.workspace, 'other.txt'));
+    const preview = await workspaces.changes(copy.workspace);
+    await workspaces.apply(copy.workspace, preview);
+
+    fs.writeFileSync(path.join(source, 'source.txt'), 'edited by the user after Apply');
+    await assert.rejects(workspaces.undo(copy.workspace, preview.changes), /source\.txt changed since it was applied\. Nothing was undone/);
+    assert.equal(read('src/added.txt'), 'added by the bot', 'a refused undo touches nothing');
+
+    fs.writeFileSync(path.join(source, 'source.txt'), 'edited by the bot');
+    const result = await workspaces.undo(copy.workspace, preview.changes);
+    assert.deepEqual(result.restored.sort(), ['other.txt', 'source.txt', 'src/added.txt']);
+    assert.equal(read('source.txt'), 'committed source');
+    assert.equal(read('other.txt'), 'other');
+    assert.equal(fs.existsSync(path.join(source, 'src', 'added.txt')), false);
+  });
+});

@@ -1594,19 +1594,24 @@ function renderVerification(evidence) {
   return container;
 }
 
-// A two-run comparison (src/comparisons.cjs): runs by label only until the user picks or reveals.
+// A two-run comparison (src/comparisons.cjs). Runs show by label while they work; once both are back the card shows the
+// verdict, which run had the change, what landed in the project, and Undo for each.
 function renderComparison(view, sessionId, opened = true) {
   const details = element('details', 'batch-report comparison-card'); details.open = opened;
   const returned = view.runs.filter(run => run.result).length;
-  const states = { running: `Running · ${returned} of ${view.runs.length} back`, finished: view.revealed ? 'Revealed' : 'Waiting for your pick', failed: 'Did not start' };
+  const verdicts = { helped: 'The change helped', hurt: 'The change hurt', cheaper: 'The change made it cheaper',
+    confounded: 'Could not compare fairly', 'no observed effect': 'No clear difference' };
+  const status = view.state === 'running' ? `Running · ${returned} of ${view.runs.length} back`
+    : view.revealed ? verdicts[view.verdict] || view.verdict : view.state;
   const targets = { bot: 'worker instructions', project: 'project INSTRUCTIONS.md' };
-  details.append(element('summary', '', `Comparison${view.number ? ' ' + view.number : ''} · ${view.pairs * 2} runs on ${view.model} · ${states[view.state] || view.state}`),
+  details.append(element('summary', '', `Comparison${view.number ? ' ' + view.number : ''} · ${view.pairs * 2} runs on ${view.model} · ${status}`),
     element('p', '', `Task: ${view.task}`), element('p', '', `Change to the ${targets[view.target]}: ${view.change}`));
   if (view.error)
     details.append(element('p', 'muted', view.error));
   if (view.revealed)
     details.append(element('p', '', `Verdict: ${view.verdict}, ${view.confidence} confidence.`));
 
+  const applied = view.applied?.files?.length && !view.applied.undoneAt;
   for (let pair = 1; pair <= view.pairs; pair++) {
     const runs = view.runs.filter(run => run.pair === pair);
     if (view.pairs > 1)
@@ -1624,17 +1629,18 @@ function renderComparison(view, sessionId, opened = true) {
       if (run.name)
         name.append(element('small', 'muted', run.name));
       row.append(name, element('td', '', result ? result.status : 'Running'),
-        element('td', '', result ? `${checks.filter(([, status]) => status === 'passed').length}/${checks.length} passed` : ''),
+        element('td', '', result ? `${checks.filter(([, state]) => state === 'passed').length}/${checks.length} passed` : ''),
         element('td', '', String(result?.corrections ?? '')),
         element('td', '', result ? (Number.isFinite(result.tokens) ? result.tokens.toLocaleString() : 'Not fully reported') : ''),
         element('td', '', Number.isFinite(result?.activeMs) ? `${Math.round(result.activeMs / 1000)} s` : ''));
       const action = element('td');
-      if (view.revealed && result?.workspace) {
+      // By hand only when nothing landed by itself (no run passed, or the project changed meanwhile).
+      if (view.revealed && result?.workspace && !applied) {
         const apply = element('button', 'compact-action', 'Apply'); apply.type = 'button';
         apply.setAttribute('aria-label', `Apply run ${run.label}'s changes to my project`);
         apply.onclick = () => applyCopy(result.workspace); action.append(apply);
       }
-      // A revealed comparison's bots are removed, and their job details with them.
+      // A finished comparison's bots are removed, and their job details with them.
       if (run.jobId && (!result || state.agents?.some(agent => agent.id === result.agentId))) {
         const button = element('button', 'compact-action', 'Details'); button.type = 'button';
         button.setAttribute('aria-label', `Details for run ${run.label}`);
@@ -1655,31 +1661,44 @@ function renderComparison(view, sessionId, opened = true) {
     }
     details.append(answers);
 
-    if (view.revealed) {
-      const verdict = view.pairVerdicts?.find(entry => entry.pair === pair);
-      const pick = view.preferences?.[pair];
-      if (verdict)
-        details.append(element('p', '', `${verdict.verdict}: ${verdict.reason}.${pick ? ` Your pick: ${pick}.` : ''}`));
-    } else if (view.state === 'finished') {
-      details.append(element('p', 'comparison-ask', `${view.pairs > 1 ? `Pair ${pair}: which` : 'Which'} run did better? The change is revealed after your pick.`));
-      const picks = element('div', 'comparison-picks');
-      for (const [pick, label] of [['A', 'A is better'], ['B', 'B is better'], ['none', 'No preference']]) {
-        const button = element('button', 'compact-action', label); button.type = 'button';
-        button.setAttribute('aria-pressed', String(view.picks?.[pair] === pick));
-        button.onclick = () => api.comparisonPick(sessionId, view.id, pair, pick).catch(notify);
-        picks.append(button);
-      }
-      details.append(picks);
-    }
+    const verdict = view.revealed && view.pairVerdicts?.find(entry => entry.pair === pair);
+    if (verdict)
+      details.append(element('p', '', `${verdict.verdict}: ${verdict.reason}.`));
   }
 
-  if (view.state === 'finished' && !view.revealed) {
-    const reveal = element('button', 'compact-action', 'Reveal without picking'); reveal.type = 'button';
-    reveal.onclick = () => api.comparisonPick(sessionId, view.id, null, 'reveal').catch(notify);
-    details.append(reveal);
-  }
-  details.append(element('p', 'muted', 'One pair is weak evidence. Nothing is adopted automatically.'));
+  if (view.applied?.files?.length)
+    details.append(comparisonOutcome(view.applied.undoneAt ? `Run ${view.applied.label}'s changes were undone.`
+      : `Applied run ${view.applied.label}'s changes to your project: ${view.applied.files.join(', ')}.`, !view.applied.undoneAt, sessionId, view.id, 'apply'));
+  else if (view.applied?.error)
+    details.append(element('p', '', view.applied.error));
+  if (view.adopted?.file)
+    details.append(comparisonOutcome(view.adopted.undoneAt ? 'The rule was taken out of INSTRUCTIONS.md again.'
+      : view.adopted.existing ? 'The rule was already in INSTRUCTIONS.md.' : 'Added the rule to INSTRUCTIONS.md.',
+    !view.adopted.undoneAt && !view.adopted.existing, sessionId, view.id, 'rule'));
+  else if (view.adopted?.error)
+    details.append(element('p', '', `The rule was not added: ${view.adopted.error}`));
+  details.append(element('p', 'muted', 'One pair is weak evidence.'));
   return details;
+}
+
+// One thing that happened to the project, with its Undo.
+function comparisonOutcome(text, undoable, sessionId, comparisonId, part) {
+  const line = element('p', 'comparison-outcome', text);
+  if (undoable) {
+    const undo = element('button', 'compact-action', 'Undo'); undo.type = 'button';
+    undo.setAttribute('aria-label', part === 'apply' ? 'Undo the applied changes' : 'Undo the added rule');
+    undo.onclick = async () => {
+      undo.disabled = true;
+      try {
+        await api.undoComparison(sessionId, comparisonId, part);
+      } catch (error) {
+        undo.disabled = false;
+        notify(error);
+      }
+    };
+    line.append(' ', undo);
+  }
+  return line;
 }
 
 function renderBatchReport(report, opened = false) {
@@ -2449,7 +2468,7 @@ function lastMessage(session) {
 function suggestionTarget(session) {
   const last = lastMessage(session);
   const idle = session && state.busy !== session.id && !session.pendingMessage && !session.queue?.length && !session.compacting;
-  return state.settings.replySuggestions === true && idle && last?.type === 'agentMessage' ? last : null;
+  return state.settings.replySuggestions !== false && idle && last?.type === 'agentMessage' ? last : null;
 }
 function renderSuggestion() {
   const session = current(), target = suggestionTarget(session);
@@ -2545,7 +2564,7 @@ $('#settings').onclick = async () => {
   $('#settings-quick').value = state.settings.jevQuickAnswers === false ? 'off' : 'on';
   $('#settings-jev-compare').value = state.settings.jevCompare === true ? 'on' : 'off';
   $('#settings-wiki-check').value = state.settings.wikiAssessment === true ? 'on' : 'off';
-  $('#settings-reply-suggestions').value = state.settings.replySuggestions === true ? 'on' : 'off';
+  $('#settings-reply-suggestions').value = state.settings.replySuggestions === false ? 'off' : 'on';
   $('#settings-background-usage').value = String(state.settings.backgroundUsageLimit || 90);
   renderRoutingDetail();
   $('#jev-key').value = '';

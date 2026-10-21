@@ -176,3 +176,28 @@ test('lessons from a batch copy are kept with its source project', () => {
   assert.equal(gate.lessonWorkspace.call(owner, '/project'), '/project');
   assert.equal(gate.lessonWorkspace.call({ agents: { workspaces: { record() { throw new Error('unregistered copy'); } } } }, '/x'), '/x');
 });
+
+test('a lesson that fails again on a task that carried it is flagged once, with the model, for a suggested comparison', t => {
+  const { lessonsOffer, markSuggested, lessonKey } = require('../src/lessons.cjs');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-lessons-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lesson = () => lessonFromTask(task(), 'checks-passed');
+  recordLesson(root, lesson());
+  recordLesson(root, lesson(), { carried: false, mode: 'codex:gpt-6.1-sol:medium' });
+  assert.equal(readLessons(root)[0].recurred, undefined, 'the same failure without the lesson offered says nothing about it');
+
+  const offer = lessonsOffer(readLessons(root));
+  assert.deepEqual(offer.keys, [lessonKey(lesson())]);
+  assert.match(offer.block, /fetchUser is not a function/);
+  recordLesson(root, lesson(), { carried: offer.keys.includes(lessonKey(lesson())), mode: 'codex:gpt-6.1-sol:medium' });
+  const [record] = readLessons(root);
+  assert.equal(record.recurred.mode, 'codex:gpt-6.1-sol:medium');
+  assert.equal(record.seen, 3);
+  recordLesson(root, lesson());
+  assert.ok(readLessons(root)[0].recurred, 'a later merge keeps the flag');
+
+  markSuggested(root, lessonKey(record));
+  assert.ok(readLessons(root)[0].suggestedAt);
+  const long = Array.from({ length: 3 }, (_, index) => ({ ...record, goal: 'x'.repeat(700), failures: [{ ...record.failures[0], check: `check ${index}` }] }));
+  assert.equal(lessonsOffer(long).keys.length, 1, 'only lessons that fit in the block count as offered');
+});

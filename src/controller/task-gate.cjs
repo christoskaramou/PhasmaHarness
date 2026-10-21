@@ -11,7 +11,7 @@ const { FINAL, OUTPUT_CAP, canProposeWiki, capStream, childBlocksClear, confirmT
 const { accessMode, sameEffort, treeEntries } = require('./shared.cjs');
 const { stripTaskStatus } = require('../routing/task-state.cjs');
 const { readWiki, assessWikiUpdate } = require('../workspace/wiki-assess.cjs');
-const { lessonFromTask, recordLesson, readLessons, relevantLessons, lessonsBlock, diffHashes } = require('../lessons.cjs');
+const { lessonFromTask, recordLesson, readLessons, relevantLessons, lessonsOffer, lessonKey, diffHashes } = require('../lessons.cjs');
 const { restoreCheckFiles } = require('../comparisons.cjs');
 
 module.exports = {
@@ -33,8 +33,12 @@ module.exports = {
       // Relevant lessons ride in this task's first worker message only; corrections never get them. Comparison runs
       // all get the block computed once when the comparison started.
       const comparison = this.comparisonOf(session);
-      if (!task.corrections && !text.startsWith('[Router]'))
-        task.lessonBlock = comparison ? comparison.record.lessonBlock || null : this.lessonsFor(session.workspace, text, configured);
+      if (!task.corrections && !text.startsWith('[Router]')) {
+        const offer = comparison ? { block: comparison.record.lessonBlock || null, keys: [] } : this.lessonOffer(session.workspace, text, configured);
+        task.lessonBlock = offer.block;
+        // Which lessons it carried: the same failure again means that lesson did not stick (saveLesson).
+        task.lessonKeys = offer.keys;
+      }
       task.foreground = !(session.delegation && !session.delegation.delivered) && !session.agentReplyActive;
       if (task.foreground) task.inputImages = (session.pendingMessage?.content || []).filter(part => part.type === 'image').map(part => part.url);
       this.agents?.budgets.register(task, session);
@@ -567,22 +571,38 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
     if (!lesson || !this.wikiStore || this.comparisonOf(session))
       return;
 
+    const project = this.lessonWorkspace(session.workspace);
+    let root;
     try {
-      recordLesson(this.wikiStore.ensure(this.lessonWorkspace(session.workspace)).root, lesson);
+      root = this.wikiStore.ensure(project).root;
+      recordLesson(root, lesson, { carried: (task.lessonKeys || []).includes(lessonKey(lesson)), mode: task.route?.id || null });
     } catch (error) {
       this.log.warn('Lesson not saved', { task: task.id, error: error.message });
+      return;
+    }
+
+    // The router's model then proposes one rule from this run, or "keep as is" (src/controller/reflection.cjs).
+    try {
+      this.reflectOnLesson(session, task, lesson, root, project);
+    } catch (error) {
+      this.log.warn('Reflection failed', { task: task.id, error: error.message });
     }
   },
 
   lessonsFor(workspace, text, checks = []) {
+    return this.lessonOffer(workspace, text, checks).block;
+  },
+
+  // The lesson block for a new task and the keys of the lessons in it.
+  lessonOffer(workspace, text, checks = []) {
     if (!this.wikiStore)
-      return null;
+      return { block: null, keys: [] };
 
     try {
       const root = this.wikiStore.location(this.lessonWorkspace(workspace)).root;
-      return lessonsBlock(relevantLessons(readLessons(root), text, checks.map(check => check.name)));
+      return lessonsOffer(relevantLessons(readLessons(root), text, checks.map(check => check.name)));
     } catch {
-      return null;
+      return { block: null, keys: [] };
     }
   },
 

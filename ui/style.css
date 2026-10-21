@@ -3766,10 +3766,6 @@ body:has(#job-dialog[open]) main {
   margin-top: 5px;
   max-width: 190px;
 }
-.comparison-ask {
-  font-weight: 600;
-  margin-bottom: 4px;
-}
 .comparison-answers {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));

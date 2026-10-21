@@ -37,6 +37,7 @@ async function setup(t) {
       async complete(request, choice, abort) {
         calls.push({ request, choice, abort });
         return { decision: request.schema.properties.summary ? { summary: 'User intent and pending work retained.' }
+          : request.schema.properties.reflection ? { reflection: 'keep', rule: '', moment: '', reason: 'Fixture.' }
           : request.schema.properties.fulfilled ? assessments.shift() || { fulfilled: true, evidence: 'The fixture worker completed the requested task.', gaps: [] }
           : replies.shift() || answer('Hello.') };
       },
@@ -891,7 +892,7 @@ test('Hub automatic dispatch avoids old manual pins and has no alternate delegat
   assert.equal(session.hubWorkerMode, manual.mode);
 });
 
-test('Hub asks once before creating several agents, then creates them all in one action with an accurate count', async t => {
+test('Hub creates several agents at once from one request, with an accurate count', async t => {
   const { hub, session, calls, replies, send } = await setup(t);
   const names = ['Orion', 'Nimbus', 'Saffron', 'Cobalt', 'Kestrel', 'Juniper', 'Ember', 'Atlas', 'Willow', 'Quartz'];
   const lastReply = () => session.items.filter(item => item.type === 'agentMessage').at(-1).text;
@@ -901,25 +902,12 @@ test('Hub asks once before creating several agents, then creates them all in one
   const strict = action('agent_create', { name: null, instructions: 'General helper', mode: null, effort: null, names });
   assert.doesNotThrow(() => require('../src/providers/structured.cjs').structuredResponse(strict, calls.at(-1).request.schema),
     'real providers validate the list against Hub\'s response schema');
-  assert.equal(hub.data.agents.length, 0, 'nothing is created before the user confirms');
-  assert.match(lastReply(), /^Create 10 agents: Orion, Nimbus.*Quartz\?/);
-
-  replies.push(action('agent_create', { names, instructions: 'General helper' }));
-  await send('yes');
-  assert.deepEqual(hub.data.agents.map(agent => agent.name), names, 'one confirmed action creates every agent');
+  assert.deepEqual(hub.data.agents.map(agent => agent.name), names, 'the request is the approval: one action creates every agent');
   assert.match(lastReply(), /^Created 10 agents: Orion, .*Quartz\.$/);
+  assert.equal(session.pendingAgents, undefined);
 
   replies.push(action('agent_create', { names: ['Orion', 'Vega'], instructions: 'General helper' }));
   await send('create Orion and Vega');
-  replies.push(answer('Okay, I will not create them.'));
-  await send('no');
-  replies.push(action('agent_create', { names: ['Orion', 'Vega'], instructions: 'General helper' }));
-  await send('actually yes');
-  assert.equal(hub.data.agents.length, 10, 'a declined list is not created by a later message');
-  assert.match(lastReply(), /^Create 2 agents: Orion, Vega\?/);
-
-  replies.push(action('agent_create', { names: ['Orion', 'Vega'], instructions: 'General helper' }));
-  await send('yes');
   assert.equal(hub.data.agents.length, 11);
   assert.match(lastReply(), /^Created 1 of 2 agents: Vega\.\nNot created: Orion \(.+\)$/);
 });
@@ -1767,7 +1755,7 @@ test('a new delegation to an explicitly selected model starts its own task goal'
 });
 
 
-test('Hub compare asks first, runs both copies from one snapshot with only the change, restores edited checks and reveals a blind pick', async t => {
+test('Hub compare starts on request with one Auto model, keeps only the change different, restores edited checks, then applies the better run and keeps a rule that helped', async t => {
   for (const target of ['bot', 'project']) await t.test(target, async t => {
     const { root, hub, session, agents, replies, calls, send } = await setup(t);
     const project = projectFixture(root, session);
@@ -1776,21 +1764,18 @@ test('Hub compare asks first, runs both copies from one snapshot with only the c
     hub.data.settings.checks[project] = [{ id: 'done-check', name: 'Done check', argv: [process.execPath, path.join(project, 'check.cjs')], cwd: project, timeoutMs: 10000 }];
     hub.lessonsFor = () => 'Lessons block for this comparison.';
     const change = 'Always create done.txt before anything else.';
-    replies.push(action('compare', { task: 'Create done.txt.', change, target, mode: 'codex:gpt-5.6-terra:low' }));
+    // No model named: Auto picks one for the request and both runs use it. The request itself is the approval.
+    replies.push(action('compare', { task: 'Create done.txt.', change, target }));
     await send(`Compare creating done.txt with the instruction change "${change}"`);
-    assert.match(session.items.at(-1).text, /Start this comparison\?[\s\S]*2 paid runs \(1 pair\)[\s\S]*Done check[\s\S]*check\.cjs[\s\S]*Reply yes/);
-    assert.equal(hub.data.agents.length, 0, 'nothing runs before the user confirms');
-
-    replies.push(action('compare', { confirm: true }));
-    await send('yes');
     const record = Object.values(hub.data.comparisons)[0];
     assert.equal(record.state, 'running');
+    assert.equal(record.mode, agents.agentMode('terra-light'), 'the model the router picked, pinned for both runs');
     assert.equal(hub.data.agents.length, 2);
     const started = session.items.at(-1);
-    assert.match(started.text, /^Started the comparison: 2 runs on .+\. The card below updates as they finish\.$/);
+    assert.match(started.text, /^Started the comparison: 2 runs on .+, judged by Done check\. The card below updates as they finish\.$/);
     assert.equal(started.hubComparison.state, 'running', 'the card sits under the start message');
-    assert.ok(session.items.find(item => item.text === 'yes' || item.content?.[0]?.text === 'yes').comparisonId, 'its batch report is replaced by the card');
-    assert.equal(JSON.stringify(agents.snapshot()).includes('"variant"'), false, 'the change mapping stays out of the renderer state');
+    assert.ok(session.items.find(item => item.type === 'userMessage' && item.comparisonId), 'its batch report is replaced by the card');
+    assert.equal(JSON.stringify(agents.snapshot()).includes('"variant"'), false, 'the change mapping stays out of the renderer state while it runs');
     const runs = record.runs.map(run => {
       const profile = hub.data.agents.find(agent => agent.name === run.name), worker = agents.execution(profile.id);
       return { run, profile, worker };
@@ -1823,7 +1808,7 @@ test('Hub compare asks first, runs both copies from one snapshot with only the c
     // The changed run gets it right first time. The other edits its check to pass, is judged by the restored one,
     // and needs a correction.
     const changed = runs.find(({ run }) => run.variant), current = runs.find(({ run }) => !run.variant);
-    fs.writeFileSync(path.join(agents.conversation(changed.worker).workspace, 'done.txt'), 'done');
+    fs.writeFileSync(path.join(agents.conversation(changed.worker).workspace, 'done.txt'), 'done by the changed run');
     await finish(changed.worker, 'Created done.txt.');
     await until(() => started.hubComparison.runs.some(run => run.result) && !hub.busy, 20000);
     assert.equal(session.items.filter(item => item.hubComparison).length, 1, 'progress updates the card in place');
@@ -1832,35 +1817,123 @@ test('Hub compare asks first, runs both copies from one snapshot with only the c
     fs.writeFileSync(path.join(currentWork.workspace, 'check.cjs'), 'process.exit(0);');
     const turns = await finish(current.worker, 'Made the check pass.');
     await until(() => current.worker.client.calls.filter(call => call.method === 'turn/start').length > turns && current.worker.activeTurns.size, 20000);
-    fs.writeFileSync(path.join(currentWork.workspace, 'done.txt'), 'done');
+    fs.writeFileSync(path.join(currentWork.workspace, 'done.txt'), 'done by the current run');
     await finish(current.worker, 'Created done.txt.');
     await until(() => record.state === 'finished' && !hub.busy, 20000);
 
+    // Nothing waits on the user: verdict, the better run applied, a project rule that helped kept, bots removed.
     const holders = session.items.filter(item => item.hubComparison);
     assert.deepEqual(holders, [session.items.at(-1)], 'the card moved down to the newest comparison message');
-    assert.equal(session.items.at(-1).text, 'Both runs are back. Which did better? Pick below, or reveal.');
+    const label = changed.run.label;
+    assert.equal(session.items.at(-1).text, `The change helped (the change needed fewer corrections (0 instead of 1)). Applied run ${label}'s changes to the project: done.txt.` +
+      (target === 'project' ? ` Added the rule to ${path.join(fs.realpathSync(project), 'INSTRUCTIONS.md')}.` : ''));
     const visible = session.items.filter(item => !item.internal);
     assert.equal(visible.filter(item => item.type === 'agentResult' || item.agentReply).length, 0, 'no per-run receipts or handoffs in the chat');
-    assert.equal(visible.filter(item => /runs returned/.test(item.text || '')).length, 0);
     const card = holders[0].hubComparison;
-    assert.equal(card.revealed, false);
-    assert.equal(card.verdict, undefined);
-    const shown = label => card.runs.find(run => run.label === label).result;
+    assert.equal(card.revealed, true);
+    assert.equal(card.verdict, 'helped', JSON.stringify(card.pairVerdicts));
+    assert.equal(card.number, 1);
+    const shown = name => card.runs.find(run => run.label === name).result;
     assert.deepEqual(shown(current.run.label).restored, ['check.cjs']);
     assert.equal(shown(current.run.label).corrections, 1);
-    assert.equal(shown(changed.run.label).corrections, 0);
+    assert.equal(fs.readFileSync(path.join(project, 'done.txt'), 'utf8'), 'done by the changed run', 'the better run landed in the project');
+    assert.equal(fs.readFileSync(path.join(project, 'check.cjs'), 'utf8').includes('existsSync'), true, 'the project check is untouched');
     assert.equal(calls.filter(call => call.request.schema.properties.fulfilled).length, 0, 'no completion check or follow-up for comparison runs');
-    assert.equal(calls.filter(call => call.request.schema.properties.action).length, 2);
-
-    const view = await hub.comparisonPick(session.id, record.id, 1, changed.run.label);
-    assert.equal(view.revealed, true);
-    assert.equal(view.verdict, 'helped', JSON.stringify(view.pairVerdicts));
-    assert.equal(view.confidence, 'low');
-    assert.equal(view.preferences[1], 'the change');
+    assert.equal(calls.filter(call => call.request.schema.properties.action).length, 1, 'one Hub call: the request');
     assert.equal(hub.data.comparisons[record.id], undefined);
-    assert.deepEqual(hub.data.agents, [], 'the revealed comparison\'s bots are removed');
-    assert.ok(view.runs.every(run => agents.workspaces.record(run.result.workspace)), 'their project copies stay for Apply');
-    assert.equal(view.number, 1);
-    await assert.rejects(async () => hub.comparisonPick(session.id, record.id, 1, 'A'), /no results to judge/);
+    assert.deepEqual(hub.data.agents, [], 'the finished comparison\'s bots are removed');
+    const entryFile = path.join(fs.realpathSync(project), 'INSTRUCTIONS.md');
+    if (target === 'project') {
+      assert.ok(fs.readFileSync(entryFile, 'utf8').trimEnd().endsWith(change), 'the rule that helped joins the project entry');
+      await hub.undoComparison(session.id, record.id, 'rule');
+      assert.equal(fs.readFileSync(entryFile, 'utf8').includes(change), false, 'Undo takes the rule out again');
+    } else assert.equal(card.adopted, null, 'only project rules are added to the project entry');
+    await hub.undoComparison(session.id, record.id, 'apply');
+    assert.equal(fs.existsSync(path.join(project, 'done.txt')), false, 'Undo removes what the comparison applied');
+    await assert.rejects(hub.undoComparison(session.id, record.id, 'apply'), /no applied run to undo/);
   });
+});
+
+test('a lesson that did not stick tests a permanent rule on the next matching task by itself, once, and only on a matching task', async t => {
+  const { WikiStore } = require('../src/workspace/wiki-store.cjs');
+  const { root, hub, session, agents, replies, send, calls } = await setup(t);
+  const project = projectFixture(root, session);
+  fs.writeFileSync(path.join(project, 'check.cjs'), "process.exit(require('node:fs').existsSync('done.txt') ? 0 : 1);");
+  hub.data.settings.checks[project] = [{ id: 'done-check', name: 'Done check', argv: [process.execPath, path.join(project, 'check.cjs')], cwd: project, timeoutMs: 10000 }];
+  hub.wikiStore = new WikiStore(path.join(root, 'wiki-store'));
+  const lessons = hub.wikiStore.ensure(project).root;
+  const failure = { check: 'Done check', exitCode: 1, excerpt: 'done.txt is missing' };
+  fs.writeFileSync(path.join(lessons, 'lessons.json'), JSON.stringify([{ taskId: 'earlier', at: Date.now(), goal: 'Create done.txt', outcome: 'fixed',
+    failures: [failure], changed: [], seen: 2, situation: { checks: ['Done check'], error: 'done.txt is missing' },
+    verdict: 'helped', verdicts: { helped: 2 }, confidence: 'medium', recurred: { at: Date.now(), mode: 'codex:gpt-5.6-terra:low' } }]));
+  const lesson = () => JSON.parse(fs.readFileSync(path.join(lessons, 'lessons.json'), 'utf8'))[0];
+
+  replies.push(action('agent_work', { name: 'Poet', task: 'Write a haiku about rain.' }));
+  await send('Write a haiku about rain');
+  assert.deepEqual(hub.data.agents.map(agent => agent.name), ['Poet'], 'an unrelated request is just dispatched');
+  assert.equal(hub.data.comparisons, undefined);
+
+  replies.push(action('agent_work', { name: 'Builder', task: 'Create done.txt.' }));
+  await send('Create done.txt in the project');
+  const record = Object.values(hub.data.comparisons)[0];
+  assert.ok(record, 'a matching request starts the comparison with no question');
+  assert.equal(record.suggested, true);
+  assert.equal(record.target, 'project');
+  assert.equal(record.mode, 'codex:gpt-5.6-terra:low', 'pinned to the model the lesson failed on');
+  assert.match(record.change, /^"Done check" has failed more than once with: done\.txt is missing/);
+  assert.equal(record.task, 'Create done.txt in the project', 'the runs get the original request');
+  const request = session.items.findLast(item => item.type === 'userMessage');
+  assert.equal(request.comparisonId, record.id, 'the batch hangs on the original request');
+  assert.deepEqual(hub.data.agents.map(agent => agent.name).sort(), ['Comparison 1 · A', 'Comparison 1 · B', 'Poet']);
+  assert.match(session.items.at(-1).text, /^This kind of task failed the same way before, even with the saved lesson \("Done check": done\.txt is missing\)\. So I am running it twice on .+: as usual, and with this rule in INSTRUCTIONS\.md:/);
+  assert.equal(session.items.at(-1).hubComparison.state, 'running');
+  assert.ok(lesson().suggestedAt, 'tested once per lesson');
+  assert.equal(calls.filter(call => call.request.schema.properties.action).length, 2, 'no extra Hub call to start it');
+
+  replies.push(answer('Done.'));
+  await send('Create done.txt again');
+  assert.equal(session.items.at(-1).text, 'Done.', 'the same lesson never starts a second comparison');
+  assert.equal(Object.keys(hub.data.comparisons).length, 1);
+  assert.ok(agents);
+});
+
+test('a comparison left waiting for a pick (from before results were automatic) settles at startup', async t => {
+  const { root, hub, session } = await setup(t);
+  const result = { status: 'completed', checks: { 'Done check': 'failed' }, corrections: 1, setups: [{ hash: 'h' }], restored: [], tokens: 10, activeMs: 10 };
+  const record = { id: randomUUID(), at: Date.now(), state: 'finished', project: root, task: 'Create done.txt.', change: 'Rule.', target: 'project',
+    pairs: 1, model: 'Terra', threshold: 0.2, sessionId: session.id, verdict: 'no observed effect', confidence: 'low',
+    pairVerdicts: [{ pair: 1, verdict: 'no observed effect', reason: 'both runs failed the same checks' }],
+    runs: [{ index: 1, pair: 1, label: 'A', variant: true, result }, { index: 2, pair: 1, label: 'B', variant: false, result }] };
+  hub.data.comparisons = { [record.id]: record };
+  session.items.push({ id: 'waiting-card', type: 'agentMessage', phase: 'final_answer', text: 'Both runs are back. Which did better?',
+    hubComparison: { id: record.id, revealed: false } });
+  await hub.settleWaitingComparisons();
+  assert.equal(hub.data.comparisons[record.id], undefined);
+  const card = session.items.find(item => item.id === 'waiting-card').hubComparison;
+  assert.equal(card.revealed, true);
+  assert.equal(card.verdict, 'no observed effect');
+  assert.match(card.applied.error, /No run passed every check/);
+});
+
+test('a reflected rule is what a lesson that did not stick tests, and a reflection that chose keep tests nothing', async t => {
+  const { WikiStore } = require('../src/workspace/wiki-store.cjs');
+  for (const reflection of [{ rule: 'Create done.txt before reporting the task finished.', moment: 'done.txt is missing', hash: 'h' }, { keep: true, reason: 'Noise.', hash: 'h' }])
+    await t.test(reflection.keep ? 'keep' : 'rule', async t => {
+      const { root, hub, session, replies, send } = await setup(t);
+      const project = projectFixture(root, session);
+      fs.writeFileSync(path.join(project, 'check.cjs'), "process.exit(require('node:fs').existsSync('done.txt') ? 0 : 1);");
+      hub.data.settings.checks[project] = [{ id: 'done-check', name: 'Done check', argv: [process.execPath, path.join(project, 'check.cjs')], cwd: project, timeoutMs: 10000 }];
+      hub.wikiStore = new WikiStore(path.join(root, 'wiki-store'));
+      fs.writeFileSync(path.join(hub.wikiStore.ensure(project).root, 'lessons.json'), JSON.stringify([{ taskId: 'earlier', at: Date.now(), goal: 'Create done.txt',
+        outcome: 'fixed', failures: [{ check: 'Done check', exitCode: 1, excerpt: 'done.txt is missing' }], changed: [], seen: 2,
+        situation: { checks: ['Done check'], error: 'done.txt is missing' }, verdict: 'helped', verdicts: { helped: 2 }, confidence: 'medium',
+        recurred: { at: Date.now(), mode: 'codex:gpt-5.6-terra:low' }, reflection }]));
+      replies.push(action('agent_work', { name: 'Builder', task: 'Create done.txt.' }));
+      await send('Create done.txt in the project');
+      const record = Object.values(hub.data.comparisons || {})[0];
+      if (reflection.keep) {
+        assert.equal(record, undefined, 'keep as is: the task is just done, no two runs');
+        assert.deepEqual(hub.data.agents.map(agent => agent.name), ['Builder']);
+      } else assert.equal(record.change, reflection.rule, 'the rule written from the run, not the template');
+    });
 });

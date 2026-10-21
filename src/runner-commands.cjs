@@ -106,7 +106,7 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
     return { cleared: !!session, sessionId: session?.id, state: agents.snapshot() };
   });
   handle('acknowledgeTask', (id, taskId) => agents.owner(id).acknowledgeTask(id, taskId));
-  handle('comparisonPick', (id, comparisonId, pair, pick) => agents.owner(id).comparisonPick(id, comparisonId, pair, pick));
+  handle('undoComparison', (id, comparisonId, part) => agents.owner(id).undoComparison(id, comparisonId, part));
   // Brings a project copy's own changes into the project it came from, after the user reviews the file list.
   handle('applyCopy', async workspace => {
     const preview = await agents.workspaces.changes(workspace);

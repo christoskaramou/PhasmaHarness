@@ -106,31 +106,34 @@ test('a project-instructions comparison gives every copy the same base and only 
   assert.equal(fs.existsSync(path.join(copies[0].workspace, 'INSTRUCTIONS.md')), false);
 });
 
-test('the chat card hides which run had the change until reveal, and the wiki keeps the records and a page', t => {
+test('a finished comparison shows its verdict at once, picks the run to apply, and the wiki keeps the records and a page', t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-compare-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const runs = [run('A', true), run('B', false, { corrections: 1 })].map((entry, index) => ({ ...entry, index: index + 1, name: `Compare ${index + 1}` }));
   const record = { id: 'c1', at: Date.parse('2026-10-20T10:00:00Z'), state: 'running', project: root, task: 'Fix greet.js', change: 'Handle empty names.',
-    target: 'bot', pairs: 1, model: 'Terra light', threshold: comparisons.THRESHOLD, lessonBlock: 'secret lessons', runs, picks: {} };
+    target: 'bot', pairs: 1, model: 'Terra light', threshold: comparisons.THRESHOLD, lessonBlock: 'secret lessons', runs };
+  assert.equal(JSON.stringify(comparisons.publicView(record)).includes('"changed"'), false, 'which run has the change shows only when finished');
   comparisons.finish(record);
   assert.equal(record.verdict, 'helped');
-  let view = comparisons.publicView(record);
-  assert.equal(view.revealed, false);
-  assert.equal(JSON.stringify(view).includes('"changed"'), false);
-  assert.equal(view.verdict, undefined);
-  comparisons.saveComparison(root, record);
-  assert.match(fs.readFileSync(path.join(root, comparisons.PAGE), 'utf8'), /stays hidden until it is revealed/);
-  record.picks[1] = 'A'; record.revealedAt = Date.now();
-  view = comparisons.publicView(record);
+  const view = comparisons.publicView(record);
+  assert.equal(view.revealed, true, 'nothing waits on a pick');
   assert.deepEqual(view.runs.map(entry => entry.changed), [true, false]);
-  assert.equal(view.preferences[1], 'the change');
+  assert.equal(comparisons.bestRun(record).label, 'A', 'every check passed with fewer corrections');
+
+  record.applied = { label: 'A', files: ['greet.js'] };
   comparisons.saveComparison(root, record);
   const saved = comparisons.readComparisons(root);
   assert.equal(saved.length, 1);
   assert.equal(saved[0].lessonBlock, undefined);
   const page = fs.readFileSync(path.join(root, comparisons.PAGE), 'utf8');
-  assert.match(page, /Verdict: helped, low confidence/);
-  assert.match(page, /Pair 1: helped; the change needed fewer corrections \(0 instead of 1\)\. Blind pick: the change\.\n {2}- Run A \(with the change\)/);
-  assert.match(comparisons.confirmText({ task: 'Fix it', change: 'Be brief', target: 'project', runs: 2, model: 'Terra light', budgetMinutes: 120,
-    budgetAttempts: 20, checks: ['Check'], protectedFiles: ['check.cjs'] }), /2 paid runs \(1 pair\) on Terra light[\s\S]*check\.cjs[\s\S]*Reply yes/);
+  assert.match(page, /Verdict: helped, low confidence\. Applied run A's changes to the project: greet\.js\./);
+  assert.match(page, /Pair 1: helped; the change needed fewer corrections \(0 instead of 1\)\.\n {2}- Run A \(with the change\)/);
+
+  // The run that lands: every check passed, then fewer corrections, then fewer tokens; a tie goes to the current setup.
+  const tie = { runs: [run('A', true), run('B', false)] };
+  assert.equal(comparisons.bestRun(tie).label, 'B');
+  tie.runs[0].result.tokens = 900;
+  assert.equal(comparisons.bestRun(tie).label, 'A');
+  tie.runs.forEach(entry => { entry.result.checks = { Check: 'failed' }; });
+  assert.equal(comparisons.bestRun(tie), null, 'nothing lands when no run passed every check');
 });

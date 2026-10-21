@@ -1448,6 +1448,7 @@ class Controller extends EventEmitter {
     this.claude.close(); this.cursor.close();
     for (const backend of this.nativeCLIs.values()) Promise.resolve(backend.close()).catch(error => this.log.error('Native CLI close failed', { message: error.message }));
     this.cancelHelpers();
+    for (const abort of this.reflections || []) abort.abort();
     this.smartRouter.cancel();
     this.smartRouter.close?.();
     this.contextSearch?.cancel();
@@ -1473,6 +1474,7 @@ for (const methods of [
   require('./controller/task-gate.cjs'),
   require('./controller/suggestions.cjs'),
   require('./controller/comparison.cjs'),
+  require('./controller/reflection.cjs'),
 ]) {
   for (const [name, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(methods))) {
     if (Object.hasOwn(Controller.prototype, name)) throw new Error(`Controller.${name} is defined twice.`);

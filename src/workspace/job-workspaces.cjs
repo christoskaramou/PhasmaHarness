@@ -473,6 +473,42 @@ class JobWorkspaces {
     return { source: fresh.source, applied };
   }
 
+  // Undo of an apply: every applied file must still hold what Apply wrote, or nothing is undone; then each goes back to
+  // its snapshot version (an added file is removed). Additions go first, the reverse of apply's deletions-first.
+  async undo(workspace, changes) {
+    const record = this.record(workspace);
+    if (!record) throw new Error('This folder is not a project copy.');
+    const input = JSON.parse(await fs.readFile(path.join(this.batchDirectory(record.batchId), 'input.json'), 'utf8'));
+    const source = await fs.realpath(input.source), snapshot = path.join(this.batchDirectory(record.batchId), 'input');
+    for (const change of changes) {
+      if (await this.fileHash(await this.target(source, change.path)) !== change.copy)
+        throw new Error(`${change.path} changed since it was applied. Nothing was undone.`);
+    }
+
+    const restored = [];
+    for (const change of [...changes].sort((a, b) => (b.kind === 'added') - (a.kind === 'added'))) {
+      const target = await this.target(source, change.path);
+      if (change.kind === 'added') {
+        await fs.rm(target);
+      } else {
+        const from = path.join(snapshot, change.path), temporary = `${target}.harness-undo-${process.pid}`;
+        if (await this.fileHash(from) !== change.base)
+          throw new Error(`The snapshot of ${change.path} is missing or changed. Restored before it: ${restored.join(', ') || 'nothing'}.`);
+
+        await fs.mkdir(path.dirname(target), { recursive: true });
+        try {
+          await fs.copyFile(from, temporary);
+          await fs.rename(temporary, target);
+        } catch (error) {
+          await fs.rm(temporary, { force: true });
+          throw error;
+        }
+      }
+      restored.push(change.path);
+    }
+    return { source, restored };
+  }
+
   // Like scoped(), but trailing folders may not exist yet; an existing link on the way is refused.
   async target(root, relative) {
     const filename = resolveInside(root, relative);

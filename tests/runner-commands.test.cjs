@@ -131,3 +131,12 @@ test('Apply shows the files and its safety notes before writing, and writes noth
   assert.equal((await apply()).applied.length, 32);
   assert.equal(applied[0], preview, 'exactly the previewed changes go to apply');
 });
+
+test('Undo from a comparison card goes to the owner of its chat', async () => {
+  const commands = new Map(), calls = [];
+  const owner = { undoComparison: (...args) => { calls.push(args); return { undone: true }; } };
+  const runner = { agents: { closing: false, owner: () => owner }, controller: {}, updater: { state: { status: 'idle' } } };
+  registerRunnerCommands((name, handler) => commands.set(name, handler), { runner, ask: async () => false });
+  assert.deepEqual(await commands.get('undoComparison')('chat', 'comparison', 'rule'), { undone: true });
+  assert.deepEqual(calls, [['chat', 'comparison', 'rule']]);
+});

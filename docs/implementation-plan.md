@@ -197,17 +197,52 @@ The original twelve-step roadmap (Usage question session, 17 October) maps onto 
 2. **Lead and sidekick pairs.** A big job runs as a strong lead that plans and reviews the diff plus a cheaper sidekick that explores and writes. Optional per job, never a mandatory reviewer loop.
 3. **Rented server and phone access.** The same runner and bot boxes on a VPS, reached from a phone (the remote gate above).
 
-### From harness2 (google-research/harness2 at `1cfe254`)
+### Self-improvement (from harness2, redone 2026-10-21)
 
-Codex compared harness2 with PhasmaHarness on 20 October; its claims about our code and the cited harness2 lines were spot-checked (no harness fingerprint exists here; their selection pool excludes the baseline; each mode schedules 4k rollouts and 3k improvement stages; lesson verdicts are helped, hurt, no observed effect and confounded). Borrow the method, not their Python framework.
+**How harness2 works** (google-research/harness2 `main`, source read 2026-10-21; README gains unverified). Per task:
+1. k base runs of the original harness;
+2. LLM improver sessions edit copies of the harness files (AGENTS.md, skills, scripts, hooks). Every edit must "trace to a moment in a trajectory": a divergence between runs first, then a repeated failure, then a visible risk. "Keep the harness as it is" is a valid answer;
+3. each candidate runs once;
+4. composers merge the evidence into finals;
+5. a blind LLM picks one;
+6. a reflector writes per-edit verdicts (helped, hurt, no observed effect, confounded) and at most one lesson (cue, lesson, evidence, confidence) into a per-domain library.
 
-1. **Setup fingerprint (first; built 2026-10-20 for worker runs, see the wiki's Setup fingerprint).** Save with every task and job result a hash, plus readable parts, of what shaped the run: bot instructions, selected skills, tool configuration, provider CLI and its version, model and effort. Cheap, no model calls. Makes "the same setup worked yesterday" checkable and is the precondition for comparisons.
-2. **Richer lessons (built 2026-10-20; see the wiki's Lessons from failed checks).** Extend `src/lessons.cjs` records, not a new memory system: the situation where the lesson applies, the actual change that fixed it, the supporting evidence, a confidence, and a verdict of helped, hurt, no observed effect or confounded. Record no lesson when evidence is thin.
-3. **Opt-in two-run comparison (built 2026-10-20 for instruction changes; see the wiki's Two-run comparison; skills are the next version).** Same task, identical project copies, same model and checks: one run with the current instructions, one with a single changed instruction or skill. Compare correctness, cost, time and corrections needed. One baseline and one candidate, never recursive experiments on every request. The baseline always may win: keep the current setup unless improvement is shown. Candidates cannot weaken permissions or change acceptance checks. Blind the comparison to reduce preference bias.
-4. **Proven setups.** Keep a small versioned, approved setup per recurring kind of work (for example Vulkan debugging, document generation) with its evidence and a rollback path. Extends bot instructions and skills; never rewrites the project wiki or rules automatically.
-5. **Earlier harness2 ideas (offered 19 October).** Best-of-N runs with a composed answer; per-agent harness pieces; tuning suggestions from recorded outcomes; a dry-run preview of what a request would do; a viewer for saved lessons.
+The library feeds the improver, never the workers. Always-on text is capped (8,000 characters for Codex) and skills with trigger lines are preferred. There is no grader inside the loop (its benchmarks hide the answers); a 1-of-k difference is treated as noise. It costs 4k runs and 3k sessions per task, and Codex runs unsandboxed.
 
-Their reported gains are not evidence for PhasmaHarness until measured here. Every experiment is opt-in, bounded and paid only when the user asks.
+**What changes for Harness.** Project checks are ground truth, and every extra run costs the user real usage. So: no repeated rollouts, no blind LLM selector, no fan-out. The checks judge, and evidence from runs already paid for comes before any paid A/B.
+
+**Rule for every step (user, 2026-10-21):** automatic by default. No new settings or approvals unless truly needed; a visible result and an Undo instead.
+
+**Built:**
+1. **Setup fingerprint** (2026-10-20).
+2. **Richer lessons** (2026-10-20).
+3. **Two-run comparison**, automatic since 2026-10-21. The request starts it, Auto pins one model, the verdict shows at once, the better run is applied and a project rule that helped is kept, each with an Undo. Creating several agents also no longer asks first.
+4. **Apply** a copy's changes, with Undo (2026-10-21).
+5. **Lessons that did not stick** start a comparison on the next matching task by themselves (2026-10-21; template rule).
+6. **Reply suggestions** on by default (2026-10-21).
+
+**Next, in order:**
+1. **Reflection writes the rule, grounded in the run** (built 2026-10-21; see the wiki's Reflection on failed checks).
+   - After a task that needed a correction or ended with failing checks, one cheap call reads that task's trajectory, check output and this project's lessons. It proposes one edit: a rule for the Harness section of `INSTRUCTIONS.md`, or "keep as is".
+   - The proposal must quote the moment in the run that went wrong (harness2's trace rule).
+   - It is a new automatic cost: one call on the router's own model, within the background usage limit, cached by an input hash so a retry costs nothing. It replaces today's template rule.
+   - Lessons stay as cue, lesson, evidence and confidence, and are re-checked before reuse ("a hypothesis, not a fact").
+2. **Trial on real work first, paid A/B only when needed.**
+   - A proposed rule goes on trial in the Harness section. Later matching tasks carry it, and their checks and corrections are compared with the same kind of task before the rule (free evidence).
+   - A two-run comparison runs only when that evidence stays thin, within the background usage limit, with one change per test.
+   - A check that flips from failing to passing counts as evidence. A token-only difference never adopts a rule.
+   - Today a single winning pair makes a rule permanent. Once trials exist, a one-pair "helped" only puts the rule on trial (harness2 treats one of one as noise); real tasks decide whether it stays.
+3. **Automatic rollback.** A kept rule that is followed by the failure it targets, or that loses an A/B, is removed by itself, with an Undo and a line in the chat.
+4. **Keep it small.**
+   - The Harness section of `INSTRUCTIONS.md` has an always-on cap.
+   - Rules beyond the cap, or ones rarely relevant, move to on-demand wiki pages or skills with trigger lines.
+   - Lessons are deduplicated and expire when unseen for a long time.
+5. **Proven setups, derived not curated.**
+   - From the records, the model and rules that pass a kind of work's checks with the fewest corrections and tokens become Auto's preference for that project and kind of work.
+   - Each change is recorded with its evidence; a later loss rolls it back.
+6. **Skills in comparisons** (the earlier v2), once rules work end to end.
+
+Not adopted from harness2: repeated rollouts per task, the blind LLM selector, parallel improver fan-out, an append-only library without pruning, and unsandboxed workers.
 
 ### Requested features
 
