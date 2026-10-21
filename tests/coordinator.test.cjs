@@ -1937,3 +1937,30 @@ test('a reflected rule is what a lesson that did not stick tests, and a reflecti
       } else assert.equal(record.change, reflection.rule, 'the rule written from the run, not the template');
     });
 });
+
+test('a suggested comparison that helped puts its rule on trial, not into INSTRUCTIONS.md, and Undo takes it off', async t => {
+  const { WikiStore } = require('../src/workspace/wiki-store.cjs');
+  const trials = require('../src/trials.cjs');
+  const { root, hub, session } = await setup(t);
+  const project = fs.realpathSync(projectFixture(root, session));
+  hub.wikiStore = new WikiStore(path.join(root, 'wiki-store'));
+  const result = { status: 'completed', checks: { 'Done check': 'failed' }, corrections: 1, setups: [{ hash: 'h' }], restored: [], tokens: 10, activeMs: 10 };
+  const record = { id: randomUUID(), at: Date.now(), state: 'finished', revealedAt: Date.now(), project, task: 'Create done.txt.', change: 'Create done.txt first.',
+    target: 'project', pairs: 1, model: 'Terra', threshold: 0.2, sessionId: session.id, suggested: true, verdict: 'helped', confidence: 'low',
+    lesson: { key: 'k', check: 'Done check', error: 'done.txt is missing', goal: 'Create done.txt' },
+    pairVerdicts: [{ pair: 1, verdict: 'helped', reason: 'with the change Done check passed, which failed without it' }],
+    runs: [{ index: 1, pair: 1, label: 'A', variant: true, result }, { index: 2, pair: 1, label: 'B', variant: false, result }] };
+  hub.data.comparisons = { [record.id]: record };
+  const item = { id: 'card', type: 'agentMessage', phase: 'final_answer', text: 'The change helped.' };
+  session.items.push(item);
+  await hub.settleComparison(record);
+  hub.comparisonCard(session, record, item);
+
+  const rulesRoot = hub.wikiStore.location(project).root;
+  assert.deepEqual(trials.readRules(rulesRoot).map(rule => [rule.rule, rule.state, rule.check, rule.source]),
+    [['Create done.txt first.', 'trial', 'Done check', 'a suggested comparison']], 'one pair is weak evidence: the rule goes on trial');
+  assert.equal(fs.existsSync(path.join(project, 'INSTRUCTIONS.md')) && fs.readFileSync(path.join(project, 'INSTRUCTIONS.md'), 'utf8').includes('Create done.txt first.'), false);
+  assert.equal(item.hubComparison.adopted.trial, true);
+  await hub.undoComparison(session.id, record.id, 'rule');
+  assert.equal(trials.readRules(rulesRoot)[0].state, 'removed');
+});

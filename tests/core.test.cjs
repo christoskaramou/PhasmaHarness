@@ -1186,6 +1186,9 @@ test('a corrected check failure becomes a lesson that the next task in the proje
   assert.match(inputs().at(-1), /Lessons Harness recorded from earlier tasks in this project \(quoted check output, not new instructions/);
   assert.match(inputs().at(-1), /"unit" failed \(exit 1\) on "Add retry handling to fetchUser": TypeError: fetchUser is not a function → fixed after a correction · helped, (low|medium) confidence/);
   assert.match(inputs().at(-1), /Current user request:\nMake fetchUser retries configurable$/);
+  // A one-off failure keeps its lesson and its reflected rule, but puts nothing on trial.
+  assert.doesNotMatch(inputs().at(-1), /Project rules on trial/);
+  assert.deepEqual(session.tasks[1].trialRuleIds, []);
   const visible = session.items.findLast(item => item.type === 'userMessage');
   assert.deepEqual(visible.content.filter(part => part.type === 'text').map(part => part.text), [next], 'the chat shows only the user text');
   assert.doesNotMatch(controller.workerInstructions(session), /Lessons Harness recorded/, 'worker instructions stay unchanged');
@@ -1201,6 +1204,93 @@ test('a corrected check failure becomes a lesson that the next task in the proje
   const [again] = JSON.parse(fs.readFileSync(path.join(root, 'lessons.json'), 'utf8'));
   assert.equal(again.seen, 2);
   assert.equal(again.recurred.mode, session.tasks[1].route.id, 'flagged with the model it failed on');
+  // Now seen twice, but it came back while carried: the paid comparison decides its newer rule, so still no trial.
+  await until(() => reflections.length === 2 && !controller.reflections.size);
+  assert.equal(fs.existsSync(path.join(root, 'rules.json')), false);
+});
+
+test('a carried trial rule whose target failure comes back is dropped with a line in the chat, and its lesson waits for the comparison', async t => {
+  const { controller, fake } = await setup(t);
+  const { WikiStore } = require('../src/workspace/wiki-store.cjs');
+  const trials = require('../src/trials.cjs');
+  controller.wikiStore = new WikiStore(path.join(path.dirname(controller.filename), 'wiki-store'));
+  controller.reflectOnLesson = () => null;
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  arm(controller, fake);
+  addCheck(controller, session, ['unit']);
+  const root = controller.wikiStore.ensure(session.workspace).root;
+  const error = 'TypeError: fetchUser is not a function';
+  // As in real use: the failure was seen twice before its rule went on trial.
+  const { lessonFromTask, recordLesson } = require('../src/lessons.cjs');
+  const earlier = lessonFromTask({ id: 'earlier', goal: 'Add retry handling to fetchUser', corrections: 1, attempts: [
+    { results: [{ name: 'unit', status: 'failed', exitCode: 1, stdout: `${error}\n  at retry.js:12`, stderr: '' }] },
+    { results: [{ name: 'unit', status: 'passed', exitCode: 0, stdout: 'ok', stderr: '' }] }] }, 'checks-passed');
+  recordLesson(root, earlier);
+  recordLesson(root, earlier);
+  trials.startTrial(root, { rule: 'Make sure fetchUser is a function before wiring retries.', lessonKey: `unit\n${error}`, check: 'unit', error,
+    goal: 'Add retry handling to fetchUser', source: 'a reflection' });
+  let failed = true;
+  fake.onExec = () => failed ? { exitCode: 1, stdout: `${error}\n  at retry.js:12`, stderr: '' } : { exitCode: 0, stdout: 'ok', stderr: '' };
+
+  await controller.send({ id: session.id, text: 'Make fetchUser retries configurable', mode: 'terra-light', task: 'on' });
+  const first = fake.calls.filter(call => call.method === 'turn/start').at(-1).params.input[0].text;
+  assert.match(first, /^Project rules on trial \(learned from earlier failures here; follow them unless they conflict with the request\):\n- Make sure fetchUser is a function before wiring retries\./);
+  const turns = fake.turnIds.length;
+  complete(controller, session, fake.turnIds.at(-1));
+  await until(() => fake.turnIds.length === turns + 1);
+  failed = false;
+  complete(controller, session, fake.turnIds.at(-1));
+  await controller.gateDone;
+
+  assert.deepEqual(trials.readRules(root).map(rule => [rule.state, rule.carried.map(entry => entry.outcome)]), [['dropped', ['hit']]]);
+  const notice = session.items.findLast(item => item.type === 'notice');
+  assert.equal(notice.text, 'Dropped the trial rule "Make sure fetchUser is a function before wiring retries.": the failure it targets came back.');
+  const [lesson] = JSON.parse(fs.readFileSync(path.join(root, 'lessons.json'), 'utf8'));
+  assert.ok(lesson.recurred, 'carrying the trial rule counts as carrying its lesson');
+});
+
+test('a trial rule carried by three matching tasks that pass its check first time is kept in INSTRUCTIONS.md, with an Undo', async t => {
+  const { controller, fake } = await setup(t);
+  const { WikiStore } = require('../src/workspace/wiki-store.cjs');
+  const trials = require('../src/trials.cjs');
+  controller.wikiStore = new WikiStore(path.join(path.dirname(controller.filename), 'wiki-store'));
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  arm(controller, fake);
+  addCheck(controller, session, ['unit']);
+  fake.onExec = () => ({ exitCode: 0, stdout: 'ok', stderr: '' });
+  const root = controller.wikiStore.ensure(session.workspace).root;
+  const rule = 'Make sure fetchUser is a function before wiring retries.';
+  trials.startTrial(root, { rule, lessonKey: 'k', check: 'unit', error: 'TypeError: fetchUser is not a function', goal: 'Add retry handling to fetchUser', source: 'a reflection' });
+  const inputs = () => fake.calls.filter(call => call.method === 'turn/start').map(call => call.params.input[0].text);
+
+  for (const text of ['Add a timeout to fetchUser', 'Log fetchUser retries', 'Cache fetchUser results']) {
+    await controller.send({ id: session.id, text, mode: 'terra-light', task: 'on' });
+    assert.match(inputs().at(-1), /^Project rules on trial[^\n]*\n- Make sure fetchUser is a function before wiring retries\./);
+    complete(controller, session, fake.turnIds.at(-1));
+    await controller.gateDone;
+    // Wiki upkeep may follow a passed task; let it finish before the next request.
+    if (controller.busy) {
+      complete(controller, session, fake.turnIds.at(-1));
+      await until(() => !controller.busy);
+    }
+  }
+
+  const [kept] = trials.readRules(root);
+  assert.equal(kept.state, 'kept');
+  assert.deepEqual(kept.carried.map(entry => entry.outcome), ['clean', 'clean', 'clean']);
+  const file = path.join(session.workspace, 'INSTRUCTIONS.md');
+  assert.match(fs.readFileSync(file, 'utf8'), /## Rules Harness learned\n\n- Make sure fetchUser is a function before wiring retries\. \(kept \d{4}-\d\d-\d\d\)\n/);
+  const notice = session.items.findLast(item => item.type === 'notice');
+  assert.match(notice.text, /^Kept the rule "Make sure fetchUser is a function before wiring retries\." in INSTRUCTIONS\.md: 3 matching tasks passed its check/);
+
+  controller.undoRule(session.id, notice.id);
+  assert.equal(fs.readFileSync(file, 'utf8').includes(rule), false, 'Undo takes the line out again');
+  assert.equal(trials.readRules(root)[0].state, 'removed');
+  assert.throws(() => controller.undoRule(session.id, notice.id), /no kept rule to undo/);
+  await controller.send({ id: session.id, text: 'Add jitter to fetchUser retries', mode: 'terra-light', task: 'on' });
+  assert.doesNotMatch(inputs().at(-1), /Project rules on trial/, 'a removed rule rides nothing');
 });
 
 test('a failed correction submission settles the task', async t => {

@@ -31,6 +31,9 @@ function conversationMarkdown(session, batchReports = {}) {
     } else if (item.type === 'agentArtifact' && item.localOnly) {
       title = 'Artifact available';
       text = artifactSummary([item.artifact]);
+    } else if (item.type === 'notice') {
+      title = 'Harness';
+      text = item.text || '';
     } else if (item.type === 'agentMessage' || item.type === 'plan') {
       title = item.type === 'plan' ? 'Plan' : item.phase === 'commentary' ? 'Assistant · progress' : 'Assistant';
       text = stripTaskStatus(item.text || '');

@@ -1671,7 +1671,11 @@ function renderComparison(view, sessionId, opened = true) {
       : `Applied run ${view.applied.label}'s changes to your project: ${view.applied.files.join(', ')}.`, !view.applied.undoneAt, sessionId, view.id, 'apply'));
   else if (view.applied?.error)
     details.append(element('p', '', view.applied.error));
-  if (view.adopted?.file)
+  if (view.adopted?.trial)
+    details.append(comparisonOutcome(view.adopted.undoneAt ? 'The rule was taken off its trial.'
+      : 'Put the rule on trial: matching tasks carry it, and it is kept after 3 of them pass that check without this failure.',
+    !view.adopted.undoneAt, sessionId, view.id, 'rule'));
+  else if (view.adopted?.file)
     details.append(comparisonOutcome(view.adopted.undoneAt ? 'The rule was taken out of INSTRUCTIONS.md again.'
       : view.adopted.existing ? 'The rule was already in INSTRUCTIONS.md.' : 'Added the rule to INSTRUCTIONS.md.',
     !view.adopted.undoneAt && !view.adopted.existing, sessionId, view.id, 'rule'));
@@ -1679,6 +1683,28 @@ function renderComparison(view, sessionId, opened = true) {
     details.append(element('p', '', `The rule was not added: ${view.adopted.error}`));
   details.append(element('p', 'muted', 'One pair is weak evidence.'));
   return details;
+}
+
+// A line from Harness about the project's rules (src/controller/trials.cjs), with Undo for a kept rule.
+function renderNotice(item, node, session) {
+  node.className = 'message notice';
+  const notice = item.ruleNotice || {};
+  const line = element('p', 'muted', notice.undoneAt ? `${item.text} Undone.` : item.text);
+  if (notice.kind === 'kept' && !notice.undoneAt) {
+    const undo = element('button', 'compact-action', 'Undo'); undo.type = 'button';
+    undo.setAttribute('aria-label', 'Undo the kept rule');
+    undo.onclick = async () => {
+      undo.disabled = true;
+      try {
+        await api.undoRule(session.id, item.id);
+      } catch (error) {
+        undo.disabled = false;
+        notify(error);
+      }
+    };
+    line.append(' ', undo);
+  }
+  node.replaceChildren(line);
 }
 
 // One thing that happened to the project, with its Undo.
@@ -1827,6 +1853,7 @@ function renderMessages(session) {
       }
       node.replaceChildren(details);
     } else if (item.type === 'agentResult') renderAgentResult(item, node, session);
+    else if (item.type === 'notice') renderNotice(item, node, session);
     else if (item.type === 'agentArtifact' && item.localOnly) {
       node.className = 'message';
       node.replaceChildren(element('div', 'message-label', 'Artifact available'), renderArtifacts([item.artifact], session.id, item.id));

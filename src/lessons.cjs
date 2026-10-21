@@ -18,6 +18,9 @@ const STOP = new Set(['the', 'and', 'for', 'with', 'that', 'this', 'from', 'into
 
 const words = text => new Set((String(text).toLowerCase().match(/[a-z0-9_.-]{3,}/g) || []).filter(word => !STOP.has(word)));
 const firstLine = text => String(text).split(/\r?\n/).map(line => line.trim()).find(Boolean) || '';
+// A failed check's quoted output and its first line, as lessons key them; trial rules match failures the same way.
+const excerptOf = result => redact(failureExcerpt(result, 400, 300)).slice(-400);
+const failureLine = result => firstLine(excerptOf(result)).slice(0, 240);
 const failureKey = record => record.failures.map(failure => `${failure.check}\n${firstLine(failure.excerpt)}`).join('\n');
 
 // Files whose `git diff --stat` line changed between the failing and the passing attempt; the stat is cumulative.
@@ -110,7 +113,7 @@ function lessonFromTask(task, state) {
   const final = task.attempts.at(-1);
   const fixed = state === 'checks-passed';
   const failed = failing.results.filter(result => result.status === 'failed').slice(0, 3);
-  const excerpt = result => redact(failureExcerpt(result, 400, 300)).slice(-400);
+  const excerpt = excerptOf;
   const failures = failed.map(result => ({
     check: String(result.name || 'check').slice(0, 80),
     exitCode: Number.isInteger(result.exitCode) ? result.exitCode : null,
@@ -284,4 +287,4 @@ function saveReflection(root, key, reflection) {
 }
 
 module.exports = { lessonFromTask, recordLesson, readLessons, relevantLessons, lessonsBlock, lessonsOffer, markSuggested, saveReflection,
-  lessonKey: failureKey, changedFiles, diffHashes, RECORDS, PAGE };
+  lessonKey: failureKey, failureLine, words, changedFiles, diffHashes, RECORDS, PAGE };

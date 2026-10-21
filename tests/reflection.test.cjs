@@ -6,6 +6,7 @@ const path = require('node:path');
 const { reflectionInput, checkReflection, SCHEMA } = require('../src/reflection.cjs');
 const { lessonFromTask, recordLesson, readLessons } = require('../src/lessons.cjs');
 const reflection = require('../src/controller/reflection.cjs');
+const { readRules } = require('../src/trials.cjs');
 
 const failed = { name: 'unit', status: 'failed', exitCode: 1, stdout: 'TypeError: fetchUser is not a function\n  at retry.js:12', stderr: '' };
 const task = () => ({ id: 'task-1', goal: 'Add retry handling to fetchUser', corrections: 1, startIndex: 0, attempts: [
@@ -63,7 +64,8 @@ test('a lesson\'s reflection is asked once per input, saved by re-reading the le
     return { decision: { reflection: 'rule', rule: 'Keep exported function names when refactoring.', moment: 'Renamed fetchUser to loadUser in retry.js', reason: 'Callers broke.' } };
   } } };
   let paused = null;
-  const controller = { agents: { primary: owner, backgroundQuota: () => paused }, log: { warn: (...args) => warnings.push(args) } };
+  const controller = { agents: { primary: owner, backgroundQuota: () => paused }, log: { warn: (...args) => warnings.push(args) },
+    trialFromReflection: reflection.trialFromReflection };
   const reflect = () => reflection.reflectOnLesson.call(controller, { items }, task(), lesson, root, root);
 
   await reflect();
@@ -74,10 +76,31 @@ test('a lesson\'s reflection is asked once per input, saved by re-reading the le
   assert.equal(record.seen, 2, 'the write made during the call survives');
   assert.match(fs.readFileSync(path.join(root, 'lessons.md'), 'utf8'), /Proposed rule: Keep exported function names when refactoring\. \(from: "Renamed fetchUser to loadUser in retry\.js"\)/);
   assert.equal(reflect(), null, 'the same input is not asked again');
+  assert.deepEqual(readRules(root).map(rule => [rule.rule, rule.state, rule.check, rule.source]),
+    [['Keep exported function names when refactoring.', 'trial', 'unit', 'a reflection']], 'a grounded rule for a failure seen twice goes on trial');
+
+  // A failure seen once keeps its lesson and the rule, but nothing goes on trial.
+  const once = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-reflection-'));
+  t.after(() => fs.rmSync(once, { recursive: true, force: true }));
+  recordLesson(once, lesson);
+  const onceOwner = { ...owner, smartRouter: { complete: async () => ({ decision: { reflection: 'rule', rule: 'Keep exported function names when refactoring.',
+    moment: 'Renamed fetchUser to loadUser in retry.js', reason: '' } }) } };
+  await reflection.reflectOnLesson.call({ ...controller, agents: { primary: onceOwner, backgroundQuota: () => null } }, { items }, task(), lesson, once, once);
+  assert.ok(readLessons(once)[0].reflection.rule);
+  assert.deepEqual(readRules(once), [], 'a one-off failure is not evidence enough for a trial');
+
+  // A lesson that already failed again while carried waits for its comparison: no free trial for its rule.
+  const waiting = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-reflection-'));
+  t.after(() => fs.rmSync(waiting, { recursive: true, force: true }));
+  recordLesson(waiting, lesson);
+  recordLesson(waiting, lesson, { carried: true, mode: 'codex:gpt-5.6-terra:low' });
+  await reflection.reflectOnLesson.call(controller, { items }, { ...task(), goal: 'Fix fetchUser again' }, lesson, waiting, waiting);
+  assert.ok(readLessons(waiting)[0].reflection.rule);
+  assert.deepEqual(readRules(waiting), []);
 
   paused = { provider: 'codex', reason: 'Background work paused.' };
   const other = { ...task(), goal: 'Something new about fetchUser' };
   assert.equal(reflection.reflectOnLesson.call(controller, { items }, other, lesson, root, root), null, 'no call past the background usage limit');
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2, 'the first lesson and the waiting one, nothing while paused');
   assert.deepEqual(warnings, []);
 });

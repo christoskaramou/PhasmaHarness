@@ -2577,6 +2577,27 @@ app.whenReady().then(async () => {
   await until(() => undoCalls.length === 1, 'Undo reaches the runner');
   assert.deepEqual(undoCalls[0], [ownerChat.id, 'ui-rule', 'rule']);
   console.log('Comparison cards show the verdict at once, what landed with Undo, and Apply only when nothing landed');
+  phase = 'rule notices';
+  ownerChat.items.push({ id: 'rule-kept', type: 'notice', localOnly: true, createdAt: Date.now(),
+    text: 'Kept the rule "Create done.txt first." in INSTRUCTIONS.md: 3 matching tasks passed its check without this failure.',
+    ruleNotice: { kind: 'kept', ruleId: 'r1' } });
+  ownerChat.items.push({ id: 'rule-dropped', type: 'notice', localOnly: true, createdAt: Date.now(),
+    text: 'Dropped the trial rule "Export greet.": the failure it targets came back.', ruleNotice: { kind: 'dropped', ruleId: 'r2' } });
+  const undoRuleCalls = [];
+  ipcMain.handle('undoRule', (_event, ...args) => {
+    undoRuleCalls.push(args);
+    return {};
+  });
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
+  const notices = await window.webContents.executeJavaScript(`[...document.querySelectorAll('.message.notice')]
+    .map(node => ({ text: node.textContent, undo: !!node.querySelector('button') }))`);
+  assert.deepEqual(notices.map(notice => notice.undo), [true, false], 'only a kept rule offers Undo');
+  assert.match(notices[0].text, /^Kept the rule "Create done\.txt first\." in INSTRUCTIONS\.md/);
+  assert.match(notices[1].text, /^Dropped the trial rule "Export greet\.": the failure it targets came back\.$/);
+  await window.webContents.executeJavaScript(`document.querySelector('.message.notice button').click(); true`);
+  await until(() => undoRuleCalls.length === 1, 'Undo of a kept rule reaches the runner');
+  assert.deepEqual(undoRuleCalls[0], [ownerChat.id, 'rule-kept']);
+  console.log('Rule notices show kept and dropped rules, with Undo for a kept one');
   phase = 'send scrolls to the newest message';
   await window.webContents.executeJavaScript(`document.querySelector('#conversation').scrollTo({ top: 0, behavior: 'instant' });
     new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);

@@ -268,7 +268,9 @@ function outcomeLines(record) {
     lines.push(`Applied run ${record.applied.label}'s changes to the project: ${record.applied.files.join(', ')}.`);
   else if (record.applied?.error)
     lines.push(record.applied.error);
-  if (record.adopted?.file)
+  if (record.adopted?.trial)
+    lines.push('Put the rule on trial: matching tasks carry it, and it is kept after 3 of them pass that check without this failure.');
+  else if (record.adopted?.file)
     lines.push(`Added the rule to ${record.adopted.file}.`);
   else if (record.adopted?.error)
     lines.push(`The rule was not added: ${record.adopted.error}`);

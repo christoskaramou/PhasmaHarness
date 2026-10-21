@@ -10,6 +10,7 @@ const { DEFAULT_MINUTES, DEFAULT_ATTEMPTS } = require('../job-budgets.cjs');
 const { readLessons, relevantLessons, markSuggested, lessonKey } = require('../lessons.cjs');
 const { projectInstructions } = require('../workspace/project-instructions.cjs');
 const { capCatalog } = require('../routing/effort-cap.cjs');
+const trials = require('../trials.cjs');
 
 const DAY = 24 * 60 * 60 * 1000;
 const list = files => files.slice(0, 5).join(', ') + (files.length > 5 ? ` and ${files.length - 5} more` : '');
@@ -100,13 +101,15 @@ module.exports = {
     }
 
     markSuggested(root, lessonKey(lesson));
-    const started = await this.startComparison(session, plan.args, images, abort, request, true);
+    const started = await this.startComparison(session, plan.args, images, abort, request,
+      { key: lessonKey(lesson), check: lesson.failures[0].check, error: lesson.situation.error, goal: lesson.goal });
     return { ...started, reply: `This kind of task failed the same way before, even with the saved lesson ("${lesson.failures[0].check}": ` +
       `${lesson.situation.error}). So I am running it twice on ${plan.summary.model}: as usual, and with this rule in INSTRUCTIONS.md:\n\n` +
       `> ${plan.args.change}\n\nThe better result goes into your project, and the rule is kept if it helps. The card below updates as they finish.` };
   },
 
-  async startComparison(session, args, images, abort, request, suggested = false) {
+  // `lesson`: the lesson that did not stick, when Harness started this comparison itself.
+  async startComparison(session, args, images, abort, request, lesson = null) {
     const message = session.items.find(item => item.id === request.id);
     if (!message)
       throw new Error('The original user message is missing.');
@@ -114,7 +117,7 @@ module.exports = {
     const checks = this.data.settings.checks?.[args.workspace] || [];
     const record = { id: randomUUID(), version: 1, at: Date.now(), state: 'running', project: args.workspace,
       task: args.task, change: args.change, target: args.target, pairs: args.pairs, mode: args.mode,
-      model: this.resolveWorker(args.mode)?.label || args.mode, threshold: comparisons.THRESHOLD, suggested,
+      model: this.resolveWorker(args.mode)?.label || args.mode, threshold: comparisons.THRESHOLD, suggested: !!lesson, lesson,
       // Numbers the comparison for its bots' names and its card.
       number: this.data.comparisonCount = (this.data.comparisonCount || 0) + 1,
       // Computed once, so both runs of every pair start with the same lessons.
@@ -211,10 +214,22 @@ module.exports = {
     }
   },
 
-  // A project rule that helped joins the project entry.
+  // A project rule that helped: one the user asked to compare joins the project entry; one Harness found itself goes on
+  // trial (src/trials.cjs), since a single pair is weak evidence and real tasks decide whether it stays.
   adoptRule(record) {
     if (record.target !== 'project' || record.verdict !== 'helped')
       return null;
+
+    if (record.suggested) {
+      try {
+        const root = this.wikiStore.ensure(this.lessonWorkspace(record.project)).root;
+        const trial = trials.startTrial(root, { rule: record.change, lessonKey: record.lesson?.key || null, check: record.lesson?.check,
+          error: record.lesson?.error, goal: record.lesson?.goal || record.task, source: 'a suggested comparison' });
+        return { trial: true, root, ruleId: trial.id, rule: record.change };
+      } catch (error) {
+        return { error: error.message };
+      }
+    }
 
     const file = path.join(record.project, 'INSTRUCTIONS.md');
     try {
@@ -245,6 +260,16 @@ module.exports = {
 
       await this.agents.workspaces.undo(view.applied.workspace, view.applied.changes);
       view.applied.undoneAt = Date.now();
+    } else if (part === 'rule' && view?.adopted?.trial) {
+      if (view.adopted.undoneAt)
+        throw new Error('There is no added rule to undo.');
+
+      trials.updateRules(view.adopted.root, records => {
+        const rule = records.find(entry => entry.id === view.adopted.ruleId);
+        if (rule && ['trial', 'kept'].includes(rule.state))
+          Object.assign(rule, { state: 'removed', endedAt: Date.now(), reason: 'undone from the comparison card' });
+      });
+      view.adopted.undoneAt = Date.now();
     } else if (part === 'rule') {
       if (!view?.adopted?.file || view.adopted.existing || view.adopted.undoneAt)
         throw new Error('There is no added rule to undo.');

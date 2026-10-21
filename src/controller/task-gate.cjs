@@ -35,9 +35,13 @@ module.exports = {
       const comparison = this.comparisonOf(session);
       if (!task.corrections && !text.startsWith('[Router]')) {
         const offer = comparison ? { block: comparison.record.lessonBlock || null, keys: [] } : this.lessonOffer(session.workspace, text, configured);
-        task.lessonBlock = offer.block;
-        // Which lessons it carried: the same failure again means that lesson did not stick (saveLesson).
-        task.lessonKeys = offer.keys;
+        // Trial rules ride ahead of the lessons, in their own capped block, so the lesson limit never cuts them.
+        const trial = comparison ? { block: null, ids: [], lessonKeys: [] } : this.trialRulesFor(session.workspace, text, configured);
+        task.lessonBlock = [trial.block, offer.block].filter(Boolean).join('\n\n') || null;
+        // Which lessons and trial rules it carried: the same failure again means they did not stick (saveLesson), and
+        // its checks decide the trial rules (recordTrials).
+        task.lessonKeys = [...new Set([...offer.keys, ...trial.lessonKeys])];
+        task.trialRuleIds = trial.ids;
       }
       task.foreground = !(session.delegation && !session.delegation.delivered) && !session.agentReplyActive;
       if (task.foreground) task.inputImages = (session.pendingMessage?.content || []).filter(part => part.type === 'image').map(part => part.url);
@@ -357,7 +361,9 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
       task.summary = summaryLine(task);
       this.writeTaskFile(session, task);
       this.traceChecks(session);
-      // Before wiki upkeep snapshots the wiki, so the lesson files never count as an upkeep change.
+      // Before wiki upkeep snapshots the wiki, so the lesson files never count as an upkeep change. Trial outcomes first,
+      // so a carried trial rule's failure reaches the lesson in the same pass.
+      this.recordTrials(session, task);
       this.saveLesson(session, task);
       try { if (task.state === 'checks-passed' && task.wikiAvailable && await this.maintainWiki(session, task)) return; }
       catch (error) { task.wikiMaintenance = { ...task.wikiMaintenance, state: 'failed', error: error.message }; this.wikiSnapshots.delete(task.id); }

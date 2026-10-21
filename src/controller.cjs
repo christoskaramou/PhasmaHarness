@@ -1475,6 +1475,7 @@ for (const methods of [
   require('./controller/suggestions.cjs'),
   require('./controller/comparison.cjs'),
   require('./controller/reflection.cjs'),
+  require('./controller/trials.cjs'),
 ]) {
   for (const [name, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(methods))) {
     if (Object.hasOwn(Controller.prototype, name)) throw new Error(`Controller.${name} is defined twice.`);

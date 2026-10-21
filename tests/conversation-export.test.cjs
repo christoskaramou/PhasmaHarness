@@ -56,3 +56,8 @@ test('assignment change receipts and earlier-revision results retain truthful st
   assert.match(markdown, /\[Attachment omitted\]/);
   assert.doesNotMatch(markdown, /private-image-data/);
 });
+
+test('a Harness notice exports as its own section', () => {
+  const markdown = conversationMarkdown({ items: [{ type: 'notice', localOnly: true, text: 'Kept the rule "Export greet." in INSTRUCTIONS.md.', ruleNotice: { kind: 'kept' } }] });
+  assert.match(markdown, /## Harness\n\nKept the rule "Export greet\." in INSTRUCTIONS\.md\./);
+});
