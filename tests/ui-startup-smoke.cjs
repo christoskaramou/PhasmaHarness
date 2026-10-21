@@ -92,12 +92,13 @@ app.whenReady().then(async () => {
     if (holdSend) return new Promise(() => {});
     return { queued: true };
   });
-  let modelRequests = 0, cursorModelRequests = 0, failModels = false, finishFetch, nextModels = [], holdApiModels = false;
+  let modelRequests = 0, cursorModelRequests = 0, failModels = false, finishFetch, nextModels = [], holdApiModels = false, holdCursorModels = true;
   ipcMain.handle('providerModels', async (_event, id) => {
     modelRequests++;
     if (id === 'cursor-cli')
       cursorModelRequests++;
     if (id !== 'cursor-cli' && !holdApiModels) return [];
+    if (id === 'cursor-cli' && !holdCursorModels) return [];
     await new Promise(resolve => { finishFetch = resolve; });
     if (failModels) throw new Error('Test model fetch failed');
     return nextModels;
@@ -949,6 +950,8 @@ app.whenReady().then(async () => {
   assert.equal(cursorModelRequests, 1, 'a failed fetch is not retried on redraw');
   await window.webContents.executeJavaScript("discoveredModels.set('cursor-cli', []); modelFetchErrors.clear(); true");
   failModels = false;
+  // Later steps open the Providers tab, which renews Cursor's models; model pickers wait for that, so it answers at once.
+  holdCursorModels = false;
   console.log('Failed model fetch shows its error once and waits for Renew passed');
   // An installed CLI with a newer release shows Update with both versions; current CLIs show no button.
   controller.cliUpdates = { 'cursor-cli': { installed: '2026.10.01-e373342', latest: '2026.10.16-e3cb207' } };
@@ -1321,6 +1324,55 @@ app.whenReady().then(async () => {
   assert.equal(controller.data.settings.routing, 'smart', 'model selection switches routing in the same save');
   assert.equal(controller.data.settings.routerPreset, chosenRoutingModel);
   assert.equal((await compareRow())[0], false);
+  // The chat checker is Off by default and saves any enabled model picked by hand; there is no Auto.
+  const chatChecker = await window.webContents.executeJavaScript(`(async () => {
+    const select = document.querySelector('#settings-chat-scan');
+    const first = [select.options[0].textContent, select.value];
+    const option = [...select.options].find(option => option.value !== 'off' && !option.disabled);
+    select.value = option.value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 200));
+    return [...first, option.value];
+  })()`);
+  assert.deepEqual(chatChecker.slice(0, 2), ['Off', 'off']);
+  assert.equal(controller.data.settings.chatScanModel, chatChecker[2]);
+  await window.webContents.executeJavaScript("document.querySelector('#settings-chat-scan').scrollIntoView({ block: 'center' }); new Promise(r => setTimeout(r, 100))");
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/chat-checker-setting.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript(`(async () => {
+    const select = document.querySelector('#settings-chat-scan');
+    select.value = 'off';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 200));
+  })()`);
+  assert.equal(controller.data.settings.chatScanModel, 'off', 'Off turns the checker off again');
+  // While any provider connects, every model picker shows only "Connecting…"; once all are ready, open ones fill in place.
+  const pickers = () => window.webContents.executeJavaScript(`['#preset', '#settings-router-preset', '#settings-chat-scan', '#agent-model', '#hub-model']
+    .map(id => { const select = document.querySelector(id); return [id, select.disabled, [...select.options].map(option => option.textContent)]; })`);
+  controller.connectingProviders.set('claude-cli', 1);
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); new Promise(r => setTimeout(r, 50))');
+  await window.webContents.executeJavaScript("document.querySelector('#settings-chat-scan').scrollIntoView({ block: 'center' }); new Promise(r => setTimeout(r, 50))");
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/pickers-connecting.png'), (await window.webContents.capturePage()).toPNG());
+  const settingsPickers = (await pickers()).slice(0, 3);
+  assert.deepEqual(settingsPickers, [['#preset', true, ['Connecting…']], ['#settings-router-preset', true, ['Connecting…']], ['#settings-chat-scan', true, ['Connecting…']]]);
+  controller.connectingProviders.delete('claude-cli');
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); new Promise(r => setTimeout(r, 50))');
+  const ready = await pickers();
+  for (const [id, disabled, options] of ready.slice(0, 3)) {
+    assert.equal(disabled, false, `${id} is usable again`);
+    assert.ok(options.length > 1 && !options.includes('Connecting…'), `${id} fills in place without reopening Settings`);
+  }
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-router-preset').value"), controller.data.settings.routerPreset, 'the saved choice shows again');
+  await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').close(); true");
+  // The agent dialog's model list and Save wait the same way.
+  controller.connectingProviders.set('claude-cli', 1);
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); editAgent(); new Promise(r => setTimeout(r, 50))');
+  assert.deepEqual((await pickers())[3], ['#agent-model', true, ['Connecting…']]);
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#agent-save').disabled"), true, 'no saving a blank model');
+  controller.connectingProviders.delete('claude-cli');
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); new Promise(r => setTimeout(r, 50))');
+  assert.deepEqual([(await pickers())[3][1], (await pickers())[3][2][0]], [false, 'Auto']);
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#agent-save').disabled"), false);
+  await window.webContents.executeJavaScript("document.querySelector('#agent-dialog').close(); document.querySelector('#settings-dialog').showModal(); true");
 
   await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').close(); true");
   // The log-only wiki check: shown with a Jev key, whatever the router, with the verdicts so far.
@@ -2586,6 +2638,10 @@ app.whenReady().then(async () => {
   ownerChat.items.push({ id: 'rule-rolled-back', type: 'notice', localOnly: true, createdAt: Date.now(),
     text: 'Took the rule "Create done.txt first." out of INSTRUCTIONS.md: the failure it targets came back after it was kept.',
     ruleNotice: { kind: 'rolledBack', ruleId: 'r1' } });
+  ownerChat.items.push({ id: 'rule-trial', type: 'notice', localOnly: true, createdAt: Date.now(),
+    text: 'Noticed: Renamed a public export. Trying the rule "Keep export names." on similar tasks.', ruleNotice: { kind: 'trialStarted', ruleId: 'r3' } });
+  ownerChat.items.push({ id: 'chat-note', type: 'notice', localOnly: true, createdAt: Date.now(),
+    text: 'Noticed: Renamed a public export. Saved a note for similar tasks: "Callers import fetchUser by name."', ruleNotice: { kind: 'noteAdded', noteId: 'n1' } });
   const undoRuleCalls = [];
   ipcMain.handle('undoRule', (_event, ...args) => {
     undoRuleCalls.push(args);
@@ -2594,7 +2650,8 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
   const notices = await window.webContents.executeJavaScript(`[...document.querySelectorAll('.message.notice')]
     .map(node => ({ text: node.textContent, undo: node.querySelector('button')?.getAttribute('aria-label') || null }))`);
-  assert.deepEqual(notices.map(notice => notice.undo), ['Undo the kept rule', null, 'Put the rule back'], 'kept and rolled-back rules offer Undo');
+  assert.deepEqual(notices.map(notice => notice.undo), ['Undo the kept rule', null, 'Put the rule back', 'Stop trying the rule', 'Remove the note'],
+    'kept, rolled-back, new trial and note notices offer Undo');
   assert.match(notices[0].text, /^Kept the rule "Create done\.txt first\." in INSTRUCTIONS\.md/);
   assert.match(notices[1].text, /^Dropped the trial rule "Export greet\.": the failure it targets came back\.$/);
   await window.webContents.executeJavaScript(`document.querySelector('.message.notice button').click(); true`);
@@ -2604,7 +2661,7 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript(`document.querySelectorAll('.message.notice')[2].querySelector('button').click(); true`);
   await until(() => undoRuleCalls.length === 2, 'Undo of a rollback reaches the runner');
   assert.deepEqual(undoRuleCalls[1], [ownerChat.id, 'rule-rolled-back']);
-  console.log('Rule notices show kept, dropped and rolled-back rules, with Undo for kept and rolled-back ones');
+  console.log('Rule notices show kept, dropped, rolled-back, new trial and note notices, with Undo for all but dropped');
   phase = 'send scrolls to the newest message';
   await window.webContents.executeJavaScript(`document.querySelector('#conversation').scrollTo({ top: 0, behavior: 'instant' });
     new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);

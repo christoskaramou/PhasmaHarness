@@ -6,9 +6,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const trials = require('../trials.cjs');
+const chatScan = require('../chat-scan.cjs');
 const { projectInstructions } = require('../workspace/project-instructions.cjs');
 
 const readText = file => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '');
+
+const keptBecause = record => (record.check ? `${trials.KEEP_AFTER} matching tasks passed its check without this failure`
+  : `${trials.KEEP_AFTER} matching tasks avoided this mistake`);
 
 module.exports = {
   // The trial and on-demand rules a new task carries, each as its own capped block, and the kept rules its
@@ -26,7 +30,7 @@ module.exports = {
       const onTrial = trials.trialBlock(trials.matchingTrials(records, text, names));
       const onDemand = trials.keptBlock(trials.matchingOnDemand(records, text, names));
       // A batch copy's worker reads the copy's own INSTRUCTIONS.md.
-      const kept = [...trials.carriedKept(records, readText(path.join(workspace, 'INSTRUCTIONS.md')), names), ...onDemand.records];
+      const kept = [...trials.carriedKept(records, readText(path.join(workspace, 'INSTRUCTIONS.md')), names, text), ...onDemand.records];
       return {
         block: [onTrial.block, onDemand.block].filter(Boolean).join('\n\n') || null,
         ids: onTrial.records.map(record => record.id),
@@ -56,7 +60,7 @@ module.exports = {
 
   settleTrial(session, root, project, record) {
     if (record.state === 'dropped') {
-      this.ruleNotice(session, { text: `Dropped the trial rule "${record.rule}": the failure it targets came back.`, root, ruleId: record.id, kind: 'dropped' });
+      this.ruleNotice(session, { text: `Dropped the trial rule "${record.rule}": ${record.reason}.`, root, ruleId: record.id, kind: 'dropped' });
       return;
     }
 
@@ -66,8 +70,8 @@ module.exports = {
     }
 
     if (record.onDemand) {
-      this.ruleNotice(session, { text: `Kept the rule "${record.rule}" for the tasks it matches: ${trials.KEEP_AFTER} matching tasks passed its check ` +
-        `without this failure, and the ${trials.MAX_KEPT} rules in INSTRUCTIONS.md are all ones you put back.`, root, ruleId: record.id, kind: 'kept' });
+      this.ruleNotice(session, { text: `Kept the rule "${record.rule}" for the tasks it matches: ${keptBecause(record)}, and the ${trials.MAX_KEPT} rules ` +
+        'in INSTRUCTIONS.md are all ones you put back.', root, ruleId: record.id, kind: 'kept' });
       return;
     }
 
@@ -107,7 +111,7 @@ module.exports = {
     }
 
     const note = moved ? ` "${moved.rule}" moved out of INSTRUCTIONS.md to keep it at ${trials.MAX_KEPT} rules; it is still used on the tasks it matches.` : '';
-    this.ruleNotice(session, { text: `Kept the rule "${record.rule}" in INSTRUCTIONS.md: ${trials.KEEP_AFTER} matching tasks passed its check without this failure.${note}`,
+    this.ruleNotice(session, { text: `Kept the rule "${record.rule}" in INSTRUCTIONS.md: ${keptBecause(record)}.${note}`,
       root, ruleId: record.id, kind: 'kept', file, line, displacedId: moved?.id || null });
   },
 
@@ -115,7 +119,7 @@ module.exports = {
   // gone was deleted by hand: no notice.
   rollBackRule(session, root, project, record) {
     if (record.onDemand) {
-      this.ruleNotice(session, { text: `Stopped adding the rule "${record.rule}" to the tasks it matches: the failure it targets came back after it was kept.`,
+      this.ruleNotice(session, { text: `Stopped adding the rule "${record.rule}" to the tasks it matches: ${record.reason}.`,
         root, ruleId: record.id, kind: 'rolledBack' });
       return;
     }
@@ -136,7 +140,7 @@ module.exports = {
       return;
     }
 
-    this.ruleNotice(session, { text: `Took the rule "${record.rule}" out of INSTRUCTIONS.md: the failure it targets came back after it was kept.`,
+    this.ruleNotice(session, { text: `Took the rule "${record.rule}" out of INSTRUCTIONS.md: ${record.reason}.`,
       root, ruleId: record.id, kind: 'rolledBack', file, line: record.line });
   },
 
@@ -151,14 +155,20 @@ module.exports = {
   },
 
   undoRule(id, noticeId) {
-    const item = this.session(id).items.find(entry => entry.id === noticeId && ['kept', 'rolledBack'].includes(entry.ruleNotice?.kind));
+    const kinds = ['kept', 'rolledBack', 'trialStarted', 'noteAdded'];
+    const item = this.session(id).items.find(entry => entry.id === noticeId && kinds.includes(entry.ruleNotice?.kind));
     if (!item || item.ruleNotice.undoneAt)
       throw new Error('There is no rule change to undo here.');
 
-    if (item.ruleNotice.kind === 'rolledBack')
+    const { kind, root, ruleId, noteId } = item.ruleNotice;
+    if (kind === 'rolledBack')
       this.undoRollback(item.ruleNotice);
-    else
+    else if (kind === 'kept')
       this.undoKeep(item.ruleNotice);
+    else if (kind === 'noteAdded')
+      chatScan.removeNote(root, noteId);
+    else
+      this.undoTrial(root, ruleId);
 
     item.ruleNotice.undoneAt = Date.now();
     this.save();
@@ -187,6 +197,16 @@ module.exports = {
 
     const restored = trials.keepInInstructions(file, moved);
     trials.updateRules(root, records => Object.assign(records.find(entry => entry.id === displacedId) || {}, { onDemand: false, line: restored, movedLine: null }));
+  },
+
+  // Undo of a rule the chat scanner put on trial takes it off; one kept since then is undone from its kept notice.
+  undoTrial(root, ruleId) {
+    const record = trials.readRules(root).find(entry => entry.id === ruleId);
+    if (record?.state !== 'trial')
+      throw new Error('The rule left its trial since; undo it from its later notice.');
+
+    trials.updateRules(root, records => Object.assign(records.find(entry => entry.id === ruleId) || {},
+      { state: 'removed', endedAt: Date.now(), reason: 'undone from the chat' }));
   },
 
   // Undo of a rollback puts the rule back (its line, or on demand) and pins it, so it is never rolled back automatically

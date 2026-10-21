@@ -156,13 +156,52 @@ function presetGroups() {
   return [...groups.values()].sort((a, b) => rank(a) - rank(b) || providerTitle(a.provider).localeCompare(providerTitle(b.provider))
     || a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: 'base' }));
 }
+// The composer's model picker, grouped by provider; "Connecting…" until every provider is ready. Returns whether it
+// rebuilt.
+function renderComposerModels() {
+  const preset = $('#preset');
+  if (providersConnecting().active)
+    return showConnecting(preset);
+
+  preset.disabled = false;
+  const groups = presetGroups();
+  const signature = `${!!state.coordinator}\n` + groups.map(g => `${g.provider}|${providerTitle(g.provider)}|${g.key}|${g.label}`).join('\n');
+  if (preset.dataset.signature === signature)
+    return false;
+
+  const defaultOption = state.coordinator ? new Option('Choose a model', '') : new Option('Auto', 'auto');
+  defaultOption.disabled = !!state.coordinator;
+  preset.replaceChildren(defaultOption);
+  let section = null;
+  for (const g of groups) {
+    if (section?.dataset.provider !== g.provider) {
+      section = document.createElement('optgroup');
+      section.label = providerTitle(g.provider); section.dataset.provider = g.provider;
+      preset.append(section);
+    }
+    section.append(new Option(g.label, g.key));
+  }
+  preset.dataset.signature = signature;
+  return true;
+}
+
 function currentMode() {
+  // While providers connect the picker shows no models; the saved choice still applies.
+  if (providersConnecting().active)
+    return state.coordinator && state.settings.mode === 'auto' ? state.hubMode || null : state.settings.mode;
+
   const group = presetGroups().find(g => g.key === $('#preset').value);
   if (!group) return state.coordinator ? null : 'auto';
   return (group.variants.find(p => (p.effort || '') === $('#effort').value) || group.variants[0]).id;
 }
 // Hub shows its pinned model; workers retain the Auto choice.
 function showMode(id) {
+  if (providersConnecting().active) {
+    $('#effort').hidden = true;
+    refreshLocalModel();
+    return;
+  }
+
   const groups = presetGroups();
   if (state.coordinator && id === 'auto') id = state.hubMode;
   const group = groups.find(g => g.variants.some(p => p.id === id));
@@ -295,12 +334,62 @@ async function withProviderAction(id, label, run) {
   }
 }
 
+// Providers still connecting, signing in or fetching their models, across every agent; `active` also covers Codex's
+// own connection.
+function providersConnecting() {
+  const snapshots = fleetState?.agentStates ? [...Object.values(fleetState.agentStates), ...Object.values(fleetState.executionStates || {})] : [state];
+  const connecting = new Set([...snapshots.flatMap(s => s?.connectingProviders || []), ...(fleetState?.connectingProviders || []), ...modelFetches.keys(), ...providerActions.keys()]);
+  if (testingJev) connecting.add('jev');
+  return { connecting, active: connecting.size > 0 || snapshots.some(s => s?.connection === 'connecting') };
+}
+
+// While any provider is still connecting, a model picker offers no models, only this line, so a partial list can never
+// be picked or saved. Returns whether it just switched to it.
+function showConnecting(select) {
+  select.disabled = true;
+  if (select.dataset.signature === 'connecting')
+    return false;
+
+  select.replaceChildren(new Option('Connecting…', ''));
+  select.dataset.signature = 'connecting';
+  return true;
+}
+
+// Replaces a picker's options only when they changed, so live updates never reset an open list or an unsaved choice. A
+// rebuilt list keeps the current choice when it is still offered, else takes `fallback`. Returns whether it rebuilt.
+function fillPicker(select, options, fallback = '') {
+  select.disabled = false;
+  const signature = JSON.stringify(options.map(option => [option.value, option.textContent, option.disabled]));
+  if (select.dataset.signature === signature)
+    return false;
+
+  const previous = select.dataset.signature === 'connecting' ? '' : select.value;
+  select.replaceChildren(...options);
+  select.dataset.signature = signature;
+  select.value = options.some(option => option.value === previous && !option.disabled) ? previous : fallback;
+  return true;
+}
+
+// Model pickers follow providers as they connect: "Connecting…" first, the full list once every provider is ready.
+function renderModelPickers() {
+  if (renderComposerModels()) {
+    showMode(state.settings.mode);
+    fitComposer();
+  }
+  if ($('#settings-dialog').open) {
+    renderRoutingModels();
+    renderChatScanModels();
+    renderBenchmarkWorkers();
+  }
+  if ($('#agent-dialog').open)
+    renderAgentModels();
+  if ($('#hub-dialog').open)
+    renderHubModels();
+}
+
 function renderProviderConnections() {
   if (!state) return;
-  const snapshots = fleetState?.agentStates ? [...Object.values(fleetState.agentStates), ...Object.values(fleetState.executionStates || {})] : [state];
-  const connecting = new Set([...snapshots.flatMap(s => s.connectingProviders || []), ...(fleetState?.connectingProviders || []), ...modelFetches.keys(), ...providerActions.keys()]);
-  if (testingJev) connecting.add('jev');
-  const active = connecting.size > 0 || snapshots.some(s => s.connection === 'connecting');
+  const { connecting, active } = providersConnecting();
   const indicator = $('#provider-connection');
   indicator.hidden = !active;
   indicator.title = connecting.size ? `Connecting: ${[...connecting].map(id => id === 'jev' ? 'Jev' : providerTitle(id)).join(', ')}` : 'Connecting providers';
@@ -326,6 +415,7 @@ function renderProviderConnections() {
       install.hidden = pending;
     if (pending || wasPending) row.querySelector('.provider-plug').disabled = pending || !!(state.anyAgentBusy || state.busy) || row.dataset.installed === 'false';
   }
+  renderModelPickers();
 }
 
 // API providers: add (name, base URL, optional key), enable/disable, replace or clear the key, remove.
@@ -717,22 +807,61 @@ function editAgent(profile) {
   $('#agent-name').value = profile?.name || '';
   $('#agent-instructions').value = profile?.instructions || '';
   $('#agent-workspace').value = conversation?.workspace || profile?.workspace || state.settings.workspace;
-  $('#agent-model').replaceChildren(new Option('Auto', 'auto'), ...state.presets.filter(p => p.available).map(p => new Option(p.label, p.id)));
-  if (profile?.mode && ![...$('#agent-model').options].some(o => o.value === profile.mode)) $('#agent-model').add(new Option(profile.mode + ' (unavailable)', profile.mode));
-  $('#agent-model').value = profile?.mode || state.settings.mode;
+  // A fresh list for this agent: nothing left from the last time the dialog was open.
+  dialog.dataset.mode = profile?.mode || state.settings.mode;
+  $('#agent-model').dataset.signature = '';
+  $('#agent-model').replaceChildren();
+  $('#agent-save').disabled = false;
+  renderAgentModels();
   $('#agent-access').replaceChildren(...state.accessModes.map(p => new Option(p.label, p.id)));
   $('#agent-access').value = conversation?.access || profile?.access || 'read-only';
   $('#agent-error').textContent = ''; dialog.showModal(); $('#agent-name').focus();
 }
-function editHub(profile) {
-  $('#hub-name').value = profile.name;
+// The agent dialog's model list; the agent's saved model stays chosen, or shows as unavailable. Saving waits for it.
+function renderAgentModels() {
+  const select = $('#agent-model');
+  const mode = $('#agent-dialog').dataset.mode;
+  if (providersConnecting().active) {
+    showConnecting(select);
+    $('#agent-save').disabled = true;
+    return;
+  }
+
+  const wasConnecting = select.dataset.signature === 'connecting';
+  const options = [new Option('Auto', 'auto'), ...state.presets.filter(p => p.available).map(p => new Option(p.label, p.id))];
+  if (mode && !options.some(option => option.value === mode))
+    options.push(new Option(mode + ' (unavailable)', mode));
+  fillPicker(select, options, mode);
+  if (wasConnecting)
+    $('#agent-save').disabled = false;
+}
+
+// The Hub dialog's model list: only models that answer in a schema can run the Hub. Saving waits for it.
+function renderHubModels() {
+  const select = $('#hub-model');
+  if (providersConnecting().active) {
+    showConnecting(select);
+    $('#hub-save').disabled = true;
+    return;
+  }
+
+  const wasConnecting = select.dataset.signature === 'connecting';
   const main = fleetState?.agentStates?.main || state;
   const models = main.presets.filter(p => p.available && providerCaps(p.provider || 'codex').structured !== false);
   const placeholder = new Option('Choose a model', '');
   placeholder.disabled = true;
-  $('#hub-model').replaceChildren(placeholder, ...models.map(p => new Option(p.label, p.id)));
   const mode = main.settings.mode === 'auto' ? main.hubMode : main.settings.mode;
-  $('#hub-model').value = models.some(p => p.id === mode) ? mode : '';
+  fillPicker(select, [placeholder, ...models.map(p => new Option(p.label, p.id))], models.some(p => p.id === mode) ? mode : '');
+  if (wasConnecting)
+    $('#hub-save').disabled = false;
+}
+
+function editHub(profile) {
+  $('#hub-name').value = profile.name;
+  $('#hub-model').dataset.signature = '';
+  $('#hub-model').replaceChildren();
+  $('#hub-save').disabled = false;
+  renderHubModels();
   $('#hub-error').textContent = '';
   $('#hub-dialog').showModal();
   $('#hub-name').select();
@@ -1155,24 +1284,7 @@ function render() {
   }
   $('#banner').textContent = sticky || flash;
   $('#banner').hidden = !$('#banner').textContent;
-  const preset = $('#preset');
-  const groups = presetGroups();
-  const signature = `${!!state.coordinator}\n` + groups.map(g => `${g.provider}|${providerTitle(g.provider)}|${g.key}|${g.label}`).join('\n');
-  if (preset.dataset.signature !== signature) {
-    const defaultOption = state.coordinator ? new Option('Choose a model', '') : new Option('Auto', 'auto');
-    defaultOption.disabled = !!state.coordinator;
-    preset.replaceChildren(defaultOption);
-    let section = null;
-    for (const g of groups) {
-      if (section?.dataset.provider !== g.provider) {
-        section = document.createElement('optgroup');
-        section.label = providerTitle(g.provider); section.dataset.provider = g.provider;
-        preset.append(section);
-      }
-      section.append(new Option(g.label, g.key));
-    }
-    preset.dataset.signature = signature;
-  }
+  renderComposerModels();
   showMode(state.settings.mode);
   showEffortCap();
   fitComposer();
@@ -1685,14 +1797,16 @@ function renderComparison(view, sessionId, opened = true) {
   return details;
 }
 
-// A line from Harness about the project's rules (src/controller/trials.cjs), with Undo for a kept or rolled-back rule.
+// A line from Harness about the project's rules and notes (src/controller/trials.cjs, src/controller/chat-scan.cjs), with
+// Undo where something changed.
 function renderNotice(item, node, session) {
   node.className = 'message notice';
   const notice = item.ruleNotice || {};
   const line = element('p', 'muted', notice.undoneAt ? `${item.text} Undone.` : item.text);
-  if (['kept', 'rolledBack'].includes(notice.kind) && !notice.undoneAt) {
+  const undoLabel = { kept: 'Undo the kept rule', rolledBack: 'Put the rule back', trialStarted: 'Stop trying the rule', noteAdded: 'Remove the note' }[notice.kind];
+  if (undoLabel && !notice.undoneAt) {
     const undo = element('button', 'compact-action', 'Undo'); undo.type = 'button';
-    undo.setAttribute('aria-label', notice.kind === 'kept' ? 'Undo the kept rule' : 'Put the rule back');
+    undo.setAttribute('aria-label', undoLabel);
     undo.onclick = async () => {
       undo.disabled = true;
       try {
@@ -2560,23 +2674,54 @@ $('#settings-browse').onclick = async () => {
     await saveSetting($('#settings-workspace'), 'workspace', folder, agentId);
   } catch (error) { notify(error); }
 };
+// A Settings model option: unavailable ones stay listed but cannot be picked.
+function presetOption(p) {
+  const option = new Option(`${p.label} · ${p.provider}${!p.available ? ' · unavailable' : ''}`, p.id);
+  option.disabled = !p.available;
+  return option;
+}
+
+// Settings pickers show the saved choice, except while their own change is being saved.
 function renderRoutingModels(selected = state.settings.routing === 'jev' ? 'jev' : state.settings.routerPreset) {
   const select = $('#settings-router-preset');
-  select.replaceChildren(...state.routerPresets.map(p => {
-    const option = new Option(`${p.label} · ${p.provider}${!p.available ? ' · unavailable' : ''}`, p.id);
-    option.disabled = !p.available;
-    return option;
-  }));
-  const jev = new Option('Jev', 'jev');
-  select.prepend(jev);
+  if (providersConnecting().active) {
+    showConnecting(select);
+    renderRoutingDetail();
+    return;
+  }
+
+  const options = [new Option('Jev', 'jev'), ...state.routerPresets.map(presetOption)];
   if (selected !== 'jev' && !state.routerPresets.some(p => p.id === selected)) {
     const placeholder = new Option(state.routerPresets.length ? 'Choose an enabled routing model' : 'Enable a routing model in Providers', '');
     placeholder.disabled = true;
-    select.prepend(placeholder);
+    options.unshift(placeholder);
     selected = '';
   }
-  select.value = selected;
+  fillPicker(select, options, selected);
+  if (!select.dataset.saving)
+    select.value = selected;
   renderRoutingDetail();
+}
+
+// Off (the default), or any enabled model that answers in a schema; a picked model that is no longer offered still shows,
+// as unavailable.
+function renderChatScanModels() {
+  const select = $('#settings-chat-scan');
+  if (providersConnecting().active) {
+    showConnecting(select);
+    return;
+  }
+
+  const saved = state.settings.chatScanModel || 'off';
+  const options = [new Option('Off', 'off'), ...(state.chatScanPresets || []).map(presetOption)];
+  if (!options.some(option => option.value === saved)) {
+    const missing = new Option(`${saved} · unavailable`, saved);
+    missing.disabled = true;
+    options.push(missing);
+  }
+  fillPicker(select, options, saved);
+  if (!select.dataset.saving)
+    select.value = saved;
 }
 $('#settings').onclick = async () => {
   try { applyState(await api.bootstrap()); }
@@ -2592,6 +2737,7 @@ $('#settings').onclick = async () => {
   $('#settings-jev-compare').value = state.settings.jevCompare === true ? 'on' : 'off';
   $('#settings-wiki-check').value = state.settings.wikiAssessment === true ? 'on' : 'off';
   $('#settings-reply-suggestions').value = state.settings.replySuggestions === false ? 'off' : 'on';
+  renderChatScanModels();
   $('#settings-background-usage').value = String(state.settings.backgroundUsageLimit || 90);
   renderRoutingDetail();
   $('#jev-key').value = '';
@@ -2771,6 +2917,22 @@ function renderBenchmarkTable(data) {
     return row;
   }));
 }
+// The worker that refreshes benchmarks; a rebuilt list suggests Astra xhigh when offered.
+function renderBenchmarkWorkers() {
+  const select = $('#benchmark-worker');
+  if (providersConnecting().active) {
+    showConnecting(select);
+    $('#benchmark-refresh').disabled = true;
+    return;
+  }
+
+  const workers = state.presets.filter(p => p.available && p.enabled !== false && p.id !== 'jev');
+  const suggested = workers.find(p => p.model === 'gpt-6-astra' && p.effort === 'xhigh');
+  if (fillPicker(select, workers.map(p => new Option(p.label, p.id)), workers[0]?.id || '') && suggested)
+    select.value = suggested.id;
+  $('#benchmark-refresh').disabled = !!state.busy || !workers.length;
+}
+
 async function showBenchmarks() {
   const { data, summary } = await api.benchmarkData();
   benchmarkCandidate = null;
@@ -2785,11 +2947,8 @@ async function showBenchmarks() {
     row.append(link, document.createTextNode(` · ${source.records ? source.records + ' records' : 'refresh target; no imported results'}`));
     return row;
   }));
-  const workers = state.presets.filter(p => p.available && p.enabled !== false && p.id !== 'jev');
-  $('#benchmark-worker').replaceChildren(...workers.map(p => new Option(p.label, p.id)));
-  const suggested = workers.find(p => p.model === 'gpt-6-astra' && p.effort === 'xhigh');
-  if (suggested) $('#benchmark-worker').value = suggested.id;
-  $('#benchmark-refresh').disabled = !!state.busy || !workers.length;
+  $('#benchmark-worker').dataset.signature = '';
+  renderBenchmarkWorkers();
   $('#benchmark-reset').disabled = !!state.busy;
 }
 $('#benchmark-import').onclick = async () => {
@@ -2864,7 +3023,7 @@ function renderRoutingDetail() {
   renderJevCompare();
   renderWikiCheck();
   const provider = $('#settings-router-preset').value === 'jev' ? 'jev' : 'smart';
-  $('#settings-router-preset').disabled = !!state.planRouting;
+  $('#settings-router-preset').disabled = !!state.planRouting || providersConnecting().active;
   $('#settings-router-preset').title = state.planRouting ? state.planRouting.reason + ' This overrides the saved routing preference.'
     : provider === 'jev' && state.jev.enabled === false ? 'Jev is disabled in Providers. Auto uses Smart until you enable Jev again.'
     : provider === 'jev' && !state.jev.configured ? 'Save your Jev API key in Providers to enable this routing option.' : '';
@@ -2903,6 +3062,7 @@ function queueSettingsWrite(write) {
 }
 async function saveSetting(control, key, value, agentId = selectedAgent) {
   control.disabled = true;
+  control.dataset.saving = 'true';
   $('#settings-save-status').textContent = 'Saving…';
   try {
     if (key === 'workspace' && checksDirty) await saveChecks();
@@ -2915,14 +3075,17 @@ async function saveSetting(control, key, value, agentId = selectedAgent) {
   } catch (error) {
     if (agentId === selectedAgent) {
       const saved = key === 'routingModel' ? (state.settings.routing === 'jev' ? 'jev' : state.settings.routerPreset) : ((key === 'workspace' || key === 'access') ? current()?.[key] ?? state.settings[key] : state.settings[key])
-        ?? { backgroundUsageLimit: 90, effortCap: 'high', contextRanking: 'local', toolSelection: 'off', jevQuickAnswers: true, jevCompare: false, wikiAssessment: false }[key];
+        ?? { backgroundUsageLimit: 90, effortCap: 'high', contextRanking: 'local', toolSelection: 'off', jevQuickAnswers: true, jevCompare: false, wikiAssessment: false,
+          chatScanModel: 'off' }[key];
       control.value = typeof value === 'boolean' ? (saved ? 'on' : 'off') : String(saved ?? '');
       control.onchange?.();
     }
     $('#settings-save-status').textContent = 'Change could not be saved.';
     notify(error);
   } finally {
-    control.disabled = false;
+    delete control.dataset.saving;
+    // A model picker that switched to "Connecting…" meanwhile stays disabled.
+    control.disabled = control.dataset.signature === 'connecting';
     renderRoutingDetail();
   }
 }
@@ -2932,7 +3095,7 @@ const settingsFields = {
   'settings-router-preset': 'routingModel', 'settings-effort-cap': 'effortCap',
   'settings-context': 'contextRanking', 'settings-tools': 'toolSelection',
   'settings-quick': 'jevQuickAnswers', 'settings-jev-compare': 'jevCompare', 'settings-wiki-check': 'wikiAssessment',
-  'settings-reply-suggestions': 'replySuggestions',
+  'settings-reply-suggestions': 'replySuggestions', 'settings-chat-scan': 'chatScanModel',
 };
 $('#settings-form').addEventListener('change', event => {
   const control = event.target, key = settingsFields[control.id];

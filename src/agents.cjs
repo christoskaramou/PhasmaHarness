@@ -619,7 +619,8 @@ class Agents extends EventEmitter {
         values[key] !== controller.data.settings[key])) this.requireIdle(execution);
     if (conversation && ['workspace', 'access'].some(key => values[key] !== undefined && values[key] !== conversation[key]) &&
         (controller.busy || controller.loading.size || conversation.queue?.length || conversation.delegationQueue?.some(job => !job.delivered) || this.pendingDelegations(conversation.id) || (conversation.delegation && !conversation.delegation.delivered))) throw new Error('Stop this agent before changing its workspace or access.');
-    const local = Object.keys(values).every(key => ['workspace', 'mode', 'access', 'backgroundUsageLimit', 'replySuggestions'].includes(key));
+    // The chat checker runs between turns, so picking it never waits for agents to stop.
+    const local = Object.keys(values).every(key => ['workspace', 'mode', 'access', 'backgroundUsageLimit', 'replySuggestions', 'chatScanModel'].includes(key));
     if (!local && this.busy) throw new Error('Stop all agents before changing shared settings.');
     if (agentId === 'main') this.primary.settings(values);
     else {

@@ -273,6 +273,7 @@ class Controller extends EventEmitter {
         return { ...p, available: (!plan || planMatch || p.id === plan.id) && this.available(p) };
       }),
       routerPresets: this.routerChoices().map(p => ({ ...p, available: this.available(p) })),
+      chatScanPresets: this.chatScanChoices().map(p => ({ ...p, available: this.available(p) })),
     };
   }
 
@@ -331,6 +332,15 @@ class Controller extends EventEmitter {
       if (!this.routerChoices().some(p => p.id === values.routerPreset)) throw new Error('Unknown router preset.');
       if (values.routerPreset !== (next.routerPreset || 'luna-light') && !this.available(this.routerChoices().find(p => p.id === values.routerPreset))) throw new Error('This router preset is unavailable on your account.');
       next.routerPreset = values.routerPreset;
+    }
+    if (values.chatScanModel !== undefined) {
+      const choice = this.chatScanChoices().find(p => p.id === values.chatScanModel);
+      if (values.chatScanModel !== 'off' && !choice)
+        throw new Error('Unknown chat checker model.');
+      if (choice && !this.available(choice))
+        throw new Error('This chat checker model is unavailable on your account.');
+
+      next.chatScanModel = values.chatScanModel;
     }
     if (values.fontScale !== undefined) {
       if (![85, 100, 115, 130, 150].includes(values.fontScale)) throw new Error('Invalid font scale.');
@@ -602,6 +612,10 @@ class Controller extends EventEmitter {
     // Only a message the user sent counts as their own turn; results, mail, routine runs and wiki proposals do not.
     session.userTurn = !agentReply && !routineRun && !wikiTaskId;
     session.replyBudgetId = agentReply ? this.agents?.budgets.forMessage(session, { agentResult, agentMail })?.id || null : null;
+    // The user's message is their reaction to the exchange before it, which the chat scanner reads in the background. A
+    // failover re-send is the same message again, not a reaction.
+    if (session.userTurn && !failover)
+      this.scanAfterUserTurn(session, text);
     if (this.isCoordinator()) return this.sendCoordinator(session, { text, images, fileMessage, mode: chosenMode, agentReply, agentReplyCancelled, agentResult, agentMail, routineRun });
     const originalRequest = session.delegation && this.agents?.executionText(session.delegation) === text
       ? this.agents.requestFor(session.delegation) : null;
@@ -1476,6 +1490,7 @@ for (const methods of [
   require('./controller/comparison.cjs'),
   require('./controller/reflection.cjs'),
   require('./controller/trials.cjs'),
+  require('./controller/chat-scan.cjs'),
 ]) {
   for (const [name, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(methods))) {
     if (Object.hasOwn(Controller.prototype, name)) throw new Error(`Controller.${name} is defined twice.`);

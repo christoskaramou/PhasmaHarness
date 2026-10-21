@@ -564,4 +564,4 @@ class SmartRouter {
   }
 }
 
-module.exports = { SmartRouter, routerModel, contextFor, applyPolicy, conversationDelta };
+module.exports = { SmartRouter, routerModel, contextFor, applyPolicy, conversationDelta, strongest };

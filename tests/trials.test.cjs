@@ -156,3 +156,46 @@ test('a kept rule a task carried rolls back on a hit unless pinned; a line delet
     assert.equal(trials.startTrial(root, { rule: text, lessonKey: 'k', check: 'unit', error: rule.error, goal: rule.goal, source: 'a reflection' }), null,
       `"${text}" was taken out, so it does not go back on trial`);
 });
+
+test('a chat rule rides only tasks that share two words with its request, one at a time, and the chat scanner decides it, not checks', t => {
+  const root = tempRoot(t);
+  const chat = (id, extra = {}) => ({ ...rule, id, rule: `Chat rule ${id}.`, check: null, error: 'renamed a public export', goal: 'Rename the loader module', ...extra });
+  trials.updateRules(root, records => records.push(chat('c1'), chat('c2'), { ...rule, id: 'checked' }));
+  let records = trials.readRules(root);
+  assert.deepEqual(trials.matchingTrials(records, 'Rename the README', ['unit']).map(record => record.id), [], 'one shared word is not enough');
+  assert.deepEqual(trials.matchingTrials(records, 'Rename the loader and add fetchUser retries', ['unit']).map(record => record.id), ['c1', 'checked'],
+    'two words carry it, and at most one chat rule rides a task');
+
+  const carrying = { ...task('t1', [[passing('unit')]]), trialRuleIds: ['c1', 'checked'] };
+  trials.recordOutcomes(root, carrying);
+  records = trials.readRules(root);
+  assert.deepEqual(records.find(record => record.id === 'c1').carried, [], 'settling the task leaves the chat rule for the scanner');
+  assert.equal(records.find(record => record.id === 'checked').carried.length, 1);
+
+  assert.deepEqual(trials.recordChatVerdicts(root, carrying, [{ id: 'c1', verdict: 'not relevant' }]), []);
+  assert.deepEqual(trials.recordChatVerdicts(root, carrying, [{ id: 'c1', verdict: 'avoided' }]), [], 'the same task counts once');
+  assert.deepEqual(trials.recordChatVerdicts(root, { ...carrying, id: 't2' }, [{ id: 'c2', verdict: 'avoided' }]), [], 'only rules the task carried');
+  trials.recordChatVerdicts(root, { ...carrying, id: 't3' }, [{ id: 'c1', verdict: 'avoided' }]);
+  trials.recordChatVerdicts(root, { ...carrying, id: 't4' }, [{ id: 'c1', verdict: 'avoided' }]);
+  const [kept] = trials.recordChatVerdicts(root, { ...carrying, id: 't5' }, [{ id: 'c1', verdict: 'avoided' }]);
+  assert.deepEqual([kept.id, kept.state], ['c1', 'kept']);
+  assert.deepEqual(trials.readRules(root).find(record => record.id === 'c1').carried.map(entry => entry.outcome), ['none', 'clean', 'clean', 'clean']);
+
+  const [dropped] = trials.recordChatVerdicts(root, { ...carrying, id: 't6', trialRuleIds: ['c2'] }, [{ id: 'c2', verdict: 'recurred' }]);
+  assert.deepEqual([dropped.state, dropped.reason], ['dropped', 'the mistake it targets came back']);
+});
+
+test('a kept chat rule is carried from INSTRUCTIONS.md only by close matches, stamped when matched, and rolled back by the scanner', t => {
+  const root = tempRoot(t);
+  const line = '- Keep public export names. (kept 2026-10-21)';
+  trials.updateRules(root, records => records.push({ ...rule, id: 'k', rule: 'Keep public export names.', check: null, error: 'renamed a public export',
+    goal: 'Rename the loader module', state: 'kept', keptAt: 1, line }));
+  const records = trials.readRules(root);
+  assert.deepEqual(trials.carriedKept(records, line, [], 'Fix the README'), []);
+  assert.deepEqual(trials.carriedKept(records, line, [], 'Rename the loader again').map(record => record.id), ['k']);
+
+  trials.recordOutcomes(root, { id: 't1', goal: 'Rename the loader again', attempts: [], keptRuleIds: ['k'] });
+  assert.ok(trials.readRules(root)[0].lastMatchedAt > 1, 'matched closely, so stamped');
+  const [rolled] = trials.recordChatVerdicts(root, { id: 't1', keptRuleIds: ['k'] }, [{ id: 'k', verdict: 'recurred' }]);
+  assert.deepEqual([rolled.state, rolled.reason], ['rolled back', 'the mistake it targets came back after it was kept']);
+});

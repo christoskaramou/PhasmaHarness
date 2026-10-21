@@ -38,19 +38,26 @@ function entry(item) {
   return null;
 }
 
-// What the reflection is shown: the goal, the failing checks, the task's own run (its first message plus as much of the
-// latest work as fits) and the project's current rules. `plain` is the same text the grounding check searches.
-function reflectionInput(task, items, rules = '') {
-  const failures = (task.attempts || []).flatMap(attempt => (attempt.results || []).filter(result => result.status === 'failed'))
-    .slice(0, 3).map(result => ({ check: String(result.name || 'check'), exitCode: result.exitCode ?? null, output: redact(failureExcerpt(result, 400, 300)).slice(-400) }));
-  const entries = items.map(entry).filter(Boolean);
+// A run's first entry (the request) plus as much of its latest work as fits.
+function trajectoryOf(entries, limit = TRAJECTORY_LIMIT) {
   const kept = [];
   let size = entries[0]?.length || 0;
-  for (let index = entries.length - 1; index > 0 && size + entries[index].length < TRAJECTORY_LIMIT; index--) {
+  for (let index = entries.length - 1; index > 0 && size + entries[index].length < limit; index--) {
     kept.unshift(entries[index]);
     size += entries[index].length;
   }
-  const trajectory = entries.length ? [entries[0], ...kept] : [];
+  return entries.length ? [entries[0], ...kept] : [];
+}
+
+// A task's failing checks, redacted, at most three.
+const failingChecks = task => (task?.attempts || []).flatMap(attempt => (attempt.results || []).filter(result => result.status === 'failed'))
+  .slice(0, 3).map(result => ({ check: String(result.name || 'check'), exitCode: result.exitCode ?? null, output: redact(failureExcerpt(result, 400, 300)).slice(-400) }));
+
+// What the reflection is shown: the goal, the failing checks, the task's own run (its first message plus as much of the
+// latest work as fits) and the project's current rules. `plain` is the same text the grounding check searches.
+function reflectionInput(task, items, rules = '') {
+  const failures = failingChecks(task);
+  const trajectory = trajectoryOf(items.map(entry).filter(Boolean));
   const input = { goal: clip(redact(task.goal || ''), 1500), failingChecks: failures, trajectory, existingRules: clip(redact(rules), 3000) };
   const plain = [input.goal, ...failures.flatMap(failure => [failure.check, failure.output]), ...trajectory].join('\n');
   const prompt = JSON.stringify(input);
@@ -81,4 +88,4 @@ function checkReflection(decision, plain) {
   return { rule, moment, reason };
 }
 
-module.exports = { SCHEMA, INSTRUCTIONS, reflectionInput, checkReflection };
+module.exports = { SCHEMA, INSTRUCTIONS, reflectionInput, checkReflection, entry, trajectoryOf, failingChecks, clip, oneLine, digest, normalize };

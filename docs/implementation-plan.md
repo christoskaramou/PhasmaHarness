@@ -242,10 +242,15 @@ The library feeds the improver, never the workers. Always-on text is capped (8,0
    - The Harness section of `INSTRUCTIONS.md` holds at most 10 rules. A new one takes the place of the rule tasks matched least recently, which moves out and rides only the tasks it matches (on demand, at most 30, at most 2 per task). Rules the user put back stay in.
    - Lessons that differ only in digits are one lesson, and lessons unseen for 90 days expire, except the newest 10.
    - Not built: skills with trigger lines (on-demand rules ride the task's first message instead), demoting a rule whose check left the project, merging near-duplicate rule texts.
-5. **Proven setups, derived not curated.**
+5. **Chat scanner** (requested 2026-10-21, built the same day; see the wiki's Chat scanner).
+   - A cheap model picked in Settings as the chat checker (Off by default) reads every exchange the user reacts to, in Bot's chat and in worker chats, in the background. It flags a mistake a rule or note could prevent, quoting the exchange.
+   - Only a flagged exchange goes to the strongest enabled model, at most 5 a day per project. It writes one rule (put on trial) or one note (offered to matching tasks as context), or nothing.
+   - Rules from the chat have no check, so the scanner judges them on later exchanges that carried them: the mistake recurred, was avoided, or the rule was not relevant. Three avoided keep it; a recurrence drops it, or rolls it back once kept.
+   - Not built: a middle model between the two; a setting for the rule-writing model; harness2 itself (only its ideas).
+6. **Proven setups, derived not curated.**
    - From the records, the model and rules that pass a kind of work's checks with the fewest corrections and tokens become Auto's preference for that project and kind of work.
    - Each change is recorded with its evidence; a later loss rolls it back.
-6. **Skills in comparisons** (the earlier v2), once rules work end to end.
+7. **Skills in comparisons** (the earlier v2), once rules work end to end.
 
 Not adopted from harness2: repeated rollouts per task, the blind LLM selector, parallel improver fan-out, an append-only library without pruning, and unsandboxed workers.
 

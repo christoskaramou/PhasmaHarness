@@ -37,7 +37,9 @@ module.exports = {
         const offer = comparison ? { block: comparison.record.lessonBlock || null, keys: [] } : this.lessonOffer(session.workspace, text, configured);
         // Trial rules ride ahead of the lessons, in their own capped block, so the lesson limit never cuts them.
         const trial = comparison ? { block: null, ids: [], lessonKeys: [] } : this.trialRulesFor(session.workspace, text, configured);
-        task.lessonBlock = [trial.block, offer.block].filter(Boolean).join('\n\n') || null;
+        // Notes the chat scanner saved ride as context after the rules (src/controller/chat-scan.cjs).
+        const notes = comparison ? null : this.notesFor(session.workspace, text);
+        task.lessonBlock = [trial.block, notes, offer.block].filter(Boolean).join('\n\n') || null;
         // Which lessons and trial or kept rules it carried: the same failure again means they did not stick
         // (saveLesson), and its checks decide the trial rules and can roll back the kept ones (recordTrials).
         task.lessonKeys = [...new Set([...offer.keys, ...trial.lessonKeys])];

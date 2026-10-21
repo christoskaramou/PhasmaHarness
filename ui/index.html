@@ -214,6 +214,8 @@
     <label id="runner-start-row">Start at sign-in<select id="settings-runner-start" disabled><option value="off">Off</option><option value="on">On</option></select></label>
     <label>Reply suggestions<select id="settings-reply-suggestions" aria-describedby="reply-suggestions-detail"><option value="off">Off</option><option value="on">On</option></select></label>
     <p id="reply-suggestions-detail" class="hint">After each answer, the model that wrote it suggests your next message as grey text. Right arrow accepts it. One extra model call per answer.</p>
+    <label>Chat checker model<select id="settings-chat-scan" aria-describedby="chat-scan-detail"></select></label>
+    <p id="chat-scan-detail" class="hint">Off by default. The model you pick reads each exchange you reply to and flags mistakes worth a project rule or note: one call per message you send. While it is unavailable, nothing is checked.</p>
     <details id="remote-settings"><summary>Browser access</summary>
       <p class="muted" id="remote-status">Off. Jobs stay on this runner.</p>
       <label>Local port<input id="remote-port" type="number" min="1" max="65535" value="8788"></label>
