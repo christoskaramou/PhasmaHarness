@@ -667,7 +667,9 @@ class Controller extends EventEmitter {
           const unlimited = usable.filter(p => !this.limits.limited(p.provider || 'codex', p.model));
           return unlimited.length ? unlimited : usable;
         };
-        const context = { ...session, ...previousState, configuredChecks: this.data.settings.checks?.[session.workspace] || [], routingCatalog: routingCatalog(), routerChoice: router, jevQuickAnswers: this.data.settings.jevQuickAnswers, attachedImageCount: images.length };
+        const context = { ...session, ...previousState, configuredChecks: this.data.settings.checks?.[session.workspace] || [], routingCatalog: routingCatalog(), routerChoice: router, jevQuickAnswers: this.data.settings.jevQuickAnswers, attachedImageCount: images.length,
+          // The presets this project's checks proved per kind of work (src/setups.cjs).
+          provenSetups: this.provenSetupsFor(session.workspace) };
         // A fresh delegation is not forced onto the model of an older, possibly misinterpreted task.
         if (originalRequest && session.job?.originalRequestId !== originalRequest.id) context.job = null;
         const smart = async () => {
@@ -1491,6 +1493,7 @@ for (const methods of [
   require('./controller/reflection.cjs'),
   require('./controller/trials.cjs'),
   require('./controller/chat-scan.cjs'),
+  require('./controller/setups.cjs'),
 ]) {
   for (const [name, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(methods))) {
     if (Object.hasOwn(Controller.prototype, name)) throw new Error(`Controller.${name} is defined twice.`);

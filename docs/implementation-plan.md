@@ -247,9 +247,11 @@ The library feeds the improver, never the workers. Always-on text is capped (8,0
    - Only a flagged exchange goes to the strongest enabled model, at most 5 a day per project. It writes one rule (put on trial) or one note (offered to matching tasks as context), or nothing.
    - Rules from the chat have no check, so the scanner judges them on later exchanges that carried them: the mistake recurred, was avoided, or the rule was not relevant. Three avoided keep it; a recurrence drops it, or rolls it back once kept.
    - Not built: a middle model between the two; a setting for the rule-writing model; harness2 itself (only its ideas).
-6. **Proven setups, derived not curated.**
-   - From the records, the model and rules that pass a kind of work's checks with the fewest corrections and tokens become Auto's preference for that project and kind of work.
-   - Each change is recorded with its evidence; a later loss rolls it back.
+6. **Proven setups, derived not curated** (built 2026-10-21; see the wiki's Proven setups).
+   - Each task Auto routes in a project with checks records its kind of work, preset and how its checks went. When one preset passes a kind of work's checks first time more often than another that also ran it at least 3 times, Auto prefers it there on low and medium difficulty (Smart and Jev routing alike), with a chat line and Undo.
+   - The next task of that kind it does not pass first time drops the preference; Undo drops it for good.
+   - Rules are handled by trials (steps 2 to 4), so this step is about the model only.
+   - Limits: it learns only in projects with checks, and only where Auto already used several setups for the same kind of work (no exploration while a preference holds).
 7. **Skills in comparisons** (the earlier v2), once rules work end to end.
 
 Not adopted from harness2: repeated rollouts per task, the blind LLM selector, parallel improver fan-out, an append-only library without pruning, and unsandboxed workers.

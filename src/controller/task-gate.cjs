@@ -27,6 +27,8 @@ module.exports = {
       if (session.delegation && !session.delegation.delivered) task.assignmentId = session.delegation.id;
       task.workspace = session.workspace; task.startIndex = session.items.length;
       task.corrections = session.delegation?.taskCorrections || 0;
+      // Corrections carried over from a delegation, so "first time" means this task's own run.
+      task.startCorrections = task.corrections;
       task.amendments = [...(session.delegation?.taskAmendments || [])];
       task.requestedMode = session.pendingMessage?.requestedMode || this.data.settings.mode;
       task.originalImageCount = session.pendingMessage?.content?.filter(part => part.type === 'image').length || 0;
@@ -60,6 +62,11 @@ module.exports = {
       provider: selected.provider || 'codex', model: selected.model, effort: selected.effort,
       label: selected.label, id: selected.id, images: selected.images !== false,
     };
+    // Auto's kind of work and difficulty, for proven setups (src/setups.cjs); a manual pick has none.
+    if (selected?.assessment?.taskKind) {
+      task.kind = selected.assessment.taskKind;
+      task.difficulty = selected.assessment.difficulty || null;
+    }
     task.summary = summaryLine(task);
     return task;
   },
@@ -368,6 +375,7 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
       // so a carried trial rule's failure reaches the lesson in the same pass.
       this.recordTrials(session, task);
       this.saveLesson(session, task);
+      this.recordSetup(session, task);
       try { if (task.state === 'checks-passed' && task.wikiAvailable && await this.maintainWiki(session, task)) return; }
       catch (error) { task.wikiMaintenance = { ...task.wikiMaintenance, state: 'failed', error: error.message }; this.wikiSnapshots.delete(task.id); }
       this.releaseSlot(session);

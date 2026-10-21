@@ -1529,6 +1529,58 @@ test('a correction in the chat becomes a trial rule through the scanner and the 
   assert.throws(() => controller.undoRule(session.id, notice.id), /left its trial/);
 });
 
+test('a preset that passes a kind of work\'s checks first time more often than another becomes Auto\'s choice there, with Undo', async t => {
+  const { controller, fake, smartRouter } = await setup(t);
+  const { WikiStore } = require('../src/workspace/wiki-store.cjs');
+  const setups = require('../src/setups.cjs');
+  controller.wikiStore = new WikiStore(path.join(path.dirname(controller.filename), 'wiki-store'));
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  arm(controller, fake);
+  addCheck(controller, session, ['unit']);
+  let failing = 0;
+  fake.onExec = () => failing-- > 0 ? { exitCode: 1, stdout: 'Error: off by one', stderr: '' } : { exitCode: 0, stdout: 'ok', stderr: '' };
+  const contexts = [];
+  let preset = 'terra-light';
+  smartRouter.choose = async (_text, context) => {
+    contexts.push(context.provenSetups);
+    return { ...controller.resolveWorker(preset), source: 'model', reason: 'test', assessment: { taskKind: 'debugging', difficulty: 'low' } };
+  };
+  const task = async (text, { on, corrected = false }) => {
+    preset = on;
+    failing = corrected ? 1 : 0;
+    await controller.send({ id: session.id, text, mode: 'auto', task: 'on' });
+    complete(controller, session, fake.turnIds.at(-1));
+    if (corrected) {
+      const turns = fake.turnIds.length;
+      await until(() => fake.turnIds.length === turns + 1);
+      complete(controller, session, fake.turnIds.at(-1));
+    }
+    await controller.gateDone;
+    // Wiki upkeep may follow a passed task; let it finish before the next request.
+    if (controller.busy) {
+      complete(controller, session, fake.turnIds.at(-1));
+      await until(() => !controller.busy);
+    }
+  };
+
+  for (let i = 0; i < 3; i++) {
+    await task(`Fix crash ${i}`, { on: 'terra-light' });
+    await task(`Fix bug ${i}`, { on: 'codex:gpt-5.6-sol:high', corrected: i === 0 });
+  }
+  assert.deepEqual([session.tasks[0].kind, session.tasks[0].difficulty], ['debugging', 'low']);
+  const root = controller.wikiStore.ensure(session.workspace).root;
+  assert.deepEqual(setups.readSetups(root).records.map(record => [record.preset, record.outcome]).slice(0, 2), [['terra-light', 'clean'], ['codex:gpt-5.6-sol:high', 'corrected']]);
+  const notice = session.items.findLast(item => item.ruleNotice?.kind === 'setupPreferred');
+  assert.match(notice.text, /^Auto now uses .+ for debugging work in this project: 3 of 3 tasks passed their checks first time/);
+
+  await task('Fix crash again', { on: 'terra-light' });
+  assert.deepEqual(contexts.at(-1), { debugging: 'terra-light' }, 'Auto routes with the preference');
+  controller.undoRule(session.id, notice.id);
+  await task('Fix one more crash', { on: 'terra-light' });
+  assert.deepEqual(contexts.at(-1), {}, 'Undo drops it');
+});
+
 test('the chat checker is off until a model is picked, and Off turns it off again', async t => {
   const { controller, fake } = await setup(t);
   const { WikiStore } = require('../src/workspace/wiki-store.cjs');

@@ -1803,7 +1803,8 @@ function renderNotice(item, node, session) {
   node.className = 'message notice';
   const notice = item.ruleNotice || {};
   const line = element('p', 'muted', notice.undoneAt ? `${item.text} Undone.` : item.text);
-  const undoLabel = { kept: 'Undo the kept rule', rolledBack: 'Put the rule back', trialStarted: 'Stop trying the rule', noteAdded: 'Remove the note' }[notice.kind];
+  const undoLabel = { kept: 'Undo the kept rule', rolledBack: 'Put the rule back', trialStarted: 'Stop trying the rule', noteAdded: 'Remove the note',
+    setupPreferred: 'Stop preferring this model' }[notice.kind];
   if (undoLabel && !notice.undoneAt) {
     const undo = element('button', 'compact-action', 'Undo'); undo.type = 'button';
     undo.setAttribute('aria-label', undoLabel);

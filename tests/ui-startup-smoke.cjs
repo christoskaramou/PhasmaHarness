@@ -2642,6 +2642,9 @@ app.whenReady().then(async () => {
     text: 'Noticed: Renamed a public export. Trying the rule "Keep export names." on similar tasks.', ruleNotice: { kind: 'trialStarted', ruleId: 'r3' } });
   ownerChat.items.push({ id: 'chat-note', type: 'notice', localOnly: true, createdAt: Date.now(),
     text: 'Noticed: Renamed a public export. Saved a note for similar tasks: "Callers import fetchUser by name."', ruleNotice: { kind: 'noteAdded', noteId: 'n1' } });
+  ownerChat.items.push({ id: 'setup-preferred', type: 'notice', localOnly: true, createdAt: Date.now(),
+    text: 'Auto now uses Terra for debugging work in this project: 3 of 3 tasks passed their checks first time (Sol: 2 of 3).',
+    ruleNotice: { kind: 'setupPreferred', setupKind: 'debugging', preset: 'terra' } });
   const undoRuleCalls = [];
   ipcMain.handle('undoRule', (_event, ...args) => {
     undoRuleCalls.push(args);
@@ -2650,7 +2653,7 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
   const notices = await window.webContents.executeJavaScript(`[...document.querySelectorAll('.message.notice')]
     .map(node => ({ text: node.textContent, undo: node.querySelector('button')?.getAttribute('aria-label') || null }))`);
-  assert.deepEqual(notices.map(notice => notice.undo), ['Undo the kept rule', null, 'Put the rule back', 'Stop trying the rule', 'Remove the note'],
+  assert.deepEqual(notices.map(notice => notice.undo), ['Undo the kept rule', null, 'Put the rule back', 'Stop trying the rule', 'Remove the note', 'Stop preferring this model'],
     'kept, rolled-back, new trial and note notices offer Undo');
   assert.match(notices[0].text, /^Kept the rule "Create done\.txt first\." in INSTRUCTIONS\.md/);
   assert.match(notices[1].text, /^Dropped the trial rule "Export greet\.": the failure it targets came back\.$/);

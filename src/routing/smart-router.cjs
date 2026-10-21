@@ -73,10 +73,23 @@ function difficultyChoice(result, decision, available) {
     reason: clip(`${decision.difficulty} difficulty: ${measured ? 'using the strongest measured model and' : 'matching'} supported effort (${best.effort || 'default'}) within the allowed catalog. ${result.reason || ''}`, 240) };
 }
 
+// A preset this project's checks proved for this kind of work (src/setups.cjs) wins on low and medium difficulty, after
+// the effort matching, so it keeps its own effort; hard tasks keep the strongest measured model.
+function provenChoice(result, decision, session, available) {
+  const id = session.provenSetups?.[decision.taskKind];
+  const proven = id && ['low', 'medium'].includes(decision.difficulty) ? available.find(p => p.id === id) : null;
+  if (!proven || proven.id === result.id)
+    return result;
+
+  return { ...result, ...proven, routerPick: result.routerPick || result.id, proven: true,
+    reason: clip(`Proven setup for ${decision.taskKind} work in this project. ${result.reason || ''}`, 240) };
+}
+
 function finalChoice(decision, text, session, workspace, available) {
   const kept = taskWorker(decision, session, available);
   if (kept) return keepTask(decision, kept, text, session, workspace, available);
-  return difficultyChoice({ ...applyPolicy(decision, text, session, workspace, available), sameTask: decision.sameTask === true && !!session.job?.worker }, decision, available);
+  const chosen = difficultyChoice({ ...applyPolicy(decision, text, session, workspace, available), sameTask: decision.sameTask === true && !!session.job?.worker }, decision, available);
+  return provenChoice(chosen, decision, session, available);
 }
 
 function applyPolicy(decision, text, session, workspace, available) {
