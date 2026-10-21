@@ -487,6 +487,8 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('document.querySelector("#dictate").click(); true');
   await until(() => voiceRequest, 'a later dictation can start');
   const voiceSource = voiceRequest.sessionId;
+  // Chat switches are ignored until the start call returns (slower machines reach main's voiceStart well before that).
+  await window.webContents.executeJavaScript(`new Promise(resolve => { const wait = () => (submitting ? setTimeout(wait, 20) : resolve()); wait(); })`);
   await window.webContents.executeJavaScript('selectSession(null)');
   await until(() => finishVoice, 'switching chats stops dictation');
   finishVoice('words for the original chat');
@@ -2709,7 +2711,11 @@ app.whenReady().then(async () => {
     view = await sentInView();
   }
   assert.ok(view.shown, 'the sent message is in view after sending from a scrolled-up chat: ' + view.at);
-  // The roll is animated and takes the same time from far back in history as from close by.
+  // The roll is animated and takes the same time from far back in history as from close by. Hosted Windows runners
+  // report reduced motion, which makes it instant, so motion is emulated here and the reduced path checked after.
+  const motion = value => window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value }] });
+  window.webContents.debugger.attach('1.3');
+  await motion('no-preference');
   const rolls = await window.webContents.executeJavaScript(`(async () => {
     const chat = document.querySelector('#conversation'), frame = () => new Promise(resolve => requestAnimationFrame(resolve));
     const left = () => chat.scrollHeight - chat.scrollTop - chat.clientHeight, results = [];
@@ -2732,6 +2738,17 @@ app.whenReady().then(async () => {
   for (const roll of rolls)
     assert.ok(roll.between && roll.ms >= 250 && roll.ms <= 500, 'an animated roll of about 300 ms: ' + JSON.stringify(rolls));
   assert.ok(Math.abs(rolls[0].ms - rolls[1].ms) <= 80, 'the same time from far and near: ' + JSON.stringify(rolls));
+  await motion('reduce');
+  const reducedLeft = await window.webContents.executeJavaScript(`(async () => {
+    const chat = document.querySelector('#conversation');
+    await new Promise(resolve => setTimeout(resolve, 400));
+    chat.scrollTo({ top: 0, behavior: 'instant' });
+    scrollChatToEnd();
+    return Math.round(chat.scrollHeight - chat.scrollTop - chat.clientHeight);
+  })()`);
+  assert.ok(reducedLeft <= 1, `with reduced motion the chat jumps to the newest message at once (${reducedLeft} px left)`);
+  await motion('');
+  window.webContents.debugger.detach();
   console.log(`Sending from a scrolled-up chat rolls to the newest message (${rolls.map(roll => `${roll.distance} px away: ${roll.ms} ms`).join(', ')})`);
   phase = 'group chat controls';
   const groupMember = agents.primary.data.agents[0];
