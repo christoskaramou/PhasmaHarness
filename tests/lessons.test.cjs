@@ -3,9 +3,11 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { lessonFromTask, recordLesson, readLessons, relevantLessons, lessonsBlock, changedFiles, diffHashes } = require('../src/lessons.cjs');
+const { lessonFromTask, recordLesson, readLessons, relevantLessons, lessonsBlock, changedFiles, diffHashes, sameLesson } = require('../src/lessons.cjs');
 const gate = require('../src/controller/task-gate.cjs');
 
+// Distinct words without digits, since keys ignore digit runs.
+const letters = i => String.fromCharCode(97 + i % 26) + String.fromCharCode(97 + Math.floor(i / 26));
 const failedResult = (name = 'unit', stdout = 'TypeError: fetchUser is not a function') => ({ name, status: 'failed', exitCode: 1, stdout, stderr: '' });
 const task = (overrides = {}) => ({
   id: 'task-1', goal: 'Add retry handling to fetchUser', corrections: 1, reason: null,
@@ -146,9 +148,42 @@ test('the same failure updates its record; records stay capped and the page is r
   assert.match(fs.readFileSync(path.join(root, 'lessons.md'), 'utf8'), /seen 2×/);
 
   for (let i = 0; i < 60; i++)
-    recordLesson(root, lessonFromTask(task({ id: `t${i}`, attempts: [{ results: [failedResult('unit', `Error: case ${i}`)] }, { results: [{ name: 'unit', status: 'passed' }] }] }), 'checks-passed'));
+    recordLesson(root, lessonFromTask(task({ id: `t${i}`, attempts: [{ results: [failedResult('unit', `Error: case ${letters(i)}`)] }, { results: [{ name: 'unit', status: 'passed' }] }] }), 'checks-passed'));
   records = readLessons(root);
   assert.equal(records.length, 50, 'capped at 50 per project');
+});
+
+test('failures that differ only in digits are one lesson, merges keep the gates, and old lessons expire except the newest ten', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-lessons-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const run = (id, error) => lessonFromTask(task({ id, attempts: [{ results: [failedResult('unit', error)] }, { results: [{ name: 'unit', status: 'passed' }] }] }), 'checks-passed');
+  recordLesson(root, run('a', 'AssertionError: expected 3 to equal 4'));
+  recordLesson(root, run('b', 'AssertionError: expected 17 to equal 4'));
+  const [record] = readLessons(root);
+  assert.deepEqual([readLessons(root).length, record.seen], [1, 2], 'counts and line numbers do not make a new lesson');
+  assert.ok(sameLesson(record, 'unit\nAssertionError: expected 3 to equal 4'), 'a key saved before keys ignored digits still finds it');
+  recordLesson(root, run('c', 'FAIL tests/b2.test.js'));
+  recordLesson(root, run('d', 'FAIL tests/c2.test.js'));
+  assert.equal(readLessons(root).length, 3, 'different files stay different lessons');
+
+  // Two records saved before keys ignored digits merge into the newest, keeping the older one's gates.
+  const failure = record.failures[0];
+  const older = { ...record, at: Date.now() - 1000, seen: 2, suggestedAt: 5, failures: [{ ...failure, excerpt: 'AssertionError: expected 8 to equal 4' }] };
+  const newer = { ...record, at: Date.now(), seen: 1, failures: [{ ...failure, excerpt: 'AssertionError: expected 9 to equal 4' }] };
+  fs.writeFileSync(path.join(root, 'lessons.json'), JSON.stringify([newer, older]));
+  assert.deepEqual(readLessons(root).map(entry => [entry.seen, entry.suggestedAt]), [[3, 5]], 'every reader sees them merged, before any write');
+  recordLesson(root, run('e', 'TypeError: something else'));
+  const merged = readLessons(root).find(entry => /expected/.test(entry.failures[0].excerpt));
+  assert.equal(readLessons(root).length, 2);
+  assert.deepEqual([merged.seen, merged.suggestedAt, merged.failures[0].excerpt], [3, 5, 'AssertionError: expected 9 to equal 4']);
+
+  const old = Date.now() - 91 * 24 * 60 * 60 * 1000;
+  const stale = Array.from({ length: 12 }, (_, i) => ({ ...record, at: old - i, failures: [{ ...failure, excerpt: `Error: stale ${letters(i)}` }] }));
+  fs.writeFileSync(path.join(root, 'lessons.json'), JSON.stringify(stale));
+  assert.equal(readLessons(root).length, 10, 'a project left alone for months keeps its newest ten');
+  recordLesson(root, run('f', 'TypeError: fresh'));
+  assert.equal(readLessons(root).length, 10, 'past the newest ten, lessons unseen for 90 days expire');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'lessons.json'), 'utf8')).length, 10, 'and leave the file');
 });
 
 test('relevant lessons share words with the request or concern a check that will run; at most three, within the block limit', () => {

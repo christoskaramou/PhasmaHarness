@@ -11,7 +11,7 @@ const { FINAL, OUTPUT_CAP, canProposeWiki, capStream, childBlocksClear, confirmT
 const { accessMode, sameEffort, treeEntries } = require('./shared.cjs');
 const { stripTaskStatus } = require('../routing/task-state.cjs');
 const { readWiki, assessWikiUpdate } = require('../workspace/wiki-assess.cjs');
-const { lessonFromTask, recordLesson, readLessons, relevantLessons, lessonsOffer, lessonKey, diffHashes } = require('../lessons.cjs');
+const { lessonFromTask, recordLesson, readLessons, relevantLessons, lessonsOffer, sameLesson, diffHashes } = require('../lessons.cjs');
 const { restoreCheckFiles } = require('../comparisons.cjs');
 
 module.exports = {
@@ -582,7 +582,7 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
     let root;
     try {
       root = this.wikiStore.ensure(project).root;
-      recordLesson(root, lesson, { carried: (task.lessonKeys || []).includes(lessonKey(lesson)), mode: task.route?.id || null });
+      recordLesson(root, lesson, { carried: (task.lessonKeys || []).some(key => sameLesson(lesson, key)), mode: task.route?.id || null });
     } catch (error) {
       this.log.warn('Lesson not saved', { task: task.id, error: error.message });
       return;

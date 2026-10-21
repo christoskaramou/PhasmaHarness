@@ -1351,6 +1351,96 @@ test('a kept rule whose target failure comes back leaves INSTRUCTIONS.md with a 
   assert.deepEqual([trials.readRules(root)[0].state, trials.readRules(root)[0].reason], ['removed', 'deleted from INSTRUCTIONS.md by hand']);
 });
 
+test('a rule kept with ten rules already in INSTRUCTIONS.md moves the one tasks matched least recently out, and Undo moves it back', async t => {
+  const { controller, fake } = await setup(t);
+  const { WikiStore } = require('../src/workspace/wiki-store.cjs');
+  const trials = require('../src/trials.cjs');
+  controller.wikiStore = new WikiStore(path.join(path.dirname(controller.filename), 'wiki-store'));
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  arm(controller, fake);
+  addCheck(controller, session, ['unit']);
+  fake.onExec = () => ({ exitCode: 0, stdout: 'ok', stderr: '' });
+  const root = controller.wikiStore.ensure(session.workspace).root;
+  const keptAt = Date.parse('2026-10-01T10:00:00Z');
+  const lines = Array.from({ length: trials.MAX_KEPT }, (_, index) => `- Kept rule ${index}. (kept 2026-10-01)`);
+  const file = path.join(session.workspace, 'INSTRUCTIONS.md');
+  fs.writeFileSync(file, `# Project instructions\n\nStay small.\n\n${trials.HEADING}\n\n${lines.join('\n')}\n`);
+  trials.updateRules(root, records => records.push(...lines.map((line, index) => ({ id: `k${index}`, rule: `Kept rule ${index}.`, lessonKey: null, check: 'unit',
+    error: 'x', goal: 'Unrelated docs work', source: 'a reflection', state: 'kept', since: 1, keptAt, lastMatchedAt: index === 6 ? 5 : 1000 + index, line, carried: [] }))));
+  const winner = 'Make sure fetchUser is a function before wiring retries.';
+  const started = trials.startTrial(root, { rule: winner, lessonKey: 'k', check: 'unit', error: 'TypeError: fetchUser is not a function',
+    goal: 'Add retry handling to fetchUser', source: 'a reflection' });
+  trials.updateRules(root, records => records.find(record => record.id === started.id).carried.push(
+    { taskId: 'x1', at: 1, outcome: 'clean' }, { taskId: 'x2', at: 2, outcome: 'clean' }));
+
+  await controller.send({ id: session.id, text: 'Cache fetchUser results', mode: 'terra-light', task: 'on' });
+  assert.equal(session.tasks[0].keptRuleIds.length, trials.MAX_KEPT, 'the task carried all ten through INSTRUCTIONS.md');
+  complete(controller, session, fake.turnIds.at(-1));
+  await controller.gateDone;
+
+  const body = fs.readFileSync(file, 'utf8');
+  assert.equal(body.includes('- Kept rule 6.'), false, 'the rule tasks matched least recently moved out');
+  assert.match(body, /- Kept rule 9\. \(kept 2026-10-01\)\n- Make sure fetchUser is a function before wiring retries\. \(kept \d{4}-\d\d-\d\d\)\n$/);
+  const moved = trials.readRules(root).find(record => record.id === 'k6');
+  assert.deepEqual([moved.state, moved.onDemand, moved.line, moved.movedLine], ['kept', true, null, lines[6]]);
+  const notice = session.items.findLast(item => item.type === 'notice');
+  assert.equal(notice.text, `Kept the rule "${winner}" in INSTRUCTIONS.md: 3 matching tasks passed its check without this failure. ` +
+    '"Kept rule 6." moved out of INSTRUCTIONS.md to keep it at 10 rules; it is still used on the tasks it matches.');
+  // Wiki upkeep may follow the passed task; let it finish before the next request.
+  if (controller.busy) {
+    complete(controller, session, fake.turnIds.at(-1));
+    await until(() => !controller.busy);
+  }
+  await controller.send({ id: session.id, text: 'More unrelated docs work', mode: 'terra-light', task: 'on' });
+  const first = fake.calls.filter(call => call.method === 'turn/start').at(-1).params.input[0].text;
+  assert.match(first, /^Project rules learned from earlier failures here \(follow them unless they conflict with the request\):\n- Kept rule 6\.\n/,
+    'a task it matches carries it in its first message');
+  assert.ok(session.tasks.at(-1).keptRuleIds.includes('k6'));
+
+  controller.undoRule(session.id, notice.id);
+  const restored = fs.readFileSync(file, 'utf8');
+  assert.equal(restored.includes(winner), false);
+  assert.ok(restored.includes(`${lines[6]}\n`), 'Undo moves the displaced rule back');
+  assert.deepEqual([trials.readRules(root).find(record => record.id === 'k6').onDemand, trials.readRules(root).find(record => record.id === started.id).state],
+    [false, 'removed']);
+});
+
+test('an on-demand rule whose target failure comes back stops riding tasks, and Undo puts it back on demand for good', async t => {
+  const { controller, fake } = await setup(t);
+  const { WikiStore } = require('../src/workspace/wiki-store.cjs');
+  const trials = require('../src/trials.cjs');
+  controller.wikiStore = new WikiStore(path.join(path.dirname(controller.filename), 'wiki-store'));
+  controller.reflectOnLesson = () => null;
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  arm(controller, fake);
+  addCheck(controller, session, ['unit']);
+  const root = controller.wikiStore.ensure(session.workspace).root;
+  const error = 'TypeError: fetchUser is not a function';
+  const rule = 'Make sure fetchUser is a function before wiring retries.';
+  trials.updateRules(root, records => records.push({ id: 'od', rule, lessonKey: `unit\n${error}`, check: 'unit', error, goal: 'Add retry handling to fetchUser',
+    source: 'a reflection', state: 'kept', onDemand: true, line: null, since: 1, keptAt: 1, carried: [] }));
+  let failed = true;
+  fake.onExec = () => failed ? { exitCode: 1, stdout: `${error}\n  at retry.js:12`, stderr: '' } : { exitCode: 0, stdout: 'ok', stderr: '' };
+
+  await controller.send({ id: session.id, text: 'Make fetchUser retries configurable', mode: 'terra-light', task: 'on' });
+  assert.deepEqual(session.tasks[0].keptRuleIds, ['od']);
+  const turns = fake.turnIds.length;
+  complete(controller, session, fake.turnIds.at(-1));
+  await until(() => fake.turnIds.length === turns + 1);
+  failed = false;
+  complete(controller, session, fake.turnIds.at(-1));
+  await controller.gateDone;
+
+  assert.equal(trials.readRules(root)[0].state, 'rolled back');
+  const notice = session.items.findLast(item => item.type === 'notice');
+  assert.equal(notice.text, `Stopped adding the rule "${rule}" to the tasks it matches: the failure it targets came back after it was kept.`);
+  controller.undoRule(session.id, notice.id);
+  const [record] = trials.readRules(root);
+  assert.deepEqual([record.state, record.onDemand, record.pinned, record.line], ['kept', true, true, null]);
+});
+
 test('a failed correction submission settles the task', async t => {
   const { controller, fake } = await setup(t);
   const session = controller.create();

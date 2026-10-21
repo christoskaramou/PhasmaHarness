@@ -11,7 +11,8 @@ const { projectInstructions } = require('../workspace/project-instructions.cjs')
 const readText = file => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '');
 
 module.exports = {
-  // The trial rules a new task carries, as their own capped block, and the kept rules its INSTRUCTIONS.md gives it.
+  // The trial and on-demand rules a new task carries, each as its own capped block, and the kept rules its
+  // INSTRUCTIONS.md gives it.
   trialRulesFor(workspace, text, checks) {
     const none = { block: null, ids: [], keptIds: [], lessonKeys: [] };
     if (!this.wikiStore)
@@ -22,14 +23,15 @@ module.exports = {
       const root = this.wikiStore.location(project).root;
       const names = checks.map(check => check.name);
       const records = trials.forgetDeletedKept(root, readText(path.join(project, 'INSTRUCTIONS.md')));
-      const { block, records: carried } = trials.trialBlock(trials.matchingTrials(records, text, names));
+      const onTrial = trials.trialBlock(trials.matchingTrials(records, text, names));
+      const onDemand = trials.keptBlock(trials.matchingOnDemand(records, text, names));
       // A batch copy's worker reads the copy's own INSTRUCTIONS.md.
-      const kept = trials.carriedKept(records, readText(path.join(workspace, 'INSTRUCTIONS.md')), names);
+      const kept = [...trials.carriedKept(records, readText(path.join(workspace, 'INSTRUCTIONS.md')), names), ...onDemand.records];
       return {
-        block,
-        ids: carried.map(record => record.id),
+        block: [onTrial.block, onDemand.block].filter(Boolean).join('\n\n') || null,
+        ids: onTrial.records.map(record => record.id),
         keptIds: kept.map(record => record.id),
-        lessonKeys: [...carried, ...kept].map(record => record.lessonKey).filter(Boolean),
+        lessonKeys: [...onTrial.records, ...kept].map(record => record.lessonKey).filter(Boolean),
       };
     } catch {
       return none;
@@ -53,12 +55,6 @@ module.exports = {
   },
 
   settleTrial(session, root, project, record) {
-    if (record.full) {
-      this.ruleNotice(session, { text: `The rule "${record.rule}" held up in ${trials.KEEP_AFTER} matching tasks, but the Rules Harness learned section ` +
-        `already has ${trials.MAX_KEPT} rules, so it stays on trial for now.`, root, ruleId: record.id, kind: 'full' });
-      return;
-    }
-
     if (record.state === 'dropped') {
       this.ruleNotice(session, { text: `Dropped the trial rule "${record.rule}": the failure it targets came back.`, root, ruleId: record.id, kind: 'dropped' });
       return;
@@ -69,20 +65,61 @@ module.exports = {
       return;
     }
 
+    if (record.onDemand) {
+      this.ruleNotice(session, { text: `Kept the rule "${record.rule}" for the tasks it matches: ${trials.KEEP_AFTER} matching tasks passed its check ` +
+        `without this failure, and the ${trials.MAX_KEPT} rules in INSTRUCTIONS.md are all ones you put back.`, root, ruleId: record.id, kind: 'kept' });
+      return;
+    }
+
+    this.keepRule(session, root, project, record);
+  },
+
+  // A won trial's line joins INSTRUCTIONS.md. A rule it displaces is marked on demand before its line leaves the file,
+  // so the next task never mistakes the missing line for a hand deletion.
+  keepRule(session, root, project, record) {
+    const file = path.join(project, 'INSTRUCTIONS.md');
+    let line;
     try {
       projectInstructions(project, true);
-      const line = trials.keepInInstructions(path.join(project, 'INSTRUCTIONS.md'), record);
-      trials.updateRules(root, records => Object.assign(records.find(entry => entry.id === record.id) || {}, { line }));
-      this.ruleNotice(session, { text: `Kept the rule "${record.rule}" in INSTRUCTIONS.md: ${trials.KEEP_AFTER} matching tasks passed its check without this failure.`,
-        root, ruleId: record.id, kind: 'kept', file: path.join(project, 'INSTRUCTIONS.md'), line });
+      line = trials.keepInInstructions(file, record);
     } catch (error) {
       trials.updateRules(root, records => Object.assign(records.find(entry => entry.id === record.id) || {}, { state: 'trial', keptAt: null, reason: error.message }));
       this.log.warn('Trial rule not kept', { rule: record.id, error: error.message });
+      return;
     }
+
+    const moved = trials.updateRules(root, records => {
+      Object.assign(records.find(entry => entry.id === record.id) || {}, { line });
+      const out = records.find(entry => entry.id === record.displaces && entry.state === 'kept' && !entry.onDemand && entry.line);
+      if (!out)
+        return null;
+
+      Object.assign(out, { onDemand: true, line: null, movedLine: out.line });
+      trials.makeRoomOnDemand(records, out.id);
+      return { ...out };
+    });
+    if (moved) {
+      try {
+        fs.writeFileSync(file, trials.removeKeptLine(readText(file), moved.movedLine));
+      } catch (error) {
+        this.log.warn('Moved rule left in INSTRUCTIONS.md', { rule: moved.id, error: error.message });
+      }
+    }
+
+    const note = moved ? ` "${moved.rule}" moved out of INSTRUCTIONS.md to keep it at ${trials.MAX_KEPT} rules; it is still used on the tasks it matches.` : '';
+    this.ruleNotice(session, { text: `Kept the rule "${record.rule}" in INSTRUCTIONS.md: ${trials.KEEP_AFTER} matching tasks passed its check without this failure.${note}`,
+      root, ruleId: record.id, kind: 'kept', file, line, displacedId: moved?.id || null });
   },
 
-  // A kept rule whose failure came back leaves INSTRUCTIONS.md. A line already gone was deleted by hand: no notice.
+  // A kept rule whose failure came back leaves INSTRUCTIONS.md, or stops riding the tasks it matches. A line already
+  // gone was deleted by hand: no notice.
   rollBackRule(session, root, project, record) {
+    if (record.onDemand) {
+      this.ruleNotice(session, { text: `Stopped adding the rule "${record.rule}" to the tasks it matches: the failure it targets came back after it was kept.`,
+        root, ruleId: record.id, kind: 'rolledBack' });
+      return;
+    }
+
     const file = path.join(project, 'INSTRUCTIONS.md');
     const restate = change => trials.updateRules(root, records => Object.assign(records.find(entry => entry.id === record.id) || {}, change));
     try {
@@ -113,34 +150,54 @@ module.exports = {
     owner.changed();
   },
 
-  // Undo of a kept rule: its line leaves INSTRUCTIONS.md and the rule is marked removed. Undo of a rollback puts the line
-  // back and pins the rule, so it is never rolled back automatically again; the user's choice may go past MAX_KEPT.
   undoRule(id, noticeId) {
     const item = this.session(id).items.find(entry => entry.id === noticeId && ['kept', 'rolledBack'].includes(entry.ruleNotice?.kind));
     if (!item || item.ruleNotice.undoneAt)
       throw new Error('There is no rule change to undo here.');
 
-    const { file, line, root, ruleId, kind } = item.ruleNotice;
-    if (kind === 'rolledBack') {
-      const record = trials.readRules(root).find(entry => entry.id === ruleId);
-      if (record?.state !== 'rolled back')
-        throw new Error('The rule changed since it was taken out; edit INSTRUCTIONS.md by hand.');
+    if (item.ruleNotice.kind === 'rolledBack')
+      this.undoRollback(item.ruleNotice);
+    else
+      this.undoKeep(item.ruleNotice);
 
-      const restored = trials.keepInInstructions(file, record);
-      trials.updateRules(root, records => Object.assign(records.find(entry => entry.id === ruleId) || {},
-        { state: 'kept', pinned: true, endedAt: null, reason: null, line: restored }));
-    } else {
+    item.ruleNotice.undoneAt = Date.now();
+    this.save();
+    this.changed();
+    return item;
+  },
+
+  // Undo of a kept rule: its line leaves INSTRUCTIONS.md (if it had one), the rule is marked removed, and a rule it moved
+  // out goes back in, if it is still kept for matching tasks.
+  undoKeep({ file, line, root, ruleId, displacedId }) {
+    // A rule moved out of INSTRUCTIONS.md since then has no line left there.
+    const record = trials.readRules(root).find(entry => entry.id === ruleId);
+    if (line && !record?.onDemand) {
       const body = fs.readFileSync(file, 'utf8');
       if (!body.includes(line))
         throw new Error('The rule is no longer in INSTRUCTIONS.md as it was added; edit the file by hand.');
 
       fs.writeFileSync(file, trials.removeKeptLine(body, line));
-      trials.updateRules(root, records => Object.assign(records.find(entry => entry.id === ruleId) || {},
-        { state: 'removed', endedAt: Date.now(), reason: 'undone from the chat' }));
     }
-    item.ruleNotice.undoneAt = Date.now();
-    this.save();
-    this.changed();
-    return item;
+
+    trials.updateRules(root, records => Object.assign(records.find(entry => entry.id === ruleId) || {},
+      { state: 'removed', endedAt: Date.now(), reason: 'undone from the chat' }));
+    const moved = trials.readRules(root).find(entry => entry.id === displacedId && entry.state === 'kept' && entry.onDemand && entry.movedLine);
+    if (!moved)
+      return;
+
+    const restored = trials.keepInInstructions(file, moved);
+    trials.updateRules(root, records => Object.assign(records.find(entry => entry.id === displacedId) || {}, { onDemand: false, line: restored, movedLine: null }));
+  },
+
+  // Undo of a rollback puts the rule back (its line, or on demand) and pins it, so it is never rolled back automatically
+  // again; the user's choice may go past MAX_KEPT.
+  undoRollback({ file, root, ruleId }) {
+    const record = trials.readRules(root).find(entry => entry.id === ruleId);
+    if (record?.state !== 'rolled back')
+      throw new Error('The rule changed since it was taken out; edit INSTRUCTIONS.md by hand.');
+
+    const line = record.onDemand ? null : trials.keepInInstructions(file, record);
+    trials.updateRules(root, records => Object.assign(records.find(entry => entry.id === ruleId) || {},
+      { state: 'kept', pinned: true, endedAt: null, reason: null, line }));
   },
 };

@@ -80,19 +80,49 @@ test('a kept rule joins INSTRUCTIONS.md under one heading as one dated line, onc
   assert.throws(() => trials.keepInInstructions(file, { rule: 'Too much.', keptAt: record.keptAt }), /64 KiB/);
 });
 
-test('with ten kept rules a winning rule stays on trial and says so once; undoing the last kept line removes the heading', t => {
+test('with ten always-on rules a winner takes the place of the one tasks matched least recently; with all ten pinned it is kept on demand', t => {
   const root = tempRoot(t);
   for (let index = 0; index < trials.MAX_KEPT; index++)
-    trials.updateRules(root, records => records.push({ id: `kept${index}`, rule: `Kept ${index}.`, state: 'kept', since: 1, carried: [] }));
-  const started = trials.startTrial(root, { rule: rule.rule, lessonKey: 'k', check: 'unit', error: rule.error, goal: rule.goal, source: 'a reflection' });
-  const carried = id => ({ ...task(id, [[passing('unit')]]), trialRuleIds: [started.id] });
-  trials.recordOutcomes(root, carried('a'));
-  trials.recordOutcomes(root, carried('b'));
-  const [full] = trials.recordOutcomes(root, carried('c'));
-  assert.equal(full.full, true);
-  assert.equal(trials.readRules(root).find(entry => entry.id === started.id).state, 'trial');
-  assert.deepEqual(trials.recordOutcomes(root, carried('d')), [], 'the user hears it once');
+    trials.updateRules(root, records => records.push({ ...rule, id: `kept${index}`, rule: `Kept rule ${index}.`, state: 'kept', keptAt: 1,
+      lastMatchedAt: index === 4 ? 2 : 100 + index, line: `- Kept rule ${index}. (kept 1970-01-01)` }));
+  const win = (text, keptRuleIds = []) => {
+    const started = trials.startTrial(root, { rule: text, lessonKey: 'k', check: 'unit', error: rule.error, goal: rule.goal, source: 'a reflection' });
+    const carried = (id, kept = []) => ({ ...task(id, [[passing('unit')]]), goal: 'Cache fetchUser results', trialRuleIds: [started.id], keptRuleIds: kept });
+    trials.recordOutcomes(root, carried(`${text}a`));
+    trials.recordOutcomes(root, carried(`${text}b`));
+    return trials.recordOutcomes(root, carried(`${text}c`, keptRuleIds));
+  };
 
+  // kept4 matched this very task too, but the choice comes first.
+  const [kept] = win('Winner rule.', ['kept4']);
+  assert.deepEqual([kept.state, kept.onDemand, kept.displaces], ['kept', undefined, 'kept4']);
+  assert.ok(trials.readRules(root).find(entry => entry.id === 'kept4').lastMatchedAt > 2, 'then the task counts as matching it');
+
+  trials.updateRules(root, records => records.forEach(record => {
+    record.pinned = record.state === 'kept';
+  }));
+  const [onDemand] = win('Second winner.');
+  assert.deepEqual([onDemand.state, onDemand.onDemand, onDemand.displaces], ['kept', true, undefined], 'pinned rules never move out');
+  assert.match(fs.readFileSync(path.join(root, trials.PAGE), 'utf8'), /\*\*Kept\*\* · Second winner\.\n.*for the tasks it matches \(not in INSTRUCTIONS\.md\)/);
+});
+
+test('on-demand rules ride matching tasks after the trials, two at most; past thirty the least used makes room and may come back', t => {
+  const root = tempRoot(t);
+  const onDemand = index => ({ ...rule, id: `od${index}`, rule: `On demand ${index}.`, state: 'kept', onDemand: true, keptAt: 1, lastMatchedAt: 10 + index });
+  trials.updateRules(root, records => records.push(...Array.from({ length: trials.MAX_ON_DEMAND + 1 }, (_, index) => onDemand(index))));
+  let records = trials.readRules(root);
+  assert.deepEqual(trials.matchingOnDemand(records, 'Make fetchUser retries configurable', ['unit']).map(record => record.id), ['od0', 'od1']);
+  assert.deepEqual(trials.matchingOnDemand(records, 'Update the README', ['unit']), []);
+  assert.match(trials.keptBlock(records.slice(0, 1)).block, /^Project rules learned from earlier failures here \(follow them unless they conflict with the request\):\n- On demand 0\.$/);
+
+  trials.updateRules(root, current => trials.makeRoomOnDemand(current, 'od0'));
+  records = trials.readRules(root);
+  assert.deepEqual([records[1].state, records[1].room], ['dropped', true], 'the least used besides the one just added makes room');
+  assert.equal(trials.retired(records, 'On demand 1.'), false, 'and may come back');
+});
+
+test('undoing the last kept line removes the heading', t => {
+  const root = tempRoot(t);
   const file = path.join(root, 'INSTRUCTIONS.md');
   fs.writeFileSync(file, '# Project instructions\n\nStay small.\n');
   const line = trials.keepInInstructions(file, { rule: 'Only rule.', keptAt: Date.parse('2026-10-21T10:00:00Z') });

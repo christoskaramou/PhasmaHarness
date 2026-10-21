@@ -11,6 +11,8 @@ const { canonical } = require('./setup-fingerprint.cjs');
 const RECORDS = 'lessons.json';
 const PAGE = 'lessons.md';
 const MAX_RECORDS = 50;
+const EXPIRE_MS = 90 * 24 * 60 * 60 * 1000;
+const KEEP_NEWEST = 10;
 const MAX_OFFERED = 3;
 const BLOCK_LIMIT = 1500;
 const STOP = new Set(['the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'are', 'was', 'not', 'but', 'you', 'your',
@@ -21,7 +23,11 @@ const firstLine = text => String(text).split(/\r?\n/).map(line => line.trim()).f
 // A failed check's quoted output and its first line, as lessons key them; trial rules match failures the same way.
 const excerptOf = result => redact(failureExcerpt(result, 400, 300)).slice(-400);
 const failureLine = result => firstLine(excerptOf(result)).slice(0, 240);
-const failureKey = record => record.failures.map(failure => `${failure.check}\n${firstLine(failure.excerpt)}`).join('\n');
+// Digit runs vary between runs of the same failure (counts, line numbers, ports), so keys and targets compare without
+// them. Idempotent, so a key saved before keys were shaped still finds its lesson (`sameLesson`).
+const shape = text => String(text).replace(/\d+/g, '#');
+const failureKey = record => shape(record.failures.map(failure => `${failure.check}\n${firstLine(failure.excerpt)}`).join('\n'));
+const sameLesson = (record, key) => failureKey(record) === shape(key);
 
 // Files whose `git diff --stat` line changed between the failing and the passing attempt; the stat is cumulative.
 function changedFiles(before, after) {
@@ -161,10 +167,37 @@ function lessonFromTask(task, state) {
 function readLessons(root) {
   try {
     const records = JSON.parse(fs.readFileSync(path.join(root, RECORDS), 'utf8'));
-    return Array.isArray(records) ? records.filter(record => record && Array.isArray(record.failures)) : [];
+    return Array.isArray(records) ? fresh(records.filter(record => record && Array.isArray(record.failures))) : [];
   } catch {
     return [];
   }
+}
+
+// Newest first, duplicates merged, so every reader sees one record per key. A lesson unseen for 90 days expires, except
+// the newest 10, so a project left alone for months keeps its latest ones. The next write drops the rest from the file.
+function fresh(records) {
+  const cutoff = Date.now() - EXPIRE_MS;
+  const merged = mergeDuplicates(records.sort((a, b) => (b.at || 0) - (a.at || 0)));
+  return merged.filter((record, index) => index < KEEP_NEWEST || record.at >= cutoff);
+}
+
+// Lessons that share a key since keys ignore digits merge into the newest. It keeps the older copy's gates (a
+// suggestion made, a recurrence, a reflection), so none of them runs twice, and adds up how often each was seen.
+function mergeDuplicates(records) {
+  const byKey = new Map();
+  for (const record of records) {
+    const key = failureKey(record);
+    const kept = byKey.get(key);
+    if (!kept) {
+      byKey.set(key, record);
+      continue;
+    }
+
+    kept.seen = (kept.seen || 1) + (record.seen || 1);
+    for (const field of ['suggestedAt', 'recurred', 'reflection'])
+      kept[field] ??= record[field];
+  }
+  return [...byKey.values()];
 }
 
 function writeAtomic(file, text) {
@@ -202,7 +235,7 @@ function renderPage(records) {
     `The records live in ${RECORDS} beside this page; this page is rewritten from them.\n\n${entries.join('\n\n')}\n`;
 }
 
-// The same check failing with the same first error line updates its record instead of adding another. `carried`: the
+// The same check failing with the same first error line, digits aside, updates its record instead of adding another. `carried`: the
 // failing task was offered this lesson, so it did not stick; `mode` is that task's model, for a suggested comparison.
 function recordLesson(root, lesson, { carried = false, mode = null } = {}) {
   fs.mkdirSync(root, { recursive: true });
@@ -221,9 +254,9 @@ function recordLesson(root, lesson, { carried = false, mode = null } = {}) {
     records.push(lesson);
 
   records.sort((a, b) => b.at - a.at);
-  records.length = Math.min(records.length, MAX_RECORDS);
-  writeAtomic(path.join(root, RECORDS), JSON.stringify(records, null, 2));
-  writeAtomic(path.join(root, PAGE), renderPage(records));
+  const kept = fresh(records).slice(0, MAX_RECORDS);
+  writeAtomic(path.join(root, RECORDS), JSON.stringify(kept, null, 2));
+  writeAtomic(path.join(root, PAGE), renderPage(kept));
 }
 
 // Lessons sharing words with the new request, or about a check that will run again, newest first among equals.
@@ -265,7 +298,7 @@ const lessonsBlock = records => lessonsOffer(records).block;
 // A lesson offered once as a suggested comparison is never offered again, whatever the answer.
 function markSuggested(root, key) {
   const records = readLessons(root);
-  const record = records.find(entry => failureKey(entry) === key);
+  const record = records.find(entry => sameLesson(entry, key));
   if (!record)
     return;
 
@@ -277,7 +310,7 @@ function markSuggested(root, key) {
 // while the reflection call ran; only that record changes.
 function saveReflection(root, key, reflection) {
   const records = readLessons(root);
-  const record = records.find(entry => failureKey(entry) === key);
+  const record = records.find(entry => sameLesson(entry, key));
   if (!record)
     return;
 
@@ -287,4 +320,4 @@ function saveReflection(root, key, reflection) {
 }
 
 module.exports = { lessonFromTask, recordLesson, readLessons, relevantLessons, lessonsBlock, lessonsOffer, markSuggested, saveReflection,
-  lessonKey: failureKey, failureLine, words, changedFiles, diffHashes, RECORDS, PAGE };
+  lessonKey: failureKey, sameLesson, shape, failureLine, words, changedFiles, diffHashes, RECORDS, PAGE };

@@ -229,7 +229,7 @@ The library feeds the improver, never the workers. Always-on text is capped (8,0
    - Lessons stay as cue, lesson, evidence and confidence, and are re-checked before reuse ("a hypothesis, not a fact").
 2. **Trials on real work first, paid A/B only when a trial fails** (built 2026-10-21; see the wiki's Trial rules on real work).
    - A rule Harness found goes on trial: a reflection for a failure seen at least twice, or a suggested comparison that helped. Matching tasks that run its check carry it in their first message.
-   - 3 carried tasks that pass that check on the first attempt keep it in `INSTRUCTIONS.md` (at most 10 kept rules until step 4). One carried task that hits the failure it targets drops it. Skipped checks and other failures count for neither.
+   - 3 carried tasks that pass that check on the first attempt keep it in `INSTRUCTIONS.md`. One carried task that hits the failure it targets drops it. Skipped checks and other failures count for neither.
    - A paid two-run comparison runs only when a trial rule fails in real use (its lesson comes back while carried), within the background usage limit, with one change per test.
    - A token-only difference never adopts a rule. A Harness-started comparison's one-pair "helped" only puts the rule on trial (harness2 treats one of one as noise). A comparison the user asked for still adopts directly, with Undo.
 3. **Automatic rollback** (built 2026-10-21; see the wiki's Trial rules on real work).
@@ -238,10 +238,10 @@ The library feeds the improver, never the workers. Always-on text is capped (8,0
    - Rule text that was taken out (rolled back, dropped, removed by Undo or deleted from `INSTRUCTIONS.md` by hand) never goes back on trial.
    - After a rollback, the lesson's next reflected rule goes to the paid comparison if none ran for that lesson yet, otherwise on trial.
    - Later idea: a comparison that tests removing a kept rule (A/B-based rollback); none exists yet.
-4. **Keep it small.**
-   - The Harness section of `INSTRUCTIONS.md` has an always-on cap.
-   - Rules beyond the cap, or ones rarely relevant, move to on-demand wiki pages or skills with trigger lines.
-   - Lessons are deduplicated and expire when unseen for a long time.
+4. **Keep it small** (built 2026-10-21; see the wiki's Trial rules on real work and Lessons from failed checks).
+   - The Harness section of `INSTRUCTIONS.md` holds at most 10 rules. A new one takes the place of the rule tasks matched least recently, which moves out and rides only the tasks it matches (on demand, at most 30, at most 2 per task). Rules the user put back stay in.
+   - Lessons that differ only in digits are one lesson, and lessons unseen for 90 days expire, except the newest 10.
+   - Not built: skills with trigger lines (on-demand rules ride the task's first message instead), demoting a rule whose check left the project, merging near-duplicate rule texts.
 5. **Proven setups, derived not curated.**
    - From the records, the model and rules that pass a kind of work's checks with the fewest corrections and tokens become Auto's preference for that project and kind of work.
    - Each change is recorded with its evidence; a later loss rolls it back.

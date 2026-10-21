@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { capabilities } = require('../providers/capabilities.cjs');
 const { SCHEMA, INSTRUCTIONS, reflectionInput, checkReflection } = require('../reflection.cjs');
-const { readLessons, saveReflection, lessonKey } = require('../lessons.cjs');
+const { readLessons, saveReflection, lessonKey, sameLesson } = require('../lessons.cjs');
 const trials = require('../trials.cjs');
 
 module.exports = {
@@ -50,7 +50,7 @@ module.exports = {
     if (!result.rule || result.rejected)
       return;
 
-    const record = readLessons(root).find(entry => lessonKey(entry) === key);
+    const record = readLessons(root).find(entry => sameLesson(entry, key));
     if (!record?.situation?.error || (record.seen || 1) < 2 || (record.recurred && !record.suggestedAt))
       return;
 
