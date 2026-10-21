@@ -578,7 +578,7 @@ app.whenReady().then(async () => {
   assert.deepEqual(imageRequests.at(-1).slice(1), ['image-message', 0]);
   await window.webContents.executeJavaScript('current().items.pop(); render(); true');
   console.log('Text/code file snapshots, binary rejection, safe collapsed display, recall and failed-send preservation passed');
-  phase = 'document attachments';
+  deadline.refresh(); phase = 'document attachments';
   const documentFixtures = require('./fixtures/documents.cjs');
   const documentResults = await window.webContents.executeJavaScript(`(async () => {
     fileDrafts.delete(draftKey()); document.querySelector('#prompt').value = '';
