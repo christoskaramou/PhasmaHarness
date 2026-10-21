@@ -95,7 +95,12 @@ function choices(response, questions) {
 }
 
 class JevClient {
-  constructor(keyStore, fetchFn = fetch, enabled = () => true) { this.keyStore = keyStore; this.fetch = fetchFn; this.isEnabled = enabled; this.model = null; this.resetHealth(); }
+  // `reported` is shared by every bot's client: one key, so the version Jev last reported is the same for all of them.
+  constructor(keyStore, fetchFn = fetch, enabled = () => true, reported = { model: null }) {
+    this.keyStore = keyStore; this.fetch = fetchFn; this.isEnabled = enabled; this.reported = reported; this.resetHealth();
+  }
+  get model() { return this.reported.model; }
+  set model(value) { this.reported.model = value; }
   get enabled() { return this.isEnabled(); }
   get configured() { return this.enabled && this.keyStore.configured; }
   // Every Jev feature shares this client, so one failing call means its features are on their fallbacks (Smart router,

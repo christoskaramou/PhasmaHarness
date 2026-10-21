@@ -10,6 +10,9 @@ const { structuredResponse } = require('./structured.cjs');
 const { imageData } = require('../image-input.cjs');
 
 const LABEL = 'DeepSeek Harness CLI';
+// dsh answers initialize in about 12 s under Harness's own runtime (8 s under Node) and took 16 s on a fresh build's
+// first runs (2026-10-21); a healthy start continues at once, so only a hung dsh waits this long.
+const START_MS = 60000;
 
 // dsh 0.2.1-rc.2's acp profile reads its sandbox mode and approval policy once at launch from DSH_PERMISSION_MODE and
 // advertises no ACP session modes, so a host serves one access level and is replaced when the level changes.
@@ -56,7 +59,7 @@ class DeepSeekCLI {
     }), stream);
     try {
       host.info = await deadline(host.rpc.initialize({ protocolVersion: 1, clientInfo: { name: 'PhasmaHarness', version: require('../../package.json').version },
-        clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } }), 15000, LABEL, signal);
+        clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } }), START_MS, LABEL, signal);
       if (host.info.protocolVersion !== 1 || !host.info.agentInfo?.name) throw new Error('Unsupported DeepSeek Harness protocol. Update DeepSeek Harness and reconnect.');
       return host;
     } catch (error) { await this.closeHost(host); throw error; }
@@ -112,8 +115,10 @@ class DeepSeekCLI {
       this.status.account = 'API key';
     } catch (error) {
       this.models = [];
+      // The cause itself, so a failed connect says why (such as a package missing from an installed Harness).
       this.status = { ...this.status, installed: error.code !== 'ENOENT', loggedIn: false,
-        error: error.code === 'ENOENT' || /Unsupported DeepSeek|cannot resume/.test(error.message) ? error.message : 'DeepSeek Harness is not ready. Check its installation and configuration.' };
+        error: error.code === 'ENOENT' || /Unsupported DeepSeek|cannot resume/.test(error.message) ? error.message
+          : `DeepSeek Harness could not start: ${String(error.message).slice(0, 300)}` };
     } finally { if (host) await this.closeHost(host); }
     return this.status;
   }
@@ -242,9 +247,10 @@ class DeepSeekCLI {
     return this.prompt(host, context, options, parts);
   }
 
-  // dsh has no sign-in over ACP; its API key lives in its own credential store or environment.
+  // dsh has no sign-in over ACP; its API key lives in its own credential store or environment. Connect calls this after
+  // a failed refresh, so that refresh's cause comes first.
   async login() {
-    throw new Error('DeepSeek Harness has no sign-in here. Add a DeepSeek API key to dsh (DEEPSEEK_API_KEY or its settings), then connect again.');
+    throw new Error(this.status.error || 'DeepSeek Harness has no sign-in here. Add a DeepSeek API key to dsh (DEEPSEEK_API_KEY or its settings), then connect again.');
   }
 
   close() { return Promise.all([...this.hosts].map(host => this.closeHost(host))); }

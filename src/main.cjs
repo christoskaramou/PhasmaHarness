@@ -399,7 +399,9 @@ async function start() {
 
   handle('jevSaveKey', value => {
     if (controller.busy) throw new Error('Stop the current turn before changing the Jev key.');
-    jevKey.save(value); controller.smartRouter.jev.resetHealth(); controller.changed(); return controller.snapshot();
+    jevKey.save(value); controller.smartRouter.jev.resetHealth(); controller.changed();
+    controller.checkJev();
+    return controller.snapshot();
   });
   handle('jevRemoveKey', () => {
     if (controller.busy) throw new Error('Stop the current turn before removing the Jev key.');
@@ -479,6 +481,7 @@ async function start() {
   // Background check for newer CLI releases; it shows an Update button on the provider row.
   controller.cliUpdateCheck = require('./providers/install.cjs').updates;
   controller.refreshCliUpdates();
+  controller.checkJev();
   try {
     browserSettings = new RemoteSettings(app.getPath('userData'), safeStorage);
     const serve = process.argv.find(value => value === '--serve' || value.startsWith('--serve='));

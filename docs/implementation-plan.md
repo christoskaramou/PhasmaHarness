@@ -266,7 +266,7 @@ Not adopted from harness2: repeated rollouts per task, the blind LLM selector, p
 ### Known limits to revisit
 
 - Kept Hub Codex threads are not released when a chat is cleared or deleted; thread reuse is Codex-only.
-- DeepSeek Harness `initialize` takes about 7.7 s warm against a 15 s deadline; a cold start can fail.
+- DeepSeek Harness `initialize` takes about 12 s under Harness's own runtime (8 s under Node); its deadline was raised from 15 s to 60 s on 2026-10-21 after cold starts timed out.
 - Muse turns are blocked by the account's Meta billing (402); Muse stays worker-only.
 - Lessons, routines and the setup above have fixture tests only until a live run uses them.
 

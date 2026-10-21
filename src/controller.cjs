@@ -412,7 +412,10 @@ class Controller extends EventEmitter {
     }
     if (next.toolSelection !== this.data.settings.toolSelection || next.largeResponses !== this.data.settings.largeResponses) this.loaded.clear();
     if (next.jevEnabled !== this.data.settings.jevEnabled) { this.jevComparing?.abort(); this.smartRouter.jev?.resetHealth?.(); }
+    const jevSwitchedOn = this.data.settings.jevEnabled === false && next.jevEnabled !== false;
     this.data.settings = next; this.save(); this.changed();
+    if (jevSwitchedOn)
+      this.checkJev();
     return this.snapshot();
   }
 

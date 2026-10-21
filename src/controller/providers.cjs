@@ -83,6 +83,18 @@ module.exports = {
   },
 
   // Installed CLIs with a newer official release. The desktop app sets cliUpdateCheck; without it (tests, headless) nothing runs.
+  // Jev names its version only in an answer, so one small test runs whenever it becomes usable: at start, after a key
+  // is saved, and when it is switched on. A failure shows in its health like any Jev call.
+  checkJev() {
+    const jev = this.smartRouter.jev;
+    if (!jev?.configured)
+      return;
+
+    jev.test()
+      .catch(error => this.log.warn('Jev check failed', { error: error.message }))
+      .finally(() => this.changed());
+  },
+
   // Several CLIs can install at once, so checks can overlap and finish out of order: only the newest one's answer is
   // shown. Each caller gets its own.
   async refreshCliUpdates() {

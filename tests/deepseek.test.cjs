@@ -288,6 +288,18 @@ test('DeepSeek sign-in explains that dsh keeps its own API key', async t => {
   await assert.rejects(backend.login(), /DEEPSEEK_API_KEY/);
 });
 
+test('a DeepSeek connect that fails says why, not that an API key is missing', async t => {
+  const { backend } = await fixture(t);
+  backend.createHost = async () => {
+    const error = new Error("Cannot find package 'zod' imported from schema-deserialize.js");
+    error.code = 'ERR_MODULE_NOT_FOUND';
+    throw error;
+  };
+  const status = await backend.refresh();
+  assert.deepEqual([status.installed, status.loggedIn], [true, false]);
+  await assert.rejects(backend.login(), /^Error: DeepSeek Harness could not start: Cannot find package 'zod'/);
+});
+
 test('Send now cancels the DeepSeek step and prompts again in the same session without restarting the process', async t => {
   const { backend, calls, children } = await fixture(t, { cancelFirst: true, text: ['Replaced answer.'] });
   let input = null;

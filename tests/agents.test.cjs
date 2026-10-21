@@ -3407,11 +3407,24 @@ test('Jev plug state persists, keeps preferences and keys, and stops calls acros
   assert.throws(() => agents.settings({ jevEnabled: true }), /Stop all agents/);
   child.busy = null;
   agents.settings({ jevEnabled: true });
+  // Switching Jev on runs one small check, which is how Harness learns Jev's version.
+  for (let i = 0; i < 50 && requests < 1; i++) await new Promise(setImmediate);
+  assert.equal(requests, 1, 'switching Jev on checks it once, not once per bot');
   assert.equal(primary.routingProvider, 'jev');
   assert.equal(child.smartRouter.jev.configured, true);
   assert.deepEqual(['contextRanking', 'toolSelection', 'jevCompare', 'wikiAssessment'].map(k => primary.data.settings[k]), ['jev', 'jev', true, true]);
   await assert.rejects(child.smartRouter.jev.test(), /transport error/);
-  assert.equal(reads, 1); assert.equal(requests, 1);
+  assert.equal(reads, 2); assert.equal(requests, 2);
+});
+
+test('the Jev version any bot hears shows for every bot, including ones added later', () => {
+  const { JevClient } = require('../src/providers/jev.cjs');
+  const key = { configured: true };
+  const reported = { model: null };
+  const hub = new JevClient(key, fetch, () => true, reported);
+  hub.model = 'jev-4.2';
+  assert.equal(new JevClient(key, fetch, () => true, reported).model, 'jev-4.2', 'a bot added later sees it at once');
+  assert.equal(new JevClient(key).model, null, 'a client of its own starts with no version');
 });
 
 nodeTest('Stop ends the commands a Codex turn started, spares the app-server and its helpers, and holds unconfirmed cleanup', { timeout: 60000 }, async t => {

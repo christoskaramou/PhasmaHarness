@@ -2142,6 +2142,10 @@ button.provider-plug.connected:hover {
   color:var(--muted)
 }
 
+.provider-account-row:has(> .provider-plug.disconnected) {
+  color:var(--muted)
+}
+
 #provider-connection,.provider-connecting {
   display:inline-flex;
   align-items:center;
@@ -2575,7 +2579,7 @@ select:focus-visible {
 #agent-list {
   display:grid;
   align-content:start;
-  gap:6px;
+  gap:2px;
   flex:1;
   min-height:0;
   overflow-y:auto;
@@ -3418,18 +3422,18 @@ dialog {
 
 .main-agent {
   display: block;
-  padding: 0 0 24px;
-  margin-bottom: 24px;
+  padding: 0 0 14px;
+  margin-bottom: 14px;
   border-bottom: 1px solid var(--border);
 }
 
 #main-agent-list .agent-nav {
   flex-direction: column;
-  width: min(100%, calc(126px * var(--font-scale, 1)));
+  width: min(100%, calc(104px * var(--font-scale, 1)));
   margin: 0 auto;
-  padding: 18px 8px 14px;
-  gap: 10px;
-  border-radius: 14px;
+  padding: 10px 6px 8px;
+  gap: 6px;
+  border-radius: 12px;
   border-color: transparent;
   background: var(--panel);
   text-align: center;
@@ -3441,13 +3445,13 @@ dialog {
 }
 
 #main-agent-list .agent-avatar {
-  width: calc(42px * var(--font-scale, 1));
-  height: calc(42px * var(--font-scale, 1));
+  width: calc(32px * var(--font-scale, 1));
+  height: calc(32px * var(--font-scale, 1));
   border: 0;
-  border-radius: 14px;
+  border-radius: 10px;
   background: var(--accent);
   color: var(--on-accent);
-  font-size: calc(21px * var(--font-scale, 1));
+  font-size: calc(16px * var(--font-scale, 1));
 }
 
 #main-agent-list .agent-nav-label small {
@@ -3456,13 +3460,13 @@ dialog {
 
 #main-agent-list .agent-indicator {
   position: absolute;
-  right: 12px;
-  top: 12px;
+  right: 9px;
+  top: 9px;
 }
 
 .agent-nav {
   position: relative;
-  padding: 10px 8px;
+  padding: 5px 8px;
 }
 
 .agent-nav[aria-pressed=true] {
@@ -3475,9 +3479,9 @@ dialog {
 }
 
 .agent-nav .agent-avatar {
-  width: calc(28px * var(--font-scale, 1));
-  height: calc(28px * var(--font-scale, 1));
-  border-radius: 9px;
+  width: calc(24px * var(--font-scale, 1));
+  height: calc(24px * var(--font-scale, 1));
+  border-radius: 7px;
   background: transparent;
   color: var(--muted);
   border-color: var(--border);
@@ -3492,7 +3496,7 @@ dialog {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  margin-top: 5px;
+  margin-top: 1px;
 }
 
 .agents-heading > span {
@@ -3664,8 +3668,8 @@ main > header {
   }
 
   .main-agent {
-    padding-bottom: 18px;
-    margin-bottom: 18px;
+    padding-bottom: 12px;
+    margin-bottom: 12px;
   }
 }
 

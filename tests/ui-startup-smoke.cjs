@@ -1016,6 +1016,41 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript(`document.querySelector('[data-connection-provider="native:deepseek"]').classList.contains('connecting')`), false);
   ipcMain.removeHandler('installProvider');
   console.log('Provider action spinner passed');
+  // Rows that are not connected are greyed like their plugs, and each Settings tab keeps its own scroll place.
+  await window.webContents.executeJavaScript(`document.querySelector('#settings-dialog').showModal(); document.querySelector('#tab-providers').click();
+    document.querySelector('.settings-body').scrollTop = 0;
+    document.querySelector('#provider-status').textContent = "DeepSeek Harness could not start: Cannot find package 'zod'";
+    new Promise(r => setTimeout(r, 150))`);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/provider-rows.png'), (await window.webContents.capturePage()).toPNG());
+  const settingsLook = await window.webContents.executeJavaScript(`(() => {
+    const row = [...document.querySelectorAll('.provider-account-row')].find(r => r.querySelector(':scope > .provider-plug.disconnected'));
+    const color = node => getComputedStyle(node).color;
+    const greyed = color(row.querySelector('strong')) === color(row.querySelector('.provider-plug'))
+      && color(row.querySelector('strong')) !== color(document.querySelector('#settings-dialog'));
+    const body = document.querySelector('.settings-body');
+    // A connect or install error shows right under the provider rows, in view while they are.
+    const status = document.querySelector('#provider-status'), box = status.getBoundingClientRect(), view = body.getBoundingClientRect();
+    const errorInView = status.previousElementSibling.classList.contains('provider-accounts') && box.top >= view.top && box.bottom <= view.bottom;
+    status.textContent = '';
+    body.scrollTop = 200;
+    const providers = body.scrollTop;
+    document.querySelector('#tab-general').click();
+    const general = body.scrollTop;
+    body.scrollTop = 40;
+    const generalSet = body.scrollTop;
+    document.querySelector('#tab-providers').click();
+    const back = body.scrollTop;
+    document.querySelector('#tab-general').click();
+    const generalBack = body.scrollTop;
+    document.querySelector('#settings-dialog').close();
+    return { greyed, errorInView, providers, general, back, generalSet, generalBack };
+  })()`);
+  assert.equal(settingsLook.greyed, true, 'a provider that is not connected is greyed like its plug');
+  assert.equal(settingsLook.errorInView, true, 'a connect error shows under the provider rows, in view');
+  assert.ok(settingsLook.providers > 0, 'the Providers tab scrolls in this fixture');
+  assert.deepEqual([settingsLook.general, settingsLook.back, settingsLook.generalBack], [0, settingsLook.providers, settingsLook.generalSet],
+    'each Settings tab keeps its own scroll place: ' + JSON.stringify(settingsLook));
+  console.log('Greyed unconnected providers, connect errors under the rows and per-tab Settings scrolling passed');
   // Check removal saves immediately without closing Settings.
   controller.data.settings.checks[controller.data.settings.workspace] = [{ id: 'c1', name: 'Syntax', argv: ['node', '--check', 'demo.js'], cwd: controller.data.settings.workspace, timeoutMs: 120000, readOnlySafe: false }];
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderChecks(); true');

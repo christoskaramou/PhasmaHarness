@@ -36,6 +36,7 @@ async function createRunner({ app, data = app?.getPath('userData'), safeStorage,
   controller.trace = new DecisionLog(path.join(log.directory, 'decisions.jsonl'));
   controller.smartRouter.benchmarks = new BenchmarkStore(path.join(data, 'benchmarks.json'));
   const jevKey = new JevKey(path.join(data, 'jev-key.enc'), safeStorage);
+  const jevReported = { model: null };
   const configure = async worker => {
     worker.log = log;
     worker.trace = controller.trace;
@@ -43,7 +44,7 @@ async function createRunner({ app, data = app?.getPath('userData'), safeStorage,
     worker.providers = new Providers(path.join(data, 'provider-keys'), safeStorage, () => controller.data.settings.providers || [], fetch);
     if (worker !== controller) worker.providers.local = controller.providers.local;
     worker.smartRouter.providers = worker.providers;
-    worker.smartRouter.jev = new JevClient(jevKey, fetch, () => controller.data.settings.jevEnabled !== false);
+    worker.smartRouter.jev = new JevClient(jevKey, fetch, () => controller.data.settings.jevEnabled !== false, jevReported);
     worker.contextSearch = new ContextSearch(os.homedir(), worker.smartRouter.jev);
     worker.contextSearch.wikiStore = wikiStore;
   };

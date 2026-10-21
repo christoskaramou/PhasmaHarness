@@ -3551,9 +3551,13 @@ function appendModelToggle(parent, { checked, label, onChange }) {
   parent.append(row);
 }
 
+// The tabs share one scrolling body; each keeps its own place in it.
+const settingsScroll = {};
 document.querySelectorAll('.settings-tab').forEach(tab => {
   tab.onclick = () => {
     const name = tab.dataset.tab;
+    const body = $('.settings-body');
+    settingsScroll[$('.settings-tab.active').dataset.tab] = body.scrollTop;
     document.querySelectorAll('.settings-tab').forEach(t => {
       const on = t.dataset.tab === name;
       t.classList.toggle('active', on);
@@ -3576,6 +3580,7 @@ document.querySelectorAll('.settings-tab').forEach(tab => {
       renderProviders();
       if (cursorInUse()) loadDiscoveredModels('cursor-cli').then(() => renderProviders()).catch(e => { $('#provider-status').textContent = e.message; });
     }
+    body.scrollTop = settingsScroll[name] || 0;
   };
 });
 
