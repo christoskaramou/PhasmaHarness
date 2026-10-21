@@ -1685,14 +1685,14 @@ function renderComparison(view, sessionId, opened = true) {
   return details;
 }
 
-// A line from Harness about the project's rules (src/controller/trials.cjs), with Undo for a kept rule.
+// A line from Harness about the project's rules (src/controller/trials.cjs), with Undo for a kept or rolled-back rule.
 function renderNotice(item, node, session) {
   node.className = 'message notice';
   const notice = item.ruleNotice || {};
   const line = element('p', 'muted', notice.undoneAt ? `${item.text} Undone.` : item.text);
-  if (notice.kind === 'kept' && !notice.undoneAt) {
+  if (['kept', 'rolledBack'].includes(notice.kind) && !notice.undoneAt) {
     const undo = element('button', 'compact-action', 'Undo'); undo.type = 'button';
-    undo.setAttribute('aria-label', 'Undo the kept rule');
+    undo.setAttribute('aria-label', notice.kind === 'kept' ? 'Undo the kept rule' : 'Put the rule back');
     undo.onclick = async () => {
       undo.disabled = true;
       try {

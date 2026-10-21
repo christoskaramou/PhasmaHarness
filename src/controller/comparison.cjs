@@ -90,9 +90,14 @@ module.exports = {
       if (!lesson)
         return null;
 
-      // The rule the reflection wrote from the run, else a template from the failure.
+      // The rule the reflection wrote from the run, else a template from the failure; never one taken out before.
       const reflected = !lesson.reflection?.rejected && lesson.reflection?.rule;
-      const rule = reflected || `"${lesson.failures[0].check}" has failed more than once with: ${lesson.situation.error} Make sure your change handles this before you finish.`;
+      const template = `"${lesson.failures[0].check}" has failed more than once with: ${lesson.situation.error} Make sure your change handles this before you finish.`;
+      const rules = trials.readRules(root);
+      const rule = [reflected, template].find(text => text && !trials.retired(rules, text));
+      if (!rule)
+        return null;
+
       // A model the user asked Bot for wins; otherwise the model the lesson failed on.
       plan = await this.planComparison(session, { task: request.text, change: rule, target: 'project', workspace,
         mode: args.mode ?? lesson.recurred.mode ?? undefined, effort: args.mode !== undefined ? args.effort : undefined });
@@ -225,6 +230,9 @@ module.exports = {
         const root = this.wikiStore.ensure(this.lessonWorkspace(record.project)).root;
         const trial = trials.startTrial(root, { rule: record.change, lessonKey: record.lesson?.key || null, check: record.lesson?.check,
           error: record.lesson?.error, goal: record.lesson?.goal || record.task, source: 'a suggested comparison' });
+        if (!trial)
+          return { error: 'the same rule was taken out before, so it does not go back on trial' };
+
         return { trial: true, root, ruleId: trial.id, rule: record.change };
       } catch (error) {
         return { error: error.message };
@@ -264,8 +272,14 @@ module.exports = {
       if (view.adopted.undoneAt)
         throw new Error('There is no added rule to undo.');
 
+      // A rule kept since then leaves INSTRUCTIONS.md too, so no line stays there untracked.
+      const file = path.join(this.lessonWorkspace(view.project), 'INSTRUCTIONS.md');
       trials.updateRules(view.adopted.root, records => {
         const rule = records.find(entry => entry.id === view.adopted.ruleId);
+        const body = rule?.state === 'kept' && rule.line && fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+        if (body.includes(rule?.line))
+          fs.writeFileSync(file, trials.removeKeptLine(body, rule.line));
+
         if (rule && ['trial', 'kept'].includes(rule.state))
           Object.assign(rule, { state: 'removed', endedAt: Date.now(), reason: 'undone from the comparison card' });
       });

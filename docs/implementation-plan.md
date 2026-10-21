@@ -232,7 +232,12 @@ The library feeds the improver, never the workers. Always-on text is capped (8,0
    - 3 carried tasks that pass that check on the first attempt keep it in `INSTRUCTIONS.md` (at most 10 kept rules until step 4). One carried task that hits the failure it targets drops it. Skipped checks and other failures count for neither.
    - A paid two-run comparison runs only when a trial rule fails in real use (its lesson comes back while carried), within the background usage limit, with one change per test.
    - A token-only difference never adopts a rule. A Harness-started comparison's one-pair "helped" only puts the rule on trial (harness2 treats one of one as noise). A comparison the user asked for still adopts directly, with Undo.
-3. **Automatic rollback.** A kept rule that is followed by the failure it targets, or that loses an A/B, is removed by itself, with an Undo and a line in the chat.
+3. **Automatic rollback** (built 2026-10-21; see the wiki's Trial rules on real work).
+   - A kept rule that a task carried (its line was in the `INSTRUCTIONS.md` that task read) and that is followed by the failure it targets is taken out by itself, with a line in the chat and an Undo.
+   - Undo puts the line back and pins the rule, so it is never rolled back automatically again.
+   - Rule text that was taken out (rolled back, dropped, removed by Undo or deleted from `INSTRUCTIONS.md` by hand) never goes back on trial.
+   - After a rollback, the lesson's next reflected rule goes to the paid comparison if none ran for that lesson yet, otherwise on trial.
+   - Later idea: a comparison that tests removing a kept rule (A/B-based rollback); none exists yet.
 4. **Keep it small.**
    - The Harness section of `INSTRUCTIONS.md` has an always-on cap.
    - Rules beyond the cap, or ones rarely relevant, move to on-demand wiki pages or skills with trigger lines.

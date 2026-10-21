@@ -1961,6 +1961,12 @@ test('a suggested comparison that helped puts its rule on trial, not into INSTRU
     [['Create done.txt first.', 'trial', 'Done check', 'a suggested comparison']], 'one pair is weak evidence: the rule goes on trial');
   assert.equal(fs.existsSync(path.join(project, 'INSTRUCTIONS.md')) && fs.readFileSync(path.join(project, 'INSTRUCTIONS.md'), 'utf8').includes('Create done.txt first.'), false);
   assert.equal(item.hubComparison.adopted.trial, true);
+  // Kept since then: Undo takes its line out of INSTRUCTIONS.md too.
+  const file = path.join(project, 'INSTRUCTIONS.md');
+  fs.writeFileSync(file, '# Project instructions\n\nStay small.\n');
+  const line = trials.keepInInstructions(file, { rule: 'Create done.txt first.', keptAt: Date.now() });
+  trials.updateRules(rulesRoot, records => Object.assign(records[0], { state: 'kept', keptAt: Date.now(), line }));
   await hub.undoComparison(session.id, record.id, 'rule');
   assert.equal(trials.readRules(rulesRoot)[0].state, 'removed');
+  assert.equal(fs.readFileSync(file, 'utf8'), '# Project instructions\n\nStay small.\n');
 });

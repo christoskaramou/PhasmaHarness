@@ -38,10 +38,11 @@ module.exports = {
         // Trial rules ride ahead of the lessons, in their own capped block, so the lesson limit never cuts them.
         const trial = comparison ? { block: null, ids: [], lessonKeys: [] } : this.trialRulesFor(session.workspace, text, configured);
         task.lessonBlock = [trial.block, offer.block].filter(Boolean).join('\n\n') || null;
-        // Which lessons and trial rules it carried: the same failure again means they did not stick (saveLesson), and
-        // its checks decide the trial rules (recordTrials).
+        // Which lessons and trial or kept rules it carried: the same failure again means they did not stick
+        // (saveLesson), and its checks decide the trial rules and can roll back the kept ones (recordTrials).
         task.lessonKeys = [...new Set([...offer.keys, ...trial.lessonKeys])];
         task.trialRuleIds = trial.ids;
+        task.keptRuleIds = trial.keptIds || [];
       }
       task.foreground = !(session.delegation && !session.delegation.delivered) && !session.agentReplyActive;
       if (task.foreground) task.inputImages = (session.pendingMessage?.content || []).filter(part => part.type === 'image').map(part => part.url);

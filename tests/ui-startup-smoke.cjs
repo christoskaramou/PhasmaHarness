@@ -2583,6 +2583,9 @@ app.whenReady().then(async () => {
     ruleNotice: { kind: 'kept', ruleId: 'r1' } });
   ownerChat.items.push({ id: 'rule-dropped', type: 'notice', localOnly: true, createdAt: Date.now(),
     text: 'Dropped the trial rule "Export greet.": the failure it targets came back.', ruleNotice: { kind: 'dropped', ruleId: 'r2' } });
+  ownerChat.items.push({ id: 'rule-rolled-back', type: 'notice', localOnly: true, createdAt: Date.now(),
+    text: 'Took the rule "Create done.txt first." out of INSTRUCTIONS.md: the failure it targets came back after it was kept.',
+    ruleNotice: { kind: 'rolledBack', ruleId: 'r1' } });
   const undoRuleCalls = [];
   ipcMain.handle('undoRule', (_event, ...args) => {
     undoRuleCalls.push(args);
@@ -2590,14 +2593,18 @@ app.whenReady().then(async () => {
   });
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
   const notices = await window.webContents.executeJavaScript(`[...document.querySelectorAll('.message.notice')]
-    .map(node => ({ text: node.textContent, undo: !!node.querySelector('button') }))`);
-  assert.deepEqual(notices.map(notice => notice.undo), [true, false], 'only a kept rule offers Undo');
+    .map(node => ({ text: node.textContent, undo: node.querySelector('button')?.getAttribute('aria-label') || null }))`);
+  assert.deepEqual(notices.map(notice => notice.undo), ['Undo the kept rule', null, 'Put the rule back'], 'kept and rolled-back rules offer Undo');
   assert.match(notices[0].text, /^Kept the rule "Create done\.txt first\." in INSTRUCTIONS\.md/);
   assert.match(notices[1].text, /^Dropped the trial rule "Export greet\.": the failure it targets came back\.$/);
   await window.webContents.executeJavaScript(`document.querySelector('.message.notice button').click(); true`);
   await until(() => undoRuleCalls.length === 1, 'Undo of a kept rule reaches the runner');
   assert.deepEqual(undoRuleCalls[0], [ownerChat.id, 'rule-kept']);
-  console.log('Rule notices show kept and dropped rules, with Undo for a kept one');
+  assert.match(notices[2].text, /^Took the rule "Create done\.txt first\." out of INSTRUCTIONS\.md/);
+  await window.webContents.executeJavaScript(`document.querySelectorAll('.message.notice')[2].querySelector('button').click(); true`);
+  await until(() => undoRuleCalls.length === 2, 'Undo of a rollback reaches the runner');
+  assert.deepEqual(undoRuleCalls[1], [ownerChat.id, 'rule-rolled-back']);
+  console.log('Rule notices show kept, dropped and rolled-back rules, with Undo for kept and rolled-back ones');
   phase = 'send scrolls to the newest message';
   await window.webContents.executeJavaScript(`document.querySelector('#conversation').scrollTo({ top: 0, behavior: 'instant' });
     new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
