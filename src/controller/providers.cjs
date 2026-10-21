@@ -83,13 +83,20 @@ module.exports = {
   },
 
   // Installed CLIs with a newer official release. The desktop app sets cliUpdateCheck; without it (tests, headless) nothing runs.
+  // Several CLIs can install at once, so checks can overlap and finish out of order: only the newest one's answer is
+  // shown. Each caller gets its own.
   async refreshCliUpdates() {
     if (!this.cliUpdateCheck)
-      return;
+      return {};
 
     const ids = Object.keys(require('../providers/install.cjs').INSTALLERS).filter(id => this.cliInstalled(id));
-    this.cliUpdates = await this.cliUpdateCheck(ids).catch(() => ({}));
-    this.changed();
+    const check = this.cliUpdateChecks = (this.cliUpdateChecks || 0) + 1;
+    const updates = await this.cliUpdateCheck(ids).catch(() => ({}));
+    if (check === this.cliUpdateChecks) {
+      this.cliUpdates = updates;
+      this.changed();
+    }
+    return updates;
   },
 
   async refreshAccount() {

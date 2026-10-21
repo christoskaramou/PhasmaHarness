@@ -488,3 +488,57 @@ test('CLIs install the newest release, and Update is offered only for an older i
   assert.deepEqual(await updates(['claude-cli', 'cursor-cli', 'native:antigravity', 'codex'], { fetcher, run }),
     { 'claude-cli': { installed: '2.1.302', latest: '2.1.303' } });
 });
+
+test('CLIs install side by side, while global npm installs take turns, even after one fails', async () => {
+  const { installing, inTurn } = require('../src/providers/install.cjs');
+  const order = [];
+  const gate = () => {
+    let open;
+    const promise = new Promise(resolve => { open = resolve; });
+    return { promise, open };
+  };
+  const work = (name, wait, fail = false) => async () => {
+    order.push(`${name} start`);
+    await wait;
+    order.push(`${name} end`);
+    if (fail)
+      throw new Error(`${name} failed`);
+    return name;
+  };
+  const claude = gate(), cursor = gate(), codex = gate(), deepseek = gate();
+  const jobs = [
+    inTurn('claude-cli', installer('claude-cli').command, work('claude', claude.promise)),
+    inTurn('cursor-cli', installer('cursor-cli').command, work('cursor', cursor.promise)),
+    inTurn('codex', installer('codex').command, work('codex', codex.promise, true)),
+    inTurn('native:deepseek', installer('native:deepseek').command, work('deepseek', deepseek.promise)),
+  ];
+  await new Promise(setImmediate);
+  assert.deepEqual(order, ['claude start', 'cursor start', 'codex start'], 'DeepSeek waits for Codex; the others run at once');
+  assert.throws(() => inTurn('codex', installer('codex').command, work('again', null)), /already installing/);
+  assert.equal(installing('native:deepseek'), true, 'a waiting install counts as installing');
+
+  cursor.open();
+  assert.equal(await jobs[1], 'cursor');
+  codex.open();
+  await assert.rejects(jobs[2], /codex failed/);
+  await new Promise(setImmediate);
+  assert.equal(order.at(-1), 'deepseek start', 'a failed npm install still lets the next one start');
+  claude.open();
+  deepseek.open();
+  assert.deepEqual(await Promise.all([jobs[0], jobs[3]]), ['claude', 'deepseek']);
+  assert.deepEqual(['claude-cli', 'cursor-cli', 'codex', 'native:deepseek'].map(installing), [false, false, false, false]);
+});
+
+test('overlapping update checks show only the newest answer, and each caller reads its own', async () => {
+  const methods = require('../src/controller/providers.cjs');
+  const answers = [];
+  const self = { cliInstalled: () => true, changed: () => {},
+    cliUpdateCheck: () => new Promise(resolve => answers.push(resolve)) };
+  const older = methods.refreshCliUpdates.call(self);
+  const newer = methods.refreshCliUpdates.call(self);
+  answers[1]({});
+  answers[0]({ 'cursor-cli': { installed: '1', latest: '2' } });
+  assert.deepEqual(await newer, {});
+  assert.deepEqual(await older, { 'cursor-cli': { installed: '1', latest: '2' } }, 'the caller still gets its own check');
+  assert.deepEqual(self.cliUpdates, {}, 'a check that started earlier never brings back a finished update');
+});

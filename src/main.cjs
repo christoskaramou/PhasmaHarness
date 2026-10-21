@@ -326,26 +326,27 @@ async function start() {
     controller.setProviderEnabled('codex', false);
     await controller.refreshAccount(); controller.save(); return controller.snapshot();
   });
-  let installing = null;
   handle('installProvider', async id => {
     if (controller.busy) throw new Error('Wait for the current turn to finish before installing.');
-    if (installing) throw new Error(`Wait for the ${installing} install to finish.`);
-    const { installer, install } = require('./providers/install.cjs');
+    const { installer, install, installing, inTurn } = require('./providers/install.cjs');
     // An installed CLI with a newer release updates; otherwise the official installer runs.
     const update = controller.cliInstalled(id) ? controller.cliUpdates?.[id] : null;
     const { label, command } = installer(id, !!update);
+    if (installing(id)) throw new Error(`Wait for the ${label} install to finish.`);
     const accepted = await confirmation.ask(update
       ? { title: `Update ${label}?`, message: `Harness will update ${label} from ${update.installed} to ${update.latest} with its official updater.`,
         confirmLabel: 'Update', details: [{ label: 'Update command', text: command }] }
       : { title: `Install ${label}?`, message: 'Harness will run the official installer on this computer.', confirmLabel: 'Install',
         details: [{ label: 'Installer command', text: command }] });
-    if (!accepted || installing) return controller.snapshot();
-    if (agents.busy) throw new Error('Stop all agents before installing a provider.');
+    if (!accepted || installing(id)) return controller.snapshot();
 
-    installing = label;
-    // Running Codex app-servers hold the Codex binary open, and Windows refuses to replace it until they stop.
-    const codexContexts = update && id === 'codex' ? [...agents.allControllers()] : [];
-    try {
+    // Other CLIs may be installing meanwhile (src/providers/install.cjs); an npm install waits its turn, so agents are
+    // checked when it starts.
+    return inTurn(id, command, async () => {
+      if (agents.busy) throw new Error('Stop all agents before installing a provider.');
+
+      // Running Codex app-servers hold the Codex binary open, and Windows refuses to replace it until they stop.
+      const codexContexts = update && id === 'codex' ? [...agents.allControllers()] : [];
       for (const context of codexContexts) {
         context.smartRouter.close?.();
         context.client.close();
@@ -370,11 +371,11 @@ async function start() {
       controller.save();
       if (!installed) throw new Error(`${label} installer finished, but ${label} is still not detected. Check the installer output or install it manually, then restart the app.`);
 
-      await controller.refreshCliUpdates();
-      const stale = update && controller.cliUpdates?.[id];
+      const updates = await controller.refreshCliUpdates();
+      const stale = update && updates[id];
       if (stale) throw new Error(`${label} updater finished, but ${label} is still ${stale.installed} (newest ${stale.latest}). Check the updater output or update it manually.`);
       return controller.snapshot();
-    } finally { installing = null; }
+    });
   });
   handle('providerSettings', value => controller.providerSettings(value));
   handle('providerKey', (id, key) => {

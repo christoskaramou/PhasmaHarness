@@ -3308,10 +3308,13 @@ function renderProviders() {
       install.disabled = !!(state.anyAgentBusy || state.busy);
       install.onclick = async () => {
         install.disabled = true;
-        $('#provider-status').textContent = `${update ? 'Updating' : 'Installing'} ${label}…`;
+        // Several installs can run at once and share this line; each clears only its own message.
+        const progress = `${update ? 'Updating' : 'Installing'} ${label}…`;
+        $('#provider-status').textContent = progress;
         try {
           applyState(await withProviderAction(id, update ? 'Updating…' : 'Installing…', () => api.installProvider(id)));
-          $('#provider-status').textContent = '';
+          if ($('#provider-status').textContent === progress)
+            $('#provider-status').textContent = '';
           renderProviders();
         } catch (e) { $('#provider-status').textContent = e.message; install.disabled = false; }
       };

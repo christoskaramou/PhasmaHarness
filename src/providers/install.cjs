@@ -131,4 +131,25 @@ function install(id, options = {}) {
   return run(label, file, args, options);
 }
 
-module.exports = { install, installer, run, INSTALLERS, updates, newer, versionIn };
+// Installs run side by side, one at a time per CLI. Global npm installs (Codex, DeepSeek) take turns, since two at once
+// can break each other's files.
+const running = new Map();
+let npmTurn = Promise.resolve();
+
+function installing(id) {
+  return running.has(id);
+}
+
+function inTurn(id, command, work) {
+  if (running.has(id))
+    throw new Error('This CLI is already installing.');
+
+  const npm = command.startsWith('npm ');
+  const job = (npm ? npmTurn : Promise.resolve()).then(work).finally(() => running.delete(id));
+  running.set(id, job);
+  if (npm)
+    npmTurn = job.catch(() => {});
+  return job;
+}
+
+module.exports = { install, installer, run, INSTALLERS, updates, newer, versionIn, installing, inTurn };
