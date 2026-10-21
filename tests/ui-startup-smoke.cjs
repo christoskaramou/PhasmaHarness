@@ -2686,10 +2686,18 @@ app.whenReady().then(async () => {
   assert.deepEqual(undoRuleCalls[1], [ownerChat.id, 'rule-rolled-back']);
   console.log('Rule notices show kept, dropped, rolled-back, new trial and note notices, with Undo for all but dropped');
   phase = 'send scrolls to the newest message';
-  await window.webContents.executeJavaScript(`document.querySelector('#conversation').scrollTo({ top: 0, behavior: 'instant' });
-    new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
-  const startScroll = await window.webContents.executeJavaScript(`(() => { const chat = document.querySelector('#conversation');
-    return [chat.scrollHeight, chat.scrollTop, chat.clientHeight]; })()`);
+  // A render from the Undo steps above may still land and keep the chat at its end; scroll up until it stays.
+  const startScroll = await window.webContents.executeJavaScript(`(async () => {
+    const chat = document.querySelector('#conversation');
+    for (let i = 0; i < 20; i++) {
+      chat.scrollTo({ top: 0, behavior: 'instant' });
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      await new Promise(resolve => setTimeout(resolve, 100));
+      if (chat.scrollHeight - chat.scrollTop - chat.clientHeight > 200)
+        break;
+    }
+    return [chat.scrollHeight, chat.scrollTop, chat.clientHeight];
+  })()`);
   assert.ok(startScroll[0] - startScroll[1] - startScroll[2] > 200, 'the chat starts scrolled well above its end: ' + startScroll);
   const beforeScrollSend = sent.length;
   await submit('Show me the newest message');
