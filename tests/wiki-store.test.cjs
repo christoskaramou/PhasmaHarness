@@ -28,15 +28,16 @@ test('local wikis isolate same-name workspaces, retain edits, use explicit locat
   fs.writeFileSync(path.join(a, 'docs/wiki/index.md'), '# Existing project wiki');
   assert.equal(store.ensure(a).managed, true);
   assert.ok((await search.search(a, 'Amberquartz', 'local')).hits.length);
+  // Only a project copy points its workspace at the wiki copied into it, and that holds across restarts.
   store.setLocation(a, path.join(a, 'docs/wiki'));
   assert.equal(new WikiStore(store.directory).ensure(a).managed, false);
   assert.equal((await search.search(a, 'Amberquartz', 'local')).hits.length, 0);
   assert.ok((await search.search(a, 'Existing project wiki', 'local')).hits.length);
-  store.setLocation(a, null);
-  assert.ok((await search.search(a, 'Amberquartz', 'local')).hits.length);
-  assert.equal(fs.readFileSync(path.join(a, 'docs/wiki/index.md'), 'utf8'), '# Existing project wiki');
-  assert.equal(new WikiStore(store.directory).ensure(a).root, first.root);
   assert.throws(() => store.setLocation(a, 'relative'));
+  // A folder the user chose before wikis were fixed in one place is no longer used.
+  fs.writeFileSync(store.settingsFile, JSON.stringify({ [store.identity(a)]: path.join(a, 'docs/wiki') }));
+  assert.equal(new WikiStore(store.directory).ensure(a).root, first.root);
+  assert.equal(fs.readFileSync(path.join(a, 'docs/wiki/index.md'), 'utf8'), '# Existing project wiki');
 });
 
 // GitHub's Windows runners have a short (8.3) temp path, C:\Users\RUNNER~1\...; this reproduces that anywhere 8.3 names exist.

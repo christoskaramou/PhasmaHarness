@@ -23,6 +23,17 @@ function canonical(workspace) {
   return process.platform === 'win32' ? result.toLowerCase() : result;
 }
 
+// The settings a bot can take from its creator, and the profile flag that says it does.
+const INHERITED = { workspace: 'inheritWorkspace', access: 'inheritAccess', mode: 'inheritMode' };
+
+function sameFolder(first, second) {
+  try {
+    return canonical(first) === canonical(second);
+  } catch {
+    return first === second;
+  }
+}
+
 // Keeps the first restart's record until it resumes; a later restart of resumed work describes that run instead.
 function restartRecovery(job) {
   if (job.recovery && !job.recovery.resumed)
@@ -235,6 +246,90 @@ class Agents extends EventEmitter {
   }
 
   profile(id) { return this.primary.data.agents.find(agent => agent.id === id); }
+
+  // A bot another bot made works for it: it follows its creator's settings and is not edited directly. Batch workers in
+  // a project copy have their own folder and cleanup, so they are not sub-bots.
+  isSubBot(profile) {
+    return !!profile?.createdBy && profile.createdBy !== 'main' && !profile.temporaryBatch;
+  }
+
+  // Where an inheriting bot's setting comes from: up its creators (a creator can inherit too) to a bot with its own. A
+  // chain that reaches the Main Bot, a deleted creator or a loop ends at the Main Bot's workspace, at Auto for the model
+  // and at Ask for access, so a broken chain never grants more. `chain` lists the creators on the way.
+  inheritedSource(profile, key) {
+    const flag = INHERITED[key];
+    const chain = [];
+    let current = profile;
+    while (current?.[flag]) {
+      const creator = current.createdBy && current.createdBy !== 'main' ? this.profile(current.createdBy) : null;
+      if (!creator || creator.id === profile.id || chain.includes(creator.id))
+        return { chain: [...chain, 'main'], value: { workspace: this.primary.data.settings.workspace, access: 'read-only', mode: 'auto' }[key] };
+
+      chain.push(creator.id);
+      current = creator;
+    }
+    return { chain, value: current[key] };
+  }
+
+  // Bots whose inherited settings (all, or only `keys`) come through this one, directly or down a chain.
+  inheritors(agentId, keys = Object.keys(INHERITED)) {
+    return this.primary.data.agents.filter(profile => profile.id !== agentId &&
+      keys.some(key => profile[INHERITED[key]] && this.inheritedSource(profile, key).chain.includes(agentId)));
+  }
+
+  requireDependentsIdle(agentId, keys) {
+    for (const dependent of this.inheritors(agentId, keys)) {
+      try {
+        this.requireIdle(this.controller(dependent.id));
+      } catch {
+        throw new Error(`${dependent.name} follows this bot's settings and is busy. Stop it first.`);
+      }
+    }
+  }
+
+  // Inheriting bots follow their source's current settings: after a change, a delete, and at start.
+  applyInherited() {
+    let changed = false;
+    for (const profile of this.primary.data.agents) {
+      const values = {};
+      for (const [key, flag] of Object.entries(INHERITED)) {
+        if (!profile[flag])
+          continue;
+
+        const { value } = this.inheritedSource(profile, key);
+        const same = key === 'workspace' ? sameFolder(value, profile.workspace) : value === profile[key];
+        if (value && !same)
+          values[key] = key === 'workspace' ? this.primary.workspace(value) : value;
+      }
+      if (!Object.keys(values).length)
+        continue;
+
+      Object.assign(profile, values);
+      for (const context of [this.controller(profile.id), this.executions.get(profile.id)].filter(Boolean)) {
+        this.sync(context);
+        this.updateConversation(context, values);
+      }
+      changed = true;
+    }
+    if (changed)
+      this.primary.save();
+  }
+
+  // A bot's own sub-bots and theirs, for deleting them with it.
+  subBotsOf(agentId) {
+    const found = [];
+    const parents = [agentId];
+    while (parents.length) {
+      const parent = parents.shift();
+      for (const profile of this.primary.data.agents) {
+        if (this.isSubBot(profile) && profile.createdBy === parent && !found.includes(profile)) {
+          found.push(profile);
+          parents.push(profile.id);
+        }
+      }
+    }
+    return found;
+  }
 
   hubName() {
     return this.primary.data.hubName || 'Hub';
@@ -481,25 +576,40 @@ class Agents extends EventEmitter {
     const execution = this.executions.get(id);
     await Promise.all([this.initializing.get(controller), execution && this.initializing.get(execution)]);
     check();
+    // Its sub-bots go with it; each must be idle too.
+    const removed = [id, ...this.subBotsOf(id).map(profile => profile.id)];
+    for (const subBot of removed.slice(1)) {
+      try {
+        this.requireIdle(this.controller(subBot));
+      } catch {
+        throw new Error(`${this.profile(subBot).name}, a bot it made, is busy. Stop it first.`);
+      }
+    }
+    this.requireDependentsIdle(id);
     const previous = this.primary.data.agents;
     const contexts = this.primary.data.workerContexts;
-    this.primary.data.agents = previous.filter(a => a.id !== id);
-    this.primary.data.workerContexts = (contexts || []).filter(value => value !== id);
-    // Routines that run on this bot go with it; Hub's routines stay.
-    const restoreRoutines = this.routines.removeAgent(id);
+    this.primary.data.agents = previous.filter(a => !removed.includes(a.id));
+    this.primary.data.workerContexts = (contexts || []).filter(value => !removed.includes(value));
+    // Routines that run on these bots go with them; Hub's routines stay.
+    const restores = removed.map(agent => this.routines.removeAgent(agent));
     try {
       this.primary.save();
     } catch (error) {
       this.primary.data.agents = previous; this.primary.data.workerContexts = contexts;
-      restoreRoutines();
+      for (const restore of restores)
+        restore();
       throw error;
     }
 
-    this.controllers.delete(id); this.executions.delete(id);
-    for (const target of [controller, execution].filter(Boolean)) {
-      target.removeAllListeners('state'); this.initializing.delete(target);
-      try { target.close(); } catch (error) { target.log.error('Deleted agent close failed', { message: error.message }); }
+    for (const agent of removed) {
+      const targets = [this.controllers.get(agent), this.executions.get(agent)].filter(Boolean);
+      this.controllers.delete(agent); this.executions.delete(agent);
+      for (const target of targets) {
+        target.removeAllListeners('state'); this.initializing.delete(target);
+        try { target.close(); } catch (error) { target.log.error('Deleted agent close failed', { message: error.message }); }
+      }
     }
+    this.applyInherited();
     this.primary.changed();
     return this.snapshot();
   }
@@ -518,6 +628,11 @@ class Agents extends EventEmitter {
 
   async initialize() {
     await Promise.all([...this.allControllers()].filter(c => c !== this.primary).map(c => this.initializeController(c)));
+    try {
+      this.applyInherited();
+    } catch (error) {
+      this.primary.log.warn('Inherited settings not applied', { error: error.message });
+    }
     // Comparisons still waiting for a pick settle now; then bots of comparisons that ended before this start go.
     await this.primary.settleWaitingComparisons();
     await this.primary.removeComparisonBots();
@@ -590,14 +705,34 @@ class Agents extends EventEmitter {
     if (value.id && !this.profile(value.id)) throw new Error('Unknown agent.');
     if (this.reservedName(value.name)) throw new Error('This name belongs to the Hub, the permanent agent.');
     if (this.primary.data.agents.some(a => a.id !== value.id && a.name.toLowerCase() === value.name.trim().toLowerCase())) throw new Error('Choose a unique agent name.');
-    if (!ACCESS_MODES.some(a => a.id === value.access)) throw new Error('Unknown access mode.');
-    if (value.mode !== 'auto' && !this.primary.resolveWorker(value.mode)) throw new Error('Unknown model selection.');
     if (temporaryBatch !== null && (value.id || typeof temporaryBatch !== 'string' ||
         this.workspaces.record(value.workspace)?.batchId !== temporaryBatch)) throw new Error('Unknown batch workspace.');
-    const profile = { id: value.id || randomUUID(), name: value.name.trim(), instructions: value.instructions.trim(), workspace: this.primary.workspace(value.workspace), mode: value.mode, access: value.access };
+    for (const flag of Object.values(INHERITED)) {
+      if (value[flag] !== undefined && typeof value[flag] !== 'boolean')
+        throw new Error('Invalid setting inheritance.');
+    }
+    if (value.createdBy !== undefined && value.createdBy !== 'main' && !this.profile(value.createdBy)) throw new Error('Unknown creator.');
+    const existing = value.id ? this.profile(value.id) : null;
+    if (this.isSubBot(existing))
+      throw new Error(`${existing.name} works for the bot that made it and follows its settings. Change that bot instead.`);
+
+    const id = value.id || randomUUID();
+    // Kept from the saved profile, so an edit that does not mention them never drops them.
+    const createdBy = existing?.createdBy || value.createdBy || 'main';
+    const draft = { id, createdBy };
+    for (const flag of Object.values(INHERITED))
+      draft[flag] = !temporaryBatch && (value[flag] ?? existing?.[flag] ?? false);
+    const pick = key => (draft[INHERITED[key]] ? this.inheritedSource(draft, key).value : value[key]);
+    const access = pick('access'), mode = pick('mode');
+    if (!ACCESS_MODES.some(a => a.id === access)) throw new Error('Unknown access mode.');
+    if (mode !== 'auto' && !this.primary.resolveWorker(mode)) throw new Error('Unknown model selection.');
+    const profile = { id, name: value.name.trim(), instructions: value.instructions.trim(), workspace: this.primary.workspace(pick('workspace')), mode, access,
+      createdBy, ...Object.fromEntries(Object.values(INHERITED).map(flag => [flag, draft[flag]])) };
     if (temporaryBatch) profile.temporaryBatch = temporaryBatch;
-    const existing = this.profile(profile.id);
     if (existing) this.requireIdle(this.controller(profile.id));
+    const moved = existing ? Object.keys(INHERITED).filter(key => (key === 'workspace' ? !sameFolder(existing.workspace, profile.workspace) : existing[key] !== profile[key])) : [];
+    if (moved.length)
+      this.requireDependentsIdle(profile.id, moved);
     const previous = this.primary.data.agents;
     this.primary.data.agents = existing ? previous.map(a => a.id === profile.id ? profile : a) : [...previous, profile];
     try { this.primary.save(); } catch (error) { this.primary.data.agents = previous; throw error; }
@@ -607,6 +742,7 @@ class Agents extends EventEmitter {
     const execution = this.executions.get(profile.id);
     if (execution) { this.sync(execution); execution.loaded.clear(); this.updateConversation(execution, profile); }
     if (!existing) this.initializeController(controller);
+    this.applyInherited();
     this.primary.changed();
     return profile;
   }
@@ -619,15 +755,21 @@ class Agents extends EventEmitter {
         values[key] !== controller.data.settings[key])) this.requireIdle(execution);
     if (conversation && ['workspace', 'access'].some(key => values[key] !== undefined && values[key] !== conversation[key]) &&
         (controller.busy || controller.loading.size || conversation.queue?.length || conversation.delegationQueue?.some(job => !job.delivered) || this.pendingDelegations(conversation.id) || (conversation.delegation && !conversation.delegation.delivered))) throw new Error('Stop this agent before changing its workspace or access.');
+    const inheritable = Object.keys(INHERITED).filter(key => values[key] !== undefined);
+    if (inheritable.length && this.isSubBot(this.profile(agentId)))
+      throw new Error(`${this.profile(agentId).name} works for the bot that made it and follows its settings. Change that bot instead.`);
+    if (inheritable.length)
+      this.requireDependentsIdle(agentId, inheritable);
     // The chat checker runs between turns, so picking it never waits for agents to stop.
-    const local = Object.keys(values).every(key => ['workspace', 'mode', 'access', 'backgroundUsageLimit', 'replySuggestions', 'chatScanModel', 'showTips'].includes(key));
+    const local = Object.keys(values).every(key => ['workspace', 'mode', 'access', 'replySuggestions', 'chatScanModel', 'showTips'].includes(key));
     if (!local && this.busy) throw new Error('Stop all agents before changing shared settings.');
     if (agentId === 'main') this.primary.settings(values);
     else {
       const { workspace, mode, access, ...shared } = values;
       const own = Object.fromEntries(Object.entries({ workspace, mode, access }).filter(([, value]) => value !== undefined));
       controller.settings(own);
-      Object.assign(this.profile(agentId), Object.fromEntries(Object.keys(own).map(key => [key, controller.data.settings[key]])));
+      Object.assign(this.profile(agentId), Object.fromEntries(Object.keys(own).map(key => [key, controller.data.settings[key]])),
+        own.workspace !== undefined ? { inheritWorkspace: false } : {});
       if (Object.keys(shared).length) this.primary.settings(shared);
       this.primary.save();
     }
@@ -643,6 +785,8 @@ class Agents extends EventEmitter {
     }
     this.updateConversation(controller, values);
     if (execution) this.updateConversation(execution, values);
+    if (inheritable.length)
+      this.applyInherited();
     this.primary.changed(); return this.snapshot();
   }
 
@@ -705,14 +849,12 @@ class Agents extends EventEmitter {
 
   backgroundQuota(controller, session, selected = null) {
     const choices = this.backgroundChoices(controller, session, selected);
-    const value = this.primary.data.settings.backgroundUsageLimit;
-    const threshold = Number.isInteger(value) && value >= 1 && value <= 100 ? value : 90;
     for (const choice of choices.filter(Boolean)) {
       const provider = choice.provider || 'codex', limit = controller.limits.limited(provider, choice.model);
       if (limit) return { provider, until: limit.known ? limit.until : null,
         reason: `Background work paused: ${PROVIDER_NAMES[provider] || provider} reported a usage limit. Choose a provider explicitly to change accounts.` };
       if (provider === 'claude-cli' && this.primary.data.settings.claudeEnabled) {
-        const quota = this.primary.limits.backgroundGuard(provider, threshold, choice.model, this.primary.claude.accountKey());
+        const quota = this.primary.limits.backgroundGuard(provider, 100, choice.model, this.primary.claude.accountKey());
         if (quota) return quota;
       }
     }
@@ -720,7 +862,7 @@ class Agents extends EventEmitter {
     if (this.primary.data.settings.chatgptEnabled === false || this.primary.account?.type !== 'chatgpt') return null;
     const provider = selected?.provider || (mode === 'auto' ? 'codex' : controller.resolveWorker(mode)?.provider || 'codex');
     if (provider !== 'codex') return null;
-    return this.primary.limits.backgroundGuard(provider, threshold);
+    return this.primary.limits.backgroundGuard(provider, 100);
   }
 
   hasQuotaWait(provider) {
@@ -1038,6 +1180,9 @@ class Agents extends EventEmitter {
     if (typeof agentId !== 'string' || !agentId) throw new Error('Choose another agent.');
     const foreground = this.controller(agentId), existing = this.executions.get(agentId), profile = this.profile(agentId);
     if (foreground.agentId === sourceController.agentId && !resuming) throw new Error('Choose another agent.');
+    // A sub-bot's results go to the bot that made it, so only that bot gives it work.
+    if (this.isSubBot(profile) && profile.createdBy !== (sourceController === this.primary ? 'main' : sourceController.agentId))
+      throw new Error(`${profile.name} works for the bot that made it; only that bot gives it work.`);
     const current = existing && this.conversation(existing);
     const visible = this.conversation(foreground);
     const workspace = current?.workspace || visible?.workspace || foreground.data.settings.workspace;
@@ -1669,6 +1814,10 @@ class Agents extends EventEmitter {
     let target = this.controller(args.agentId), current = this.conversation(target);
     const question = args.replyTo ? source.items.find(item => item.type === 'agentMail' && item.id === args.replyTo && item.fromAgentId === target.agentId && item.kind === 'question') : null;
     if (args.replyTo && !question) throw new Error('Reply to a received question from that agent using its message ID.');
+    // A sub-bot hears from the bot that made it and from its own sub-bots, and gets answers to its questions.
+    const recipient = this.profile(target.agentId), sender = controller === this.primary ? 'main' : controller.agentId;
+    if (this.isSubBot(recipient) && !question && recipient.createdBy !== sender && this.profile(sender)?.createdBy !== recipient.id)
+      throw new Error(`${recipient.name} works for the bot that made it; message that bot instead.`);
     const scope = args.jobId || question?.jobId || (source.delegation && !source.delegation.delivered ? source.delegation.id : null);
     let destination = question?.fromSessionId;
     if (!destination && scope) {
@@ -1784,6 +1933,29 @@ class Agents extends EventEmitter {
     return result;
   }
 
+  // The Main Bot changes a bot's name, role or model at the user's request. Its workspace and access stay as they are,
+  // and the limits of messaging that bot apply: another workspace needs Full access, and never a bot with more access.
+  async updateAgent(controller, source, args) {
+    if (controller !== this.primary)
+      throw new Error('Only the Main Bot can change other bots.');
+
+    const profile = typeof args.agentId === 'string' && args.agentId !== 'main' ? this.profile(args.agentId) : null;
+    if (!profile)
+      throw new Error('Choose another bot from agents_list.');
+    if (this.isSubBot(profile))
+      throw new Error(`${profile.name} works for the bot that made it and follows its settings.`);
+    if (source.access !== 'danger-full-access' && !this.workspaces.same(profile.workspace, source.workspace))
+      throw new Error('Changing a bot in another workspace requires Full access.');
+    if (ACCESS_MODES.findIndex(a => a.id === source.access) < ACCESS_MODES.findIndex(a => a.id === profile.access))
+      throw new Error('This bot has more access than this conversation. Ask the user to change it in its Edit dialog.');
+
+    const changesModel = args.mode !== undefined || args.effort !== undefined;
+    const mode = changesModel ? this.agentMode(args.mode ?? profile.mode, args.effort) : profile.mode;
+    const saved = await this.saveAgent({ id: profile.id, name: args.name ?? profile.name, instructions: args.instructions ?? profile.instructions,
+      workspace: profile.workspace, access: profile.access, mode });
+    return { agentId: saved.id, name: saved.name, instructions: saved.instructions, mode: saved.mode };
+  }
+
   async manageAgent(controller, source, action, args) {
     const turnId = controller.activeTurns.get(source.id);
     const authorize = () => {
@@ -1862,7 +2034,9 @@ class Agents extends EventEmitter {
       const busy = contexts.some(context => context.busy || context.data.sessions.some(chat =>
         chat.queue?.length || chat.delegationQueue?.some(job => !job.delivered) || this.pendingDelegations(chat.id) ||
         (chat.delegation && !chat.delegation.delivered)));
-      return { id, name: this.agentName(id), workspace: current?.workspace || worker.data.settings.workspace,
+      // A sub-bot takes work only from the bot that made it.
+      const subBot = this.isSubBot(this.profile(id)) ? { worksFor: this.agentName(this.profile(id).createdBy) } : {};
+      return { id, name: this.agentName(id), ...subBot, workspace: current?.workspace || worker.data.settings.workspace,
         access: current?.access || worker.data.settings.access, busy, instructions: this.profile(id)?.instructions?.slice(0, 240) || 'Chat and coordination', mode: worker.data.settings.mode,
         ownedJobs: this.pendingJobs().filter(({ job }) => sessions.has(job.owner || job.source)).map(({ job, controller, session }) => ({
           jobId: job.id, workerId: controller.agentId, state: this.budgets.held(job) || job.quotaPause || session.quotaWaiting ? 'paused' : job.state,
@@ -1887,9 +2061,17 @@ class Agents extends EventEmitter {
     }
     if (name === 'agent_create' && Object.keys(args).every(key => ['name', 'instructions', 'mode', 'effort'].includes(key))) {
       if (this.closing) throw new Error('The app is closing.');
-      const mode = this.agentMode(args.mode === undefined ? 'auto' : args.mode, args.effort);
       const batch = temporaryBatch || (session.delegation && this.workspaces.record(session.delegation.projectScope || session.workspace)?.batchId) || null;
-      return this.saveAgent({ ...args, mode, workspace: session.workspace, access: session.access }, batch);
+      const createdBy = controller === this.primary ? 'main' : controller.agentId;
+      const creator = createdBy === 'main' ? null : this.profile(createdBy);
+      const own = creator ? creator.workspace : this.primary.data.settings.workspace;
+      const asked = args.mode !== undefined || args.effort !== undefined;
+      const mode = asked ? this.agentMode(args.mode === undefined ? creator?.mode || 'auto' : args.mode, args.effort) : creator?.mode || 'auto';
+      // Inherited only from the creator's own folder and access: a chat elsewhere, or running with less access, gives the
+      // new bot that folder and access instead, so a bot never gets more than the chat that made it.
+      const inheritance = { inheritWorkspace: !batch && sameFolder(own, session.workspace),
+        ...(creator && !batch ? { inheritAccess: session.access === creator.access, inheritMode: !asked } : {}) };
+      return this.saveAgent({ ...args, mode, workspace: session.workspace, access: session.access, createdBy, ...inheritance }, batch);
     }
     if (name === 'agent_delegate' && Object.keys(args).every(key => ['agentId', 'task'].includes(key))) return this.delegate(controller, session, args.agentId, args.task);
     if (name === 'agent_message' && Object.keys(args).every(key => ['agentId', 'messageId', 'text', 'kind', 'replyTo', 'jobId'].includes(key))) return this.sendMessage(controller, session, args);
@@ -1899,6 +2081,8 @@ class Agents extends EventEmitter {
     if (name === 'agent_read_context' && Object.keys(args).every(key => ['agentId', 'query', 'line', 'column'].includes(key))) return this.readContext(session, args);
     if (name === 'agent_stop' && Object.keys(args).every(key => key === 'agentId')) return this.manageAgent(controller, session, name, args);
     if (name === 'agent_set_access' && Object.keys(args).every(key => ['agentId', 'access'].includes(key))) return this.manageAgent(controller, session, name, args);
+    if (name === 'agent_update' && Object.keys(args).every(key => ['agentId', 'name', 'instructions', 'mode', 'effort'].includes(key)))
+      return this.updateAgent(controller, session, args);
     if (name === 'routine')
       return this.routines.fromChat(controller, session, args);
 

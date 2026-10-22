@@ -18,6 +18,35 @@ const ASK_TOOLS = ['Read', 'Glob', 'Grep', 'Bash', 'Edit', 'Write', 'WebFetch', 
 const INTERACTIVE_TOOLS = ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'];
 const ASK_NOTE = '\nHarness access: tool calls outside the pre-approved set wait for the user\'s approval. Prefer Read/Glob/Grep for inspection and group shell commands to keep approvals few.';
 
+// Bots get Harness's rules and skills, not the user's personal Claude Code setup: user settings (their hooks,
+// permissions, skills and subagents), the home CLAUDE.md and auto-memory stay out, and every plugin is off. The project's CLAUDE.md,
+// settings and hooks still load, and worker turns keep the user's MCP servers (personalMcp).
+function withoutPersonalSetup() {
+  const home = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+  let plugins = {};
+  try {
+    plugins = JSON.parse(fs.readFileSync(path.join(home, 'plugins', 'installed_plugins.json'), 'utf8')).plugins || {};
+  } catch { /* none installed */ }
+
+  const settings = {
+    claudeMdExcludes: [path.join(home, 'CLAUDE.md').replace(/\\/g, '/')],
+    enabledPlugins: Object.fromEntries(Object.keys(plugins).map(id => [id, false])),
+    autoMemoryEnabled: false,
+  };
+  return ['--setting-sources', 'project,local', '--settings', JSON.stringify(settings)];
+}
+
+// Leaving out user settings also drops the user's MCP servers; Claude reads them straight from ~/.claude.json as an MCP
+// config, so nothing is copied.
+function personalMcp() {
+  const file = path.join(process.env.CLAUDE_CONFIG_DIR || os.homedir(), '.claude.json');
+  try {
+    return Object.keys(JSON.parse(fs.readFileSync(file, 'utf8')).mcpServers || {}).length ? [file] : [];
+  } catch {
+    return [];
+  }
+}
+
 function executable() {
   const native = path.join(os.homedir(), '.local', 'bin', process.platform === 'win32' ? 'claude.exe' : 'claude');
   return fs.existsSync(native) ? native : 'claude';
@@ -202,7 +231,8 @@ class ClaudeCLI {
   run({ cwd, model, effort, prompt, images = [], resume, access, signal, onEvent = () => {}, approve, schema, helpers, onInput, instructions = WORKER_INSTRUCTIONS }) {
     return new Promise((resolve, reject) => {
       if (signal?.aborted) return reject(new Error('Claude stopped.'));
-      const args = ['-p', '--verbose', '--input-format', 'stream-json', '--output-format', 'stream-json', '--include-partial-messages', '--model', model];
+      const args = ['-p', '--verbose', '--input-format', 'stream-json', '--output-format', 'stream-json', '--include-partial-messages', '--model', model,
+        ...withoutPersonalSetup()];
       if (onInput && !schema) args.push('--replay-user-messages');
       if (EFFORTS.includes(effort)) args.push('--effort', effort);
       // With an approval callback, the Harness access setting applies: pre-approved tools run, anything else asks the user in the Harness.
@@ -212,8 +242,10 @@ class ClaudeCLI {
       if (resume) args.push('--resume', resume);
       if (schema) args.push('--tools', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--no-session-persistence', '--json-schema', JSON.stringify(schema));
       else {
-        // Do not use --strict-mcp-config here: preserve the user's Claude MCP servers and add ours.
-        if (helpers?.claudeConfig) args.push('--mcp-config', JSON.stringify(helpers.claudeConfig));
+        // Not --strict-mcp-config: the user's own MCP servers stay, with ours added.
+        const mcp = [...personalMcp(), ...(helpers?.claudeConfig ? [JSON.stringify(helpers.claudeConfig)] : [])];
+        if (mcp.length)
+          args.push('--mcp-config', ...mcp);
         if (ask) {
           const helperTools = helpers ? helpers.allowedTools(access) : [];
           if (access === 'read-only') {

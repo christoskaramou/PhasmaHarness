@@ -7,7 +7,7 @@ const image = 'data:image/png;base64,YQ==';
 function fixture(normalizeImage = async value => value) {
   const commands = new Map(), sent = [], stopped = [];
   const worker = { send: value => { sent.push(value); return { saved: true }; } };
-  const agents = { closing: false, owner: () => worker,
+  const agents = { closing: false, owner: () => worker, profile: () => null, isSubBot: () => false,
     sync() {}, stop: id => { stopped.push(id); }, snapshot: () => ({ kept: true }) };
   const runner = { agents, controller: {}, updater: { state: { status: 'idle' } } };
   registerRunnerCommands((name, handler) => {
@@ -139,4 +139,21 @@ test('Undo from a comparison card goes to the owner of its chat', async () => {
   registerRunnerCommands((name, handler) => commands.set(name, handler), { runner, ask: async () => false });
   assert.deepEqual(await commands.get('undoComparison')('chat', 'comparison', 'rule'), { undone: true });
   assert.deepEqual(calls, [['chat', 'comparison', 'rule']]);
+});
+
+test('a sub-bot’s chat is watched: sending, the queue, access and new chats are refused, approval answers still go through', async () => {
+  const commands = new Map(), answered = [];
+  const owner = { agentId: 'sub', send() { throw new Error('sent'); }, queuedMessage() { throw new Error('queued'); }, permissions() { throw new Error('access'); },
+    answer: (...args) => { answered.push(args); return { answered: true }; } };
+  const agents = { closing: false, owner: () => owner, controller: () => owner, profile: id => (id === 'sub' ? { id, createdBy: 'lead' } : null),
+    isSubBot: profile => profile?.createdBy === 'lead', sync() {}, snapshot: () => ({}), conversation() { throw new Error('created'); } };
+  const runner = { agents, controller: {}, updater: { state: { status: 'idle' } } };
+  registerRunnerCommands((name, handler) => commands.set(name, handler), { runner, ask: async () => false });
+  const watchOnly = /only that bot gives it work/;
+  await assert.rejects(commands.get('send')({ id: 'chat', text: 'Do this instead.' }), watchOnly);
+  assert.throws(() => commands.get('queuedMessage')('chat', 'message', 'steer'), watchOnly);
+  assert.throws(() => commands.get('permissions')('chat', 'danger-full-access'), watchOnly);
+  assert.throws(() => commands.get('create')('C:/project', 'danger-full-access', 'sub'), watchOnly);
+  await commands.get('answer')('chat', { id: 'request', decision: 'accept' }, 'sub');
+  assert.equal(answered.length, 1, 'approval answers reach the sub-bot');
 });

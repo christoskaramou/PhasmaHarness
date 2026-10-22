@@ -365,6 +365,7 @@ function runStep(id, step, root, runDir, extraEnv) {
   const env = { ...process.env, ...extraEnv, TESTPOOL_TEST_ID: id };
   for (const [k, v] of Object.entries(step.env || {})) env[k] = expand(v, root);
   delete env.JEV_API_KEY; delete env.JEV_API_KEY_FILE; // tests never need the Jev key
+  delete env.ELECTRON_RUN_AS_NODE; // set when Harness or Codex starts the runner; an Electron app under test would start as Node
   return new Promise(resolve => {
     const log = fs.openSync(logFile, 'w');
     fs.writeSync(log, `$ ${command}\n(cwd ${cwd})\n\n`);

@@ -5,6 +5,7 @@ const { PassThrough } = require('node:stream');
 const { ClaudeCLI } = require('../src/providers/claude.cjs');
 const { CursorCLI } = require('../src/providers/cursor.cjs');
 const { WORKER_INSTRUCTIONS } = require('../src/worker-instructions.cjs');
+const { withoutPersonalSetup } = require('../src/providers/codex.cjs');
 
 test('workers are told rtk starts programs only: shell built-ins and PowerShell cmdlets run without it', () => {
   const skill = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'skills', 'rtk', 'SKILL.md'), 'utf8');
@@ -12,6 +13,15 @@ test('workers are told rtk starts programs only: shell built-ins and PowerShell 
   assert.match(WORKER_INSTRUCTIONS, /shell built-ins and PowerShell cmdlets \(Get-Content, Select-String, cd\) run without it/);
   assert.match(skill, /rtk proxy Get-Content fails/);
   assert.doesNotMatch(WORKER_INSTRUCTIONS + skill, /Prefix shell commands with rtk/);
+});
+
+test('workers get the request rules: build what was asked, marked-up images, two readings, logs, no Co-Authored-By', () => {
+  assert.match(WORKER_INSTRUCTIONS, /remove what they say to remove, for good/);
+  assert.match(WORKER_INSTRUCTIONS, /a question gets an answer, not an edit/);
+  assert.match(WORKER_INSTRUCTIONS, /name each mark back/);
+  assert.match(WORKER_INSTRUCTIONS, /If two readings fit, ask one short question first/);
+  assert.match(WORKER_INSTRUCTIONS, /no Co-Authored-By lines/);
+  assert.match(WORKER_INSTRUCTIONS, /each log warning or error with its cause/);
 });
 
 test('a relocated checkout loads full bundled skills without global skill folders', t => {
@@ -65,4 +75,77 @@ test('Claude and Cursor workers receive defaults; classifiers remain isolated', 
     assert.equal(prompt.includes('Harness skills'), !schema);
     if (!schema) assert.ok(prompt.includes(WORKER_INSTRUCTIONS));
   }
+});
+
+// A stand-in home with a personal CLAUDE.md, one installed plugin, user MCP servers and personal Codex skills.
+function personalHome(t) {
+  const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'harness home '));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const claude = path.join(home, '.claude');
+  fs.mkdirSync(path.join(claude, 'plugins'), { recursive: true });
+  fs.writeFileSync(path.join(claude, 'plugins', 'installed_plugins.json'), JSON.stringify({ version: 2, plugins: { 'superpowers@official': [{}] } }));
+  fs.writeFileSync(path.join(claude, '.claude.json'), JSON.stringify({ mcpServers: { docs: { command: 'docs' } } }));
+  for (const skill of ['.agents/skills/mine', '.codex/skills/also-mine', '.codex/skills/.system/builtin']) {
+    fs.mkdirSync(path.join(home, skill), { recursive: true });
+    fs.writeFileSync(path.join(home, skill, 'SKILL.md'), '---\nname: x\n---\n');
+  }
+  return { home, claude };
+}
+
+function withEnv(t, values) {
+  const saved = Object.fromEntries(Object.keys(values).map(key => [key, process.env[key]]));
+  Object.assign(process.env, values);
+  t.after(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined)
+        delete process.env[key];
+      else
+        process.env[key] = value;
+    }
+  });
+}
+
+test('Claude bots leave out the personal setup: user settings, home CLAUDE.md, auto-memory and plugins off, user MCP servers kept', async t => {
+  const path = require('node:path');
+  const { claude: config } = personalHome(t);
+  withEnv(t, { CLAUDE_CONFIG_DIR: config });
+  const cli = new ClaudeCLI();
+  let args;
+  cli.start = values => {
+    args = values;
+    const child = new EventEmitter();
+    child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+    setImmediate(() => {
+      child.stdout.write(JSON.stringify({ type: 'result', result: 'ok' }) + '\n');
+      child.emit('close', 0);
+    });
+    return child;
+  };
+  for (const schema of [undefined, { type: 'object' }]) {
+    await cli.run({ model: 'test', prompt: 'hello', access: 'danger-full-access', schema });
+    assert.equal(args[args.indexOf('--setting-sources') + 1], 'project,local', 'user settings (hooks, skills, subagents) stay out');
+    assert.deepEqual(JSON.parse(args[args.indexOf('--settings') + 1]), {
+      claudeMdExcludes: [path.join(config, 'CLAUDE.md').replace(/\\/g, '/')],
+      enabledPlugins: { 'superpowers@official': false },
+      autoMemoryEnabled: false,
+    });
+    const after = args.slice(args.indexOf('--mcp-config') + 1);
+    const mcp = after.slice(0, after.findIndex(arg => arg.startsWith('--')));
+    assert.deepEqual(mcp, schema ? ['{"mcpServers":{}}'] : [path.join(config, '.claude.json')], 'workers keep the user MCP servers; classifiers get none');
+  }
+});
+
+test('Codex bots leave out the personal setup: hooks, plugins, memories, notify, personality and personal skills off, built-in skills kept', t => {
+  const path = require('node:path');
+  const { home } = personalHome(t);
+  withEnv(t, { HOME: home, USERPROFILE: home, CODEX_HOME: path.join(home, '.codex') });
+  const args = withoutPersonalSetup();
+  assert.deepEqual(args.slice(0, 10), ['-c', 'features.hooks=false', '-c', 'features.plugins=false', '-c', 'features.memories=false',
+    '-c', 'notify=[]', '-c', 'personality="none"']);
+  const skills = args.find(arg => arg.startsWith('skills.config='));
+  assert.match(skills, /^skills\.config=\[/);
+  for (const skill of ['.agents/skills/mine', '.codex/skills/also-mine'])
+    assert.ok(skills.includes(JSON.stringify(path.join(home, skill, 'SKILL.md').replace(/\\/g, '/')) + ', enabled=false'), skill);
+  assert.ok(!skills.includes('builtin'), 'Codex keeps its own .system skills');
 });

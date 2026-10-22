@@ -8,11 +8,6 @@ const { TOOLS: HELPER_TOOLS } = require('../tools/tool-helpers.cjs');
 const { TOOLS: AGENT_TOOLS } = require('../tools/agent-tools.cjs');
 
 module.exports = {
-  async findContext(id, query, mode) {
-    if (this.busy) throw new Error('Wait for the current turn to finish before using the search panel.');
-    if (!this.contextSearch) throw new Error('Context search is unavailable.');
-    return this.contextSearch.search(id ? this.session(id).workspace : this.data.settings.workspace, query, mode);
-  },
 
   async contextToolCall(message) {
     const p = message.params;

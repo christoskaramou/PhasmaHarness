@@ -53,22 +53,24 @@ test('limits expire at their reset, or after a default wait when none was report
   assert.deepEqual(Object.keys(limits.active()), ['cursor-cli']);
 });
 
-test('background quota reserve uses valid saved reports, respects resets and never invents unknown allowance', () => {
+test('background work holds on a window reported full, from valid saved reports, respecting resets and never inventing allowance', () => {
   let now = 1000;
   const quotas = {}, limits = new ProviderLimits({}, () => now, quotas);
   assert.equal(limits.backgroundGuard('codex'), null);
-  limits.setUsage('codex', { primary: { usedPercent: 92, resetsAt: 10 }, credits: { unlimited: true } });
-  assert.equal(limits.backgroundGuard('codex').usedPercent, 92);
+  limits.setUsage('codex', { primary: { usedPercent: 99, resetsAt: 10 }, credits: { unlimited: true } });
+  assert.equal(limits.backgroundGuard('codex'), null, 'a window that is not full holds nothing');
+  limits.setUsage('codex', { primary: { usedPercent: 100, resetsAt: 10 }, credits: { unlimited: true } });
+  assert.equal(limits.backgroundGuard('codex').usedPercent, 100);
   assert.equal(limits.backgroundGuard('codex').until, 10000);
-  assert.equal(limits.backgroundGuard('codex', 95), null);
+  assert.match(limits.backgroundGuard('codex').reason, /^Background work paused: ChatGPT reported 100% usage\.$/);
   limits.setUsage('codex', { primary: { usedPercent: '0' }, secondary: { usedPercent: -1 } });
-  assert.equal(limits.backgroundGuard('codex').usedPercent, 92, 'malformed updates do not erase a valid reserve');
+  assert.equal(limits.backgroundGuard('codex').usedPercent, 100, 'malformed updates do not erase a valid reserve');
   const restored = new ProviderLimits({}, () => now, JSON.parse(JSON.stringify(quotas)));
-  assert.equal(restored.backgroundGuard('codex').usedPercent, 92);
+  assert.equal(restored.backgroundGuard('codex').usedPercent, 100);
   assert.equal(restored.backgroundGuard('native:muse'), null);
   now = 10000;
   assert.equal(restored.backgroundGuard('codex'), null);
-  limits.setUsage('codex', { secondary: { usedPercent: 95 } });
+  limits.setUsage('codex', { secondary: { usedPercent: 100 } });
   now += UNKNOWN_RESET_MS * 2;
   assert.equal(limits.backgroundGuard('codex').until, null, 'no reset time is guessed');
   limits.setUsage('codex', { secondary: { usedPercent: 12 } });

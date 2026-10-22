@@ -946,12 +946,12 @@ app.whenReady().then(async () => {
   const cursorRows = await window.webContents.executeJavaScript(`[...document.querySelectorAll('#provider-model-list .provider-model-row')].map(r => r.textContent).filter(t => t.endsWith('· Cursor CLI'))`);
   assert.deepEqual(cursorRows, ['GPT-5.5 · Cursor CLI', 'Grok 4.7 · Cursor CLI', 'Kimi K3 · Cursor CLI']);
   console.log('Cursor settings list the full model list, one row per model, no efforts passed');
-  // A provider's model group collapses under its title and stays collapsed when the list re-renders.
+  // A provider's model group starts collapsed under its title; one the user opens stays open when the list re-renders.
   const cursorGroup = `[...document.querySelectorAll('#provider-model-list .provider-model-section')].find(section => section.querySelector('summary').textContent === 'Cursor CLI')`;
-  assert.equal(await window.webContents.executeJavaScript(`${cursorGroup}.open`), true, 'groups start expanded');
+  assert.equal(await window.webContents.executeJavaScript(`[...document.querySelectorAll('#provider-model-list .provider-model-section')].some(section => section.open)`), false, 'groups start collapsed');
   await window.webContents.executeJavaScript(`${cursorGroup}.querySelector('summary').click(); new Promise(r => setTimeout(r, 50))`);
-  await window.webContents.executeJavaScript('renderProviders(); true');
-  assert.equal(await window.webContents.executeJavaScript(`${cursorGroup}.open`), false, 'collapsed group stays collapsed after re-render');
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderProviders(); true');
+  assert.equal(await window.webContents.executeJavaScript(`${cursorGroup}.open`), true, 'an opened group stays open after re-render');
   await window.webContents.executeJavaScript(`${cursorGroup}.querySelector('summary').click(); new Promise(r => setTimeout(r, 50))`);
   console.log('Collapsible provider model groups passed');
   deadline.refresh(); phase = 'provider settings';
@@ -1112,18 +1112,10 @@ app.whenReady().then(async () => {
   })()`);
 
 
-  await changeSetting('settings-background-usage', '95');
-  assert.equal(controller.data.settings.backgroundUsageLimit, 95);
-  await changeSetting('settings-background-usage', '0');
-  assert.equal(controller.data.settings.backgroundUsageLimit, 95, 'an invalid threshold leaves the saved reserve intact');
-  await changeSetting('settings-background-usage', '90');
-  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#background-usage-detail')"), null);
-  const originalWorkspace = controller.data.settings.workspace;
-  await window.webContents.executeJavaScript("document.querySelector('#settings-browse').onclick()");
-  assert.equal(controller.data.settings.workspace, fs.realpathSync(root), 'choosing a workspace saves immediately');
-  chosenWorkspace = originalWorkspace;
-  await window.webContents.executeJavaScript("document.querySelector('#settings-browse').onclick()");
-  assert.equal(controller.data.settings.workspace, originalWorkspace);
+  // The Main Bot's workspace is chosen in its Edit dialog (Settings has none); Browse fills the field, Save applies it.
+  await window.webContents.executeJavaScript("editHub({ name: 'Hub' }); document.querySelector('#hub-browse').onclick()");
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#hub-workspace').value"), root, 'Browse fills in the chosen folder');
+  await window.webContents.executeJavaScript("document.querySelector('#hub-dialog').close(); true");
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').open"), true);
   await changeSetting('settings-context', 'jev');
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-context').value"), 'local', 'a rejected option returns to the saved value');
@@ -1145,7 +1137,7 @@ app.whenReady().then(async () => {
     const result = { visible: !panel.hidden, loaded: document.querySelector('#benchmark-status').textContent.includes('fixture'),
       fits: panel.scrollWidth <= panel.clientWidth };
     document.querySelector('#tab-general').click();
-    const input = document.querySelector('#settings-background-usage');
+    const input = document.querySelector('#settings-show-tips');
     const compact = input.getBoundingClientRect().height;
     input.style.paddingBlock = '10px';
     result.ratio = compact / input.getBoundingClientRect().height;
@@ -1153,7 +1145,7 @@ app.whenReady().then(async () => {
     return result;
   })()`);
   assert.ok(settingsLayout.visible && settingsLayout.loaded && settingsLayout.fits, 'benchmark tab loads inside settings');
-  assert.ok(Math.abs(settingsLayout.ratio - .75) < .02, 'number field is one-quarter shorter');
+  assert.ok(Math.abs(settingsLayout.ratio - .75) < .02, 'form fields are one-quarter shorter');
   const compactGear = await window.webContents.executeJavaScript(`(() => {
     const button = document.querySelector('#settings');
     return button.getBoundingClientRect().width < 50;
@@ -1482,12 +1474,20 @@ app.whenReady().then(async () => {
   ipcMain.handle('load', () => agents.snapshot());
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); document.querySelector("#agent-new").click(); true');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#agent-dialog").open'), true);
+  // A new bot inherits its creator's workspace by default: the folder field is hidden and out of the form's checks.
+  const inheritField = () => window.webContents.executeJavaScript(`[document.querySelector('#agent-inherit').checked,
+    document.querySelector('#agent-workspace-row').hidden, document.querySelector('#agent-workspace').disabled]`);
+  assert.deepEqual(await inheritField(), [true, true, true], 'Inherit is ticked by default and hides the folder');
+  await window.webContents.executeJavaScript("document.querySelector('#agent-inherit').click(); true");
+  assert.deepEqual(await inheritField(), [false, false, false], 'unticked shows the folder and Browse');
+  await window.webContents.executeJavaScript("document.querySelector('#agent-inherit').click(); true");
   await window.webContents.executeJavaScript(`document.querySelector('#agent-name').value = 'Researcher';
     document.querySelector('#agent-instructions').value = 'Inspect source and report evidence.';
     document.querySelector('#agent-model').value = 'auto';
     document.querySelector('#agent-form').dispatchEvent(new Event('submit', { cancelable: true })); true`);
   await until(() => controller.data.agents.length === 1, 'the named agent was saved');
   const profile = controller.data.agents[0];
+  assert.deepEqual([profile.inheritWorkspace, profile.createdBy], [true, 'main'], 'a bot made with + inherits from the Main Bot');
   for (let i = 0; i < 100 && await window.webContents.executeJavaScript('selectedAgent') !== profile.id; i++) await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(await window.webContents.executeJavaScript('selectedAgent'), profile.id);
   assert.equal(profile.access, 'read-only');
@@ -1522,6 +1522,7 @@ app.whenReady().then(async () => {
     document.querySelector('#agent-cards [data-agent="main"][data-action="edit"]').click();
     document.querySelector('#hub-name').value = 'Atlas';
     document.querySelector('#hub-model').value = [...document.querySelector('#hub-model').options].find(option => option.value).value; new Promise(r => setTimeout(r, 100))`);
+  const chosenHubMode = await window.webContents.executeJavaScript('hubChoice()');
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/hub-rename.png'), (await window.webContents.capturePage()).toPNG());
   await window.webContents.executeJavaScript("document.querySelector('#hub-form').dispatchEvent(new Event('submit', { cancelable: true })); true");
   await until(async () => await window.webContents.executeJavaScript(`(() => {
@@ -1530,12 +1531,12 @@ app.whenReady().then(async () => {
   })()`), 'the renamed Hub shows its name and initial in the sidebar');
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#hub-dialog').open"), false);
   assert.equal(agents.hubName(), 'Atlas');
-  assert.equal(controller.data.settings.mode, await window.webContents.executeJavaScript("document.querySelector('#hub-model').value"));
+  assert.equal(controller.data.settings.mode, chosenHubMode, 'the Hub saves the model and effort its two pickers show');
   const editedMainMode = controller.data.settings.mode;
   const workerModeBeforeHubEdit = agents.controller(profile.id).data.settings.mode;
   await window.webContents.executeJavaScript('selectAgent(' + JSON.stringify(profile.id) + ')');
   await window.webContents.executeJavaScript(`document.querySelector('#agent-cards [data-agent="main"][data-action="edit"]').click(); true`);
-  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#hub-model').value"), editedMainMode);
+  assert.equal(await window.webContents.executeJavaScript('hubChoice()'), editedMainMode, 'reopening shows the saved model and effort');
   await window.webContents.executeJavaScript("document.querySelector('#hub-name').value = 'Hub'; document.querySelector('#hub-form').requestSubmit(); true");
   await until(() => agents.hubName() === 'Hub', 'Main edit saves while a worker is selected');
   assert.equal(agents.controller(profile.id).data.settings.mode, workerModeBeforeHubEdit);
@@ -1584,13 +1585,22 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('selectAgent(' + JSON.stringify(profile.id) + ')');
   await window.webContents.executeJavaScript('api.browseWorkspace(null, "changes")');
   assert.equal(browseCalls.at(-1).at(-1), profile.id, 'new conversations browse the selected agent workspace');
+  // The Main Bot's workspace and access live in its Edit dialog, not in Settings, and change only the Main Bot even while
+  // another bot is selected.
   const mainAccessBefore = controller.data.settings.access, agentAccessBefore = agents.profile(profile.id).access;
-  await window.webContents.executeJavaScript("document.querySelector('#settings').onclick()");
-  await changeSetting('settings-access', 'danger-full-access');
-  assert.equal(agents.profile(profile.id).access, 'danger-full-access');
-  assert.equal(controller.data.settings.access, mainAccessBefore, 'settings autosave targets the selected agent');
-  await changeSetting('settings-access', agentAccessBefore);
-  await window.webContents.executeJavaScript('closeSettings()');
+  const editMainAccess = access => window.webContents.executeJavaScript(`editHub({ name: state.agents?.find(agent => agent.id === 'main')?.name || 'Hub' });
+    document.querySelector('#hub-access').value = ${JSON.stringify(access)};
+    document.querySelector('#hub-form').requestSubmit(); true`);
+  assert.deepEqual(await window.webContents.executeJavaScript(`[!!document.querySelector('#settings-workspace'), !!document.querySelector('#settings-access'),
+    !!document.querySelector('#hub-workspace'), !!document.querySelector('#hub-access')]`), [false, false, true, true], 'workspace and access moved from Settings to the Main Bot');
+  const newMainAccess = mainAccessBefore === 'danger-full-access' ? 'read-only' : 'danger-full-access';
+  await editMainAccess(newMainAccess);
+  await until(() => controller.data.settings.access === newMainAccess, 'the Main Bot dialog saves its access');
+  assert.equal(agents.profile(profile.id).access, agentAccessBefore, 'the selected bot keeps its own access');
+  await until(async () => !(await window.webContents.executeJavaScript("document.querySelector('#hub-dialog').open")), 'the Main Bot dialog closed');
+  await editMainAccess(mainAccessBefore);
+  await until(() => controller.data.settings.access === mainAccessBefore, 'the Main Bot access restored');
+  await until(async () => !(await window.webContents.executeJavaScript("document.querySelector('#hub-dialog').open")), 'the Main Bot dialog closed again');
   await window.webContents.executeJavaScript(`document.querySelector('#prompt').value = 'Researcher draft'; imageDrafts.set(draftKey(), ['data:image/png;base64,']); selectAgent('main')`);
   assert.notEqual(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), 'Researcher draft');
   assert.equal(await window.webContents.executeJavaScript('attachedImages().includes("data:image/png;base64,")'), false);
@@ -1743,6 +1753,88 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('document.querySelector("#toast").hidden = true; true');
   await new Promise(resolve => setTimeout(resolve, 200));
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/agents-sidebar.png'), (await window.webContents.capturePage()).toPNG());
+  // A bot another bot made sits under it, one step in; it has no Edit, its chat is read only, and deleting its creator says it goes too.
+  const [researcher, reviewer] = agents.primary.data.agents;
+  reviewer.createdBy = researcher.id;
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); selectAgent(' + JSON.stringify(reviewer.id) + ')');
+  await new Promise(resolve => setTimeout(resolve, 200));
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/subbots-sidebar.png'), (await window.webContents.capturePage()).toPNG());
+  const subBotView = await window.webContents.executeJavaScript(`(async () => {
+    const rows = [...document.querySelectorAll('#agent-list .agent-nav')];
+    const index = id => rows.findIndex(row => row.dataset.agent === id);
+    const left = id => rows[index(id)].getBoundingClientRect().left;
+    const nested = index(${JSON.stringify(reviewer.id)}) === index(${JSON.stringify(researcher.id)}) + 1
+      && left(${JSON.stringify(reviewer.id)}) > left(${JSON.stringify(researcher.id)});
+    const prompt = document.querySelector('#prompt');
+    const composer = [prompt.readOnly, prompt.placeholder, document.querySelector('#send').disabled, document.querySelector('#attach-files').disabled,
+      document.querySelector('#permissions').disabled];
+    let modelCommand = '';
+    try { openCommandPanel('model'); } catch (error) { modelCommand = error.message; }
+    document.querySelector('#agents-overview').click();
+    const card = [...document.querySelectorAll('#agent-cards button[data-agent=${JSON.stringify(reviewer.id)}]')].map(button => button.dataset.action);
+    document.querySelector('#agent-cards button[data-agent=${JSON.stringify(researcher.id)}][data-action=delete]').click();
+    const deleteNote = [document.querySelector('#delete-subbots').hidden, document.querySelector('#delete-subbots').textContent];
+    document.querySelector('#delete-dialog').close();
+    document.querySelector('#agents-dialog').close();
+    return { nested, composer, modelCommand, card, deleteNote };
+  })()`);
+  assert.deepEqual(subBotView, {
+    nested: true,
+    composer: [true, 'Read only: Researcher gives this bot its work.', true, true, true],
+    modelCommand: "This bot follows Researcher's model and settings.",
+    card: ['open', 'delete'],
+    deleteNote: [false, 'The bots it made go with it: Reviewer.'],
+  }, 'a sub-bot is nested, read only, not editable, and deleted with its creator');
+  // They show only while their creator or one of them is selected; the creator counts them.
+  const listed = () => window.webContents.executeJavaScript(`[[...document.querySelectorAll('#agent-list .agent-nav')].some(row => row.dataset.agent === ${JSON.stringify(reviewer.id)}),
+    document.querySelector('#agent-list .agent-nav[data-agent=${JSON.stringify(researcher.id)}] .agent-subbots')?.textContent || null]`);
+  await window.webContents.executeJavaScript('selectAgent(' + JSON.stringify(agents.primary.data.agents[2].id) + ')');
+  assert.deepEqual(await listed(), [false, '1'], 'hidden while another bot is selected, counted on its creator');
+  await window.webContents.executeJavaScript('selectAgent(' + JSON.stringify(researcher.id) + ')');
+  assert.deepEqual(await listed(), [true, '1'], 'shown while its creator is selected');
+  // Work a bot does for another bot shows in its chat: a sub-bot's always, read only; another bot's while the job is open,
+  // then its own chat again.
+  const giveWork = async (profile, delivered) => {
+    const execution = agents.execution(profile.id);
+    await agents.initializeController(execution);
+    const job = agents.conversation(execution, true);
+    job.items = [{ id: `task-${profile.id}`, type: 'userMessage', content: [{ type: 'text', text: 'Task from agent: say hello.' }], createdAt: Date.now() },
+      { id: `answer-${profile.id}`, type: 'agentMessage', phase: 'final_answer', text: 'Hello from the background.', createdAt: Date.now() }];
+    job.delegation = { id: `job-${profile.id}`, state: 'running', delivered };
+    return job;
+  };
+  const shown = () => window.webContents.executeJavaScript(`[document.querySelector('#messages').textContent.includes('Hello from the background.'),
+    document.querySelector('#prompt').readOnly, document.querySelector('#prompt').placeholder]`);
+  await giveWork(reviewer, true);
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); selectAgent(' + JSON.stringify(reviewer.id) + ')');
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.deepEqual(await shown(), [true, true, 'Read only: Researcher gives this bot its work.'], 'a sub-bot’s chat shows its work, read only');
+  delete reviewer.createdBy;
+  const ownChat = agents.conversation(agents.controller(researcher.id), true);
+  ownChat.items.push({ id: 'own-message', type: 'agentMessage', phase: 'final_answer', text: 'Written in my own chat.', createdAt: Date.now() });
+  const researcherJob = await giveWork(researcher, false);
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); selectAgent(' + JSON.stringify(researcher.id) + ')');
+  await new Promise(resolve => setTimeout(resolve, 100));
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/background-work.png'), (await window.webContents.capturePage()).toPNG());
+  assert.deepEqual(await shown(), [true, true, 'Read only while this bot works on a task from another bot. You can write again when it returns.'],
+    'a bot working for another bot shows that work, read only');
+  researcherJob.delegation.delivered = true;
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); new Promise(r => setTimeout(r, 100))');
+  const back = await shown();
+  assert.deepEqual([back[0], back[1]], [false, false], 'once its result returns, the bot’s own chat is back');
+  assert.deepEqual(await window.webContents.executeJavaScript(`[selectedId, document.querySelector('#messages').textContent.includes('Written in my own chat.')]`),
+    [ownChat.id, true], 'Send goes to the bot’s own chat again, with its messages');
+  // A task resumed from the bot's own chat is not another bot's work (shown to the UI only, nothing runs).
+  const ownView = agents.snapshot(), ownBackground = ownView.executionStates[researcher.id];
+  ownBackground.sessions.find(chat => chat.id === ownBackground.conversationId).delegation = { id: 'own-resumed-task', state: 'running', owner: ownChat.id, source: ownChat.id };
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(ownView) + '); new Promise(r => setTimeout(r, 100))');
+  const own = await shown();
+  assert.deepEqual([own[0], own[1]], [false, false], 'a task resumed from the bot’s own chat keeps that chat writable');
+  for (const profile of [reviewer, researcher])
+    agents.conversation(agents.execution(profile.id), true).items = [];
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); selectAgent(' + JSON.stringify(researcher.id) + ')');
+  console.log('Sub-bots sit under their creator, read only and without Edit passed');
+  console.log('Background work shows read only in the bot’s chat passed');
   for (const mode of ['light', 'dark']) {
     await chooseAppearance(mode);
     await themeFrame();
@@ -1865,7 +1957,43 @@ app.whenReady().then(async () => {
     await openCommand(command);
     assert.equal(await window.webContents.executeJavaScript('document.querySelector("#command-dialog").open'), false);
     assert.deepEqual(await window.webContents.executeJavaScript('[document.querySelector("#agent-dialog").open, document.querySelector("#agent-dialog").dataset.agentId]'), [true, commandAgent]);
-    await window.webContents.executeJavaScript(`document.querySelector('#agent-model').value = ${JSON.stringify(mode)}; document.querySelector('#agent-save').click(); true`);
+    // Models are grouped by provider; a model with several efforts gets its own Effort picker, where /effort lands.
+    const picker = await window.webContents.executeJavaScript(`({ focused: document.activeElement.id,
+      sections: [...document.querySelectorAll('#agent-model optgroup')].map(group => group.label),
+      efforts: document.querySelector('#agent-effort').disabled ? null : [...document.querySelector('#agent-effort').options].map(option => option.value) })`);
+    assert.ok(picker.sections.includes('Codex CLI / ChatGPT'), 'models sit under their provider: ' + JSON.stringify(picker.sections));
+    if (command === 'effort') {
+      assert.deepEqual([picker.focused, picker.efforts], ['agent-effort', ['low', 'high']], '/effort opens on the Effort picker');
+      fs.writeFileSync(path.resolve(__dirname, '../.scratch/agent-model-effort.png'), (await window.webContents.capturePage()).toPNG());
+      // Model and Effort share a row with Access under Model, and a narrow dialog keeps that arrangement.
+      const layout = await window.webContents.executeJavaScript(`(() => {
+        const box = id => document.querySelector(id).getBoundingClientRect();
+        const place = () => {
+          const model = box('#agent-model'), effort = box('#agent-effort'), access = box('#agent-access');
+          return [Math.round(model.top) === Math.round(effort.top), effort.left > model.right, access.top > model.bottom, Math.round(access.left) === Math.round(model.left)];
+        };
+        const wide = place();
+        document.querySelector('#agent-dialog').style.width = '360px';
+        const narrow = place();
+        document.querySelector('#agent-dialog').style.width = '';
+        return { wide, narrow };
+      })()`);
+      assert.deepEqual(layout, { wide: [true, true, true, true], narrow: [true, true, true, true] }, 'Model and Effort stay on one row, Access under Model');
+    }
+    if (mode === 'auto' && command === 'model') {
+      const auto = await window.webContents.executeJavaScript(`(() => {
+        document.querySelector('#agent-model').value = 'auto';
+        document.querySelector('#agent-model').dispatchEvent(new Event('change'));
+        const effort = document.querySelector('#agent-effort');
+        return [effort.hidden, effort.disabled, effort.selectedOptions[0]?.textContent];
+      })()`);
+      assert.deepEqual(auto, [false, true, 'Chosen by Auto'], 'with Auto the Effort picker stays in place, greyed out');
+    }
+    const [model, effort] = mode === 'auto' ? ['auto', ''] : ['codex|gpt-6-sol', mode.split(':').at(-1)];
+    await window.webContents.executeJavaScript(`document.querySelector('#agent-model').value = ${JSON.stringify(model)};
+      document.querySelector('#agent-model').dispatchEvent(new Event('change'));
+      document.querySelector('#agent-effort').value = ${JSON.stringify(effort)};
+      document.querySelector('#agent-save').click(); true`);
     await until(() => commandWorker.data.settings.mode === mode, 'Edit saves the worker model and effort');
     assert.equal(controller.data.settings.mode, originalMainMode, 'Edit changes only the selected agent');
     await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 20))');
@@ -2322,20 +2450,19 @@ app.whenReady().then(async () => {
     answers.push({ id, answer, agentId, contextId }); execution.requests.delete(id); await publish();
   });
   await publish();
+  // While a bot works on another bot's assignment, its chat shows that work, read only until the result returns.
   await window.webContents.executeJavaScript('selectAgent(' + JSON.stringify(splitProfile.id) + ')');
   const foregroundState = await window.webContents.executeJavaScript(`(() => {
-    document.querySelector('#prompt').value = 'Keep my question';
-    document.querySelector('#prompt').dispatchEvent(new Event('input'));
     document.querySelector('#job-activity').open = true;
     document.querySelector('#job-activity-list .job-row button').click();
-    return { busy: state.busy, selectedId, ready: !document.querySelector('#send').disabled,
+    return { selectedId, readOnly: document.querySelector('#prompt').readOnly, sendable: !document.querySelector('#send').disabled,
       modal: document.querySelector('#job-dialog').matches(':modal'), details: document.querySelector('#job-dialog').open };
   })()`);
-  assert.equal(foregroundState.busy, null);
-  assert.equal(foregroundState.selectedId, foregroundChat.id);
-  assert.equal(foregroundState.ready, true);
+  assert.deepEqual([foregroundState.selectedId, foregroundState.readOnly, foregroundState.sendable], [assignment.id, true, false],
+    'the bot’s chat shows the assignment, read only');
+  assert.notEqual(foregroundChat.id, assignment.id);
   assert.equal(foregroundState.details, true);
-  assert.equal(foregroundState.modal, false, 'assignment details do not trap foreground input');
+  assert.equal(foregroundState.modal, false, 'assignment details stay nonmodal');
   assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-artifacts").textContent'), /Open folder.*Run/s);
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-artifacts img")'), null);
   assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-budget-summary").textContent'), /120 min/);
@@ -2376,9 +2503,10 @@ app.whenReady().then(async () => {
   assert.equal(timeBudget.usedMs, 300000, 'the UI cannot reset the consumed allowance');
   execution.busy = assignment.id;
   await window.webContents.executeJavaScript('document.querySelector("#job-budget").open = false; true');
+  // While a bot works, its composer shows Stop where Send was; details must not cover either.
   const sendIsReachable = () => window.webContents.executeJavaScript(`(() => {
-    const send = document.querySelector('#send'), box = send.getBoundingClientRect();
-    return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)?.closest('#send') === send;
+    const send = document.querySelector('#send:not([hidden])') || document.querySelector('#stop'), box = send.getBoundingClientRect();
+    return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)?.closest('#' + send.id) === send;
   })()`);
   assert.equal(await sendIsReachable(), true, 'details reserve space instead of covering the Send button');
   window.setSize(840, 640);
@@ -2400,7 +2528,6 @@ app.whenReady().then(async () => {
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/foreground-job-details.png'), (await window.webContents.capturePage()).toPNG());
   await window.webContents.executeJavaScript('document.querySelector("#job-update-text").value = "unsent update"; document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); true');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-dialog").open'), false);
-  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), 'Keep my question');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-activity-list .job-row button").click(); document.querySelector("#job-update-text").value'), 'unsent update', 'reopening assignment details keeps the unsent update');
   await window.webContents.executeJavaScript(`document.querySelector('#job-activity-list .job-row button').click();
     document.querySelector('#prompt').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })); true`);
@@ -2409,11 +2536,9 @@ app.whenReady().then(async () => {
   execution.requests.set(7, { id: 7, method: 'item/commandExecution/requestApproval',
     params: { threadId: 'split-thread', command: 'Private fixture check', reason: 'Review this background action.' } });
   await publish();
-  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#request-dialog").open'), false,
-    'a background approval cannot open a modal over chat by itself');
-  await window.webContents.executeJavaScript(`document.querySelector('#job-activity').open = true;
-    [...document.querySelectorAll('#job-activity-list button')].find(button => button.textContent === 'Review').click(); true`);
-  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#request-dialog").open'), true);
+  // You are watching that work, so its approval opens in place, on Decline: nothing typed can approve it.
+  assert.deepEqual(await window.webContents.executeJavaScript('[document.querySelector("#request-dialog").open, document.activeElement.textContent]'),
+    [true, 'Decline'], 'the watched work’s approval opens on Decline');
   const deferred = await window.webContents.executeJavaScript(`(() => {
     const dialog = document.querySelector('#request-dialog'), cancel = new Event('cancel', { cancelable: true });
     dialog.dispatchEvent(cancel); if (!cancel.defaultPrevented) dialog.close(); return !cancel.defaultPrevented;
@@ -2428,8 +2553,7 @@ app.whenReady().then(async () => {
   window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
   await until(() => answers.length === 1, 'the background approval reached its controller');
   assert.deepEqual(answers[0], { id: 7, answer: { decision: 'accept' }, agentId: splitProfile.id, contextId: assignment.id });
-  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), 'Keep my question');
-  console.log('Separate foreground, nonmodal assignment details, received/applied updates and deferred scoped approvals passed');
+  console.log('Watched assignment, nonmodal assignment details, received/applied updates and deferred scoped approvals passed');
   // An approval that opens on its own focuses Decline: Enter typed for the composer must not approve a command.
   const foregroundFocus = await window.webContents.executeJavaScript(`(() => {
     const saved = { requests: state.requests, reviewing: reviewingExecution };
@@ -2854,6 +2978,22 @@ app.whenReady().then(async () => {
     'Cancel the current step, then send this in the same session', 'Cancel the current step, then send this in the same session',
     'Add this to the running turn now', 'Add this to the running turn now', 'Stop the current turn, then send this message with conversation context']);
   console.log('Send now describes each provider’s delivery passed');
+  // A message on its way after Send now leaves the queue list at once; only a failed send brings it back.
+  const queueRows = await window.webContents.executeJavaScript(`(() => {
+    const session = current();
+    const saved = session.queue;
+    session.queue = [{ id: 'on-its-way', text: 'Use the new requirement', images: [] }];
+    render();
+    const queued = document.querySelectorAll('#message-queue .queued-message').length;
+    session.queue[0].sending = true;
+    render();
+    const sending = document.querySelectorAll('#message-queue .queued-message').length;
+    session.queue = saved;
+    render();
+    return [queued, sending];
+  })()`);
+  assert.deepEqual(queueRows, [1, 0], 'Send now removes the message and its Send now button from the queue list');
+  console.log('A sent queued message leaves the queue list passed');
   phase = 'reply suggestions';
   // One call per answer; grey text while the draft matches its start; Right arrow at the end accepts; off hides it.
   const suggestionCalls = [];
@@ -2946,6 +3086,38 @@ app.whenReady().then(async () => {
     return hidden;
   })()`);
   assert.equal(lateHidden, true, 'a suggestion that arrives after sending is not shown');
+  // A read-only chat (a sub-bot's, or a bot working on another bot's task) asks for no suggestion and shows none.
+  ipcMain.removeHandler('replySuggestion');
+  const readOnlyCalls = [];
+  ipcMain.handle('replySuggestion', (_event, id) => {
+    readOnlyCalls.push(id);
+    return { itemId: 'suggest-watched', text: 'Now add tests for it.' };
+  });
+  const watchedHidden = await window.webContents.executeJavaScript(`(async () => {
+    const session = current() || state.sessions.find(entry => !entry.archived);
+    window.suggestionSaved = { selectedId, busy: state.busy, queue: session.queue, session };
+    selectedId = session.id;
+    session.queue = [];
+    session.items.push({ id: 'suggest-watched', type: 'agentMessage', phase: 'final_answer', text: 'Done for the other bot.' });
+    state.busy = null;
+    state.settings.replySuggestions = true;
+    state.watching = true;
+    render();
+    await new Promise(resolve => setTimeout(resolve, 200));
+    return document.querySelector('#prompt-ghost').hidden;
+  })()`);
+  assert.deepEqual([watchedHidden, readOnlyCalls.length], [true, 0], 'a read-only chat asks for no suggestion and shows none');
+  await window.webContents.executeJavaScript(`(() => {
+    const saved = window.suggestionSaved;
+    state.watching = false;
+    saved.session.items.pop();
+    saved.session.queue = saved.queue;
+    state.settings.replySuggestions = undefined;
+    selectedId = saved.selectedId;
+    state.busy = saved.busy;
+    render();
+    return true;
+  })()`);
   ipcMain.removeHandler('replySuggestion');
   assert.equal(suggestionCalls.length, 1, 'the same answer asks for a suggestion once');
   assert.deepEqual(suggestionUi.empty, { hidden: false, text: 'Now add tests for it.', placeholder: '', described: 'Suggested reply, Right arrow accepts: Now add tests for it.' });

@@ -52,7 +52,6 @@
       text: 'Press the microphone to dictate in English or Greek. Start talking when it says "Listening…"; your words appear after you stop.' },
     { id: 'suggestions', when: () => state.settings.replySuggestions !== false,
       text: 'When grey text appears after an answer, press → to take it as your next message.' },
-    { id: 'project-context', text: 'Settings → General → Find project context searches your project and adds the best excerpts to your message.' },
     { id: 'routines', text: 'Ask a bot to do something on a schedule, for example "every weekday at 8:00, summarise new commits". It runs in that chat as a routine; it can also run once, or after each new commit.' },
     { id: 'copies', text: () => `Ask ${hub()} for several workers on one task and each works in its own copy of the project. In the job's details, "Apply changes to my project…" keeps the one you want.` },
     { id: 'budgets', text: 'Each job\'s details have a Budget: active minutes, AI attempts and a token limit (120 minutes and 20 attempts unless you change them).' },
@@ -69,7 +68,6 @@
     { id: 'benchmarks', text: 'Settings → Benchmarks shows the measurements Auto uses to rank models. "Prepare refresh" sets up a bot to research newer numbers for you to review.' },
 
     // Settings worth knowing.
-    { id: 'background-limit', text: 'Settings → General → Background usage threshold (90% by default) pauses background bot work before your ChatGPT or Claude limit runs out, so your own chat keeps working.' },
     { id: 'tray', when: desktop,
       text: 'Settings → General → On Exit → Stay on Tray keeps bots and routines running after you close the window. Quit runner in the tray menu stops them.' },
     { id: 'sign-in', when: () => desktop() && !/Linux/i.test(navigator.userAgent),
@@ -87,7 +85,7 @@
     { id: 'instructions', text: 'Put your project\'s rules in INSTRUCTIONS.md at the project root: every model reads it before each turn.' },
     { id: 'rules', text: 'Rules Harness learns go into your project\'s INSTRUCTIONS.md under "Rules Harness learned", and each one\'s line in the chat has an Undo.' },
     { id: 'learned', text: 'To see what Harness has learned, open the project\'s wiki folder (Settings → Wiki → Show in folder): lessons.md, rules.md, notes.md and setups.md.' },
-    { id: 'wiki', text: 'Each project has a wiki that Harness keeps up to date after tasks whose checks pass. Settings → Wiki shows where it is and lets you move it.' },
+    { id: 'wiki', text: 'Each project has a wiki that Harness keeps up to date after tasks whose checks pass. Settings → Wiki shows where it is, and Show in folder opens it.' },
     { id: 'correction', when: () => projectChecks().length > 0,
       text: 'When a check fails, Harness asks the bot for one fix by itself before the task comes back to you.' },
     { id: 'read-only-checks', when: () => projectChecks().length > 0,

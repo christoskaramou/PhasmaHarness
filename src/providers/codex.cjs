@@ -134,6 +134,34 @@ async function discoverCodex() {
   return (found = best);
 }
 
+// Bots get Harness's rules and skills, not the user's personal Codex setup: hooks (Codex only turns them all off),
+// plugins, the notify program, the memories store, the personality, and each skill in ~/.agents/skills and
+// ~/.codex/skills (Codex's own .system skills stay). Login, MCP servers and the project's AGENTS.md are untouched.
+// Codex 0.163 has no switch for ~/.codex/AGENTS.md or the saved approvals in ~/.codex/rules.
+// shortcut: of the user's other [features] flags only memories differed from Codex's defaults (2026-10-22); pin any
+// new personal flag here if one starts to change how bots work.
+function withoutPersonalSetup() {
+  const roots = [
+    path.join(os.homedir(), '.agents', 'skills'),
+    path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'skills'),
+  ];
+  const skills = roots.flatMap(root => {
+    let names = [];
+    try {
+      names = fs.readdirSync(root).filter(name => !name.startsWith('.'));
+    } catch { /* no such folder */ }
+    return names.map(name => path.join(root, name, 'SKILL.md')).filter(file => fs.existsSync(file));
+  });
+
+  // JSON string escapes are valid TOML basic-string escapes.
+  const off = skills.map(file => `{path=${JSON.stringify(file.replace(/\\/g, '/'))}, enabled=false}`);
+  const args = ['-c', 'features.hooks=false', '-c', 'features.plugins=false', '-c', 'features.memories=false', '-c', 'notify=[]',
+    '-c', 'personality="none"'];
+  if (off.length)
+    args.push('-c', `skills.config=[${off.join(', ')}]`);
+  return args;
+}
+
 class CodexClient extends EventEmitter {
   constructor(cwd) {
     super();
@@ -149,7 +177,7 @@ class CodexClient extends EventEmitter {
     const executable = await findCodex();
     if (this.closed) throw new Error('Codex connection closed during discovery.');
     this.version = formatCodexVersion(executable.version);
-    this.process = spawnOwned(spawn, executable.command, [...executable.args, 'app-server', '--stdio'], {
+    this.process = spawnOwned(spawn, executable.command, [...executable.args, 'app-server', ...withoutPersonalSetup(), '--stdio'], {
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: this.cwd,
@@ -216,4 +244,4 @@ class CodexClient extends EventEmitter {
   }
 }
 
-module.exports = { CodexClient, findCodex, codexVersion, parseCodexVersion, compareCodexVersions };
+module.exports = { CodexClient, findCodex, codexVersion, parseCodexVersion, compareCodexVersions, withoutPersonalSetup };

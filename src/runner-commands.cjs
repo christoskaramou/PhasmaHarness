@@ -3,6 +3,9 @@ function assertRunnerOpen(agents, name) {
     throw new Error('The runner is stopping or updating. Reopen Harness when it finishes.');
 }
 
+// You watch a sub-bot's chat; its work comes from the bot that made it.
+const WATCH_ONLY = 'This bot works for the bot that made it; only that bot gives it work.';
+
 function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolder, stopDownloads }) {
   const { controller, agents, wikiStore, documents, updater } = runner;
   const preparing = new Set();
@@ -47,8 +50,14 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
     const workers = controller.catalog().filter(p => p.worker && p.enabled && controller.available(p));
     return { data: controller.smartRouter.benchmarks.data, summary: controller.smartRouter.benchmarks.summary(workers) };
   });
-  handle('create', (workspace, access, agentId) => agents.conversation(agents.controller(agentId), true, workspace, access));
-  handle('permissions', (id, access) => agents.owner(id).permissions(id, access));
+  handle('create', (workspace, access, agentId) => {
+    if (agents.isSubBot(agents.profile(agentId))) throw new Error(WATCH_ONLY);
+    return agents.conversation(agents.controller(agentId), true, workspace, access);
+  });
+  handle('permissions', (id, access) => {
+    if (agents.isSubBot(agents.profile(agents.owner(id).agentId))) throw new Error(WATCH_ONLY);
+    return agents.owner(id).permissions(id, access);
+  });
   handle('load', id => agents.owner(id).load(id));
   handle('image', (id, itemId, index) => {
     if (typeof id !== 'string' || !id) throw new Error('Invalid image request.');
@@ -57,8 +66,6 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
   handle('rename', (id, title) => agents.owner(id).rename(id, title));
   handle('archive', id => agents.owner(id).archive(id));
   handle('deleteSession', id => agents.owner(id).deleteSession(id));
-  handle('findContext', (id, query, mode, agentId) => (id ? agents.owner(id) : agents.controller(agentId)).findContext(id, query, mode));
-  handle('cancelContext', agentId => { const worker = agents.controller(agentId); if (!worker.busy) worker.contextSearch.cancel(); });
   handle('preview', (id, text, mode, agentId) => (id ? agents.owner(id) : agents.controller(agentId)).preview(id, text, mode));
   handle('send', async message => {
     if (!message || typeof message !== 'object' || Array.isArray(message)) throw new Error('Choose a conversation and message.');
@@ -67,6 +74,7 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
     if (!Array.isArray(images) || images.length > 4 || images.some(url => typeof url !== 'string') ||
         images.reduce((n, url) => n + url.length, 0) > 12 * 1024 * 1024) throw new Error('Attach up to four images, under 8 MB total.');
     const worker = agents.owner(message.id); agents.sync(worker);
+    if (agents.isSubBot(agents.profile(worker.agentId))) throw new Error(WATCH_ONLY);
     const request = { id: message.id, abort: new AbortController() };
     preparing.add(request);
     try {
@@ -93,7 +101,10 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
   handle('reviseJob', args => agents.reviseUserJob(args));
   handle('reconcileJob', args => agents.reconcileJob(args));
   handle('updateStatus', () => updater.state);
-  handle('queuedMessage', (id, messageId, action) => agents.owner(id).queuedMessage(id, messageId, action));
+  handle('queuedMessage', (id, messageId, action) => {
+    if (agents.isSubBot(agents.profile(agents.owner(id).agentId))) throw new Error(WATCH_ONLY);
+    return agents.owner(id).queuedMessage(id, messageId, action);
+  });
   handle('compact', id => agents.owner(id).compact(id));
   handle('replySuggestion', id => agents.owner(id).replySuggestion(id));
   handle('clearConversation', async (agentId, groupId) => {

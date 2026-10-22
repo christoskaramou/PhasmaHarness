@@ -18,10 +18,27 @@ const { Dictation } = require('./dictation.cjs');
 const { DocumentReader } = require('./documents.cjs');
 const { sweepAgentFiles } = require('./providers/antigravity.cjs');
 
+// The fixed wikis folder. The earlier one ("workspace-data") is renamed once; if that fails, it stays in use so no
+// project knowledge is lost.
+function wikisFolder(base, log) {
+  const wikis = path.join(base, 'Wikis');
+  const previous = path.join(base, 'workspace-data');
+  if (fs.existsSync(wikis) || !fs.existsSync(previous))
+    return wikis;
+
+  try {
+    fs.renameSync(previous, wikis);
+    return wikis;
+  } catch (error) {
+    log?.warn('Wikis folder not renamed; using the previous one', { error: error.message });
+    return previous;
+  }
+}
+
 async function createRunner({ app, data = app?.getPath('userData'), safeStorage, fetch = globalThis.fetch, log, quit }) {
   if (!data || !path.isAbsolute(data)) throw new Error('Choose an absolute runner data directory.');
   const version = app?.getVersion() || require('../package.json').version;
-  const wikiStore = new WikiStore(path.join(app && !app.isPackaged ? app.getAppPath() : data, 'workspace-data'));
+  const wikiStore = new WikiStore(wikisFolder(app && !app.isPackaged ? app.getAppPath() : data, log));
   const store = path.join(data, 'sessions.json');
   backupStores(store);
   const containment = await containRunner(data);

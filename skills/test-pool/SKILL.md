@@ -5,7 +5,7 @@ description: After finishing a fix or a task that changed code in a repository, 
 
 # Test pool
 
-Each repository keeps a pool of regression tests in `.testpool/catalog.json`. After every agent reply a Stop hook runs the pool runner. It:
+Each repository keeps a pool of regression tests in `.testpool/catalog.json`. After every agent reply the pool runner runs: Phasma Harness starts it once your reply is done, elsewhere a Stop hook does. It:
 
 1. Finds the files changed since the last check.
 2. Keeps the tests whose `paths` match those files.
@@ -112,12 +112,14 @@ Results are written to `.testpool/runs/`: `last.json`, `history.jsonl`, and one 
 
 ## When a `Test pool:` failure report arrives
 
-- **Your change caused it:** fix the code and finish your reply. The hook reruns the failing test.
+- **Your change caused it:** fix the code and finish your reply. The runner reruns the failing test.
 - **It is unrelated or pre-existing:** say that plainly in your reply. Don't change the code under test to hide it.
 - **Never** weaken, disable or delete a failing test to make it pass. If the test itself is wrong, fix the test and explain why.
 - Automatic retries stop after `maxBlocks` for the same failures. Report what is still failing.
 
 ## Setup (once per machine)
+
+In Phasma Harness there is nothing to set up: Harness runs the pool itself. Do not install the hooks from a Harness bot.
 
 - `node "{{SKILL_DIR}}/scripts/install.cjs"` installs this skill for Claude Code (`~/.claude/skills`), Codex and Cursor (`~/.agents/skills`). It also adds the Stop hook to:
   - `~/.claude/settings.json`

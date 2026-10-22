@@ -178,15 +178,16 @@
     <div class="dialog-heading"><h2 id="agent-heading">New agent</h2><button type="button" class="close-dialog icon-button" aria-label="Close agent editor">×</button></div>
     <label>Name<input id="agent-name" required maxlength="60" placeholder="Researcher"></label>
     <label>Role &amp; instructions<textarea id="agent-instructions" rows="4" maxlength="8000" placeholder="e.g. Review code for bugs. Explain each finding and keep changes read-only."></textarea></label>
-    <label>Workspace<span class="path-field"><input id="agent-workspace" required><button id="agent-browse" type="button">Browse…</button></span></label>
-    <div class="agent-form-options"><label>Model<select id="agent-model"></select></label><label>Access<select id="agent-access"></select></label></div>
+    <div class="workspace-field"><span>Workspace</span><label class="inherit-check"><input type="checkbox" id="agent-inherit">Inherit</label><span class="path-field" id="agent-workspace-row"><input id="agent-workspace" required aria-label="Workspace"><button id="agent-browse" type="button">Browse…</button></span></div>
+    <div class="agent-form-options"><label>Model<select id="agent-model"></select></label><label>Effort<select id="agent-effort"></select></label><label>Access<select id="agent-access"></select></label></div>
     <p class="hint">Your agent is saved immediately. Connections start in the background.</p>
     <p id="agent-error" class="turn-error" role="alert"></p><div class="dialog-footer"><button id="agent-save" class="primary" type="submit">Create agent</button></div>
   </form></dialog>
   <dialog id="hub-dialog" aria-labelledby="hub-heading"><form id="hub-form">
     <div class="dialog-heading"><h2 id="hub-heading">Edit main Bot</h2><button type="button" class="close-dialog icon-button" aria-label="Close edit">×</button></div>
     <label>Name<input id="hub-name" required maxlength="60"></label>
-    <label>Model<select id="hub-model" required></select></label>
+    <label>Workspace<span class="path-field"><input id="hub-workspace" required><button id="hub-browse" type="button">Browse…</button></span></label>
+    <div class="agent-form-options"><label>Model<select id="hub-model" required></select></label><label>Effort<select id="hub-effort"></select></label><label>Access<select id="hub-access"></select></label></div>
     <p id="hub-error" class="turn-error" role="alert"></p><div class="dialog-footer"><button id="hub-save" class="primary" type="submit">Save</button></div>
   </form></dialog>
   <dialog id="settings-dialog"><form id="settings-form">
@@ -201,9 +202,9 @@
     </div>
     <div class="settings-body">
     <div id="panel-wiki" class="settings-panel" role="tabpanel" aria-labelledby="tab-wiki" hidden>
-      <h3 class="settings-section">Workspace wiki <span id="wiki-kind"></span></h3>
+      <h3 class="settings-section">Workspace wiki</h3>
       <p id="wiki-location" role="status"></p>
-      <div class="compact-actions"><button type="button" id="wiki-open">Show in folder</button><button type="button" id="wiki-choose">Change folder</button><button type="button" id="wiki-reset">Reset to default</button></div>
+      <div class="compact-actions"><button type="button" id="wiki-open">Show in folder</button></div>
       <label id="wiki-check-row">Check wiki updates with Jev<select id="settings-wiki-check" aria-describedby="wiki-check-detail"><option value="off">Off</option><option value="on">Log only</option></select></label>
       <p id="wiki-check-detail" class="hint"></p>
     </div>
@@ -236,11 +237,6 @@
       <p class="hint">The connection link grants access to this runner. Keep it private.</p>
     </details>
     <button type="button" id="remote-logout">Disconnect this browser</button>
-    <label>Background usage threshold (%)<input id="settings-background-usage" type="number" min="1" max="100" step="1" value="90"></label>
-    <label id="settings-workspace-row">Agent workspace<div class="path-field"><input id="settings-workspace" readonly><button id="settings-browse" type="button">Browse</button></div></label>
-    <button id="context-search" type="button">Find project context</button>
-    <label>Agent permissions<select id="settings-access" aria-describedby="settings-access-detail"></select></label>
-    <p id="settings-access-detail" class="hint"></p>
     <h3 class="settings-section">Routing</h3>
     <label>Routing model (Auto)<select id="settings-router-preset"></select></label>
     <label>Jev quick answers<select id="settings-quick"><option value="on">On</option><option value="off">Off</option></select></label>
@@ -359,19 +355,11 @@
       <p id="job-update-feedback" role="status" hidden></p>
     </form>
   </dialog>
-  <dialog id="context-dialog" aria-labelledby="context-heading">
-    <div class="dialog-heading"><h2 id="context-heading">Find project context</h2><button type="button" class="close-dialog" aria-label="Close context search">Close</button></div>
-    <p class="muted">Search the selected workspace source and documentation. Jev sends the question and up to 12 bounded excerpts to TypeSafe. Results are starting evidence; continue searching when needed.</p>
-    <form id="context-form"><label>Question<input id="context-query" maxlength="1000" required placeholder="How are frame resources synchronized?"></label>
-      <div class="context-controls"><select id="context-mode" aria-label="Context ranking"><option value="local">Local search</option><option value="jev">Local + Jev ranking</option></select><button id="context-run" class="primary" type="submit">Search</button><button id="context-cancel" type="button" hidden>Stop search</button></div>
-    </form>
-    <p id="context-status" class="muted" role="status"></p><div id="context-results"></div>
-    <button id="context-attach" type="button" hidden>Add results to message</button>
-  </dialog>
   <dialog id="delete-dialog" aria-labelledby="delete-heading" aria-describedby="delete-description"><form id="delete-form">
     <h2 id="delete-heading">Delete agent?</h2>
     <p id="delete-title"></p>
     <p id="delete-description" class="muted">Remove this agent and its conversation from the app. Local conversation files are kept for recovery. Workspace files stay intact.</p>
+    <p id="delete-subbots" class="muted" hidden></p>
     <p id="delete-error" class="turn-error" role="alert" hidden></p>
     <div class="dialog-footer"><button type="button" class="close-dialog" autofocus>Cancel</button><button id="delete-confirm" class="danger" type="submit">Delete</button></div>
   </form></dialog>

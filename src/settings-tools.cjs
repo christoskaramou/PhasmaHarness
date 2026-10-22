@@ -1,7 +1,7 @@
 const { randomUUID } = require('node:crypto');
 
 const GENERAL = {
-  backgroundUsageLimit: 'Whole percentage from 1 to 100', routingModel: 'jev or an ID from routerChoices',
+  routingModel: 'jev or an ID from routerChoices',
   effortCap: ['low', 'medium', 'high', 'xhigh', 'max'],
   jevEnabled: 'boolean', jevQuickAnswers: 'boolean', jevCompare: 'boolean', wikiAssessment: 'boolean',
   contextRanking: ['local', 'jev'], toolSelection: ['off', 'jev'], largeResponses: 'boolean',
@@ -15,7 +15,7 @@ const SPECIAL = {
   models: 'Model action: { action: toggle, id, enabled }, { action: toggleCodexModel, model, enabled }, or { action: enableDiscovered, provider, model, label }',
   providerKey: '{ id: provider ID, key: new secret or null to remove }; reads show configured flags only',
   jevKey: 'New secret or null to remove; reads show configured status only',
-  checks: 'Array of workspace checks using the existing Checks format', wikiFolder: 'Absolute wiki folder or null to reset',
+  checks: 'Array of workspace checks using the existing Checks format', wikiFolder: 'This workspace’s wiki folder (fixed, read only)',
   benchmarks: 'Validated benchmark snapshot or null to reset to bundled evidence',
 };
 const MANUAL = new Set(['access', 'workspace', 'browserAccess', 'providers', 'providerConnection', 'providerKey', 'jevKey', 'checks', 'wikiFolder', 'startAtSignIn']);

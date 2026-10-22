@@ -120,7 +120,8 @@ class ProviderLimits {
       (this.quotas[provider] ||= {})[key] = { usedPercent: window.usedPercent, resetsAt: seconds(window.resetsAt), at: this.now() };
     }
   }
-  backgroundGuard(provider, threshold = 90, model = null, account = null) {
+  // A window reported full (100% used) holds background work before a turn fails on it; direct chat is never held.
+  backgroundGuard(provider, threshold = 100, model = null, account = null) {
     if (!['codex', 'claude-cli'].includes(provider)) return null;
     const windows = Object.values(this.quotas[provider] || {}).filter(window =>
       (provider !== 'claude-cli' || (account && window.account === account && covers(window, model))) &&
@@ -132,7 +133,7 @@ class ProviderLimits {
     const until = resets.every(Number.isFinite) ? Math.max(...resets) : null;
     const limiting = windows.find(window => window.usedPercent === usedPercent);
     return { provider, usedPercent, threshold, until,
-      reason: `Background work paused: ${provider === 'codex' ? 'ChatGPT' : 'Claude Code' + (limiting.label ? ' ' + limiting.label : '')} reported ${usedPercent}% usage (background threshold ${threshold}%).` +
+      reason: `Background work paused: ${provider === 'codex' ? 'ChatGPT' : 'Claude Code' + (limiting.label ? ' ' + limiting.label : '')} reported ${usedPercent}% usage.` +
         (limiting.scopeUnknown ? ' Its model scope is unavailable, so all Claude background work is protected.' : '') };
   }
   active() {

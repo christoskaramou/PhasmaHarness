@@ -19,7 +19,11 @@ const COMPARE = { name: 'compare', description: 'Only when the user explicitly a
   inputSchema: { type: 'object', properties: { task: { type: 'string', maxLength: 14000 }, change: { type: 'string', maxLength: 4000 },
     target: { type: 'string', enum: ['bot', 'project'] }, pairs: { type: 'integer', minimum: 1, maximum: 3 }, workspace: { type: 'string' },
     mode: { type: 'string' }, effort: { type: 'string' } }, additionalProperties: false } };
-const HUB_TOOLS = [WORK, COMPARE, ...TOOLS.filter(t => t.name !== 'agent_delegate').map(t => t.name === 'agent_create' ? HUB_CREATE : t)];
+// Hub only: the user's requests to rename a bot or change its role or model. Its workspace and access stay as they are.
+const UPDATE = { name: 'agent_update', description: 'Only when the user asks: change an existing bot’s name, role and instructions, or model and effort. Pass only what changes. Its workspace and access stay as they are (agent_set_access changes access; the workspace changes only in its Edit dialog). For a model, call agent_models and pass its mode; set effort only when requested. The bot must be idle.',
+  inputSchema: { type: 'object', properties: { agentId: { type: 'string', minLength: 1 }, name: { type: 'string', minLength: 1, maxLength: 60 },
+    instructions: { type: 'string', maxLength: 8000 }, mode: { type: 'string' }, effort: { type: 'string' } }, required: ['agentId'], additionalProperties: false } };
+const HUB_TOOLS = [WORK, COMPARE, UPDATE, ...TOOLS.filter(t => t.name !== 'agent_delegate').map(t => t.name === 'agent_create' ? HUB_CREATE : t)];
 const workReply = result => (result.agents
   ? `Sent the task to ${result.agents.length} agents: ${result.agents.map(agent => `**${agent.agent}**`).join(', ')}. I’ll collect all their results. Each agent runs independently.`
   : result.status === 'queued' ? `Queued the task for **${result.agent}**. Their current work continues; I will bring the result back here.`

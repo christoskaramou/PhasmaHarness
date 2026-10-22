@@ -113,6 +113,8 @@ class Controller extends EventEmitter {
       if (session.queueSending) for (const message of session.queue || []) {
         message.uncertain = true; message.error = 'App closed during delivery. Check the conversation before resending.';
       }
+      for (const message of session.queue || [])
+        delete message.sending;
       session.queueSending = false;
       session.compacting = false;
       session.submission = null;
@@ -246,7 +248,6 @@ class Controller extends EventEmitter {
       routing: this.routing, routingProvider: this.routingProvider, routerModel: this.routingProvider === 'jev' ? this.smartRouter.jev?.model || JEV_MODEL : this.routerChoices().find(p => p.id === this.data.settings.routerPreset)?.model || null,
       jev: { configured: !!this.smartRouter.jev?.configured, keySaved: !!(this.smartRouter.jev?.keyStore?.configured ?? this.smartRouter.jev?.configured), enabled: this.data.settings.jevEnabled !== false, model: this.smartRouter.jev?.model || null, requestedModel: JEV_MODEL, compare: this.jevCompare?.summary() || null, health: this.smartRouter.jev?.health || null },
       decisions: this.trace.summary(),
-      contextRoot: this.contextSearch?.root || null,
       helperCapabilities: {
         projectContext: { codex: true, responsesApi: true, claudeCli: true, cursorCli: true },
         jevToolRecommendations: { codex: true, responsesApi: true, claudeCli: 'codex-thread-mcp-catalog', cursorCli: 'codex-thread-mcp-catalog' },
@@ -355,11 +356,6 @@ class Controller extends EventEmitter {
         throw new Error('Invalid tips setting.');
 
       next.showTips = values.showTips;
-    }
-    if (values.backgroundUsageLimit !== undefined) {
-      if (!Number.isInteger(values.backgroundUsageLimit) || values.backgroundUsageLimit < 1 || values.backgroundUsageLimit > 100)
-        throw new Error('Background usage threshold must be a whole percentage from 1 to 100.');
-      next.backgroundUsageLimit = values.backgroundUsageLimit;
     }
     if (values.toolSelection !== undefined || values.largeResponses !== undefined) {
       if (this.busy && ((values.toolSelection !== undefined && values.toolSelection !== next.toolSelection) ||
@@ -1035,6 +1031,9 @@ class Controller extends EventEmitter {
   }
 
   settle(session) {
+    if (session)
+      this.testPoolAfterTurn(session);
+
     if (!session || this.busy || this.blockedReason() || session.queueSending || this.connection !== 'ready' || session.queuePaused) return;
     setImmediate(() => {
       if (this.busy || this.blockedReason() || session.queueSending || this.connection !== 'ready' || session.queuePaused || !this.data.sessions.includes(session)) return;
@@ -1074,6 +1073,8 @@ class Controller extends EventEmitter {
     if (action === 'send') session.queuePaused = false;
     if (action === 'live' && (!this.liveInput || session.delegation || message.agentReply || activeTask?.state === 'checking'))
       throw new Error('Live input is unavailable for this turn.');
+    // Sending: the queue list hides it at once, though it stays queued until the provider takes it; a failure shows it again.
+    message.sending = true;
     session.queueSending = true;
     try {
       this.save(); this.changed();
@@ -1103,7 +1104,7 @@ class Controller extends EventEmitter {
       message.error = error.message;
       message.uncertain = /timed out|closed|disconnect/i.test(error.message);
       throw error;
-    } finally { session.queueSending = false; this.save(); this.changed(); this.settle(session); this.flushLiveQueue(session); }
+    } finally { delete message.sending; session.queueSending = false; this.save(); this.changed(); this.settle(session); this.flushLiveQueue(session); }
   }
 
   flushLiveQueue(session) {

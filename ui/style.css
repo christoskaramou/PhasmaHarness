@@ -88,11 +88,6 @@ input:not([type=checkbox]):not([type=radio]):not([type=file]), select {
   padding-block: max(0px, calc(7.25px - .125lh));
 }
 
-#settings-background-usage {
-  margin-left: 12px;
-  width: 5em;
-}
-
 select {
   cursor:pointer
 }
@@ -1168,66 +1163,6 @@ dialog label select {
   margin:15px 0
 }
 
-#panel-general #settings-workspace-row {
-  margin-bottom:6px;
-}
-
-#context-search {
-  margin-top:0;
-  text-align:left;
-  font-size:calc(12px * var(--font-scale,1))
-}
-
-#context-dialog {
-  width:820px;
-  max-width:calc(100vw - 40px)
-}
-
-#context-query {
-  display:block;
-  width:100%;
-  margin-top:10px
-}
-
-.context-controls {
-  display:flex;
-  gap:8px;
-  flex-wrap:wrap
-}
-
-.context-controls select {
-  flex:1
-}
-
-#context-status {
-  white-space:pre-wrap
-}
-
-.context-hit {
-  border:1px solid var(--border);
-  border-radius:8px;
-  padding:12px;
-  margin:12px 0
-}
-
-.context-hit summary {
-  font-size:calc(12px * var(--font-scale,1));
-  overflow-wrap:anywhere;
-  cursor:pointer
-}
-
-.context-hit pre {
-  white-space:pre-wrap;
-  overflow-wrap:anywhere;
-  font:calc(11px * var(--font-scale,1))/1.6 Consolas,monospace;
-  max-height:240px;
-  overflow:auto
-}
-
-#context-attach {
-  margin-top:12px
-}
-
 header>div:first-child {
   min-width:0
 }
@@ -2105,13 +2040,6 @@ dialog {
   margin:14px 0 16px
 }
 
-#wiki-kind {
-  color:var(--muted);
-  font-weight:400;
-  text-transform:none;
-  letter-spacing:0
-}
-
 .provider-install {
   padding:2px 10px;
   font-size:calc(12px * var(--font-scale,1))
@@ -2820,10 +2748,16 @@ select:focus-visible {
   margin-left:auto
 }
 
+/* Model and its Effort share the first row and Access sits under Model, at every width. */
 .agent-form-options {
   display:grid;
-  grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));
-  gap:16px
+  grid-template-columns:minmax(0,2fr) minmax(0,1fr);
+  gap:12px 16px;
+  margin:17px 0
+}
+
+#agent-dialog .agent-form-options label,#hub-dialog .agent-form-options label {
+  margin:0
 }
 
 #agent-dialog textarea {
@@ -2843,20 +2777,40 @@ select:focus-visible {
   margin:17px 0
 }
 
-#agent-dialog .path-field {
+/* Workspace, then its Inherit tick; ticked hides the folder field. */
+#agent-dialog .workspace-field {
+  display:grid;
+  gap:7px;
+  margin:17px 0;
+  font-size:calc(12px * var(--font-scale,1))
+}
+
+#agent-dialog .inherit-check {
+  display:flex;
+  align-items:center;
+  gap:6px;
+  margin:0
+}
+
+#agent-dialog .inherit-check input {
+  width:auto;
+  margin:0
+}
+
+#agent-dialog .path-field,#hub-dialog .path-field {
   margin:0;
   min-width:0
 }
 
-#agent-dialog .path-field input {
+#agent-dialog .path-field input,#hub-dialog .path-field input {
   min-width:0
 }
 
-#agent-dialog .path-field button {
+#agent-dialog .path-field button,#hub-dialog .path-field button {
   flex:none
 }
 
-#agent-dialog label select {
+#agent-dialog label select,#hub-dialog label select {
   margin:0
 }
 
@@ -2875,11 +2829,6 @@ select:focus-visible {
 
   .agents-toolbar {
     align-items:flex-start
-  }
-
-  .agent-form-options {
-    grid-template-columns:1fr;
-    gap:0
   }
 
 }
@@ -3467,6 +3416,44 @@ dialog {
 .agent-nav {
   position: relative;
   padding: 5px 8px;
+}
+
+/* How many bots a creator has under it. */
+.agent-subbots {
+  flex: none;
+  min-width: calc(16px * var(--font-scale, 1));
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--hover);
+  color: var(--muted);
+  font-size: calc(10px * var(--font-scale, 1));
+  line-height: calc(16px * var(--font-scale, 1));
+  text-align: center;
+}
+
+/* Sub-bots sit under the bot that made them, one step in per level, a little smaller. */
+#agent-list .agent-nav {
+  margin-left: calc(var(--depth, 0) * 14px);
+  width: calc(100% - var(--depth, 0) * 14px);
+}
+
+#agent-list .agent-nav-sub {
+  padding-block: 3px;
+}
+
+#agent-list .agent-nav-sub .agent-avatar {
+  width: calc(20px * var(--font-scale, 1));
+  height: calc(20px * var(--font-scale, 1));
+  border-radius: 6px;
+  font-size: calc(8px * var(--font-scale, 1));
+}
+
+#agent-list .agent-nav-sub .agent-nav-label strong {
+  font-size: calc(11px * var(--font-scale, 1));
+}
+
+#agent-list .agent-nav-sub .agent-nav-preview {
+  font-size: calc(10px * var(--font-scale, 1));
 }
 
 .agent-nav[aria-pressed=true] {

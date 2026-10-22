@@ -14,6 +14,20 @@ const { readWiki, assessWikiUpdate } = require('../workspace/wiki-assess.cjs');
 const { lessonFromTask, recordLesson, readLessons, relevantLessons, lessonsOffer, sameLesson, diffHashes } = require('../lessons.cjs');
 const { restoreCheckFiles } = require('../comparisons.cjs');
 
+const TEST_POOL = path.resolve(__dirname, '..', '..', 'skills', 'test-pool', 'scripts', 'testpool.cjs');
+// One test pool run per repository at a time; a turn that ends meanwhile gets one more run afterwards.
+const poolRuns = new Map();
+
+// The folder holding .testpool/catalog.json, looking up from the workspace.
+function poolRoot(workspace) {
+  for (let dir = path.resolve(workspace || '.'); ; dir = path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, '.testpool', 'catalog.json')))
+      return dir;
+    if (path.dirname(dir) === dir)
+      return null;
+  }
+}
+
 module.exports = {
   openTask(session, selected, text, clientId, taskMode) {
     if (!shouldTrack(taskMode) || selected?.directAnswer) return null;
@@ -387,6 +401,102 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
       this.writeTaskFile(session, task);
       this.releaseSlot(session);
     }
+  },
+
+  // After a bot's turn has settled (its checks included), the repository's test pool (.testpool/catalog.json, see
+  // skills/test-pool) runs in the background, so no reply waits for it. Only after Full-access turns, where the bot could
+  // already run anything: after a Workspace turn the catalog and its scripts may be the bot's own, and Harness would run
+  // them outside the sandbox. Gap, as with the old global Stop hooks: what a Workspace bot wrote earlier still runs on the
+  // next Full-access turn in that repository. Cursor bots still run the user's own Stop hook.
+  testPoolAfterTurn(session) {
+    if (!this.testPoolDue?.delete(session.id))
+      return;
+
+    const trusted = session.access === 'danger-full-access' && session.activeProvider !== 'cursor' && !this.isCoordinator();
+    const root = trusted ? poolRoot(session.workspace) : null;
+    if (root)
+      this.startTestPool(root, session);
+  },
+
+  startTestPool(root, session) {
+    const running = poolRuns.get(root);
+    if (running) {
+      running.again = () => this.startTestPool(root, session);
+      return;
+    }
+
+    const entry = {};
+    poolRuns.set(root, entry);
+    this.runTestPool(root, session)
+      .catch(error => this.log?.warn('Test pool run failed', { message: error.message }))
+      .finally(() => {
+        poolRuns.delete(root);
+        entry.again?.();
+      });
+  },
+
+  // The script's Stop-hook entry point keeps its own lock, change tracking and per-chat retry cap: exit 2 with the
+  // report means "send it back to the bot", a systemMessage is a notice (passed, invalid, still failing), nothing means
+  // there was nothing to run.
+  async runTestPool(root, session) {
+    const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
+    // Harness's own Jev key or none, so the script never reads one from the Windows credential store.
+    try {
+      if (this.smartRouter?.jev?.configured)
+        env.JEV_API_KEY = this.smartRouter.jev.keyStore.read();
+    } catch { /* runs without Jev */ }
+    if (!env.JEV_API_KEY)
+      env.TESTPOOL_NO_JEV = '1';
+
+    const last = session.items.findLast(item => item.type === 'agentMessage' && item.phase !== 'commentary');
+    const input = { cwd: session.workspace, session_id: session.id, last_assistant_message: stripTaskStatus(last?.text) || '' };
+    const child = spawnOwned(spawn, process.execPath, [TEST_POOL, 'hook', '--agent', 'claude'], {
+      cwd: root, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env,
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', data => {
+      if (stdout.length <= OUTPUT_CAP)
+        stdout += data;
+    });
+    child.stderr.on('data', data => {
+      if (stderr.length <= OUTPUT_CAP)
+        stderr += data;
+    });
+    child.stdin.on('error', () => {});
+    child.stdin.end(JSON.stringify(input));
+    const code = await new Promise(resolve => {
+      child.once('error', () => resolve(null));
+      child.once('close', resolve);
+    });
+
+    const notice = text => {
+      session.notice = text;
+      session.noticeExpiresAt = /failed|invalid|error/i.test(text) ? null : Date.now() + 10000;
+      this.changed();
+    };
+    const report = stderr.trim();
+    if (code === 2 && report) {
+      // A job's or sub-bot's result has already gone back to the bot that asked for it, so the report only shows here.
+      if (this.executionContext)
+        return notice(report);
+
+      try {
+        await this.send({ id: session.id, text: report, routineRun: { id: 'test-pool', name: 'Test pool', occurrenceId: randomUUID() } });
+      } catch {
+        notice(report);
+      }
+      return;
+    }
+
+    let message = null;
+    try {
+      message = JSON.parse(stdout.trim() || 'null')?.systemMessage;
+    } catch { /* no notice */ }
+    if (message)
+      notice(message);
+    else if (code !== 0)
+      this.log?.warn('Test pool exited unexpectedly', { code, stderr: stderr.slice(-300) });
   },
 
   async submitCorrection(session, task) {

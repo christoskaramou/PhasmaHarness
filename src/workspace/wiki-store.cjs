@@ -3,11 +3,14 @@ const path = require('node:path');
 const { createHash } = require('node:crypto');
 
 
+// Every wiki lives in this one folder, one subfolder per workspace, and cannot be moved (the user's choice, 2026-10-22).
+// Only a project copy points its workspace at the wiki copied into it; folders chosen before that are no longer used.
 class WikiStore {
   constructor(directory) {
     this.directory = path.resolve(directory);
     this.settingsFile = path.join(this.directory, 'locations.json');
-    this.locations = fs.existsSync(this.settingsFile) ? JSON.parse(fs.readFileSync(this.settingsFile, 'utf8')) : {};
+    const saved = fs.existsSync(this.settingsFile) ? JSON.parse(fs.readFileSync(this.settingsFile, 'utf8')) : {};
+    this.locations = Object.fromEntries(Object.entries(saved).filter(([, entry]) => entry?.copy === true && typeof entry.root === 'string'));
   }
 
   identity(workspace) {
@@ -15,15 +18,13 @@ class WikiStore {
     return process.platform === 'win32' ? root.toLowerCase() : root;
   }
 
+  // A project copy's own wiki, copied in with it.
   setLocation(workspace, folder) {
     const key = this.identity(workspace);
     const locations = { ...this.locations };
-    if (folder === null) delete locations[key];
-    else {
-      if (typeof folder !== 'string' || !path.isAbsolute(folder) || !fs.statSync(folder).isDirectory())
-        throw new Error('Choose an existing absolute wiki folder.');
-      locations[key] = fs.realpathSync(folder);
-    }
+    if (typeof folder !== 'string' || !path.isAbsolute(folder) || !fs.statSync(folder).isDirectory())
+      throw new Error('Choose an existing absolute wiki folder.');
+    locations[key] = { root: fs.realpathSync(folder), copy: true };
     fs.mkdirSync(this.directory, { recursive: true });
     fs.writeFileSync(this.settingsFile + '.tmp', JSON.stringify(locations, null, 2));
     fs.renameSync(this.settingsFile + '.tmp', this.settingsFile);
@@ -33,8 +34,8 @@ class WikiStore {
 
   location(workspace) {
     const root = fs.realpathSync(workspace);
-    const custom = this.locations[this.identity(root)];
-    if (custom) return { workspace: root, root: custom, managed: false };
+    const copy = this.locations[this.identity(root)];
+    if (copy) return { workspace: root, root: copy.root, managed: false };
     const identity = process.platform === 'win32' ? root.toLowerCase() : root;
     const id = createHash('sha256').update(identity).digest('hex').slice(0, 20);
     const name = path.basename(root).replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 48) || 'workspace';

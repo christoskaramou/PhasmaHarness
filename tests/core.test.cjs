@@ -2823,6 +2823,7 @@ test('live delivery keeps a queued correction until acknowledgement and preserve
   const delivery = controller.queuedMessage(session.id, message.id, 'live');
   assert.equal(session.queue.length, 1);
   assert.equal(session.queueSending, true);
+  assert.equal(message.sending, true, 'the queue list hides it while it is on its way');
   acknowledge();
   await delivery;
   assert.equal(session.queue.length, 0);
@@ -2830,7 +2831,18 @@ test('live delivery keeps a queued correction until acknowledgement and preserve
   session.queue = [{ ...message, id: 'uncertain-note' }];
   controller.liveInput = async () => { throw new Error('Claude input disconnected before delivery was confirmed.'); };
   await assert.rejects(controller.queuedMessage(session.id, 'uncertain-note', 'live'), /disconnected/);
-  assert.equal(session.queue[0].uncertain, true);
+  assert.deepEqual([session.queue[0].uncertain, session.queue[0].sending], [true, undefined], 'a failed send shows in the queue again');
+});
+
+test('a message the app closed on while sending shows in the queue again after a restart, as unconfirmed', async t => {
+  const { controller } = await setup(t);
+  const session = controller.create();
+  session.queue = [{ id: 'mid-send', text: 'new requirement', images: [], sending: true }];
+  session.queueSending = true;
+  controller.save();
+  const restarted = reopen(controller);
+  const [message] = restarted.session(session.id).queue;
+  assert.deepEqual([message.sending, message.uncertain], [undefined, true]);
 });
 
 test('Send now steers where the provider can, uses its own queue otherwise, and steer-only providers are never fed the queue', async t => {

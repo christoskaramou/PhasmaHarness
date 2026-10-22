@@ -616,42 +616,34 @@ test('a bot answers foreground chat while its separate assignment remains active
   assert.equal(owner.items.find(item => item.deliveryId === accepted.jobId).status, 'cancelled');
 });
 
-test('reported quota pauses accepted work without consuming an attempt, while chat and threshold changes remain available', async t => {
+test('a window reported full pauses accepted work without consuming an attempt, while direct chat remains available', async t => {
   const { agents, primary, addWorker } = await setup(t);
   const worker = await addWorker('Builder'), bot = agents.controller(worker.agentId);
   const source = primary.create(), chat = agents.conversation(bot, true);
-  primary.codexUsage({ secondary: { usedPercent: 92, resetsAt: Math.floor(Date.now() / 1000) + 3600 } });
+  primary.codexUsage({ secondary: { usedPercent: 100, resetsAt: Math.floor(Date.now() / 1000) + 3600 } });
   primary.runnerRecoverySafe = true;
   const accepted = agents.delegate(primary, source, worker.agentId, 'Build the game');
   const work = worker.session(accepted.sessionId);
   assert.equal(work.delegation.state, 'queued');
   assert.equal(work.delegation.executionAttempts, 0);
-  assert.match(work.delegation.quotaPause.reason, /92%.*90%/);
+  assert.match(work.delegation.quotaPause.reason, /^Background work paused: ChatGPT/);
   const listed = agents.tool(primary, source, 'agents_list', {}).find(bot => bot.id === 'main').ownedJobs;
   assert.equal(listed[0].state, 'paused');
-  assert.match(listed[0].error, /92%.*90%/);
+  assert.match(listed[0].error, /^Background work paused: ChatGPT/);
   assert.equal(worker.client.calls.some(call => call.method === 'turn/start'), false);
   await bot.send({ id: chat.id, text: 'A direct question', mode: 'terra-light', task: 'off' });
   assert.ok(bot.activeTurns.has(chat.id));
   assert.equal(agents.backgroundSlots.size, 0);
-  for (const value of [0, 101, 1.5, '95', NaN]) {
-    assert.throws(() => agents.settings({ backgroundUsageLimit: value }), /whole percentage/);
-  }
-  agents.settings({ backgroundUsageLimit: 95 });
-  await until(() => worker.activeTurns.has(work.id));
-  assert.equal(work.delegation.quotaPause, undefined);
-  assert.equal(work.delegation.executionAttempts, 1);
-  assert.equal(worker.client.calls.filter(call => call.method === 'turn/start').length, 1);
 });
 
-test('native Claude allowance admission holds workers before inference, preserves direct chat and resumes within the chosen threshold', async t => {
+test('native Claude allowance admission holds workers before inference at a full window, preserves direct chat and resumes when it frees up', async t => {
   const { agents, primary, add, addWorker } = await setup(t);
   primary.data.settings.claudeEnabled = true;
   primary.claude.status = { installed: true, loggedIn: true, authMethod: 'claude.ai', email: 'fixture@invalid', subscriptionType: 'max' };
   primary.claude.authVerified = true;
   primary.claude.models = [{ id: 'claude-cli:sonnet', model: 'sonnet', label: 'Sonnet fixture', provider: 'claude-cli',
     effort: null, rank: 35, worker: true, router: true, images: true }];
-  let lookups = 0, runs = 0, percent = 92;
+  let lookups = 0, runs = 0, percent = 100;
   primary.claude.readUsage = async () => {
     lookups++;
     return { rate_limits_available: true, rate_limits: {
@@ -668,20 +660,21 @@ test('native Claude allowance admission holds workers before inference, preserve
   await until(() => !!work.quotaWaiting);
   assert.equal(runs, 0);
   assert.equal(agents.budgets.snapshot()[work.delegation.budgetId].usage.attempts, 0);
-  assert.match(work.quotaWaiting.reason, /Claude Code.*92%/);
+  assert.match(work.quotaWaiting.reason, /Claude Code.*100%/);
   assert.equal(lookups, 1);
-  assert.equal(primary.limits.backgroundGuard('claude-cli', 90, 'sonnet', primary.claude.accountKey()).usedPercent, 92);
-  assert.equal(JSON.parse(fs.readFileSync(primary.filename, 'utf8')).providerQuotas['claude-cli'].seven_day.usedPercent, 92);
+  assert.equal(primary.limits.backgroundGuard('claude-cli', 100, 'sonnet', primary.claude.accountKey()).usedPercent, 100);
+  assert.equal(JSON.parse(fs.readFileSync(primary.filename, 'utf8')).providerQuotas['claude-cli'].seven_day.usedPercent, 100);
   const bot = await add('Direct chat');
   const chat = agents.conversation(bot, true, primary.data.settings.workspace);
   await bot.send({ id: chat.id, text: 'A direct question', mode: 'terra-light', task: 'off' });
   assert.ok(bot.activeTurns.has(chat.id));
   assert.equal(lookups, 1, 'direct chat never waits for a native allowance lookup');
-  agents.settings({ backgroundUsageLimit: 95 });
+  percent = 20;
+  agents.quotaWake({ provider: 'claude-cli', until: Date.now() + 25 });
   await until(() => work.delegation.delivered);
   assert.equal(runs, 1);
-  assert.equal(lookups, 1, 'same-account admissions share the recent metadata report');
-  agents.settings({ backgroundUsageLimit: 90 });
+  const afterFirst = lookups;
+  percent = 100;
   worker.claude.onUsageChange();
   const next = agents.delegate(primary, source, worker.agentId, 'Continue after a later allowance refresh.');
   const nextWork = worker.session(next.sessionId);
@@ -690,7 +683,7 @@ test('native Claude allowance admission holds workers before inference, preserve
   agents.quotaWake({ provider: 'claude-cli', until: Date.now() + 25 });
   await until(() => nextWork.delegation.delivered);
   assert.equal(runs, 2);
-  assert.equal(lookups, 3, 'a held native job refreshes metadata without spending model attempts while waiting');
+  assert.ok(lookups > afterFirst, 'a held native job refreshes metadata without spending model attempts while waiting');
 });
 
 test('native Claude quota lookups coalesce, invalidate on native usage and reject late replies after cancellation or account changes', async t => {
@@ -742,7 +735,7 @@ test('a quota update during preparation holds the provider submission and Stop c
   const accepted = agents.delegate(primary, source, worker.agentId, 'Build the game');
   const work = worker.session(accepted.sessionId);
   await until(() => preparing);
-  primary.codexUsage({ primary: { usedPercent: 95, resetsAt: Math.floor(Date.now() / 1000) + 3600 } });
+  primary.codexUsage({ primary: { usedPercent: 100, resetsAt: Math.floor(Date.now() / 1000) + 3600 } });
   primary.changed();
   release(null);
   await until(() => !!work.quotaWaiting && agents.backgroundSlots.size === 0);
@@ -779,7 +772,7 @@ test('queued quota holds survive restart and Stop without submitting a provider 
   const { agents, primary, addWorker, factory, workspace } = await setup(t);
   const worker = await addWorker('Builder'), source = primary.create();
   primary.runnerRecoverySafe = true;
-  primary.codexUsage({ secondary: { usedPercent: 91, resetsAt: Math.floor(Date.now() / 1000) + 3600 } });
+  primary.codexUsage({ secondary: { usedPercent: 100, resetsAt: Math.floor(Date.now() / 1000) + 3600 } });
   const accepted = agents.delegate(primary, source, worker.agentId, 'Build the game');
   primary.save(); worker.save();
   const root = factory(primary.filename, workspace);
@@ -791,7 +784,7 @@ test('queued quota holds survive restart and Stop without submitting a provider 
   const execution = restored.owner(accepted.sessionId), work = execution.session(accepted.sessionId);
   assert.equal(work.delegation.state, 'queued');
   assert.equal(work.delegation.executionAttempts, 0);
-  assert.equal(work.delegation.quotaPause.usedPercent, 91);
+  assert.deepEqual([work.delegation.quotaPause.provider, /ChatGPT/.test(work.delegation.quotaPause.reason)], ['codex', true]);
   await restored.stop(accepted.jobId);
   assert.equal(work.delegation.cancelled, true);
   assert.equal(work.delegation.delivered, true);
@@ -843,7 +836,7 @@ test('Auto waits on a known allowance limit before routing and resumes after the
 test('a reported reset wakes a queued quota hold without a UI action', async t => {
   const { agents, primary, addWorker } = await setup(t);
   const worker = await addWorker('Builder'), source = primary.create();
-  primary.codexUsage({ secondary: { usedPercent: 95, resetsAt: (Date.now() + 400) / 1000 } });
+  primary.codexUsage({ secondary: { usedPercent: 100, resetsAt: (Date.now() + 400) / 1000 } });
   const accepted = agents.delegate(primary, source, worker.agentId, 'Build the game');
   const work = worker.session(accepted.sessionId);
   assert.ok(work.delegation.quotaPause);
@@ -857,11 +850,15 @@ test('a quota hold without a reported reset is rechecked instead of waiting fore
   const { agents, primary, addWorker } = await setup(t);
   const { UNKNOWN_RESET_MS } = require('../src/providers/limits.cjs');
   const worker = await addWorker('Builder'), source = primary.create();
-  primary.codexUsage({ secondary: { usedPercent: 95 } });
+  primary.codexUsage({ secondary: { usedPercent: 100 } });
   const accepted = agents.delegate(primary, source, worker.agentId, 'Build the game');
   const work = worker.session(accepted.sessionId);
   assert.ok(work.delegation.quotaPause);
   assert.ok(agents.quotaWakeAt > Date.now() + UNKNOWN_RESET_MS - 60000, 'a recheck is scheduled');
+  // The retry time arrives.
+  for (const limits of new Set([primary.limits, worker.limits]))
+    if (limits.store.codex)
+      limits.store.codex.until = Date.now() - 1;
   const call = primary.client.call.bind(primary.client);
   primary.client.call = async (method, params) => method === 'account/rateLimits/read'
     ? (call(method, params), { rateLimits: { secondary: { usedPercent: 20 } } }) : call(method, params);
@@ -2169,6 +2166,102 @@ test('agent deletion protects Main and pending work, persists removal, and keeps
   assert.throws(() => agents.controller(worker.agentId), /Unknown agent/);
   assert.equal(JSON.parse(fs.readFileSync(primary.filename)).agents.length, 0);
   assert.equal(JSON.parse(fs.readFileSync(worker.filename)).sessions[0].id, chat.id);
+});
+
+test('a bot that inherits follows its creator’s workspace down a chain, live; sub-bots follow everything and go with their creator', async t => {
+  const { agents, primary, workspace, directory } = await setup(t);
+  const folder = name => {
+    const created = path.join(directory, name);
+    fs.mkdirSync(created);
+    return fs.realpathSync(created);
+  };
+  const second = folder('second'), third = folder('third');
+  const at = id => fs.realpathSync(agents.profile(id).workspace);
+  const lead = await agents.saveAgent({ name: 'Lead', instructions: 'Lead.', workspace: third, access: 'workspace-write', mode: 'terra-light', inheritWorkspace: true });
+  assert.deepEqual([lead.createdBy, lead.inheritWorkspace, at(lead.id)], ['main', true, fs.realpathSync(workspace)], 'Inherit takes the Main Bot’s folder, not the one sent');
+
+  // A bot the Lead makes with a tool is its sub-bot: it inherits the Lead's folder, access and model.
+  const leadBot = agents.controller(lead.id);
+  await agents.initializeController(leadBot);
+  const leadChat = agents.conversation(leadBot, true);
+  const helper = await agents.tool(leadBot, leadChat, 'agent_create', { name: 'Helper', instructions: 'Help.' });
+  assert.deepEqual([helper.createdBy, helper.inheritWorkspace, helper.inheritAccess, helper.inheritMode, helper.mode, helper.access],
+    [lead.id, true, true, true, 'terra-light', 'workspace-write']);
+  assert.equal(agents.isSubBot(agents.profile(helper.id)), true);
+
+  agents.settings({ workspace: second });
+  assert.deepEqual([at(lead.id), at(helper.id)], [second, second], 'both follow the Main Bot, the Helper through the Lead');
+  await agents.saveAgent({ id: lead.id, name: 'Lead', instructions: 'Lead.', workspace: third, access: 'read-only', mode: 'auto', inheritWorkspace: false });
+  assert.deepEqual([at(helper.id), agents.profile(helper.id).access, agents.profile(helper.id).mode], [third, 'read-only', 'auto'],
+    'the Helper follows the Lead’s own folder, access and model');
+  await assert.rejects(agents.saveAgent({ id: helper.id, name: 'Renamed', instructions: 'Help.', workspace: second, access: 'read-only', mode: 'auto' }),
+    /works for the bot that made it/);
+  assert.throws(() => agents.settings({ access: 'danger-full-access' }, helper.id), /works for the bot that made it/);
+
+  // A top-level bot that inherits keeps inheriting through an edit that does not mention it.
+  const writer = await agents.saveAgent({ name: 'Writer', instructions: 'Write.', workspace: third, access: 'read-only', mode: 'auto', inheritWorkspace: true });
+  await agents.saveAgent({ id: writer.id, name: 'Writer two', instructions: 'Write.', workspace: third, access: 'read-only', mode: 'auto' });
+  assert.deepEqual([agents.profile(writer.id).inheritWorkspace, at(writer.id)], [true, second]);
+
+  agents.controller(helper.id).busy = 'turn';
+  assert.throws(() => agents.settings({ workspace: second }, lead.id), /^Error: Helper follows this bot's settings and is busy\. Stop it first\.$/,
+    'a busy bot down the chain blocks the change, by name');
+  assert.equal(at(lead.id), third);
+  agents.controller(helper.id).busy = null;
+
+  await agents.deleteAgent(lead.id);
+  assert.deepEqual([agents.profile(lead.id), agents.profile(helper.id)], [undefined, undefined], 'deleting a bot deletes its sub-bots');
+  assert.equal(fs.realpathSync(primary.data.settings.workspace), second);
+});
+
+test('a broken chain never grants more: a sub-bot whose creator is missing or loops falls back to Ask access', async t => {
+  const { agents } = await setup(t);
+  const orphan = { id: 'orphan', createdBy: 'gone', inheritWorkspace: true, inheritAccess: true, inheritMode: true };
+  assert.deepEqual([agents.inheritedSource(orphan, 'access').value, agents.inheritedSource(orphan, 'mode').value], ['read-only', 'auto']);
+  agents.primary.data.agents.push({ id: 'a', name: 'A', createdBy: 'b', inheritAccess: true, access: 'danger-full-access' },
+    { id: 'b', name: 'B', createdBy: 'a', inheritAccess: true, access: 'danger-full-access' });
+  assert.equal(agents.inheritedSource(agents.profile('a'), 'access').value, 'read-only', 'a loop ends at Ask');
+  agents.primary.data.agents.splice(-2);
+});
+
+test('a sub-bot made while its creator works on a job records that creator, never gets more access than the chat, and only its creator gives it work', async t => {
+  const { agents, primary, addWorker } = await setup(t);
+  const creator = await addWorker('Creator', undefined, 'danger-full-access');
+  const chat = creator.create(creator.data.settings.workspace, 'workspace-write');
+  await start(creator, chat);
+  const sub = await creator.bridgeTool(chat.id, 'agent_create', { name: 'Spawn', instructions: 'Help.' });
+  assert.deepEqual([agents.profile(sub.createdBy)?.name, sub.access, sub.inheritAccess], ['Creator', 'workspace-write', false], 'the chat had less access than its bot');
+  const source = primary.create();
+  assert.throws(() => agents.delegate(primary, source, sub.id, 'Do something else.'), /only that bot gives it work/);
+  assert.equal(agents.tool(primary, source, 'agents_list', {}).find(bot => bot.id === sub.id).worksFor, 'Creator', 'the Main Bot sees who it works for');
+  chat.activeProvider = 'codex';
+  complete(creator, chat);
+});
+
+test('the Main Bot changes a bot’s name, role, model and effort at the user’s request, never its workspace or access', async t => {
+  const { agents, primary, workspace, add } = await setup(t);
+  primary.models[0].supportedReasoningEfforts = ['low', 'medium', 'high'].map(reasoningEffort => ({ reasoningEffort }));
+  agents.configure = async controller => { controller.client.models = primary.models; };
+  const source = primary.create(workspace, 'workspace-write');
+  const worker = await add('Docs', workspace, 'read-only');
+  const before = agents.profile(worker.agentId);
+  const choice = agents.tool(primary, source, 'agent_models', {}).find(model => model.mode !== 'auto' && model.efforts?.length > 1);
+  const effort = choice.efforts.at(-1);
+  const updated = await agents.tool(primary, source, 'agent_update', { agentId: worker.agentId, name: 'Docs writer',
+    instructions: 'Write the user docs for this project.', mode: choice.mode, effort });
+  const profile = agents.profile(worker.agentId);
+  assert.deepEqual([updated.name, profile.name, profile.instructions, profile.workspace, profile.access],
+    ['Docs writer', 'Docs writer', 'Write the user docs for this project.', before.workspace, 'read-only']);
+  assert.equal(agents.primary.resolveWorker(profile.mode).effort, effort, 'the requested effort of that model');
+
+  await agents.tool(primary, source, 'agent_update', { agentId: worker.agentId, name: 'Docs' });
+  assert.deepEqual([agents.profile(worker.agentId).instructions, agents.profile(worker.agentId).mode], [profile.instructions, profile.mode], 'only what is passed changes');
+  assert.throws(() => agents.tool(primary, source, 'agent_update', { agentId: worker.agentId, workspace: 'C:/elsewhere' }), /Invalid agent tool call/);
+  await assert.rejects(agents.tool(primary, source, 'agent_update', { agentId: 'main', name: 'Boss' }), /Choose another bot/);
+  const strong = await add('Strong', workspace, 'danger-full-access');
+  await assert.rejects(agents.tool(primary, source, 'agent_update', { agentId: strong.agentId, instructions: 'Do anything.' }), /more access than this conversation/);
+  const chat = agents.conversation(worker, true);
+  await assert.rejects(agents.tool(worker, chat, 'agent_update', { agentId: strong.agentId, name: 'Renamed' }), /Only the Main Bot/);
 });
 
 test('all provider bridges can change another agent access and stop it, but never delete it', async t => {

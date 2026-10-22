@@ -803,6 +803,30 @@
         "fix": "Save evidence-backed lessons from corrected or failing checks and give relevant ones to the next task first message.",
         "date": "2026-10-19"
       }
+    },
+    {
+      "id": "bot-setup",
+      "name": "Bots load Harness rules, not the personal setup; the pool runs after turns",
+      "covers": "Claude and Codex bots leave out the user's hooks, personal skills, plugins and home CLAUDE.md but keep user MCP servers; the worker defaults carry the request rules under 4,000 characters; Harness runs the test pool after Full-access and Read-only turns, sends failures back as a Test pool message and only notices for jobs.",
+      "paths": [
+        "src/providers/claude.cjs",
+        "src/providers/codex.cjs",
+        "src/worker-instructions.cjs",
+        "src/controller/task-gate.cjs",
+        "src/controller/turns.cjs",
+        "src/controller.cjs",
+        "skills/**",
+        "tests/worker-defaults.test.cjs",
+        "tests/testpool-harness.test.cjs"
+      ],
+      "command": "node --test tests/worker-defaults.test.cjs tests/testpool-harness.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 120,
+      "origin": {
+        "problem": "Harness bots ran the user's global Claude Code and Codex Stop hooks (a test pool run held a reply for 8 minutes) and loaded personal skills, plugins and instructions.",
+        "fix": "Start Claude without user settings, home CLAUDE.md or plugins and Codex without hooks, plugins or personal skills; run the test pool from Harness after a turn settles.",
+        "date": "2026-10-22"
+      }
     }
   ]
 }

@@ -148,12 +148,12 @@
   const api = { remote: true };
   for (const method of ['bootstrap', 'saveAgent', 'renameHub', 'saveGroup', 'deleteAgent',
     'workspaceWiki', 'browseWorkspace', 'settings', 'benchmarkData', 'create', 'permissions', 'load', 'image', 'rename',
-    'archive', 'deleteSession', 'findContext', 'cancelContext', 'preview', 'send', 'stop', 'reviseJob', 'reconcileJob', 'jobBudget',
+    'archive', 'deleteSession', 'preview', 'send', 'stop', 'reviseJob', 'reconcileJob', 'jobBudget',
     'stopArtifactRun', 'artifactAction', 'stopDownloads', 'appInfo', 'runnerInfo', 'updateStatus', 'queuedMessage', 'replySuggestion', 'compact',
     'clearConversation', 'acknowledgeTask', 'applyCopy', 'undoComparison', 'undoRule', 'proposeWiki', 'answer', 'answerConfirmation', 'renewModels', 'providerModels'])
     api[method] = (...args) => call(method, args);
   for (const method of ['benchmarkRefresh', 'benchmarkImport', 'benchmarkApply', 'benchmarkReset', 'nativeProviderAction',
-    'runnerAutostart', 'quitRunner', 'exportConversation', 'chooseWorkspaceWiki', 'openWorkspaceWiki', 'cursorLogin',
+    'runnerAutostart', 'quitRunner', 'exportConversation', 'openWorkspaceWiki', 'cursorLogin',
     'cursorRefresh', 'cursorLogout', 'claudeLogin', 'claudeRefresh', 'claudeLogout', 'connectChatGPT', 'logoutChatGPT',
     'installProvider', 'providerSettings', 'providerKey', 'localModel', 'jevSaveKey',
     'jevRemoveKey', 'jevTest', 'checks', 'phasmaGameChecks', 'diagnostics', 'openLogs', 'checkUpdates', 'installUpdate', 'chooseWorkspace',

@@ -222,19 +222,6 @@ async function start() {
   });
   // The recorded audio; Dictation checks it is the open recording's and valid PCM before it reaches the engine.
   handle('voiceTranscribe', (id, audio) => voice.transcribe(id, audio));
-  handle('chooseWorkspaceWiki', async (id, reset = false, agentId) => {
-    const workspace = id ? agents.owner(id).session(id).workspace : agents.controller(agentId).data.settings.workspace;
-    if (reset === true) {
-      const accepted = await confirmation.ask({
-        title: 'Reset the wiki folder?', message: 'Use the default wiki folder for this workspace again.', confirmLabel: 'Reset folder',
-        details: [{ label: 'Current folder', text: wikiStore.ensure(workspace).root }], note: 'Pages in the current folder stay where they are.',
-      });
-      return accepted ? wikiStore.setLocation(workspace, null) : wikiStore.ensure(workspace);
-    }
-    const selection = await dialog.showOpenDialog(window, { title: 'Choose wiki folder for this workspace', properties: ['openDirectory'] });
-    if (selection.canceled) return wikiStore.ensure(workspace);
-    return wikiStore.setLocation(workspace, selection.filePaths[0]);
-  });
   handle('openWorkspaceWiki', async (id, agentId) => {
     const wiki = wikiStore.ensure(id ? agents.owner(id).session(id).workspace : agents.controller(agentId).data.settings.workspace);
     const error = await shell.openPath(wiki.root);

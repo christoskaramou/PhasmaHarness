@@ -156,6 +156,9 @@ module.exports = {
     }
     const stopping = this.stopping.has(session.id);
     this.stopping.delete(session.id);
+    // The test pool runs once this turn has settled (see testPoolAfterTurn).
+    if (submission.kind === 'turn' && outcome.status === 'completed' && !stopping && !maintenanceRoute)
+      (this.testPoolDue ||= new Set()).add(session.id);
     const task = submission.taskId ? (session.tasks || []).find(item => item.id === submission.taskId) : null;
     session.updated = Date.now();
     if (task && !FINAL.has(task.state)) {
