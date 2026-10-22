@@ -1569,9 +1569,13 @@ app.whenReady().then(async () => {
   assert.equal(menuView.color, await window.webContents.executeJavaScript('getComputedStyle(document.querySelector("#delete-confirm")).color'),
     'Delete retains the theme danger color');
   assert.equal(menuView.inBounds, true, 'menu stays visible near window edges');
+  assert.equal(await window.webContents.executeJavaScript('document.activeElement === document.querySelector("#agent-menu")'), true);
+  await window.webContents.executeJavaScript('document.querySelector("#agent-menu").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })); true');
   await window.webContents.executeJavaScript('document.querySelector("#agent-menu").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })); true');
   assert.equal(await window.webContents.executeJavaScript('document.activeElement.textContent'), 'Edit');
   await window.webContents.executeJavaScript('document.querySelector("#agent-menu").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); true');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#agent-dialog").open'), false, 'Enter does not activate menu buttons');
+  await window.webContents.executeJavaScript('document.activeElement.click(); true');
   for (let i = 0; i < 100 && !await window.webContents.executeJavaScript('document.querySelector("#agent-dialog").open'); i++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#agent-dialog").dataset.agentId'), profile.id);
   assert.equal(await window.webContents.executeJavaScript('selectedAgent'), 'main', 'Right-click does not switch conversations');
@@ -2139,11 +2143,27 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), '/clear');
   const confirmationView = await window.webContents.executeJavaScript(`(() => {
     const dialog = document.querySelector('.confirmation-dialog'), box = dialog.getBoundingClientRect();
-    return { focus: document.activeElement.textContent, cursor: getComputedStyle(dialog).cursor, backdrop: getComputedStyle(dialog, '::backdrop').cursor,
+    return { focus: document.activeElement === dialog, cursor: getComputedStyle(dialog).cursor, backdrop: getComputedStyle(dialog, '::backdrop').cursor,
       buttonsUnselectable: [...dialog.querySelectorAll('button')].every(button => getComputedStyle(button).userSelect === 'none'),
       fits: box.left >= 0 && box.top >= 0 && box.right <= innerWidth && box.bottom <= innerHeight };
   })()`);
-  assert.deepEqual(confirmationView, { focus: 'Keep conversation', cursor: 'default', backdrop: 'default', buttonsUnselectable: true, fits: true });
+  assert.deepEqual(confirmationView, { focus: true, cursor: 'default', backdrop: 'default', buttonsUnselectable: true, fits: true });
+  for (const target of ['.confirmation-cancel', '.confirmation-accept', 'input']) {
+    await window.webContents.executeJavaScript(`(() => {
+      const dialog = document.querySelector('.confirmation-dialog');
+      if (${JSON.stringify(target)} === 'input') {
+        const input = document.createElement('input'); input.id = 'implicit-submit-fixture'; dialog.querySelector('form').append(input);
+      }
+      dialog.querySelector(${JSON.stringify(target)}).focus();
+    })()`);
+    if (target !== 'input') assert.equal(await window.webContents.executeJavaScript('getComputedStyle(document.activeElement).outlineStyle'), 'none');
+    window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+    window.webContents.sendInputEvent({ type: 'char', keyCode: '\r' });
+    window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+    await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+    assert.equal(await window.webContents.executeJavaScript('!!document.querySelector(".confirmation-dialog[open]")'), true, 'Enter neither activates buttons nor implicitly submits forms');
+  }
+  await window.webContents.executeJavaScript('document.querySelector("#implicit-submit-fixture").remove(); document.querySelector(".confirmation-dialog").focus(); true');
   await new Promise(resolve => setTimeout(resolve, 200));
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/confirmation-clear.png'), (await window.webContents.capturePage()).toPNG());
   await window.webContents.executeJavaScript('document.querySelector(".confirmation-cancel").click(); true');
@@ -2156,7 +2176,7 @@ app.whenReady().then(async () => {
   await waitForCommand();
   assert.equal(agents.conversation(agents.controller(commandAgent)).id, oldConversation.id, 'Escape cancels without clearing');
   await submit('/clear', false); await waitForDialog();
-  assert.equal(await window.webContents.executeJavaScript('document.activeElement.textContent'), 'Keep conversation', 'reopened confirmation has a safe default');
+  assert.equal(await window.webContents.executeJavaScript('document.activeElement === document.querySelector(".confirmation-dialog")'), true, 'reopened confirmation does not select a button');
   await window.webContents.executeJavaScript('document.querySelector(".confirmation-accept").click(); true');
   await waitForCommand();
   for (let i = 0; i < 100 && await window.webContents.executeJavaScript('selectedId') === oldConversation.id; i++) await new Promise(resolve => setTimeout(resolve, 10));
@@ -2179,7 +2199,7 @@ app.whenReady().then(async () => {
   const closeAnswer = confirmation.ask({ title: 'Remove provider?', message: 'Remove this provider from Harness settings?',
     confirmLabel: 'Remove', cancelLabel: 'Keep provider', danger: true });
   await waitForDialog();
-  assert.equal(await window.webContents.executeJavaScript('document.activeElement.textContent'), 'Keep provider');
+  assert.equal(await window.webContents.executeJavaScript('document.activeElement === document.querySelector(".confirmation-dialog")'), true);
   await new Promise(resolve => setTimeout(resolve, 200));
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/confirmation-provider.png'), (await window.webContents.capturePage()).toPNG());
   await window.webContents.executeJavaScript('document.querySelector(".confirmation-close").click(); true');
@@ -2188,7 +2208,7 @@ app.whenReady().then(async () => {
   await errorWindow.loadFile(path.resolve(__dirname, '../ui/startup-error.html'), { query: { message: '<test> startup failure' } });
   assert.equal(await errorWindow.webContents.executeJavaScript('document.querySelector(".confirmation-dialog").open'), true);
   assert.equal(await errorWindow.webContents.executeJavaScript('document.querySelector("#confirmation-description").textContent'), '<test> startup failure');
-  assert.equal(await errorWindow.webContents.executeJavaScript('document.activeElement.textContent'), 'Close Harness');
+  assert.equal(await errorWindow.webContents.executeJavaScript('document.activeElement.matches("dialog")'), true);
   errorWindow.destroy();
   console.log('Styled clear/provider/startup dialogs, cancel defaults, Escape and visible cursor styles passed');
   phase = 'asynchronous chat under fake worker output';
@@ -2202,7 +2222,7 @@ app.whenReady().then(async () => {
     await agents.initializeController(worker);
     const chat = agents.conversation(worker, true);
     chat.title = `Build game ${index + 1}`; chat.status = 'running'; worker.busy = chat.id;
-    chat.delegation = { id: `fake-job-${index}`, source: ownerChat.id, state: 'running', startIndex: 0, delivered: false };
+    chat.delegation = { id: `fake-job-${index}`, source: ownerChat.id, task: chat.title, state: 'running', startIndex: 0, delivered: false };
     chat.items.push({ id: `fake-output-${index}`, type: 'commandExecution', command: 'Fake build',
       status: 'inProgress', aggregatedOutput: 'Background output\n'.repeat(2000) });
     background.push({ worker, chat });
@@ -2260,7 +2280,7 @@ app.whenReady().then(async () => {
   });
   ownerChat.items.push(deferredResult);
   await publish();
-  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-activity-summary").textContent'), /1 result waiting/);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-activity-summary").textContent'), /1 saved report · review/);
   assert.equal(artifactCalls.length, 0, 'rendering a result cannot launch an artifact');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector(".job-result .artifact-list")'), null, 'file controls are not duplicated in chat');
   await window.webContents.executeJavaScript('openJobDetails("deferred-task")');
@@ -2432,6 +2452,7 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript('document.querySelectorAll(".job-result").length'), 2);
   assert.match(await window.webContents.executeJavaScript('document.querySelector("#messages").textContent'), /Builder 1 · Result received/);
   assert.match(await window.webContents.executeJavaScript('document.querySelector("#messages").textContent'), /Builder 2 · Cancelled/);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-activity-list").textContent'), /Builder 1 · Build game 1/);
   assert.equal(await window.webContents.executeJavaScript('document.querySelector(".job-result img")'), null, 'reports are untrusted text');
   assert.ok(controller.busy, 'reports appear before their busy owner can resume');
   ownerChat.items.push({ id: 'hidden-handoff-fixture', type: 'userMessage', agentReply: true,
@@ -2455,9 +2476,33 @@ app.whenReady().then(async () => {
       duplicate: !!node.querySelector('details'), fullChat: node.querySelector('button')?.textContent };
   })()`);
   assert.match(longReport.warning, /Checks failed/);
-  assert.equal(longReport.preview.length, 'Long report. '.repeat(40).length, 'the complete answer remains in chat without a duplicate in task details');
+  assert.equal(longReport.preview.trim(), 'Long report. '.repeat(40).trim(), 'the complete answer remains in chat without a duplicate in task details');
   assert.equal(longReport.duplicate, false);
   assert.equal(longReport.fullChat, 'Open full chat');
+  const historicalReport = await window.webContents.executeJavaScript(`(() => {
+    const node = document.createElement('div');
+    renderAgentResult({ agentName: 'PhasmaHarness', status: 'completed', text:
+      'Both accepted; replies are pending.\\n[task: pending]\\nSub 1 replied Yellow.\\n[task: pending]\\nBoth bots replied **Yellow**:\\n\\n| Bot | Reply |\\n| --- | --- |\\n| Sub 1 | Yellow |\\n| Sub 2 | Yellow |\\n[task: done]\\n<img src=x onerror=alert(1)>' }, node, current());
+    document.querySelector('#messages').append(node);
+    return { text: node.textContent, table: !!node.querySelector('table'), bold: node.querySelector('strong')?.textContent, image: !!node.querySelector('img') };
+  })()`);
+  assert.doesNotMatch(historicalReport.text, /pending|\[task:|Both accepted|Sub 1 replied/);
+  assert.equal(historicalReport.table, true);
+  assert.equal(historicalReport.bold, 'Yellow');
+  assert.equal(historicalReport.image, false);
+  const reportExamples = [
+    'Explanation\n```text\n[task: pending]\n```\nKeep this example.',
+    'Explanation\n> [task: pending]\nKeep this quotation.',
+    'Explanation\n    [task: pending]\nKeep this indented code.',
+  ];
+  for (const text of reportExamples) {
+    assert.equal(await window.webContents.executeJavaScript(`reportAnswer(${JSON.stringify({ text })})`), text);
+  }
+  assert.equal(await window.webContents.executeJavaScript(`reportAnswer({text: 'Old progress\\n[task: pending]\\nFinal answer'})`), 'Final answer');
+  assert.equal(await window.webContents.executeJavaScript(`reportAnswer({text: 'Waiting\\n[task: pending]'})`), 'Waiting');
+  assert.equal(await window.webContents.executeJavaScript(`reportAnswer({finalReport: true, text: 'Example\\n[task: pending]\\nExplanation'})`), 'Example\n[task: pending]\nExplanation');
+  await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/historical-report.png'), (await window.webContents.capturePage()).toPNG());
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/compact-reports.png'), (await window.webContents.capturePage()).toPNG());
   window.setSize(840, 640);
   await window.webContents.executeJavaScript('document.documentElement.style.setProperty("--font-scale", "1.5"); true');
@@ -2589,9 +2634,9 @@ app.whenReady().then(async () => {
   execution.requests.set(7, { id: 7, method: 'item/commandExecution/requestApproval',
     params: { threadId: 'split-thread', command: 'Private fixture check', reason: 'Review this background action.' } });
   await publish();
-  // You are watching that work, so its approval opens in place, on Decline: nothing typed can approve it.
-  assert.deepEqual(await window.webContents.executeJavaScript('[document.querySelector("#request-dialog").open, document.activeElement.textContent]'),
-    [true, 'Decline'], 'the watched work’s approval opens on Decline');
+  // Watched approvals open without selecting an action.
+  assert.deepEqual(await window.webContents.executeJavaScript('[document.querySelector("#request-dialog").open, document.activeElement.matches("button")]'),
+    [true, false], 'the watched approval never selects a button');
   const deferred = await window.webContents.executeJavaScript(`(() => {
     const dialog = document.querySelector('#request-dialog'), cancel = new Event('cancel', { cancelable: true });
     dialog.dispatchEvent(cancel); if (!cancel.defaultPrevented) dialog.close(); return !cancel.defaultPrevented;
@@ -2600,26 +2645,30 @@ app.whenReady().then(async () => {
   assert.equal(execution.requests.size, 1, 'deferring an approval does not silently allow or reject it');
   await window.webContents.executeJavaScript(`[...document.querySelectorAll('#job-activity-list button')].find(button => button.textContent === 'Review').click();
     true`);
-  assert.equal(await window.webContents.executeJavaScript('document.activeElement.textContent'), 'Allow once');
+  assert.equal(await window.webContents.executeJavaScript('document.activeElement.matches("dialog")'), true);
+  await window.webContents.executeJavaScript(`[...document.querySelectorAll('dialog[open] button')].find(button => button.textContent === 'Allow once').focus(); true`);
   window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
   window.webContents.sendInputEvent({ type: 'char', keyCode: '\r' });
   window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+  await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  assert.equal(answers.length, 0, 'Enter cannot activate a focused approval button');
+  await window.webContents.executeJavaScript(`[...document.querySelectorAll('dialog[open] button')].find(button => button.textContent === 'Allow once').click(); true`);
   await until(() => answers.length === 1, 'the background approval reached its controller');
   assert.deepEqual(answers[0], { id: 7, answer: { decision: 'accept' }, agentId: splitProfile.id, contextId: assignment.id });
   console.log('Watched assignment, nonmodal assignment details, received/applied updates and deferred scoped approvals passed');
-  // An approval that opens on its own focuses Decline: Enter typed for the composer must not approve a command.
+  // An approval that opens on its own never selects an action.
   const foregroundFocus = await window.webContents.executeJavaScript(`(() => {
     const saved = { requests: state.requests, reviewing: reviewingExecution };
     reviewingExecution = null; shownRequest = null;
     state.requests = [{ id: 'focus-check', method: 'item/commandExecution/requestApproval', params: { threadId: 'none', command: 'echo focus', reason: 'Focus check' } }];
     renderRequest();
-    const focused = document.activeElement.textContent;
+    const focused = document.activeElement.matches('button');
     state.requests = saved.requests; reviewingExecution = saved.reviewing; shownRequest = null;
     renderRequest();
     return focused;
   })()`);
-  assert.equal(foregroundFocus, 'Decline');
-  console.log('Approvals that open on their own focus Decline passed');
+  assert.equal(foregroundFocus, false);
+  console.log('Approvals never auto-select buttons or activate them with Enter passed');
   timeBudget.limitTokens = null;
   timeBudget.requests['unknown-cost-fixture'] = { id: 'unknown-cost-fixture', kind: 'worker', provider: 'native:deepseek',
     complete: true, usage: null, providerEstimateUsd: null };

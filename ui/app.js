@@ -1097,7 +1097,7 @@ function agentContextMenu(event) {
   agentMenu.showPopover();
   agentMenu.style.left = `${Math.max(8, Math.min(keyboard ? anchor.left : event.clientX, document.documentElement.clientWidth - agentMenu.offsetWidth - 8))}px`;
   agentMenu.style.top = `${Math.max(8, Math.min(keyboard ? anchor.bottom : event.clientY, document.documentElement.clientHeight - agentMenu.offsetHeight - 8))}px`;
-  agentMenu.querySelector('button:not(:disabled)')?.focus();
+  agentMenu.tabIndex = -1; agentMenu.focus();
 }
 agentMenu.addEventListener('click', event => {
   const item = event.target.closest('button');
@@ -1115,7 +1115,7 @@ agentMenu.addEventListener('keydown', event => {
   } else if (event.key === 'Escape') {
     event.preventDefault(); event.stopPropagation(); closeAgentMenu(true);
   } else if (event.key === 'Tab') closeAgentMenu(true);
-  else if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); document.activeElement?.click(); }
+  else if (event.key === ' ') { event.preventDefault(); document.activeElement?.click(); }
 });
 for (const container of [$('#agent-list'), $('#main-agent-list'), $('#agent-cards')]) {
   container.addEventListener('contextmenu', agentContextMenu);
@@ -1610,7 +1610,7 @@ function openJobDetails(id) {
   $('#job-budget').open = false;
   renderJobDetails();
   if (!$('#job-dialog').open) $('#job-dialog').show();
-  $('#job-dialog .close-dialog').focus();
+  $('#job-dialog').focus();
 }
 function renderJobDetails() {
   if (!viewedJob) return;
@@ -1774,14 +1774,14 @@ function renderJobActivity(session) {
   const owner = state.agents?.find(agent => agent.id === selectedAgent)?.name || 'Hub';
   const comparisonBatches = new Set((session?.items || []).filter(item => item.comparisonId && item.hubBatch).map(item => item.hubBatch.id));
   const batch = Object.values(fleetState?.batchReports || {}).findLast(report => report.sessionId === session?.id && !comparisonBatches.has(report.id));
-  const key = JSON.stringify([session?.id, jobs, runs, downloads, replies, mail, owner, batch?.id, batch?.summary]);
+  const key = JSON.stringify([session?.id, session?.queuePaused, jobs, runs, downloads, queued.map(message => message.id), replies, mail, owner, batch?.id, batch?.summary]);
   if (key === jobActivityKey) return;
   jobActivityKey = key;
   panel.hidden = !jobs.length && !runs.length && !downloads.active && !downloads.error && !replies && !mail && !batch;
   const directCount = jobs.filter(job => job.directTask).length, backgroundCount = jobs.length - directCount;
   $('#job-activity-summary').textContent = [directCount ? `${directCount} task${directCount === 1 ? '' : 's'}` : '',
     backgroundCount ? `${backgroundCount} background task${backgroundCount === 1 ? '' : 's'}` : '',
-    replies ? `${replies} result${replies === 1 ? '' : 's'} waiting` : '', mail ? `${mail} message${mail === 1 ? '' : 's'} waiting` : '',
+    replies ? `${replies} saved report${replies === 1 ? '' : 's'} · review ${session?.queuePaused ? 'paused' : 'queued'}` : '', mail ? `${mail} message${mail === 1 ? '' : 's'} waiting` : '',
     runs.length ? `${runs.length} running test${runs.length === 1 ? '' : 's'}` : '',
     downloads.error ? 'Download cleanup needs attention' : downloads.active ? `${downloads.active} download${downloads.active === 1 ? '' : 's'}` : '',
     batch ? `Batch report · ${batch.summary}` : '',
@@ -1823,7 +1823,13 @@ function renderJobActivity(session) {
     };
     row.append(stop); $('#job-activity-list').append(row);
   }
-  if (replies) $('#job-activity-list').append(element('p', 'muted', `Worker reports are saved below. ${owner} will review them when available.`));
+  for (const message of queued.filter(message => message.agentReply && !message.agentMail)) {
+    const receipt = session.items.find(item => item.type === 'agentResult' && item.id === message.id);
+    $('#job-activity-list').append(element('p', 'muted', `${receipt?.agentName || 'Bot'} · ${(message.agentResult?.request?.text || receipt?.title || 'Saved report').replace(/\s+/g, ' ').slice(0, 200)}`));
+  }
+  if (replies) $('#job-activity-list').append(element('p', 'muted', session?.queuePaused
+    ? 'These reports have already arrived. Review is paused. /clear archives them without running another review.'
+    : `${owner} has these reports queued for review.`));
 }
 
 function renderArtifacts(records, sessionId, receiptId) {
@@ -1854,14 +1860,51 @@ function renderArtifacts(records, sessionId, receiptId) {
   return list;
 }
 
+function reportAnswer(item) {
+  if (item.finalReport) return item.text || '';
+  // Old receipts joined turns; quoted examples and fenced code are not turn boundaries.
+  const lines = (item.text || '').split('\n');
+  let fence = null, boundary = -1, ending = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(lines[i])?.[1];
+    if (marker) {
+      if (!fence) fence = marker;
+      else if (marker[0] === fence[0] && marker.length >= fence.length && !lines[i].trim().slice(marker.length).trim()) fence = null;
+      continue;
+    }
+    const status = !fence && /^ {0,3}\[task:\s*(done|pending|needs-input)\s*\]\s*$/i.exec(lines[i]);
+    if (status) {
+      ending = i;
+      if (status[1].toLowerCase() !== 'done') boundary = i;
+    }
+  }
+  const start = lines.slice(boundary + 1).some(line => line.trim()) ? boundary + 1 : 0;
+  const answer = lines.slice(start);
+  if (ending >= start && lines.slice(ending + 1).filter(line => line.trim()).length < 3) answer.splice(ending - start, 1);
+  return answer.join('\n').trimEnd();
+}
+
+function renderMarkdown(body, text) {
+  body.innerHTML = DOMPurify.sanitize(marked.parse(text, { breaks: true }), {
+    FORBID_TAGS: ['img', 'style', 'iframe', 'form', 'input', 'button', 'video', 'audio', 'svg', 'math'],
+    FORBID_ATTR: ['style'],
+  });
+  for (const equation of body.querySelectorAll('[data-equation]')) {
+    try { katex.render(decodeURIComponent(equation.dataset.equation), equation, { displayMode: equation.dataset.display === 'true', throwOnError: false, trust: false, maxExpand: 100, maxSize: 20 }); }
+    catch { equation.textContent = 'Equation could not be displayed.'; }
+  }
+}
+
 function renderAgentResult(item, node, session) {
   node.className = 'message job-result';
   const checksFailed = Object.values(item.verification || {}).some(group => group.status === 'failed');
   node.dataset.status = checksFailed ? 'failed' : item.status;
   const status = checksFailed ? 'Checks failed' : { completed: 'Result received', failed: 'Failed', cancelled: 'Cancelled', interrupted: 'Interrupted' }[item.status] || 'Needs review';
   const label = element('div', 'message-label', `${item.agentName} · ${item.superseded ? 'Earlier revision' : status}`);
-  const report = [item.error, item.text].filter(Boolean).filter((text, i, all) => all.indexOf(text) === i).join('\n\n');
-  const preview = element('p', 'job-result-preview', report);
+  const answer = reportAnswer(item);
+  const report = [item.error, answer].filter(Boolean).filter((text, i, all) => all.indexOf(text) === i).join('\n\n');
+  const preview = element('div', 'job-result-preview message-body');
+  renderMarkdown(preview, report);
   const header = element('div', 'job-result-header'); header.append(label);
   if (item.deliveryId) {
     const assignment = element('button', 'compact-action', 'View task'); assignment.type = 'button';
@@ -2206,14 +2249,7 @@ function renderMessages(session) {
         actions.append(copy);
       }
       if (!user || item.routineRun) actions.append(label);
-      body.innerHTML = DOMPurify.sanitize(marked.parse(text, { breaks: true }), {
-        FORBID_TAGS: ['img', 'style', 'iframe', 'form', 'input', 'button', 'video', 'audio', 'svg', 'math'],
-        FORBID_ATTR: ['style'],
-      });
-      for (const equation of body.querySelectorAll('[data-equation]')) {
-        try { katex.render(decodeURIComponent(equation.dataset.equation), equation, { displayMode: equation.dataset.display === 'true', throwOnError: false, trust: false, maxExpand: 100, maxSize: 20 }); }
-        catch { equation.textContent = 'Equation could not be displayed.'; }
-      }
+      renderMarkdown(body, text);
       if (user) {
         for (const file of attachment?.files || []) {
           const details = element('details', 'sent-file');
@@ -2397,8 +2433,6 @@ function renderRequest() {
     }
     const actions = element('div', 'dialog-footer');
     const decline = element('button', '', 'Decline'); decline.onclick = () => finish({ decision: 'decline' }); actions.append(decline);
-    // A request that opened on its own focuses Decline, so a keypress meant for the composer cannot approve it.
-    decline.autofocus = !reviewingExecution;
     if (request.canAllowSession) {
       const session = element('button', '', 'Allow for this session');
       session.title = request.method === 'router/tool/requestApproval'
@@ -2408,14 +2442,13 @@ function renderRequest() {
     }
     if (!unsupported) {
       const allow = element('button', 'primary', 'Allow once');
-      allow.autofocus = !!reviewingExecution;
       allow.onclick = () => finish({ decision: 'accept' });
       actions.append(allow);
     }
     content.append(actions);
   }
   if (!dialog.open) dialog.showModal();
-  content.querySelector('[autofocus]')?.focus({ preventScroll: true });
+  if (document.activeElement?.matches('button')) dialog.focus({ preventScroll: true });
 }
 
 function slashCommand(text) {
@@ -2475,7 +2508,7 @@ function openCommandPanel(name) {
   $('#command-search').value = ''; $('#command-error').textContent = '';
   $('#command-content').dataset.signature = '';
   renderCommandPanel(); $('#command-dialog').showModal();
-  ($('#command-search').hidden ? $('#command-dialog .close-dialog') : $('#command-search')).focus();
+  ($('#command-search').hidden ? $('#command-dialog') : $('#command-search')).focus();
 }
 function commandChoices(name) {
   if (name === 'access') return state.accessModes.map(a => ({ id: a.id, label: a.label, detail: a.description, selected: a.id === (current()?.access || draftAccess || state.settings.access), disabled: !!state.busy || !!state.waitingForAgents?.length }));
@@ -2568,7 +2601,6 @@ $('#command-dialog').addEventListener('keydown', event => {
   if (event.isComposing || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
   const buttons = [...$('#command-content').querySelectorAll('button:not(:disabled)')];
   const index = buttons.indexOf(document.activeElement), searching = document.activeElement === $('#command-search');
-  if (searching && event.key === 'Enter' && buttons.length) { event.preventDefault(); buttons[0].click(); }
   if (buttons.length && (searching || index >= 0) && ['ArrowDown', 'ArrowUp'].includes(event.key)) {
     const next = searching ? (event.key === 'ArrowDown' ? 0 : buttons.length - 1) : (index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
     event.preventDefault(); buttons[next].focus();

@@ -1,4 +1,26 @@
 'use strict';
+document.addEventListener('beforetoggle', event => {
+  const dialog = event.target;
+  if (!(dialog instanceof HTMLDialogElement) || event.newState !== 'open') return;
+  dialog.tabIndex = -1;
+  dialog.autofocus = true;
+}, true);
+document.addEventListener('toggle', event => {
+  const dialog = event.target;
+  if (dialog instanceof HTMLDialogElement && dialog.open && document.activeElement?.matches('button, input[type="submit"], input[type="button"], input[type="reset"], [role="button"]'))
+    dialog.focus({ preventScroll: true });
+}, true);
+
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Enter') return;
+  const target = event.target;
+  const button = target.closest?.('button, [role="button"], input[type="button"], input[type="submit"], input[type="reset"]');
+  const implicitSubmit = target instanceof HTMLInputElement && target.form;
+  if (!button && !implicitSubmit) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+}, true);
+
 let confirmationQueue = Promise.resolve();
 function confirmAction(options) {
   const result = confirmationQueue.then(() => new Promise(resolve => {
@@ -28,13 +50,13 @@ function confirmAction(options) {
     accept.textContent = options.confirmLabel || 'Continue'; accept.classList.add(options.danger ? 'danger' : 'primary');
     cancel.onclick = () => dialog.close();
     dialog.querySelector('.confirmation-close').onclick = () => dialog.close();
-    (cancel.hidden ? accept : cancel).autofocus = true;
     dialog.addEventListener('close', () => {
       const accepted = dialog.returnValue === 'confirm';
       window.getSelection()?.removeAllRanges(); dialog.remove(); resolve(accepted);
     }, { once: true });
     document.body.append(dialog);
     dialog.showModal();
+    dialog.focus({ preventScroll: true });
   }));
   confirmationQueue = result.catch(() => false);
   return result;

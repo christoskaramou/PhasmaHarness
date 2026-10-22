@@ -523,7 +523,7 @@ class Agents extends EventEmitter {
     }
   }
 
-  requireIdle(controller) {
+  requireIdle(controller, clearing = null) {
     const execution = !controller.executionContext && this.executions.get(controller.agentId);
     if (execution) this.requireIdle(execution);
     if (controller.busy || controller.loading.size || controller.activeTurns.size || controller.requests.size || controller.cleanupPending.size || controller.blockedReason())
@@ -532,17 +532,22 @@ class Agents extends EventEmitter {
     const ids = new Set(controller.data.sessions.map(s => s.id));
     if (this.pendingJobs().some(record => record.controller === controller || ids.has(record.job.source) || ids.has(record.job.owner)))
       throw new Error('Finish or stop delegated tasks and resolve pending work before continuing.');
-    if (controller.data.sessions.some(s => s.queue?.length || s.items.some(item => item.pendingReply))) throw new Error('Clear queued messages and resolve pending work before continuing.');
+    const savedReport = (session, message) => session === clearing && message.agentReply && !message.agentMail && !message.sending &&
+      session.items.some(item => item.localOnly && item.type === 'agentResult' && item.id === message.id &&
+        ['completed', 'failed', 'cancelled', 'interrupted'].includes(item.status));
+    if (controller.data.sessions.some(s => s.queue?.some(message => !savedReport(s, message)) ||
+        s.items.some(item => item.pendingReply && !savedReport(s, item.pendingReply))))
+      throw new Error('Clear queued messages and resolve pending work before continuing.');
   }
 
   async clearConversation(id, confirm, groupId = null) {
     const controller = this.controller(id), current = groupId ? controller.session(groupId) : this.conversation(controller);
     if (groupId && (id !== 'main' || !current.group || current.archived)) throw new Error('This group is no longer available.');
-    this.requireIdle(controller);
+    this.requireIdle(controller, current);
     if (!current) throw new Error('This agent has no conversation to clear.');
     if (!await confirm(current.group ? current.title : this.agentName(id))) return null;
     if (this.controllers.get(id) !== controller || (groupId ? !controller.data.sessions.includes(current) || current.archived : this.conversation(controller)?.id !== current.id)) throw new Error('The conversation changed. Try clearing it again.');
-    this.requireIdle(controller);
+    this.requireIdle(controller, current);
     const now = Date.now();
     const fresh = { id: randomUUID(), threadId: null, title: current.group ? current.title : 'New session',
       ...(current.group ? { group: { ...current.group, members: [...current.group.members] } } : {}), workspace: current.workspace, access: current.access,
@@ -551,7 +556,12 @@ class Agents extends EventEmitter {
     const routineOwners = Object.values(this.routines.records).filter(routine => routine.ownerId === current.id)
       .map(routine => ({ routine, ownerId: routine.ownerId, version: routine.version }));
     for (const { routine } of routineOwners) { routine.ownerId = fresh.id; routine.version++; }
-    controller.data.sessions = [fresh, ...previous.map(s => s.id === current.id ? { ...s, archived: true } : s)];
+    controller.data.sessions = [fresh, ...previous.map(s => s.id === current.id ? { ...s, archived: true, queue: [], queuePaused: true,
+      items: s.items.map(item => {
+        if (!item.pendingReply) return item;
+        const { pendingReply, ...receipt } = item;
+        return { ...receipt, notified: true };
+      }) } : s)];
     if (!groupId) controller.data.agentSessionId = fresh.id;
     try { controller.save(); }
     catch (error) {
@@ -1266,7 +1276,10 @@ class Agents extends EventEmitter {
     const deliveryId = job.id || session.id;
     const delivered = source.agentDeliveries ||= [];
     if (!delivered.includes(deliveryId)) {
-      const report = session.items.slice(job.startIndex || 0).filter(item => item.type === 'agentMessage' && item.phase !== 'commentary').map(item => item.text || '').join('\n');
+      const answers = session.items.slice(job.startIndex || 0).filter(item => item.type === 'agentMessage' && item.phase !== 'commentary');
+      const last = answers.at(-1);
+      const report = (last?.turnId ? answers.filter(item => item.turnId === last.turnId) : last ? [last] : [])
+        .map(item => stripTaskStatus(item.text || '')).filter(Boolean).join('\n\n');
       const result = report.slice(-16000);
       const budgetSummary = this.budgets.summary(job.budgetId);
       const task = (session.tasks || []).findLast(task => task.assignmentId === job.id);
@@ -1287,7 +1300,7 @@ class Agents extends EventEmitter {
         title: session.title, assignment: job.task, status: job.cancelled ? 'cancelled' : session.status, error: session.error || null,
         // The setup of the run that produced this result (after a failover, the provider that finished).
         setup: session.routes?.findLast(route => route.setup)?.setup || null,
-        text: stripTaskStatus(result) || 'No final answer was produced.', truncated: report.length > 16000,
+        text: result || 'No final answer was produced.', finalReport: true, truncated: report.length > 16000,
         revision: job.revision || 1, amendments: job.amendments || [], superseded: !!superseded,
         artifacts: job.artifacts || [], workspaceCopy: job.workspaceCopy || null,
         budgetId: job.budgetId || null,

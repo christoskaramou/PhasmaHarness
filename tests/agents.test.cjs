@@ -312,9 +312,14 @@ test('host check facts reach the owner and exports without letting worker prose 
   const chat = worker.session(accepted.sessionId);
   await until(() => worker.activeTurns.has(chat.id));
   chat.tasks.at(-1).corrections = 1;
+  chat.items.push({ id: 'earlier-progress', type: 'agentMessage', text: 'Earlier pending update.\n[task: pending]' });
+  chat.items.push({ id: 'final-part-one', type: 'agentMessage', turnId: chat.turnId, text: 'First part of the final answer.' });
   complete(worker, chat, 'Everything builds, launches and plays perfectly.');
   await until(() => chat.delegation.delivered);
   const receipt = owner.items.find(item => item.deliveryId === accepted.jobId);
+  assert.doesNotMatch(receipt.text, /Earlier pending|\[task:/);
+  assert.match(receipt.text, /First part of the final answer.*Everything builds/s);
+  assert.equal(receipt.finalReport, true);
   assert.match(receipt.assignment, /Build and launch the requested output/);
   assert.equal(receipt.verification.build.status, 'passed');
   assert.equal(receipt.verification.launch.status, 'failed');
@@ -2124,6 +2129,34 @@ test('clear rejects pending work, rechecks after confirmation and rolls back a f
   await assert.rejects(agents.clearConversation('main', confirm), /Disk full/); primary.save = save;
   assert.equal(primary.data.sessions, previous); assert.equal(primary.data.agentSessionId, old.id);
   assert.equal(fs.readFileSync(primary.filename, 'utf8'), before); assert.equal(old.archived, false);
+});
+
+test('clear archives delivered reports awaiting review without replaying or losing history', async t => {
+  const { agents, primary } = await setup(t), chat = agents.conversation(primary, true);
+  const reply = { id: 'saved-result', agentReply: true, text: 'Old result', images: [] };
+  chat.status = 'completed'; chat.queuePaused = true; chat.queue = [reply];
+  chat.items.push({ id: reply.id, type: 'agentResult', localOnly: true, status: 'completed', text: 'Final answer' },
+    { id: 'deferred-result', type: 'agentResult', localOnly: true, status: 'completed', text: 'Deferred answer',
+      pendingReply: { ...reply, id: 'deferred-result' } });
+  primary.save();
+  assert.equal(await agents.clearConversation('main', () => false), null);
+  assert.equal(chat.queue.length, 1);
+  assert.ok(chat.items[1].pendingReply);
+  const save = primary.save;
+  primary.save = () => { throw new Error('Disk full'); };
+  await assert.rejects(agents.clearConversation('main', () => true), /Disk full/);
+  primary.save = save;
+  assert.equal(chat.queue.length, 1);
+  assert.ok(chat.items[1].pendingReply);
+  const fresh = await agents.clearConversation('main', () => true);
+  const archived = primary.data.sessions.find(s => s.id === chat.id);
+  assert.equal(archived.archived, true);
+  assert.deepEqual(archived.queue, []);
+  assert.equal(archived.items[1].pendingReply, undefined);
+  assert.deepEqual(archived.items.map(item => item.text), ['Final answer', 'Deferred answer']);
+  assert.deepEqual(fresh.items, []);
+  assert.doesNotThrow(() => agents.requireIdle(primary));
+  assert.equal(primary.client.calls.some(call => call.method === 'turn/start'), false);
 });
 
 test('one conversation is retained per agent and old chats migrate once without losing IDs or history', async t => {
