@@ -11,7 +11,45 @@ const { Agents } = require('../src/agents.cjs');
 const { SmartRouter, conversationDelta } = require('../src/routing/smart-router.cjs');
 
 const answer = reply => ({ reply, action: null });
+
+test('completed worker survives a Main Bot follow-up timeout without replaying the assignment', async t => {
+  const { hub, session, agents, replies, send } = await setup(t);
+  replies.push(action('agent_work', { name: 'Worker', task: 'Say hello.' }));
+  await send('Ask Worker to say hello.');
+  const worker = agents.execution(session.hubWorker), work = agents.conversation(worker);
+  await until(() => worker.activeTurns.size > 0);
+  hub.smartRouter.complete = async () => { throw new Error('The model took too long to respond.'); };
+  worker.notification({ method: 'item/completed', params: { threadId: work.threadId, turnId: work.turnId,
+    item: { id: randomUUID(), type: 'agentMessage', phase: 'final_answer', text: 'Hello.' } } });
+  worker.notification({ method: 'turn/completed', params: { threadId: work.threadId, turn: { id: work.turnId, status: 'completed' } } });
+  await until(() => session.items.at(-1)?.text?.includes('My follow-up could not finish') && !session.queue?.length);
+  assert.equal(session.status, 'completed');
+  assert.equal(session.error, null);
+  assert.equal(session.hubCompletion.fulfilled, false);
+  assert.equal(work.delegation.delivered, true);
+  assert.equal(session.items.filter(item => item.type === 'agentResult').length, 1);
+  assert.equal(session.agentDelegations, 1);
+  const saved = JSON.parse(fs.readFileSync(hub.filename));
+  assert.equal(saved.sessions.find(chat => chat.id === session.id).status, 'completed');
+});
 const action = (tool, args) => ({ reply: '', action: { tool, arguments: args } });
+test('failed worker reviews count batch receipts, but storage and budget failures stay visible', async t => {
+  const { hub, session } = await setup(t);
+  const input = { text: 'Done.', images: [], mode: 'terra-light', agentReply: true,
+    agentResult: { agentId: 'main', status: 'completed', request: { id: 'request', text: 'Say hello.', batch: { id: 'batch', index: 1, count: 2 } } } };
+  hub.smartRouter.complete = async () => { throw new Error('Review timeout'); };
+  await hub.sendCoordinator(session, input);
+  assert.equal(session.items.find(item => item.hubBatchResult)?.hubBatchResult.fulfilled, false);
+  assert.equal(session.items.find(item => item.hubBatchResult)?.hubBatchResult.index, 1);
+  hub.smartRouter.complete = async () => { throw Object.assign(new Error('Budget held'), { code: 'JOB_BUDGET_HOLD' }); };
+  await assert.rejects(hub.sendCoordinator(session, input), /Budget held/);
+  hub.smartRouter.complete = async () => { throw Object.assign(new Error('Budget save failed'), { budgetPersistenceFailed: true }); };
+  await assert.rejects(hub.sendCoordinator(session, input), /Budget save failed/);
+  const save = hub.save.bind(hub); let fail = true;
+  hub.save = () => { if (fail) { fail = false; throw new Error('Storage unavailable'); } return save(); };
+  await assert.rejects(hub.sendCoordinator(session, input), /Storage unavailable/);
+  assert.equal(session.status, 'failed');
+});
 class Client extends EventEmitter {
   constructor() { super(); this.calls = []; }
   async start() {}
@@ -1679,7 +1717,9 @@ test('invalid completion checks and a stop during a late check never dispatch mo
   await until(() => worker.activeTurns.size > 0);
   const agentResult = { request: work.delegation.originalRequest, agentId: worker.agentId, workspace: work.workspace, status: 'completed' };
   assessments.push({ fulfilled: true, evidence: '', gaps: [] });
-  await assert.rejects(hub.send({ id: session.id, text: 'Summary only.', agentReply: true, agentResult }), /could not verify/);
+  await hub.send({ id: session.id, text: 'Summary only.', agentReply: true, agentResult });
+  assert.equal(session.hubCompletion.fulfilled, false);
+  assert.match(session.items.at(-1).text, /could not verify/);
   assert.equal(session.agentDelegations, 1);
   let release;
   hub.smartRouter.complete = () => new Promise(resolve => { release = resolve; });

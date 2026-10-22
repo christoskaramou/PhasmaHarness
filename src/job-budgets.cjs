@@ -66,16 +66,22 @@ class JobBudgets {
           !Number.isFinite(budget.usedMs) || budget.usedMs < 0 || !['active', 'paused'].includes(budget.state) ||
           (budget.activeSince != null && !Number.isFinite(budget.activeSince)))
         throw new Error('A saved job budget is invalid. No job was resumed.');
+      if (budget.limitsEnabled === undefined) {
+        budget.limitsEnabled = budget.version > 1 || budget.limitMs !== DEFAULT_MINUTES * 60000 ||
+          (budget.limitAttempts ?? DEFAULT_ATTEMPTS) !== DEFAULT_ATTEMPTS || budget.limitTokens != null;
+        changed = true;
+      }
+      if (typeof budget.limitsEnabled !== 'boolean') throw new Error('Saved job limits need review.');
       if (budget.activeSince != null) {
         const end = Number.isFinite(alive) && alive >= budget.activeSince ? Math.min(alive, this.now()) : this.now();
-        budget.usedMs = Math.min(budget.limitMs, budget.usedMs + Math.max(0, end - budget.activeSince));
+        budget.usedMs = Math.min(budget.limitsEnabled ? budget.limitMs : Infinity, budget.usedMs + Math.max(0, end - budget.activeSince));
         budget.activeSince = null; budget.estimated = true;
         budget.state = 'paused'; budget.version++;
         budget.reason = 'Runner restarted with active work. Review the assignment; elapsed time is estimated.';
         changed = true;
       }
       if (budget.requests === undefined) { budget.requests = {}; budget.limitAttempts = DEFAULT_ATTEMPTS; budget.limitTokens = null; changed = true; }
-      if (!budget.requests || typeof budget.requests !== 'object' || Array.isArray(budget.requests) || Object.keys(budget.requests).length > MAX_ATTEMPTS ||
+      if (!budget.requests || typeof budget.requests !== 'object' || Array.isArray(budget.requests) || (budget.limitsEnabled && Object.keys(budget.requests).length > MAX_ATTEMPTS) ||
           !Number.isInteger(budget.limitAttempts) || budget.limitAttempts < 1 || budget.limitAttempts > MAX_ATTEMPTS ||
           (budget.limitTokens !== null && (!Number.isSafeInteger(budget.limitTokens) || budget.limitTokens < 1 || budget.limitTokens > MAX_TOKENS)))
         throw new Error('Saved model usage limits need review. No job was resumed.');
@@ -103,7 +109,7 @@ class JobBudgets {
     if (inherited && !this.records[inherited]) throw new Error('The original job budget is unavailable. Review it before continuing.');
     if (inherited && this.records[inherited].state === 'paused') throw new Error(this.records[inherited].reason);
     job.budgetId = inherited || job.id;
-    if (!inherited) this.records[job.id] = { id: job.id, version: 1, state: 'active',
+    if (!inherited) this.records[job.id] = { id: job.id, version: 1, state: 'active', limitsEnabled: !!limits,
       limitMs: limits?.limitMs ?? DEFAULT_MINUTES * 60000, usedMs: 0, activeSince: null, reason: null,
       limitAttempts: limits?.limitAttempts ?? DEFAULT_ATTEMPTS, limitTokens: limits?.limitTokens ?? null, requests: {} };
     if (job.originalRequest) job.originalRequest.budgetId = job.budgetId;
@@ -123,7 +129,11 @@ class JobBudgets {
     if (id && !this.records[id]) throw new Error('The original job budget is unavailable. Review it before continuing.');
     return id ? this.records[id] : null;
   }
-  persist() { this.agents.primary.save(); this.dirty = false; }
+  persist() {
+    try { this.agents.primary.save(); }
+    catch (error) { error.budgetPersistenceFailed = true; throw error; }
+    this.dirty = false;
+  }
   held(job) { return !!job?.budgetId && (!this.forJob(job) || this.forJob(job).state === 'paused'); }
   elapsed(budget) {
     const lease = this.leases.get(budget.id);
@@ -131,8 +141,8 @@ class JobBudgets {
   }
   summary(id) {
     const budget = this.records[id];
-    return budget ? { id, at: this.now(), usedMs: this.elapsed(budget), limitMs: budget.limitMs,
-      limitAttempts: budget.limitAttempts, limitTokens: budget.limitTokens, ...usageSummary(budget) } : null;
+    return budget ? { id, at: this.now(), usedMs: this.elapsed(budget), limitMs: budget.limitsEnabled ? budget.limitMs : null,
+      limitAttempts: budget.limitsEnabled ? budget.limitAttempts : null, limitTokens: budget.limitsEnabled ? budget.limitTokens : null, ...usageSummary(budget) } : null;
   }
   scoped(session, operation) { return this.context.run({ id: this.forSession(session)?.id || null }, operation); }
   beginRequest(controller, session, fields = {}) {
@@ -143,7 +153,7 @@ class JobBudgets {
     if (this.closed || this.agents.closing) throw new Error('The runner is stopping.');
     if (budget.state === 'paused') throw Object.assign(new Error(budget.reason), { code: 'JOB_BUDGET_HOLD' });
     const usage = usageSummary(budget);
-    const reason = usage.attempts >= budget.limitAttempts ? 'The job’s model-attempt limit was reached.'
+    const reason = !budget.limitsEnabled ? null : usage.attempts >= budget.limitAttempts ? 'The job’s model-attempt limit was reached.'
       : budget.limitTokens !== null && !capabilities(fields.provider).usage ? 'This provider cannot report tokens for the configured token limit.'
       : budget.limitTokens !== null && usage.missingFinalUsage ? 'Earlier model usage is unavailable. Review it before continuing with a token limit.'
       : budget.limitTokens !== null && usage.reportedTokens >= budget.limitTokens ? 'The job’s reported-token limit was reached.' : null;
@@ -172,7 +182,7 @@ class JobBudgets {
     if (complete) this.inflight.delete(handle.id);
     this.dirty = true;
     const summary = usageSummary(budget);
-    if (budget.state === 'active' && budget.limitTokens !== null &&
+    if (budget.state === 'active' && budget.limitsEnabled && budget.limitTokens !== null &&
         (summary.reportedTokens >= budget.limitTokens || summary.missingFinalUsage))
       this.pause(budget, summary.missingFinalUsage ? 'A model attempt ended without usable token usage. Review it before continuing.' : 'The job’s reported-token limit was reached.');
     try { this.persist(); }
@@ -213,7 +223,7 @@ class JobBudgets {
       } else if (running && !leased) {
         this.leases.set(budget.id, this.monotonic()); budget.activeSince = this.now(); changed = true;
       }
-      if (budget.state !== 'active') continue;
+      if (budget.state !== 'active' || !budget.limitsEnabled) continue;
       const usage = usageSummary(budget);
       const missingProviderUsage = Object.values(budget.requests).some(entry => !entry.complete && !capabilities(entry.provider).usage);
       const reason = usage.attempts > budget.limitAttempts ? 'The job’s model-attempt limit was reached.'
@@ -283,13 +293,16 @@ class JobBudgets {
         !Number.isInteger(args.limitMinutes) || args.limitMinutes < 1 || args.limitMinutes > MAX_MINUTES ||
         (args.limitAttempts !== undefined && (!Number.isInteger(args.limitAttempts) || args.limitAttempts < 1 || args.limitAttempts > MAX_ATTEMPTS)) ||
         (args.limitTokens !== undefined && args.limitTokens !== null && (!Number.isSafeInteger(args.limitTokens) || args.limitTokens < 1 || args.limitTokens > MAX_TOKENS)) ||
-        typeof args.resume !== 'boolean' || Object.keys(args).some(key => !['jobId', 'expectedVersion', 'limitMinutes', 'limitAttempts', 'limitTokens', 'resume'].includes(key)))
+        (args.limitsEnabled !== undefined && typeof args.limitsEnabled !== 'boolean') ||
+        typeof args.resume !== 'boolean' || Object.keys(args).some(key => !['jobId', 'expectedVersion', 'limitMinutes', 'limitAttempts', 'limitTokens', 'resume', 'limitsEnabled'].includes(key)))
       throw new Error('Choose valid whole-number time, attempt and token limits.');
     if (this.closed || this.agents.closing) throw new Error('The runner is stopping.');
     let budget;
     try { budget = this.forJob(this.agents.findJob(args.jobId).job); }
     catch { budget = this.records[args.jobId]; }
     if (!budget || budget.version !== args.expectedVersion) throw new Error('The job budget changed. Reopen its details.');
+    const limitsEnabled = args.limitsEnabled ?? true;
+    if (!limitsEnabled && (budget.limitsEnabled || !args.resume)) throw new Error('Only an unlimited task can resume without limits.');
     const records = this.agents.pendingJobs().filter(({ job }) => job.budgetId === budget.id);
     const tasks = (this.agents.foregroundTasks?.() || []).filter(({ task }) => task.budgetId === budget.id);
     const reviews = this.agents.allControllers().flatMap(controller => controller.data.sessions
@@ -302,9 +315,9 @@ class JobBudgets {
     const limitAttempts = args.limitAttempts ?? budget.limitAttempts;
     const limitTokens = args.limitTokens === undefined ? budget.limitTokens : args.limitTokens;
     const usage = usageSummary(budget);
-    if (args.resume && limitMs <= this.elapsed(budget)) throw new Error('Extend the total time limit beyond the time already used.');
-    if (args.resume && limitAttempts <= usage.attempts) throw new Error('Extend the model-attempt limit beyond the attempts already recorded.');
-    if (args.resume && limitTokens !== null && (usage.missingFinalUsage || usage.reportedTokens >= limitTokens))
+    if (args.resume && limitsEnabled && limitMs <= this.elapsed(budget)) throw new Error('Extend the total time limit beyond the time already used.');
+    if (args.resume && limitsEnabled && limitAttempts <= usage.attempts) throw new Error('Extend the model-attempt limit beyond the attempts already recorded.');
+    if (args.resume && limitsEnabled && limitTokens !== null && (usage.missingFinalUsage || usage.reportedTokens >= limitTokens))
       throw new Error('The reported-token limit is exhausted or earlier usage is unknown. Review the usage and change the limit explicitly.');
     if (args.resume && (this.operations.has(budget.id) || [...this.inflight.values()].some(request => request.budgetId === budget.id) || tasks.some(({ controller, session, task }) =>
       (session.activeTaskId === task.id && (controller.busy === session.id || controller.activeTurns.has(session.id) || controller.loading.has(session.id) || controller.stopping.has(session.id))) ||
@@ -322,7 +335,7 @@ class JobBudgets {
       task.resumeJobId ||= randomUUID(); task.budgetResumePending = true; controller.save();
     }
     if (args.resume) this.resumeSavedWork(budget, records, reviews);
-    Object.assign(budget, { limitMs, limitAttempts, limitTokens, version: budget.version + 1, ...(args.resume ? { state: 'active', reason: null } : {}) });
+    Object.assign(budget, { limitMs, limitAttempts, limitTokens, limitsEnabled, version: budget.version + 1, ...(args.resume ? { state: 'active', reason: null } : {}) });
     try { this.agents.primary.save(); } catch (error) { Object.assign(budget, before); throw error; }
     this.agents.pump(); this.agents.emit('state', this.agents.snapshot());
     return this.snapshot()[budget.id];

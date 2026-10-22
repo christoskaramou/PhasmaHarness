@@ -683,18 +683,23 @@ h2 {
 }
 
 .job-result {
-  border-left:2px solid var(--border-strong);
-  padding-left:16px;
+  border:1px solid var(--border);
+  border-radius:14px;
+  padding:14px 18px;
   overflow-wrap:anywhere;
 }
 
-.job-result-owner,.job-result-preview {
-  color:var(--muted);
+.job-result-header {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  flex-wrap:wrap;
 }
-
-.job-result-title {
-  font-weight:600;
-}
+.job-result-header .message-label { margin:0; }
+.job-result[data-status="failed"] .message-label { color:var(--error); }
+.job-result-header button { border:0; background:transparent; color:var(--muted); }
+.job-result-preview { margin:10px 0; white-space:pre-wrap; }
 
 .artifact-list {
   max-height: 200px;
@@ -723,17 +728,12 @@ h2 {
 }
 #job-budget {
   flex-shrink: 0;
-  max-height: 30vh;
-  overflow: auto;
 }
 #job-budget-form {
   display: grid;
   gap: 8px;
 }
 #job-budget > summary {
-  position: sticky;
-  top: 0;
-  z-index: 1;
   background: var(--panel);
 }
 
@@ -3690,7 +3690,10 @@ body:has(#job-dialog[open]) main {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  overflow-y: auto;
+  scroll-padding-top: calc(70px * var(--font-scale, 1));
 }
+#job-dialog > * { flex-shrink: 0; }
 
 .file-preview {
   display: flex;
@@ -3726,9 +3729,8 @@ body:has(#job-dialog[open]) main {
   line-height: 1;
 }
 .job-transcript {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
+  flex: none;
+  overflow: visible;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   line-height: 1.55;

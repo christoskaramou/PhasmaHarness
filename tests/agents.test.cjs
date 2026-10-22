@@ -158,7 +158,7 @@ test('paused direct work resumes privately with its original goal, checks and co
   task.amendments.push({ text: 'Preserve this accepted amendment.', images: [amendmentImage] });
   task.attempts.push({ results: [{ name: 'Earlier check', status: 'failed', exitCode: 1 }], at: Date.now() });
   const originalChecks = JSON.parse(JSON.stringify(task.checks));
-  budget.limitMs = 60; agents.budgets.persist(); agents.pump();
+  budget.limitsEnabled = true; budget.limitMs = 60; agents.budgets.persist(); agents.pump();
   await until(() => task.budgetPaused && !bot.busy && !agents.budgets.operations.size);
   const savedId = task.resumeJobId, used = budget.usedMs;
   bot.data.settings.checks[workspace] = [{ name: 'Changed later', command: 'node', args: ['-e', 'process.exit(1)'] }];
@@ -315,6 +315,7 @@ test('host check facts reach the owner and exports without letting worker prose 
   complete(worker, chat, 'Everything builds, launches and plays perfectly.');
   await until(() => chat.delegation.delivered);
   const receipt = owner.items.find(item => item.deliveryId === accepted.jobId);
+  assert.match(receipt.assignment, /Build and launch the requested output/);
   assert.equal(receipt.verification.build.status, 'passed');
   assert.equal(receipt.verification.launch.status, 'failed');
   assert.equal(receipt.verification.gameplay.status, 'not-verified');
@@ -492,7 +493,7 @@ test('a real budget timer pauses its helper tree, preserves foreground chat, and
   const unrelated = agents.delegate(primary, source, other.agentId, 'Independent output.');
   const independent = other.session(unrelated.sessionId);
   const budget = agents.budgets.forJob(work.delegation);
-  budget.limitMs = 60; agents.primary.save(); agents.pump();
+  budget.limitsEnabled = true; budget.limitMs = 60; agents.primary.save(); agents.pump();
   await until(() => budget.state === 'paused' && !builder.busy && !helper.busy && !agents.budgets.operations.size);
   assert.equal(work.delegation.delivered, false);
   assert.equal(work.delegation.cancelled, undefined);

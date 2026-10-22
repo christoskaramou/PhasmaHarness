@@ -650,8 +650,8 @@ function subBotCreator(id = selectedAgent) {
   const profile = state?.agents?.find(agent => agent.id === id);
   return isSubBot(profile) ? state.agents.find(agent => agent.id === profile.createdBy)?.name || 'the bot that made it' : null;
 }
-// While a bot works on a job another bot gave it, its chat shows that work, read only until the result returns; a
-// sub-bot's chat always shows its work. Both run in the bot's background context, not its own chat.
+// Active delegated work uses the read-only execution view. Completed work also appears in the direct chat below.
+// Sub-bots always use the read-only execution view.
 function backgroundView(next, id) {
   const background = next?.executionStates?.[id];
   const conversation = background?.sessions.find(session => session.id === background.conversationId);
@@ -668,7 +668,11 @@ function readOnlyNote() {
   const creator = subBotCreator();
   if (creator)
     return `Read only: ${creator} gives this bot its work.`;
-  return state?.watching ? 'Read only while this bot works on a task from another bot. You can write again when it returns.' : null;
+  const background = fleetState?.executionStates?.[selectedAgent];
+  const work = background?.sessions.find(chat => chat.id === background.conversationId);
+  const job = work?.delegation;
+  const own = fleetState?.agentStates?.[selectedAgent]?.sessions.some(chat => chat.id === (job?.owner || job?.source));
+  return state?.watching || (job && !job.delivered && !own) ? 'Read only while this bot works on a task from another bot. You can write again when it returns.' : null;
 }
 function subBotsOf(id) {
   const found = [];
@@ -691,6 +695,18 @@ function notify(error) {
 }
 
 function current() { return state?.sessions.find(s => s.id === selectedId); }
+function chatSessions(session) {
+  const background = fleetState?.executionStates?.[selectedAgent];
+  const work = background?.sessions.find(chat => chat.id === background.conversationId);
+  const own = state?.sessions.some(chat => chat.id === (work?.delegation?.owner || work?.delegation?.source));
+  const clearedAt = state?.sessions.some(chat => chat.archived) ? session?.created || 0 : 0;
+  let at = work?.created || 0;
+  return work?.delegation?.delivered && !own && !state?.watching && selectedAgent !== 'main'
+    ? [{ ...work, items: work.items.filter(item => {
+      at = Math.max(at, item.createdAt || 0);
+      return !clearedAt || at >= clearedAt;
+    }) }, session].filter(Boolean) : [session].filter(Boolean);
+}
 function basename(value) { return value?.split(/[\\/]/).filter(Boolean).at(-1) || 'Choose a folder'; }
 function routerName(value, effort) {
   if (value?.startsWith('jev-')) return `Jev ${value.slice(4)}`;
@@ -1468,7 +1484,7 @@ function render() {
   showMode(state.settings.mode);
   showEffortCap();
   fitComposer();
-  $('#welcome').hidden = !!session?.items.length || !!session?.pendingMessage;
+  $('#welcome').hidden = chatSessions(session).some(chat => chat.items.length || chat.pendingMessage);
   renderSendButton();
   $('#message-queue').replaceChildren();
   for (const message of (session?.queue || []).filter(message => !message.agentReply && !message.sending)) {
@@ -1569,7 +1585,8 @@ function jobRecord(id) {
   for (const [, worker] of agentContexts()) for (const chat of worker.sessions) {
     const receipt = chat.items.find(item => item.localOnly && item.type === 'agentResult' && item.deliveryId === id);
     if (receipt) return { agentId: receipt.agentId, worker, chat, receipt,
-      job: { id, title: receipt.title, revision: receipt.revision, delivered: true, owner: chat.id,
+      job: { id, title: receipt.title, task: receipt.assignment, amendments: receipt.amendments,
+        error: receipt.error, cancelled: receipt.status === 'cancelled', revision: receipt.revision, delivered: true, owner: chat.id,
         access: chat.access, artifacts: receipt.artifacts, budgetId: receipt.budgetId, workspaceCopy: receipt.workspaceCopy } };
   }
 }
@@ -1602,13 +1619,11 @@ function renderJobDetails() {
   const { job, chat, agentId, worker, receipt, task } = record;
   const budget = fleetState?.jobBudgets?.[job.budgetId];
   const copy = job.workspaceCopy && (fleetState?.jobWorkspaces?.[job.workspaceCopy.workspace] || job.workspaceCopy);
-  const owner = agentContexts().find(([, worker]) => worker.sessions.some(session => session.id === (job.owner || job.source)))?.[0];
   const name = id => state.agents?.find(agent => agent.id === id)?.name || 'Bot';
-  $('#job-details-heading').textContent = job.title || 'Assignment';
+  $('#job-details-heading').textContent = 'Task';
   const status = job.cancelled ? (job.delivered ? 'Cancelled' : 'Stopping') : budget?.state === 'paused' && !job.delivered ? (budget.stopping ? 'Pausing…' : 'Paused') : task ? task.resumedAsJobId ? 'Continued in background' : task.budgetResumePending ? 'Queued to continue in background' : task.summary || 'Working' : job.delivered ? 'Result returned'
     : job.quotaPause || chat.quotaWaiting ? 'Paused'
     : worker.requests.length ? 'Needs input' : ({ queued: 'Queued', running: 'Working', revising: 'Updating' })[job.state] || 'Needs review';
-  const access = state.accessModes.find(mode => mode.id === job.access)?.label || 'Unknown access';
   $('#job-copy-location').hidden = !copy;
   $('#job-copy-location').textContent = copy ? `Project copy: ${copy.workspace}\nChanges stay here until you apply them.` : '';
   $('#job-copy-apply').hidden = !copy || !job.delivered;
@@ -1617,10 +1632,11 @@ function renderJobDetails() {
   const verificationKey = JSON.stringify(verification || null);
   if ($('#job-verification').dataset.key !== verificationKey) {
     $('#job-verification').dataset.key = verificationKey;
-    $('#job-verification').replaceChildren(renderVerification(verification));
+    $('#job-verification').replaceChildren(renderVerification(verification, true));
+    $('#job-verification').hidden = !$('#job-verification summary');
   }
   const copyStatus = !job.delivered && copy?.state === 'preparing' ? 'Preparing workspace' : !job.delivered && copy?.state === 'failed' ? 'Needs review' : status;
-  $('#job-details-status').textContent = `${name(agentId)} · Owner: ${name(owner)} · ${copyStatus} · ${access} · Revision ${job.revision || 1}`;
+  $('#job-details-status').textContent = `${name(agentId)} · ${copyStatus}`;
   const failure = job.revisionError || job.deliveryError || job.error || job.quotaPause?.reason || chat.quotaWaiting?.reason || (job === chat.delegation && chat.error);
   $('#job-details-error').textContent = failure || '';
   $('#job-details-error').hidden = !failure;
@@ -1641,28 +1657,24 @@ function renderJobDetails() {
     published.replaceChildren(renderArtifacts(job.artifacts, chat.id, receipt?.id));
   }
   published.hidden = !job.artifacts?.length;
-  const items = task ? chat.items.slice(task.startIndex || 0) : job === chat.delegation ? chat.items.slice(job.historyStartIndex ?? job.startIndex ?? 0)
-    : chat.items.filter(item => item.amendment?.jobId === job.id);
-  const evidence = items.flatMap(item => {
-    if (item.type === 'agentMessage') return [item.text || ''];
-    if (item.type === 'userMessage') return [(item.content || []).filter(part => part.type === 'text').map(part => part.text).join('\n')];
-    if (item.type === 'agentMail') return [`${item.fromName || 'Message'}: ${item.text || ''}`];
-    if (item.type === 'agentResult') return [`Result from ${item.agentName || 'bot'}: ${item.text || ''}`];
-    return [];
-  }).join('\n\n').slice(-16000);
-  const transcript = receipt ? receipt.text || '' : task ? `Original request${task.goal.length > 8000 ? ' (excerpt)' : ''}:\n${task.goal.slice(0, 8000)}\n\n${task.originalImageCount || 0} original image(s)\n\n${evidence.slice(-8000)}` : evidence;
-  if ($('#job-details-log').textContent !== transcript) $('#job-details-log').textContent = transcript || 'Waiting to start.';
-  $('#job-update-form').hidden = !!task;
-  $('#job-budget').hidden = !budget;
+  const assignment = task?.goal || job.originalRequest?.text || job.task?.replace(/^Task from agent [^\n]*\n\n/, '') || job.title || receipt?.title || '';
+  const updates = (job.amendments || []).map(change => change.text).filter(Boolean);
+  const transcript = [assignment, ...updates.map(text => 'Update: ' + text), task?.originalImageCount ? task.originalImageCount + ' attached image(s)' : ''].filter(Boolean).join('\n\n');
+  if ($('#job-details-log').textContent !== transcript) $('#job-details-log').textContent = transcript;
+  $('#job-details-log').hidden = !transcript;
+  $('#job-update-form').hidden = !!task || !!job.delivered || !!job.cancelled;
+  $('#job-budget').hidden = !budget || (budget.limitsEnabled === false && budget.state !== 'paused');
   if (budget) {
+    const unlimited = budget.limitsEnabled === false;
+    for (const field of $('#job-budget-form').querySelectorAll('label, input')) field.hidden = unlimited;
     const used = (budget.usedMs / 60000).toFixed(1), limit = budget.limitMs / 60000;
-    $('#job-budget-summary').textContent = `Budget · ${budget.state === 'paused' ? (budget.stopping ? 'Pausing… · ' : 'Paused · ') : ''}${used} / ${limit} min`;
-    $('#job-budget-status').textContent = [budget.reason, budget.estimated ? 'Elapsed time includes a restart estimate.' : '',
-      'Shared with helpers, job routing and follow-ups. Initial Hub chat is separate. Attempts count turns and routing requests; a CLI turn can include several internal calls. Queue and quota waits do not consume active time.'].filter(Boolean).join(' ');
+    $('#job-budget-summary').textContent = `Limits · ${budget.state === 'paused' ? (budget.stopping ? 'Pausing… · ' : 'Paused · ') : ''}${used} / ${limit} min`;
+    if (unlimited) $('#job-budget-summary').textContent = budget.stopping ? 'Pausing…' : 'Paused';
+    $('#job-budget-status').textContent = budget.reason || '';
+    $('#job-budget-status').hidden = !budget.reason;
     const usage = budget.usage || {};
-    const tokens = usage.reportedTokens == null ? 'Not reported' : `${usage.reportedTokens.toLocaleString()}${usage.tokensComplete ? '' : ' (incomplete)'}`;
-    const cost = formatProviderEstimate(usage);
-    $('#job-budget-usage').textContent = `AI attempts: ${usage.attempts || 0} / ${budget.limitAttempts}. Reported tokens: ${tokens}. Provider estimate: ${cost}. Estimates are not invoices; calls can exceed a token limit before reporting usage.`;
+    $('#job-budget-usage').textContent = (usage.attempts || 0) + ' / ' + budget.limitAttempts + ' attempts';
+    $('#job-budget-usage').hidden = unlimited;
     if (!viewedJob.budgetDirty) {
       viewedJob.budgetVersion = budget.version;
       $('#job-budget-limit').value = limit;
@@ -1843,28 +1855,24 @@ function renderArtifacts(records, sessionId, receiptId) {
 }
 
 function renderAgentResult(item, node, session) {
-  const opened = node.querySelector('details')?.open || false;
   node.className = 'message job-result';
-  const status = { completed: 'Result received', failed: 'Failed', cancelled: 'Cancelled', interrupted: 'Interrupted' }[item.status] || 'Needs review';
+  const checksFailed = Object.values(item.verification || {}).some(group => group.status === 'failed');
+  node.dataset.status = checksFailed ? 'failed' : item.status;
+  const status = checksFailed ? 'Checks failed' : { completed: 'Result received', failed: 'Failed', cancelled: 'Cancelled', interrupted: 'Interrupted' }[item.status] || 'Needs review';
   const label = element('div', 'message-label', `${item.agentName} · ${item.superseded ? 'Earlier revision' : status}`);
-  const owner = element('p', 'job-result-owner', `Owner: ${item.ownerName} · Worker report`);
-  const title = element('p', 'job-result-title', item.title);
-  const preview = element('p', 'job-result-preview', (item.error || item.text || '').slice(0, 260));
-  const details = element('details', 'activity'); details.open = opened;
-  details.append(element('summary', '', 'Report and handoff'), element('pre', '', item.text));
-  for (const change of item.amendments || []) details.append(element('p', '',
-    `Revision ${change.revision} · ${change.state === 'applied' ? 'Applied' : 'Received'}: ${change.text}`));
-  if (item.truncated) details.append(element('p', '', 'Report shortened. Open the bot chat for the full result.'));
-  const open = element('button', 'compact-action', 'Open chat'); open.type = 'button';
-  open.disabled = !state.agents?.some(agent => agent.id === item.agentId);
-  open.onclick = () => selectAgent(item.agentId).catch(notify);
-  node.replaceChildren(label, owner, title, preview, details, renderArtifacts(item.artifacts, session.id, item.id), open);
-  if (Object.values(item.verification || {}).some(group => group.checks?.length) || item.artifacts?.some(artifact => artifact.kind === 'program'))
-    node.append(renderVerification(item.verification));
+  const report = [item.error, item.text].filter(Boolean).filter((text, i, all) => all.indexOf(text) === i).join('\n\n');
+  const preview = element('p', 'job-result-preview', report);
+  const header = element('div', 'job-result-header'); header.append(label);
   if (item.deliveryId) {
-    const assignment = element('button', 'compact-action', 'Details'); assignment.type = 'button';
-    assignment.onclick = () => openJobDetails(item.deliveryId); node.append(assignment);
+    const assignment = element('button', 'compact-action', 'View task'); assignment.type = 'button';
+    assignment.onclick = () => openJobDetails(item.deliveryId); header.append(assignment);
   }
+  if (item.truncated) {
+    const full = element('button', 'compact-action', 'Open full chat'); full.type = 'button';
+    full.disabled = !state.agents?.some(agent => agent.id === item.agentId);
+    full.onclick = () => selectAgent(item.agentId).catch(notify); header.append(full);
+  }
+  node.replaceChildren(header, preview);
 }
 
 function formatProviderEstimate(usage) {
@@ -1873,11 +1881,12 @@ function formatProviderEstimate(usage) {
   return (value > 0 && value < 0.0001 ? '<$0.0001' : '$' + value.toFixed(4)) + (usage.costComplete ? '' : ' (incomplete)');
 }
 
-function renderVerification(evidence) {
+function renderVerification(evidence, configuredOnly = false) {
   const container = element('div', 'job-verification');
   const states = { passed: 'Check passed', failed: 'Check failed', 'needs-review': 'Needs review', 'not-verified': 'Not verified' };
   for (const [kind, label] of [['build', 'Build'], ['launch', 'Launch'], ['gameplay', 'Gameplay'], ['test', 'Tests']]) {
     const group = evidence?.[kind];
+    if (configuredOnly && !group?.checks?.length && !['failed', 'needs-review'].includes(group?.status)) continue;
     const row = element('details', 'verification-check');
     row.append(element('summary', '', `${label}: ${states[group?.status] || 'Not verified'}`));
     if (!group?.checks?.length) row.append(element('p', 'muted', 'No host check evidence. A bot report or an available file is not a passed check.'));
@@ -2115,9 +2124,18 @@ function renderMessages(session) {
   const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
   if (renderedSession !== selectedId) { $('#messages').replaceChildren(); messageNodes.clear(); renderedSession = selectedId; }
   const ids = new Set();
-  const maintenance = (session?.routes || []).filter(route => route.wikiMaintenanceTaskId);
-  for (const item of [...(session?.items || []), ...(session?.pendingMessage ? [session.pendingMessage] : [])]) {
-    if (item.internal || maintenance.some(route => route.messageId === (item.clientId || item.id) || (route.turnId && route.turnId === item.turnId))) continue;
+  const chats = chatSessions(session);
+  const entries = chats.flatMap(chat => {
+    let at = chat.created || 0;
+    return [...chat.items, ...(chat.pendingMessage ? [chat.pendingMessage] : [])].map(item => {
+      at = Math.max(at, item.createdAt || 0);
+      return { item, session: chat, at };
+    });
+  });
+  if (chats.length > 1) entries.sort((a, b) => a.at - b.at);
+  for (const { item, session } of entries) {
+    const maintenance = (session.routes || []).filter(route => route.wikiMaintenanceTaskId);
+    if (item.internal || item.agentReply || maintenance.some(route => route.messageId === (item.clientId || item.id) || (route.turnId && route.turnId === item.turnId))) continue;
     ids.add(item.id);
     let entry = messageNodes.get(item.id);
     const selected = item.type === 'userMessage' ? session.routes.find(r => r.messageId === (item.clientId || item.id)) : null;
@@ -2155,12 +2173,7 @@ function renderMessages(session) {
       node.className = 'message';
       node.replaceChildren(element('div', 'message-label', 'Artifact available'), renderArtifacts([item.artifact], session.id, item.id));
     }
-    else if (item.agentReply) {
-      node.className = 'message';
-      const details = element('details', 'activity'); details.open = node.querySelector('details')?.open || false;
-      details.append(element('summary', '', 'Handoff details'), element('pre', '', (item.content || []).filter(part => part.type === 'text').map(part => part.text).join('\n')));
-      node.replaceChildren(details);
-    } else if (item.type === 'userMessage' || item.type === 'agentMessage' || item.type === 'plan') {
+    else if (item.type === 'userMessage' || item.type === 'agentMessage' || item.type === 'plan') {
       const user = item.type === 'userMessage';
       node.className = `message ${user ? 'user' : item.phase === 'commentary' ? 'commentary' : 'assistant'}`;
       node.tabIndex = 0;
@@ -2263,6 +2276,15 @@ function renderMessages(session) {
       if (item.type === 'webSearch') { title = `Web search · ${item.query || item.action?.query || ''}`; detail = JSON.stringify(item.action || {}, null, 2); }
       if (item.type === 'contextCompaction') title = 'Conversation context compacted';
       details.append(element('summary', '', title), element('pre', '', detail)); node.replaceChildren(details);
+    }
+  }
+  let previousNode = null;
+  for (const { item } of entries) {
+    const entry = messageNodes.get(item.id);
+    if (entry && ids.has(item.id)) for (const node of [entry.node, entry.routeNode].filter(Boolean)) {
+      const next = previousNode ? previousNode.nextSibling : $('#messages').firstChild;
+      if (next !== node) $('#messages').insertBefore(node, next);
+      previousNode = node;
     }
   }
   for (const [id, entry] of messageNodes) if (!ids.has(id)) { entry.node.remove(); entry.routeNode?.remove(); messageNodes.delete(id); }
@@ -3349,6 +3371,7 @@ $('#job-budget-form').onsubmit = async event => {
     await window.router.jobBudget({ jobId: budget.id, expectedVersion: selected.budgetVersion,
       limitMinutes: Number($('#job-budget-limit').value), limitAttempts: Number($('#job-budget-attempts').value),
       limitTokens: $('#job-budget-tokens').value.trim() ? Number($('#job-budget-tokens').value) : null,
+      ...(budget.limitsEnabled === false ? { limitsEnabled: false } : {}),
       resume: budget.state === 'paused' });
     selected.budgetDirty = false; feedback.textContent = budget.state === 'paused' ? 'Resume accepted.' : 'Time limit saved.';
   } catch (error) { feedback.textContent = error.message; }

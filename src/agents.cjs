@@ -1284,7 +1284,7 @@ class Agents extends EventEmitter {
       source.items.push({ id: reply.id, type: 'agentResult', localOnly: true, createdAt: Date.now(),
         deliveryId, agentId: controller.agentId, agentName: this.agentName(controller.agentId), sessionId: session.id,
         ownerId: sourceController.agentId, ownerName: this.agentName(sourceController.agentId),
-        title: session.title, status: job.cancelled ? 'cancelled' : session.status, error: session.error || null,
+        title: session.title, assignment: job.task, status: job.cancelled ? 'cancelled' : session.status, error: session.error || null,
         // The setup of the run that produced this result (after a failover, the provider that finished).
         setup: session.routes?.findLast(route => route.setup)?.setup || null,
         text: stripTaskStatus(result) || 'No final answer was produced.', truncated: report.length > 16000,
@@ -2043,7 +2043,7 @@ class Agents extends EventEmitter {
           ownerVersion: job.ownerVersion || 1,
           revision: job.revision || 1, changes: (job.amendments || []).map(change => ({ id: change.id, revision: change.revision, state: change.state })),
           timeBudget: this.budgets.forJob(job) ? { usedMs: this.budgets.elapsed(this.budgets.forJob(job)),
-            limitMs: this.budgets.forJob(job).limitMs, state: this.budgets.forJob(job).state } : null,
+            limitMs: this.budgets.forJob(job).limitsEnabled ? this.budgets.forJob(job).limitMs : null, state: this.budgets.forJob(job).state } : null,
           budgetUsage: this.budgets.summary(job.budgetId),
           error: job.budgetError || (this.budgets.held(job) && this.budgets.forJob(job)?.reason) || job.revisionError || job.quotaPause?.reason || session.quotaWaiting?.reason || null })) };
     });

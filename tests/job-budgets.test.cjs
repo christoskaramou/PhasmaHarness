@@ -2,6 +2,51 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { JobBudgets, normalizedUsage, usageSummary } = require('../src/job-budgets.cjs');
 
+test('task bots and their children have no default time or attempt limits; explicit limits remain enforced', t => {
+  const f = fixture(t), root = f.worker('task', {}, null), child = f.worker('child', root.session);
+  const budget = f.budgets.forJob(root.job);
+  assert.equal(budget.limitsEnabled, false);
+  assert.equal(child.job.budgetId, root.job.budgetId);
+  for (let i = 0; i < 25; i++) {
+    const handle = f.budgets.beginRequest(root.controller, root.session, { provider: 'codex' });
+    f.budgets.report(handle, { usage: { inputTokens: 1, outputTokens: 1 } }, true);
+  }
+  f.budgets.refresh(); f.tick(121 * 60000); f.budgets.refresh();
+  assert.equal(budget.state, 'active');
+  assert.equal(root.controller.busy, root.session.id);
+  assert.equal(f.budgets.summary(budget.id).limitMs, null);
+  assert.equal(f.budgets.summary(budget.id).limitAttempts, null);
+  assert.equal(f.budgets.summary(budget.id).attempts, 25);
+  const limited = f.worker('maintenance');
+  assert.equal(f.budgets.forJob(limited.job).limitsEnabled, true);
+});
+
+test('legacy default caps become unlimited while customized limits survive reload', t => {
+  const f = fixture(t), root = f.worker('root'), custom = f.worker('custom');
+  const saved = structuredClone(f.budgets.records);
+  delete saved.root.limitsEnabled; delete saved.custom.limitsEnabled;
+  saved.custom.limitAttempts = 5;
+  saved.edited = { ...saved.root, id: 'edited', version: 2 };
+  const reloaded = fixture(t, saved);
+  assert.equal(reloaded.budgets.records.root.limitsEnabled, false);
+  assert.equal(reloaded.budgets.records.custom.limitsEnabled, true);
+  assert.equal(reloaded.budgets.records.edited.limitsEnabled, true, 'previously edited default-valued limits are preserved');
+});
+
+test('paused unlimited tasks resume without introducing caps and still require cleanup', async t => {
+  const f = fixture(t), root = f.worker('root', {}, null), budget = f.budgets.forJob(root.job);
+  budget.state = 'paused'; budget.usedMs = 121 * 60000;
+  const args = { jobId: root.job.id, expectedVersion: budget.version, limitMinutes: 120, resume: true, limitsEnabled: false };
+  assert.throws(() => f.budgets.update(args), /cleanup/);
+  await root.controller.stop();
+  f.budgets.update(args);
+  assert.equal(budget.state, 'active');
+  assert.equal(budget.limitsEnabled, false);
+  assert.equal(root.job.state, 'queued');
+  const limited = f.worker('limited');
+  assert.throws(() => f.budgets.update({ ...args, jobId: limited.job.id, expectedVersion: 1 }), /Only an unlimited/);
+});
+
 function fixture(t, saved = {}) {
   let wall = 1000000, mono = 0, failSave = false, writes = 0;
   const contexts = [], jobs = [], persisted = [];
@@ -15,9 +60,9 @@ function fixture(t, saved = {}) {
     findJob(id) { const found = jobs.find(record => record.job.id === id); if (!found) throw new Error('Unknown assignment'); return found; },
     pump() { budgets.refresh(); } };
   const budgets = new JobBudgets(agents, () => wall, () => mono);
-  const worker = (id, source = {}) => {
+  const worker = (id, source = {}, limits = { limitMs: 7200000, limitAttempts: 20, limitTokens: null }) => {
     const job = { id, state: 'running', delivered: false, startIndex: 0, historyStartIndex: 0 };
-    budgets.register(job, source); budgets.persist();
+    budgets.register(job, source, source.delegation ? null : limits); budgets.persist();
     const session = { id: `session-${id}`, delegation: job, items: [{ text: 'Earlier evidence' }], status: 'running', queue: [] };
     const controller = { busy: session.id, data: { sessions: [session] }, activeTurns: new Map([[session.id, 'turn']]),
       loading: new Set(), stopping: new Set(), cleanupPending: new Set(), blockedReason: () => null,
@@ -228,7 +273,7 @@ test('attempt ceilings include failures and require an explicit extension withou
 
 test('a failed admission save creates no live request and retains uncertain usage for review', t => {
   const f = fixture(t), root = f.worker('root'); f.fail(true);
-  assert.throws(() => f.budgets.beginRequest(root.controller, root.session, { provider: 'codex' }), /Budget disk failure/);
+  assert.throws(() => f.budgets.beginRequest(root.controller, root.session, { provider: 'codex' }), { message: 'Budget disk failure', budgetPersistenceFailed: true });
   assert.equal(f.budgets.inflight.size, 0);
   assert.equal(f.budgets.snapshot().root.usage.missingFinalUsage, true);
   f.fail(false);

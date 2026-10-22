@@ -1810,20 +1810,45 @@ app.whenReady().then(async () => {
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.deepEqual(await shown(), [true, true, 'Read only: Researcher gives this bot its work.'], 'a sub-bot’s chat shows its work, read only');
   delete reviewer.createdBy;
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); selectAgent(' + JSON.stringify(reviewer.id) + ')');
+  assert.deepEqual((await shown()).slice(0, 2), [true, false], 'a normal bot without a direct chat retains completed work and accepts input');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#welcome").hidden'), true);
   const ownChat = agents.conversation(agents.controller(researcher.id), true);
   ownChat.items.push({ id: 'own-message', type: 'agentMessage', phase: 'final_answer', text: 'Written in my own chat.', createdAt: Date.now() });
   const researcherJob = await giveWork(researcher, false);
+  delete researcherJob.items[1].createdAt;
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); selectAgent(' + JSON.stringify(researcher.id) + ')');
   await new Promise(resolve => setTimeout(resolve, 100));
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/background-work.png'), (await window.webContents.capturePage()).toPNG());
   assert.deepEqual(await shown(), [true, true, 'Read only while this bot works on a task from another bot. You can write again when it returns.'],
     'a bot working for another bot shows that work, read only');
+  const queuedView = agents.snapshot();
+  queuedView.executionStates[researcher.id].sessions.find(chat => chat.id === researcherJob.id).items = [];
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(queuedView) + ')');
+  assert.equal((await shown())[1], true, 'typing is disabled even before the delegated worker emits its first message');
   researcherJob.delegation.delivered = true;
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); new Promise(r => setTimeout(r, 100))');
   const back = await shown();
-  assert.deepEqual([back[0], back[1]], [false, false], 'once its result returns, the bot’s own chat is back');
+  assert.deepEqual([back[0], back[1]], [true, false], 'once its result returns, work remains visible and the bot’s own chat is writable');
   assert.deepEqual(await window.webContents.executeJavaScript(`[selectedId, document.querySelector('#messages').textContent.includes('Written in my own chat.')]`),
     [ownChat.id, true], 'Send goes to the bot’s own chat again, with its messages');
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/delegated-chat-completed.png'), (await window.webContents.capturePage()).toPNG());
+  assert.equal(await window.webContents.executeJavaScript(`(() => {
+    const text = document.querySelector('#messages').textContent;
+    return text.indexOf('Task from agent: say hello.') < text.indexOf('Hello from the background.');
+  })()`), true, 'messages without timestamps retain their position after delegated instructions');
+  await window.webContents.executeJavaScript('selectAgent("main"); selectAgent(' + JSON.stringify(researcher.id) + ')');
+  assert.deepEqual((await shown()).slice(0, 2), [true, false], 'completed work survives navigating away and back');
+  const clearedView = agents.snapshot();
+  const clearedState = clearedView.agentStates[researcher.id];
+  clearedState.sessions.push({ id: 'previous-cleared-chat', archived: true });
+  clearedState.sessions.find(chat => chat.id === ownChat.id).created = Date.now() + 1000;
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(clearedView) + ')');
+  assert.equal((await shown())[0], false, 'clearing a direct chat does not resurrect old delegated history');
+  const freshWork = clearedView.executionStates[researcher.id].sessions.find(chat => chat.id === researcherJob.id);
+  freshWork.items[0].createdAt = Date.now() + 2000;
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(clearedView) + ')');
+  assert.equal((await shown())[0], true, 'new delegated answers without timestamps remain visible after a clear');
   // A task resumed from the bot's own chat is not another bot's work (shown to the UI only, nothing runs).
   const ownView = agents.snapshot(), ownBackground = ownView.executionStates[researcher.id];
   ownBackground.sessions.find(chat => chat.id === ownBackground.conversationId).delegation = { id: 'own-resumed-task', state: 'running', owner: ownChat.id, source: ownChat.id };
@@ -2223,7 +2248,7 @@ app.whenReady().then(async () => {
   const originalQueue = ownerChat.queue, originalPause = ownerChat.queuePaused;
   ownerChat.queuePaused = true;
   ownerChat.queue = Array.from({ length: 10 }, (_, i) => ({ id: `full-${i}`, text: 'Queued user message', images: [] }));
-  const deferredResult = { id: 'deferred-fixture', type: 'agentResult', localOnly: true, text: 'Saved build evidence.',
+  const deferredResult = { id: 'deferred-fixture', deliveryId: 'deferred-task', type: 'agentResult', localOnly: true, text: 'Saved build evidence.',
     agentName: 'Builder 1', ownerName: 'Hub', status: 'completed', pendingReply: { id: 'deferred-fixture', agentReply: true } };
   const fixtureArtifact = { id: 'game', scopeId: 'split-assignment', version: 3, kind: 'program',
     path: 'Game <img src=x onerror=alert(1)>.exe', label: 'Game', workspace: root };
@@ -2237,6 +2262,8 @@ app.whenReady().then(async () => {
   await publish();
   assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-activity-summary").textContent'), /1 result waiting/);
   assert.equal(artifactCalls.length, 0, 'rendering a result cannot launch an artifact');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector(".job-result .artifact-list")'), null, 'file controls are not duplicated in chat');
+  await window.webContents.executeJavaScript('openJobDetails("deferred-task")');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector(".artifact-path img")'), null);
   assert.match(await window.webContents.executeJavaScript('document.querySelector(".artifact-list").textContent'), /Files available/);
   await window.webContents.executeJavaScript(`document.querySelector('.artifact-row button').click(); true`);
@@ -2245,6 +2272,7 @@ app.whenReady().then(async () => {
   await until(() => artifactCalls.length === 2, 'artifact Run is explicit');
   assert.deepEqual(artifactCalls, ['folder', 'run'].map(action => ({ action, sessionId: ownerChat.id,
     receiptId: deferredResult.id, artifactId: 'game', expectedVersion: 3 })));
+  await window.webContents.executeJavaScript('document.querySelector("#job-dialog .close-dialog").click(); true');
   const fixtureRunId = '00000000-0000-4000-8000-000000000001';
   agents.artifactRuns.runs.set(fixtureRunId, { id: fixtureRunId, label: 'Game', path: 'game.exe', workspace: root, child: null });
   await publish();
@@ -2406,6 +2434,31 @@ app.whenReady().then(async () => {
   assert.match(await window.webContents.executeJavaScript('document.querySelector("#messages").textContent'), /Builder 2 · Cancelled/);
   assert.equal(await window.webContents.executeJavaScript('document.querySelector(".job-result img")'), null, 'reports are untrusted text');
   assert.ok(controller.busy, 'reports appear before their busy owner can resume');
+  ownerChat.items.push({ id: 'hidden-handoff-fixture', type: 'userMessage', agentReply: true,
+    content: [{ type: 'text', text: 'Internal handoff diagnostic fixture' }] });
+  await publish();
+  const compactReport = await window.webContents.executeJavaScript(`(() => {
+    const card = document.querySelector('.job-result');
+    return { open: !!card.querySelector('details'), text: card.innerText,
+      hiddenHandoff: !document.querySelector('#messages').textContent.includes('Internal handoff diagnostic fixture'),
+      controls: [...card.querySelectorAll(':scope > .job-result-header button')].map(button => button.textContent) };
+  })()`);
+  assert.equal(compactReport.open, false);
+  assert.equal(compactReport.hiddenHandoff, true);
+  assert.doesNotMatch(compactReport.text, /Requested by|Report and handoff|Owner:/);
+  assert.deepEqual(compactReport.controls, ['View task']);
+  const longReport = await window.webContents.executeJavaScript(`(() => {
+    const node = document.createElement('div'), text = 'Long report. '.repeat(40);
+    renderAgentResult({ agentId: selectedAgent, agentName: 'Worker', ownerName: 'Hub', title: 'Assignment', status: 'completed', text, truncated: true,
+      verification: { test: { status: 'failed', checks: [] } } }, node, current());
+    return { warning: node.querySelector('.message-label').textContent, preview: node.querySelector('.job-result-preview').textContent,
+      duplicate: !!node.querySelector('details'), fullChat: node.querySelector('button')?.textContent };
+  })()`);
+  assert.match(longReport.warning, /Checks failed/);
+  assert.equal(longReport.preview.length, 'Long report. '.repeat(40).length, 'the complete answer remains in chat without a duplicate in task details');
+  assert.equal(longReport.duplicate, false);
+  assert.equal(longReport.fullChat, 'Open full chat');
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/compact-reports.png'), (await window.webContents.capturePage()).toPNG());
   window.setSize(840, 640);
   await window.webContents.executeJavaScript('document.documentElement.style.setProperty("--font-scale", "1.5"); true');
   const activityFits = await window.webContents.executeJavaScript(`(() => {
@@ -2435,9 +2488,9 @@ app.whenReady().then(async () => {
   execution.connection = 'disconnected';
   const foregroundChat = agents.conversation(foreground, true), assignment = agents.conversation(execution, true);
   assignment.delegation = { id: 'split-assignment', revision: 1, source: ownerChat.id, owner: ownerChat.id,
-    state: 'queued', access: assignment.access, task: 'Private fixture assignment', title: 'Build a game', startIndex: 0, delivered: false };
+    state: 'queued', access: assignment.access, task: 'Private fixture assignment <img src=x onerror=alert(1)>', title: 'Build a game', startIndex: 0, delivered: false };
   assignment.delegation.artifacts = [fixtureArtifact];
-  agents.budgets.register(assignment.delegation, ownerChat); agents.budgets.persist();
+  agents.budgets.register(assignment.delegation, ownerChat, { limitMs: 7200000, limitAttempts: 20, limitTokens: null }); agents.budgets.persist();
   const timeBudget = agents.budgets.forJob(assignment.delegation), budgetCalls = [];
   ipcMain.handle('jobBudget', async (_event, args) => {
     budgetCalls.push(args); const result = agents.budgets.update(args); await publish(); return result;
@@ -2466,11 +2519,11 @@ app.whenReady().then(async () => {
   assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-artifacts").textContent'), /Open folder.*Run/s);
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-artifacts img")'), null);
   assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-budget-summary").textContent'), /120 min/);
-  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-budget-usage").textContent'), /Reported tokens: Not reported\. Provider estimate: Not reported/);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-budget-usage").textContent'), /0 \/ 20 attempts/);
   timeBudget.requests['cost-fixture'] = { id: 'cost-fixture', kind: 'worker', provider: 'claude-cli', complete: true,
     usage: { inputTokens: 125, cachedInputTokens: 20, outputTokens: 10, totalTokens: 135 }, providerEstimateUsd: 0.0031 };
   agents.primary.save(); await publish();
-  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-budget-usage").textContent'), /Reported tokens: 135\. Provider estimate: \$0\.0031/);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-budget-usage").textContent'), /1 \/ 20 attempts/);
   await window.webContents.executeJavaScript(`document.querySelector('#job-budget').open = true;
     document.querySelector('#job-budget-limit').value = '5';
     document.querySelector('#job-budget-attempts').value = '25';
@@ -2486,7 +2539,7 @@ app.whenReady().then(async () => {
     return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)?.closest('#job-budget-save') === button;
   })()`), true, 'the expanded budget form retains a reachable Save button');
   assert.equal(await window.webContents.executeJavaScript(`(() => {
-    const summary = document.querySelector('#job-budget-summary'), box = summary.getBoundingClientRect();
+    const summary = document.querySelector('#job-budget-summary'); summary.scrollIntoView({ block: 'start' }); const box = summary.getBoundingClientRect();
     return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)?.closest('summary') === summary;
   })()`), true, 'the budget disclosure remains reachable after scrolling to its controls');
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/job-budget.png'), (await window.webContents.capturePage()).toPNG());
@@ -2572,16 +2625,36 @@ app.whenReady().then(async () => {
     complete: true, usage: null, providerEstimateUsd: null };
   ownerChat.items.push({ id: 'archived-assignment-result', type: 'agentResult', localOnly: true,
     deliveryId: 'replaced-assignment', agentId: splitProfile.id, agentName: 'Split bot', ownerName: 'Hub',
-    title: 'Earlier assignment', status: 'completed', text: 'Retained report after the worker was reused.', budgetId: timeBudget.id });
+    title: 'Earlier assignment', assignment: 'Earlier assignment in full, preserved after reuse.', status: 'completed', text: 'Retained report after the worker was reused.', budgetId: timeBudget.id });
   await publish(); await window.webContents.executeJavaScript('selectAgent("main")');
   await window.webContents.executeJavaScript(`(() => {
-    const result = [...document.querySelectorAll('.job-result')].find(row => row.textContent.includes('Earlier assignment'));
-    [...result.querySelectorAll('button')].find(button => button.textContent === 'Details').click();
+    const result = [...document.querySelectorAll('.job-result')].find(row => row.textContent.includes('Retained report after the worker was reused.'));
+    [...result.querySelectorAll('button')].find(button => button.textContent === 'View task').click();
   })()`);
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-dialog").open'), true);
-  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-details-log").textContent'), /worker was reused/);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-details-log").textContent'), /Earlier assignment in full, preserved after reuse/);
+  assert.doesNotMatch(await window.webContents.executeJavaScript('document.querySelector("#job-dialog").innerText'), /Owner:|Revision|Not verified|Retained report after the worker was reused/);
+  await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/task-panel-minimal.png'), (await window.webContents.capturePage()).toPNG());
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-update-form").hidden'), true, 'completed assignments hide update controls');
+  await window.webContents.executeJavaScript(`document.querySelector('#job-details-log').textContent += '\\n' + 'Readable assignment instructions.\\n'.repeat(30);
+    document.querySelector('#job-details-log').scrollIntoView({ block: 'start' }); true`);
+  const taskLayout = await window.webContents.executeJavaScript(`(() => {
+    const log = document.querySelector('#job-details-log'), budget = document.querySelector('#job-budget');
+    return { logOverflow: getComputedStyle(log).overflowY, logHeight: log.clientHeight,
+      budgetOverflow: getComputedStyle(budget).overflowY, summaryPosition: getComputedStyle(budget.querySelector('summary')).position };
+  })()`);
+  assert.equal(taskLayout.logOverflow, 'visible');
+  assert.ok(taskLayout.logHeight > 500, 'assignment text keeps its natural height');
+  assert.equal(taskLayout.budgetOverflow, 'visible');
+  assert.equal(taskLayout.summaryPosition, 'static');
+  await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/task-panel-readable.png'), (await window.webContents.capturePage()).toPNG());
+  timeBudget.limitsEnabled = false; await publish();
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-budget").hidden'), true, 'unlimited task bots have no limits controls');
+  timeBudget.limitsEnabled = true; await publish();
   assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-budget-summary").textContent'), /6 min/);
-  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-budget-usage").textContent'), /Reported tokens: 135 \(incomplete\)\. Provider estimate: \$0\.0031 \(incomplete\)/);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-budget-usage").textContent'), /2 \/ 25 attempts/);
   await window.webContents.executeJavaScript('document.querySelector("#job-dialog .close-dialog").click(); true');
   console.log('Saved result details retain their report and shared budget after worker reuse');
   phase = 'direct tracked task details';
@@ -2604,16 +2677,21 @@ app.whenReady().then(async () => {
   })()`);
   assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-activity-summary").textContent'), /1 task/);
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-update-form").hidden'), true);
-  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-details-log").textContent'), /Original request.*Continue my direct task.*1 original image/s);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-details-log").textContent'), /Continue my direct task.*1 attached image/s);
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-details-log img")'), null);
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-budget-save").textContent'), 'Resume');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-budget").hidden'), false);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-budget-limit").hidden'), true);
   assert.equal(await sendIsReachable(), true);
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/direct-task-budget.png'), (await window.webContents.capturePage()).toPNG());
-  await window.webContents.executeJavaScript(`document.querySelector('#job-budget').open = true;
-    document.querySelector('#job-budget-form').dispatchEvent(new Event('submit', { cancelable: true })); true`);
+  await window.webContents.executeJavaScript(`document.querySelector('#job-budget').open = true; true`);
+  await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/unlimited-task-resume.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript(`document.querySelector('#job-budget-form').dispatchEvent(new Event('submit', { cancelable: true })); true`);
   await until(() => directTask.resumedAsJobId === directTask.resumeJobId, 'direct-task Resume admits one private continuation');
   assert.equal(agents.findJob(directTask.resumeJobId).job.owner, foregroundChat.id);
   assert.equal(agents.findJob(directTask.resumeJobId).job.budgetId, directBudget.id);
+  assert.equal(directBudget.limitsEnabled, false, 'resuming an unlimited task does not add limits');
   ipcMain.removeHandler('stop');
   let stoppedDirectTask;
   ipcMain.handle('stop', async (_event, id) => { stoppedDirectTask = id; await agents.stop(id); await publish(); });
@@ -2733,7 +2811,8 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript('document.querySelector(".batch-entry [data-kind=launch]").textContent'), 'Not verified');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector(".batch-report img")'), null);
   await window.webContents.executeJavaScript('document.querySelector(".batch-entry button").click(); true');
-  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-verification").textContent'), /Build: Check passed.*Gameplay: Not verified/s);
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#job-verification").textContent'), /Build: Check passed/);
+  assert.doesNotMatch(await window.webContents.executeJavaScript('document.querySelector("#job-verification").textContent'), /Not verified/);
   assert.equal(await sendIsReachable(), true);
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), 'Keep my next question');
   await window.webContents.executeJavaScript(`document.querySelector('#job-dialog .close-dialog').click();

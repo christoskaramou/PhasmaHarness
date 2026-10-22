@@ -264,6 +264,7 @@ module.exports = {
 
   async sendCoordinator(session, { text, images, fileMessage, mode, agentReply, agentReplyCancelled, agentResult, agentMail, routineRun = null }) {
     const abort = new AbortController(), turnId = randomUUID();
+    let reviewingResult = false, resultMessage;
     this.coordinatorAbort = abort; this.smartRouter.abort = abort; this.busy = session.id; this.activeTurns.set(session.id, turnId);
     session.status = 'running'; session.error = null; session.agentReplyActive = agentReply === true; session.turnId = turnId;
     if (!agentReply) { session.agentDelegations = 0; session.agentMessages = 0; }
@@ -290,6 +291,7 @@ module.exports = {
       await this.summarizeCoordinator(session, choice, abort);
       const message = { id: randomUUID(), type: 'userMessage', localOnly: true, ...(fileMessage ? { fileMessage } : {}), ...(agentReply ? { agentReply: true } : {}), ...(routineRun ? { routineRun } : {}), createdAt: Date.now(), content: [{ type: 'text', text }, ...images.map(url => ({ type: 'image', url }))] };
       session.items.push(message);
+      resultMessage = message;
       const mailedJob = agentMail?.jobId ? this.agents.pendingJobs().find(record => record.job.id === agentMail.jobId)?.job : null;
       const mailRequest = mailedJob?.ownerRequest || mailedJob?.originalRequest;
       const request = agentReply ? agentResult?.request || mailRequest || session.hubRequest : { id: message.id, text };
@@ -319,10 +321,12 @@ module.exports = {
 
 
       if (agentReply && agentResult && !agentReplyCancelled && !request?.comparison) {
+        reviewingResult = true;
         const { decision, usage } = await this.smartRouter.complete({ instructions: COMPLETION_INSTRUCTIONS,
           prompt: JSON.stringify({ originalRequest: context.originalRequest, ...(request.batch ? { assignment: 'This worker owes one full independent instance of the requested task. Harness handles creating the other workers and checking their results; do not require this worker to create or complete its peers.' } : {}), workerStatus: agentResult.status, workerResult: text, verification: agentResult.verification, resultTruncated: !!agentResult.truncated }), schema: COMPLETION_SCHEMA, timeoutMs: 120000 }, choice, abort);
         abort.signal.throwIfAborted(); recordUsage(session, usage);
         if (!decision || typeof decision.fulfilled !== 'boolean' || typeof decision.evidence !== 'string' || !decision.evidence.trim() || !Array.isArray(decision.gaps) || decision.gaps.some(gap => typeof gap !== 'string' || !gap.trim()) || (decision.fulfilled ? decision.gaps.length !== 0 : decision.gaps.length === 0)) throw new Error('Hub could not verify the worker result. The task has not been confirmed complete.');
+        reviewingResult = false;
         const hostGaps = verificationGaps(agentResult.verification);
         const gaps = [...decision.gaps, ...hostGaps];
         if (context.originalRequest.truncated) gaps.push('The original request exceeds Hub\'s completion-check window; its full scope has not been verified.');
@@ -366,12 +370,14 @@ module.exports = {
         }
       }
       for (let step = 0; !reply && step < 6; step++) {
+        reviewingResult = true;
         // The chat id keys its kept Codex thread, so later calls send only what changed.
         const { decision, usage } = await this.smartRouter.complete({ instructions: INSTRUCTIONS(this.agents.hubName()), prompt: JSON.stringify(context), schema: SCHEMA, images,
           timeoutMs: 120000, conversation: { key: session.id, context } }, choice, abort);
         abort.signal.throwIfAborted();
         recordUsage(session, usage);
         if (!decision || typeof decision.reply !== 'string' || !Object.hasOwn(decision, 'action')) throw new Error('Hub returned an invalid response. No action was taken from that response.');
+        reviewingResult = false;
         if (decision.action === null) {
           if (context.currentRequestTruncated) throw new Error('This long request needs a worker to read its full context. Please retry.');
           reply = decision.reply; break;
@@ -438,6 +444,18 @@ module.exports = {
       }
       session.status = 'completed';
     } catch (error) {
+      if (reviewingResult && !error.budgetPersistenceFailed && error.code !== 'JOB_BUDGET_HOLD' && !abort.signal.aborted && agentReply && agentResult?.status === 'completed') {
+        const worker = this.agents.agentName(agentResult.agentId);
+        session.hubCompletion = { requestId: agentResult.request?.id, agentId: agentResult.agentId,
+          fulfilled: false, evidence: 'Worker report received.', gaps: [`${this.agents.hubName()} follow-up could not finish: ${error.message}`] };
+        if (resultMessage && agentResult.request?.batch) resultMessage.hubBatchResult = {
+          ...agentResult.request.batch, agentId: agentResult.agentId, fulfilled: false,
+          evidence: session.hubCompletion.evidence, gaps: session.hubCompletion.gaps };
+        session.items.push({ id: randomUUID(), turnId, type: 'agentMessage', phase: 'final_answer', localOnly: true,
+          createdAt: Date.now(), text: `**${worker} completed its assignment.** Its report is available above.\n\nMy follow-up could not finish: ${error.message}\nThe report is retained, but I have not confirmed the full request complete.` });
+        session.status = 'completed'; session.error = null;
+        return;
+      }
       session.status = abort.signal.aborted ? 'interrupted' : 'failed';
       session.error = abort.signal.aborted ? 'Hub stopped.' : error.message;
       if (!abort.signal.aborted) throw error;
