@@ -476,13 +476,17 @@ function renderApiProviders() {
   }));
   renderProviderConnections();
 }
+function showProviderError(message) {
+  const status = $('#provider-status'); status.textContent = message;
+  if ($('#settings-dialog').open && !$('#panel-providers').hidden) status.scrollIntoView({ block: 'center' });
+}
 async function apiProviderAction(run, id = null, label = null) {
   try {
     applyState(await (id ? withProviderAction(id, label, run) : run()));
     for (const id of [...discoveredModels.keys()]) if (!['codex', 'claude-cli', 'cursor-cli'].includes(id)) discoveredModels.delete(id);
     renderProviders(); $('#provider-status').textContent = '';
   }
-  catch (error) { $('#provider-status').textContent = error.message; }
+  catch (error) { showProviderError(error.message); }
 }
 $('#api-add').onclick = () => {
   const name = $('#api-name').value.trim(), baseUrl = $('#api-url').value.trim(), key = $('#api-key').value;
@@ -3440,7 +3444,7 @@ function renderProviders() {
         $('#provider-status').textContent = '';
         renderProviders();
         if (!connected) loadDiscoveredModels(id).catch(() => {});
-      } catch (e) { $('#provider-status').textContent = e.message; }
+      } catch (e) { showProviderError(e.message); }
     };
     const text = element('div', 'provider-account-text');
     text.append(element('strong', '', label), element('span', 'provider-detail', detail ? ` · ${detail}` : ''));
@@ -3466,7 +3470,7 @@ function renderProviders() {
           if ($('#provider-status').textContent === progress)
             $('#provider-status').textContent = '';
           renderProviders();
-        } catch (e) { $('#provider-status').textContent = e.message; install.disabled = false; }
+        } catch (e) { showProviderError(e.message); install.disabled = false; }
       };
       row.append(install);
     }
@@ -3680,7 +3684,7 @@ $('#renew-models').onclick = async () => {
     renderProviders();
     $('#provider-status').textContent = next.modelRefreshNote || 'Models refreshed.';
   } catch (e) {
-    $('#provider-status').textContent = e.message;
+    showProviderError(e.message);
   } finally {
     renewingModels = false;
     renderModelFetching();
@@ -3729,7 +3733,7 @@ document.querySelectorAll('.settings-tab').forEach(tab => {
     if (name === 'checks') renderChecks();
     if (name === 'providers') {
       renderProviders();
-      if (cursorInUse()) loadDiscoveredModels('cursor-cli').then(() => renderProviders()).catch(e => { $('#provider-status').textContent = e.message; });
+      if (cursorInUse()) loadDiscoveredModels('cursor-cli').then(() => renderProviders()).catch(e => { showProviderError(e.message); });
     }
     body.scrollTop = settingsScroll[name] || 0;
   };

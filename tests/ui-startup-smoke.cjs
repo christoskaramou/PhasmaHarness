@@ -1021,9 +1021,11 @@ app.whenReady().then(async () => {
   ipcMain.removeHandler('installProvider');
   console.log('Provider action spinner passed');
   // Rows that are not connected are greyed like their plugs, and each Settings tab keeps its own scroll place.
+  const providerWindowSize = window.getSize();
+  window.setSize(providerWindowSize[0], 480); await new Promise(resolve => setTimeout(resolve, 50));
   await window.webContents.executeJavaScript(`document.querySelector('#settings-dialog').showModal(); document.querySelector('#tab-providers').click();
     document.querySelector('.settings-body').scrollTop = 0;
-    document.querySelector('#provider-status').textContent = "DeepSeek Harness could not start: Cannot find package 'zod'";
+    showProviderError("DeepSeek Harness could not start: Cannot find package 'zod'");
     new Promise(r => setTimeout(r, 150))`);
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/provider-rows.png'), (await window.webContents.capturePage()).toPNG());
   const settingsLook = await window.webContents.executeJavaScript(`(() => {
@@ -1047,13 +1049,14 @@ app.whenReady().then(async () => {
     document.querySelector('#tab-general').click();
     const generalBack = body.scrollTop;
     document.querySelector('#settings-dialog').close();
-    return { greyed, errorInView, providers, general, back, generalSet, generalBack };
+    return { greyed, errorInView, providers, general, back, generalSet, generalBack, errorBox: [box.top, box.bottom], view: [view.top, view.bottom] };
   })()`);
   assert.equal(settingsLook.greyed, true, 'a provider that is not connected is greyed like its plug');
-  assert.equal(settingsLook.errorInView, true, 'a connect error shows under the provider rows, in view');
+  assert.equal(settingsLook.errorInView, true, 'a connect error shows under the provider rows, in view: ' + JSON.stringify(settingsLook));
   assert.ok(settingsLook.providers > 0, 'the Providers tab scrolls in this fixture');
   assert.deepEqual([settingsLook.general, settingsLook.back, settingsLook.generalBack], [0, settingsLook.providers, settingsLook.generalSet],
     'each Settings tab keeps its own scroll place: ' + JSON.stringify(settingsLook));
+  window.setSize(...providerWindowSize); await new Promise(resolve => setTimeout(resolve, 50));
   console.log('Greyed unconnected providers, connect errors under the rows and per-tab Settings scrolling passed');
   // Check removal saves immediately without closing Settings.
   controller.data.settings.checks[controller.data.settings.workspace] = [{ id: 'c1', name: 'Syntax', argv: ['node', '--check', 'demo.js'], cwd: controller.data.settings.workspace, timeoutMs: 120000, readOnlySafe: false }];
