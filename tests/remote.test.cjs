@@ -288,6 +288,8 @@ test('public browser assets expose the UI with a network CSP, while source, keys
   assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
   const html = await response.text();
   assert.match(html, /remote-api\.js/);
+  assert.match(html, /connectors\.js/);
+  assert.equal((await f.request('/ui/connectors.js')).status, 200);
   assert.match(html, /connect-src 'self'/);
   assert.doesNotMatch(html, /connect-src 'none'/);
   assert.ok(!html.includes(f.key));

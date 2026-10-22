@@ -33,6 +33,8 @@ module.exports = {
       throw new Error('Helper MCP call rejected: no active turn for this session.');
     }
     if (signal?.aborted || this.cliAbort?.signal.aborted) throw new Error('Helper call stopped.');
+    if (['connector_tools', 'connector_call'].includes(tool)) return this.connectorTool(session, tool, args, signal);
+    if (tool === 'router_read_output' && this.connectors) return this.toolHelpers.read(session, args);
     if (this.agents && AGENT_TOOLS.some(item => item.name === tool)) return this.agents.tool(this, session, tool, args);
     if (!isCLI(session.activeProvider)) throw new Error('Only agent tools are available through the Codex helper MCP.');
     this.toolHelpers.jev = this.smartRouter.jev;
@@ -93,6 +95,7 @@ module.exports = {
   },
 
   cancelHelpers(prefix = '') {
+    if (!prefix) this.connectors?.cancelOwners(this.data.sessions.map(session => session.id));
     this.toolHelpers.cancel();
     for (const [id, resolve] of this.helperApprovals) if (id.startsWith(prefix)) { resolve(false); this.requests.delete(id); this.helperApprovals.delete(id); this.approvalKeys.delete(id); }
   },

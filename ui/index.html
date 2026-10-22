@@ -16,6 +16,7 @@
   <script defer src="documents.js"></script>
   <script defer src="agent-state.js"></script>
   <script defer src="report-format.js"></script>
+  <script defer src="connectors.js"></script>
   <script defer src="app.js"></script>
   <script defer src="dictation.js"></script>
   <script defer src="tips.js"></script>
@@ -197,12 +198,38 @@
     <div class="settings-tabs" role="tablist" aria-label="Settings sections">
       <button type="button" class="settings-tab active" role="tab" id="tab-general" aria-selected="true" aria-controls="panel-general" data-tab="general">General</button>
       <button type="button" class="settings-tab" role="tab" id="tab-providers" aria-selected="false" aria-controls="panel-providers" data-tab="providers">Providers</button>
+      <button type="button" class="settings-tab" role="tab" id="tab-connectors" aria-selected="false" aria-controls="panel-connectors" data-tab="connectors">Connectors</button>
       <button type="button" class="settings-tab" role="tab" id="tab-benchmarks" aria-selected="false" aria-controls="panel-benchmarks" data-tab="benchmarks">Benchmarks</button>
       <button type="button" class="settings-tab" role="tab" id="tab-checks" aria-selected="false" aria-controls="panel-checks" data-tab="checks">Checks</button>
       <button type="button" class="settings-tab" role="tab" id="tab-wiki" aria-selected="false" aria-controls="panel-wiki" data-tab="wiki">Wiki</button>
       <button type="button" class="settings-tab" role="tab" id="tab-about" aria-selected="false" aria-controls="panel-about" data-tab="about">About</button>
     </div>
     <div class="settings-body">
+    <div id="panel-connectors" class="settings-panel" role="tabpanel" aria-labelledby="tab-connectors" hidden>
+      <div class="connector-heading"><div><h3 class="settings-section">Shared connectors</h3><p class="hint">Available to every bot, with any model or CLI.</p></div><button type="button" id="connector-add">Add connector</button></div>
+      <p id="connector-status" class="hint" role="status"></p>
+      <div id="connector-list"></div>
+      <div id="connector-editor" hidden>
+        <h3 id="connector-editor-heading">Add MCP connector</h3>
+        <label>Name<input id="connector-name" maxlength="80" placeholder="My connector" autocomplete="off"></label>
+        <label>Connection<select id="connector-transport"><option value="http">Remote server</option><option value="stdio">Local program</option></select></label>
+        <div id="connector-http">
+          <label>Server URL<input id="connector-url" type="url" placeholder="https://example.com/mcp" autocomplete="off" spellcheck="false"></label>
+          <label>Authentication<select id="connector-auth"><option value="none">None</option><option value="bearer">Bearer token</option><option value="oauth">Sign in with OAuth</option></select></label>
+          <label id="connector-token-row" hidden>Bearer token<input id="connector-token" type="password" autocomplete="new-password"></label>
+          <label id="connector-client-row" hidden>OAuth client ID <span class="hint">Optional, if required by the server</span><input id="connector-client" autocomplete="off"></label>
+        </div>
+        <div id="connector-local" hidden>
+          <p class="hint">Local MCP servers run programs on this computer. Put credentials in environment variables, not arguments.</p>
+          <label>Program<input id="connector-command" placeholder="npx" autocomplete="off" spellcheck="false"></label>
+          <label>Arguments <span class="hint">One per line</span><textarea id="connector-args" rows="3" spellcheck="false" placeholder="-y&#10;your-mcp-server"></textarea></label>
+          <label>Working directory <span class="hint">Optional; defaults to the bot’s workspace</span><input id="connector-cwd" autocomplete="off" spellcheck="false"></label>
+          <label>Environment variables <span class="hint">KEY=value, one per line; saved securely</span><textarea id="connector-env" rows="3" autocomplete="off" spellcheck="false"></textarea></label>
+        </div>
+        <label>Tool calls<select id="connector-confirm"><option value="ask">Confirm each call</option><option value="full">Allow calls for bots with Full access</option></select></label>
+        <div class="compact-actions"><button type="button" id="connector-cancel">Cancel</button><button type="button" id="connector-save" class="primary">Save and connect</button></div>
+      </div>
+    </div>
     <div id="panel-wiki" class="settings-panel" role="tabpanel" aria-labelledby="tab-wiki" hidden>
       <h3 class="settings-section">Workspace wiki</h3>
       <p id="wiki-location" role="status"></p>

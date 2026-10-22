@@ -20,6 +20,9 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
   });
   const preparing = new Set();
   handle('bootstrap', () => agents.snapshot());
+  handle('connectorList', () => runner.connectors.list());
+  handle('connectorSave', input => runner.connectors.save(input));
+  handle('connectorAction', (id, action) => runner.connectors.action(id, action));
   handle('providerConnection', (id, action) => require('./provider-connection.cjs').providerConnection(runner, id, action));
   handle('renewModels', () => require('./provider-connection.cjs').renewModels(runner));
   handle('providerModels', async id => {

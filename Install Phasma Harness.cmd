@@ -11,7 +11,7 @@ param([switch]$CheckOnly)
 $ErrorActionPreference = 'Stop'
 try {
     $folder = Split-Path -LiteralPath $env:ROUTER_INSTALLER_PATH
-    foreach ($file in @('package.json', 'package-lock.json', 'src\main.cjs', 'src\worker-instructions.cjs', 'src\workspace\project-instructions.cjs', 'skills\workflow\SKILL.md', 'skills\caveman\SKILL.md', 'skills\ponytail\SKILL.md', 'skills\i-have-adhd\SKILL.md', 'skills\large-responses\SKILL.md', 'skills\large-responses\scripts\output.cjs', 'skills\rtk\SKILL.md', 'tools\fetch.cjs', 'tools\manifest.json', 'src\routing\benchmarks.cjs', 'benchmarks\snapshot.json', 'benchmarks\sources.json', 'benchmarks\REFRESH.md', 'Launch Phasma Harness.vbs')) {
+    foreach ($file in @('package.json', 'package-lock.json', 'src\main.cjs', 'src\install-preflight.ps1', 'src\worker-instructions.cjs', 'src\workspace\project-instructions.cjs', 'skills\workflow\SKILL.md', 'skills\caveman\SKILL.md', 'skills\ponytail\SKILL.md', 'skills\i-have-adhd\SKILL.md', 'skills\large-responses\SKILL.md', 'skills\large-responses\scripts\output.cjs', 'skills\rtk\SKILL.md', 'tools\fetch.cjs', 'tools\manifest.json', 'src\routing\benchmarks.cjs', 'benchmarks\snapshot.json', 'benchmarks\sources.json', 'benchmarks\REFRESH.md', 'Launch Phasma Harness.vbs')) {
         if (-not (Test-Path -LiteralPath (Join-Path $folder $file))) {
             throw "Missing $file. Extract the entire app ZIP first, then run this installer inside that folder."
         }
@@ -53,14 +53,8 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'An older Node.js still takes priority on PATH. Restart Windows and run this installer again.' }
     }
     if (-not (Get-Command npm.cmd -ErrorAction SilentlyContinue)) { throw 'npm is missing. Repair the Node.js installation, then rerun this installer.' }
-    # npm ci deletes node_modules first; a running Harness locks its Electron files and would leave the app half-installed.
-    function Wait-HarnessClosed($electron) {
-        while (Get-CimInstance Win32_Process -Filter "Name='electron.exe'" | Where-Object { $_.ExecutablePath -ieq $electron }) {
-            Write-Host 'Phasma Harness is running. Quit it from its tray icon (Quit runner), then press Enter to continue.' -ForegroundColor Yellow
-            Read-Host | Out-Null
-        }
-    }
-    Wait-HarnessClosed (Join-Path $folder 'node_modules\electron\dist\electron.exe')
+    . (Join-Path $folder 'src\install-preflight.ps1')
+    Wait-HarnessClosed $folder
     Write-Host 'Installing locked app dependencies...'
     # Electron is a dev dependency; include it even with NODE_ENV=production.
     # Run its downloader explicitly instead of relying on npm lifecycle policy.

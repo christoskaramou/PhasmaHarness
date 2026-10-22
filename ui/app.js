@@ -2939,6 +2939,7 @@ $('#settings').onclick = async () => {
   $('#settings-save-status').textContent = '';
   showAbout();
   $('#settings-dialog').showModal();
+  if (!$('#panel-connectors').hidden) HarnessConnectors.show();
   loadRunnerSettings();
   loadRemoteSettings();
 };
@@ -3714,11 +3715,13 @@ document.querySelectorAll('.settings-tab').forEach(tab => {
     });
     $('#panel-general').hidden = name !== 'general';
     $('#panel-providers').hidden = name !== 'providers';
+    $('#panel-connectors').hidden = name !== 'connectors';
     $('#panel-checks').hidden = name !== 'checks';
     $('#panel-wiki').hidden = name !== 'wiki';
     $('#panel-about').hidden = name !== 'about';
     $('#panel-benchmarks').hidden = name !== 'benchmarks';
     if (name === 'benchmarks') showBenchmarks().catch(notify);
+    if (name === 'connectors') HarnessConnectors.show();
     if (name === 'wiki') {
       $('#wiki-location').textContent = 'Loading…';
       api.workspaceWiki(selectedId).then(showWiki).catch(error => { $('#wiki-location').textContent = error.message; });

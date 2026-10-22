@@ -4,6 +4,20 @@ Desktop client (Windows and Linux) for local coding agents. Create named agents 
 
 Antigravity currently accepts text workers with Full access. Ask, Workspace, images and Hub routing are unavailable for this adapter. Sign in with `agy` in your terminal, then connect it in Settings.
 
+## Shared MCP connectors
+
+Harness includes **Context7**, **Microsoft Learn**, and **OpenAI Docs** as enabled documentation connectors. New installs get them automatically; upgrades add only missing entries and preserve existing names, endpoints, credentials and permissions. Editing, disabling or removing a default is permanent across restarts. Connections open when used, so startup works offline. Context7 supports an optional personal API key for higher limits; no shared key ships with Harness.
+
+Use **Settings → Connectors → Add connector** to connect a remote Streamable HTTP MCP server or a local stdio program. The connection belongs to Harness and is available to Hub, normal bots and sub-bots with any supported CLI or API model. No provider-specific MCP configuration is required. Bots discover tools with `connector_tools` and run them with `connector_call`.
+
+Connector configuration changes do not require a restart. Settings refreshes the saved `connectors.json` while the tab is open (every two seconds); bots also reload it before discovering or calling tools. External edits must keep the version-1 format and unique connector IDs; replace the file atomically when possible. Invalid or incomplete files leave the last loaded configuration intact and show an error until repaired. Keep credentials in Settings so they stay encrypted. Changed or removed connectors close their old sessions, while unchanged connections remain open.
+
+Remote servers support no authentication, a bearer token, or browser OAuth. Local programs accept one argument per line, an optional working directory and encrypted environment variables. They run as your OS user; only add programs you trust. Each bot conversation gets its own server session/process. Credentials are encrypted with the OS key store and never included in bot tool discovery. If OS key protection is unavailable (including the current headless runner), only connections without saved credentials are supported. OAuth sign-in must finish in a browser on the runner computer.
+
+**Confirm each call** is the default, including for Full-access bots. You can explicitly allow a connector for Full-access bots; Ask and Workspace bots still require confirmation. Stop cancels the bot's pending call. A cancelled or failed remote action may already have completed, so Harness does not retry it automatically. Disconnect disables the connector for all bots; Forget credentials removes its saved authorization.
+
+This initial integration exposes MCP **tools**. MCP resources, prompts and legacy HTTP/SSE servers are not included. Use Connect in Settings to reload a changed server catalog. Third-party account sign-in has not been live-tested; protocol, permissions, UI and adapter tests use local servers without paid inference. The three bundled documentation endpoints have also passed live read-only requests.
+
 ## Conversation commands
 
 Type `/` to show every command above the composer; keep typing to filter command names without case sensitivity. Use ↑/↓ to select, Enter or a click to run, Tab to complete without running, and Escape to dismiss. `/help` and **Commands /** under **Options** also open the full command list. Commands run locally against the selected agent and are never sent as model prompts or routed through Jev. `/compact` compacts Codex/Claude context while keeping the visible chat; Cursor has no manual compaction. `/clear` asks for confirmation, archives the current chat locally and starts a fresh provider conversation without changing the agent, role, workspace or access. **Clear** and usage details are available under **Options**. Cancel keeps the conversation and draft unchanged; confirming clears the draft and attached images. Active or pending work must finish or be stopped/resolved first. `/stop` stops the selected agent and its pending child tasks, `/agents` opens the overview, and `/settings` opens settings. Commands take no arguments; unknown commands are reported locally. The full slash-command handler is in `ui/app.js`.
@@ -101,7 +115,7 @@ npm start
 
 `Launch Phasma Harness.vbs` opens the app without a command window after dependencies are installed.
 
-`Install Phasma Harness.cmd` installs missing Node.js LTS and Git through winget, runs `npm ci`, fetches the bundled tools, and creates a desktop shortcut. If Harness is running it stops and asks you to quit it first (tray icon → Quit runner), because `npm ci` replaces the files the running app uses. Launching Harness again while it runs brings back the existing window. Providers are installed from the app. Keep the folder where the shortcut points.
+`Install Phasma Harness.cmd` installs missing Node.js LTS and Git through winget, runs `npm ci`, fetches the bundled tools, and creates a desktop shortcut. Before replacing dependencies, it requests a normal shutdown of this folder's Harness and waits for its workers and file locks to clear. If shutdown or file release takes more than 45 seconds, installation stops before changing dependencies and identifies the blocker; it never force-closes Cursor or unrelated apps. A Harness already running an older version needs one manual tray → Quit runner. Successful installation starts Harness again. Launching Harness normally while it runs brings back the existing window. Providers are installed from the app. Keep the folder where the shortcut points.
 
 ### Installer build and updates
 

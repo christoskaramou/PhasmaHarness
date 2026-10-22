@@ -1873,9 +1873,19 @@ dialog {
   user-select:none
 }
 
+.connector-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.connector-heading .settings-section { margin-bottom: 4px; }
+.connector-card { border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 12px; }
+.connector-card p { margin: 8px 0 12px; overflow-wrap: anywhere; }
+#connector-editor { border-top: 1px solid var(--border); margin-top: 20px; padding-top: 16px; }
+#connector-editor label { display: flex; flex-direction: column; align-items: stretch; gap: 7px; margin: 14px 0; }
+#connector-editor label input, #connector-editor label select, #connector-editor textarea { width: 100%; min-width: 0; box-sizing: border-box; }
+#connector-editor textarea { min-height: 90px; resize: vertical; font: inherit; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--raised); color: inherit; }
+#panel-connectors .compact-actions { flex-wrap: wrap; }
 .settings-tabs {
   flex:none;
   display:flex;
+  flex-wrap:wrap;
   gap:4px;
   padding:0 26px;
   background:var(--panel);

@@ -3,6 +3,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { pathToFileURL } = require('node:url');
+app.setPath('userData', path.join(app.getPath('appData'), 'Phasma Harness'));
+app.setName('Phasma Harness');
+const quitForInstall = process.argv.includes('--quit-for-install');
+// A control launch must hand off without loading dependencies or starting another runner.
+const ownsRunner = app.requestSingleInstanceLock({ quitForInstall: quitForInstall ? process.execPath : null });
+if (!ownsRunner || quitForInstall) { app.quit(); return; }
 const { createRunner, RunnerWindow } = require('./runner.cjs');
 const { configureWindowZoom } = require('./window-zoom.cjs');
 const { confirmations } = require('./confirmations.cjs');
@@ -18,12 +24,10 @@ const { microphoneAllowed } = require('./dictation.cjs');
 // Workers and helpers inherit this, so bundled rtk/rg win over any system copies.
 process.env.PATH = path.join(__dirname, '..', 'tools', 'bin') + path.delimiter + process.env.PATH;
 require('./process-tree.cjs').cleanPowerShellModulePath();
-app.setPath('userData', path.join(app.getPath('appData'), 'Phasma Harness'));
-app.setName('Phasma Harness');
 // The installed app's shortcuts carry the appId (electron-builder), and Windows shows a shortcut's icon on the taskbar for
 // windows with the same ID. Only the installed app uses it; a source-folder run keeps its own window icon.
 if (process.platform === 'win32' && app.isPackaged) app.setAppUserModelId('com.phasma.harness');
-let window, controller, agents, runner, desktop, quitting = false, closing = null, closed = false;
+let window, controller, agents, runner, desktop, quitting = false, closing = null, closed = false, installQuitRequested = false;
 let browserAccess, browserSettings, browserStarting, browserError = null;
 const browserRequest = new AsyncLocalStorage();
 let showRequested = !process.argv.includes('--background');
@@ -42,13 +46,23 @@ function windowControls() {
 }
 process.on('uncaughtExceptionMonitor', error => log.error('Uncaught exception', { message: error?.message, stack: String(error?.stack || '').slice(0, 1500) }));
 process.on('unhandledRejection', reason => log.error('Unhandled rejection', { message: reason?.message || String(reason) }));
-if (!app.requestSingleInstanceLock()) app.quit();
-else {
+{
   const reopen = () => { if (closing) return; showRequested = true; desktop?.show(); };
-  app.on('second-instance', reopen);
+  app.on('second-instance', (_event, _argv, _cwd, data) => {
+    if (data?.quitForInstall) {
+      const normalize = value => process.platform === 'win32' ? value.toLowerCase() : value;
+      if (typeof data.quitForInstall !== 'string' || normalize(data.quitForInstall) !== normalize(process.execPath)) return;
+      installQuitRequested = true;
+      quitting = true;
+      if (controller) app.quit();
+      return;
+    }
+    reopen();
+  });
   app.on('activate', reopen);
-  app.whenReady().then(start).catch(async error => {
+  app.whenReady().then(() => installQuitRequested ? app.quit() : start()).catch(async error => {
     log.error('Startup failed', { message: error.message });
+    if (installQuitRequested) { app.quit(); return; }
     try {
       const previous = window;
       quitting = true;
@@ -66,6 +80,7 @@ async function start() {
   runner = await createRunner({ app, safeStorage, fetch: (...args) => net.fetch(...args), log,
     quit: () => { quitting = true; app.quit(); } });
   ({ controller, agents } = runner);
+  if (installQuitRequested) { app.quit(); return; }
   const { wikiStore, updater, voice } = runner;
   log.info('Started', { version: app.getVersion(), electron: process.versions.electron, platform: `${process.platform} ${process.arch} ${os.release()}`, packaged: app.isPackaged });
   updater.on('state', state => { if (window && !window.isDestroyed()) window.webContents.send('update', state); });

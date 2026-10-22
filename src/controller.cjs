@@ -8,6 +8,7 @@ const { AntigravityCLI } = require('./providers/antigravity.cjs');
 const { DeepSeekCLI } = require('./providers/deepseek.cjs');
 const { ApiAgent } = require('./providers/api-agent.cjs');
 const { TOOLS: AGENT_TOOLS } = require('./tools/agent-tools.cjs');
+const { TOOLS: CONNECTOR_TOOLS, INSTRUCTIONS: CONNECTOR_INSTRUCTIONS } = require('./connectors/tools.cjs');
 const { NATIVE_CLI_INFO } = require('./providers/native-cli.cjs');
 const { ClaudeCLI, handoff } = require('./providers/claude.cjs');
 const { CAPABILITIES, API: API_CAPABILITIES, capabilities, isCLI } = require('./providers/capabilities.cjs');
@@ -493,7 +494,7 @@ class Controller extends EventEmitter {
     const contextEnabled = session.threadId ? session.contextTool : !!this.contextSearch?.supports(session.workspace);
     const helpersEnabled = session.threadId ? session.helperTools : true;
     const workerInstructions = this.workerInstructions(session);
-    const agentHelpers = this.agents && this.bridge.base ? this.bridge.childConfig(session.id) : null;
+    const agentHelpers = (this.agents || this.connectors) && this.bridge.base ? this.bridge.childConfig(session.id) : null;
     const params = {
       ...providerConfig, model: choice.model,
       cwd: this.workspace(session.workspace), approvalPolicy: permissions.approvalPolicy, approvalsReviewer: 'user',
@@ -504,7 +505,7 @@ class Controller extends EventEmitter {
         ...(session.featurePolicy === 'tracked' ? { 'features.goals': false } : {}),
         ...(this.agents || session.featurePolicy === 'tracked' ? { 'features.multi_agent': false } : {}),
       },
-      developerInstructions: workerInstructions + (contextEnabled ? CONTEXT_INSTRUCTIONS : '') + (helpersEnabled ? HELPER_INSTRUCTIONS +
+      developerInstructions: workerInstructions + (this.connectors ? CONNECTOR_INSTRUCTIONS : '') + (contextEnabled ? CONTEXT_INSTRUCTIONS : '') + (helpersEnabled ? HELPER_INSTRUCTIONS +
         ` Jev tool recommendations are ${this.data.settings.toolSelection === 'jev' ? 'enabled' : 'disabled (discovery uses local ranking)'}. Large-response capture is ${this.data.settings.largeResponses ? 'enabled' : 'disabled'}.` : ''),
     };
     if (session.threadId) {
@@ -914,8 +915,8 @@ class Controller extends EventEmitter {
         session.helperTools = true;
         if (contextEnabled) session.contextTool = true;
       }
-      const helpers = helpersEnabled && this.bridge.base ? this.bridge.childConfig(session.id) : null;
-      const bridge = api ? { tools: [...AGENT_TOOLS, ...(contextEnabled ? [CONTEXT_TOOL] : [])],
+      const helpers = (helpersEnabled || this.connectors) && this.bridge.base ? this.bridge.childConfig(session.id) : null;
+      const bridge = api ? { tools: [...AGENT_TOOLS, ...CONNECTOR_TOOLS, HELPER_TOOLS.find(tool => tool.name === 'router_read_output'), ...(contextEnabled ? [CONTEXT_TOOL] : [])],
         call: (name, args, signal) => this.bridgeTool(session.id, name, args, signal) } : undefined;
       const result = await runtime.run({
         provider: selected.provider, bridge,
@@ -927,7 +928,7 @@ class Controller extends EventEmitter {
           if (input) setImmediate(() => this.flushLiveQueue(session));
         } } : {}),
         cwd: this.workspace(session.workspace), model: selected.model, effort: selected.effort || null, effortOption: selected.effortOption, parameterized: selected.parameterized, parameters: selected.parameters,
-        prompt, images, instructions: this.workerInstructions(session),
+        prompt, images, instructions: this.workerInstructions(session) + (this.connectors ? CONNECTOR_INSTRUCTIONS : ''),
         resume: session[sessionKey], access: session.agentReplyCancelledActive ? 'read-only' : session.access, signal: abort.signal, helpers,
         approve: (tool, options = {}) => new Promise(resolve => {
           if (abort.signal.aborted || turnOver || options.signal?.aborted) return resolve(false);
@@ -1506,6 +1507,7 @@ for (const methods of [
   require('./controller/providers.cjs'),
   require('./controller/turns.cjs'),
   require('./controller/helpers.cjs'),
+  require('./controller/connectors.cjs'),
   require('./controller/task-gate.cjs'),
   require('./controller/suggestions.cjs'),
   require('./controller/comparison.cjs'),

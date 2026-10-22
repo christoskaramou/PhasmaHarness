@@ -16,6 +16,7 @@ const REMOTE_METHODS = new Set([
   'stopArtifactRun', 'artifactAction', 'artifactDownload', 'stopDownloads', 'appInfo', 'runnerInfo', 'updateStatus', 'queuedMessage', 'replySuggestion', 'compact',
   'clearConversation', 'acknowledgeTask', 'applyCopy', 'undoComparison', 'undoRule', 'proposeWiki', 'answer', 'readDocument', 'answerConfirmation',
   'providerConnection', 'renewModels', 'providerModels',
+  'connectorList', 'connectorSave', 'connectorAction',
 ]);
 
 function failure(status, message) { return Object.assign(new Error(message), { status }); }

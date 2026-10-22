@@ -1,7 +1,7 @@
 {
   "name": "phasma-harness",
   "productName": "Phasma Harness",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "private": true,
   "description": "A local Windows desktop client for Codex, Claude Code, and Cursor.",
   "author": "Christos Karamoustos",
@@ -21,8 +21,11 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.9.0",
+    "@modelcontextprotocol/client": "2.3.1",
+    "@modelcontextprotocol/core": "2.3.1",
     "@muse-code/sdk": "1.4.11",
     "@napi-rs/canvas": "1.0.11",
+    "cross-spawn": "7.0.6",
     "dompurify": "3.4.17",
     "fflate": "0.8.3",
     "katex": "^0.18.7",

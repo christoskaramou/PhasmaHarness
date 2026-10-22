@@ -52,7 +52,7 @@ async function handle(message) {
       const args = message.params?.arguments || {};
       if (!MCP_TOOLS.some(tool => tool.name === name)) throw new Error(`Unknown helper tool: ${name}`);
       const result = await callBridge(name, args);
-      write({ jsonrpc: '2.0', id: message.id, result: toolResult(result, result?.isError === true) });
+      write({ jsonrpc: '2.0', id: message.id, result: name === 'connector_call' && Array.isArray(result?.content) ? result : toolResult(result, result?.isError === true) });
       return;
     }
     if (message.method === 'ping') {

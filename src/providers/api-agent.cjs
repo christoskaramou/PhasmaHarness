@@ -166,7 +166,7 @@ class ApiAgent {
     if (bridge?.tools.some(tool => tool.name === name)) {
       try {
         const result = await bridge.call(name, args, signal);
-        return { error: false, text: bounded(typeof result === 'string' ? result : JSON.stringify(result)) };
+        return { error: result?.isError === true, text: bounded(typeof result === 'string' ? result : JSON.stringify(result)) };
       } catch (error) { return { error: true, text: error.message }; }
     }
     if (!TOOLS.some(tool => tool.name === name)) return { error: true, text: `Unknown tool: ${name}.` };

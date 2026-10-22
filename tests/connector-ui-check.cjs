@@ -1,0 +1,73 @@
+const { ipcMain, safeStorage } = require('electron');
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const fs = require('node:fs');
+const { randomUUID } = require('node:crypto');
+const { atomicWrite } = require('../src/session-store.cjs');
+const { Connectors } = require('../src/connectors.cjs');
+const { serve } = require('./fixtures/connector-server.cjs');
+
+module.exports = async (window, root) => {
+  const manager = new Connectors(path.join(root, 'connectors'), safeStorage), server = await serve();
+  ipcMain.handle('connectorList', () => manager.list());
+  ipcMain.handle('connectorSave', (_event, input) => manager.save(input));
+  ipcMain.handle('connectorAction', (_event, id, action) => manager.action(id, action));
+  const run = source => window.webContents.executeJavaScript(source);
+  const wait = async source => {
+    for (let i = 0; i < 150; i++) { if (await run(source)) return; await new Promise(resolve => setTimeout(resolve, 20)); }
+    throw new Error('Connector UI did not settle: ' + source + '\n' + await run("document.querySelector('#connector-status').textContent"));
+  };
+  const size = window.getSize();
+  try {
+    await run("document.querySelector('#settings-dialog').showModal(); document.querySelector('#tab-connectors').click()");
+    await wait("['Context7', 'Microsoft Learn', 'OpenAI Docs'].every(name => document.querySelector('#connector-list').textContent.includes(name))");
+    assert.equal(manager.snapshot().length, 3);
+    assert.equal(manager.connections.size, 0, 'showing defaults does not contact their services');
+    window.setSize(size[0], Math.max(size[1], 900));
+    await new Promise(resolve => setTimeout(resolve, 150));
+    fs.writeFileSync(path.resolve(__dirname, '../.scratch/connectors-defaults.png'), (await window.webContents.capturePage()).toPNG());
+    window.setSize(...size);
+    for (const record of [...manager.records]) await manager.action(record.id, 'remove');
+    await run("document.querySelector('#tab-connectors').click()");
+    await wait("document.querySelector('#connector-list').textContent.includes('Add an MCP server')");
+    await run("document.querySelector('#connector-add').click(); document.querySelector('#connector-save').click()");
+    await wait("document.querySelector('#connector-status').textContent.includes('name')");
+    await run(`document.querySelector('#connector-name').value = 'Local test service'; document.querySelector('#connector-url').value = ${JSON.stringify(server.url)}; document.querySelector('#connector-save').click()`);
+    await wait("document.querySelector('#connector-list').textContent.includes('Connected') && document.querySelector('#connector-editor').hidden");
+    assert.equal(manager.snapshot().length, 1);
+    assert.equal(manager.snapshot()[0].confirmCalls, true);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    fs.writeFileSync(path.resolve(__dirname, '../.scratch/connectors-settings.png'), (await window.webContents.capturePage()).toPNG());
+    await run("document.querySelector('#connector-list button').click()");
+    await wait("!document.querySelector('#connector-editor').hidden");
+    await run("document.querySelector('#connector-transport').value = 'stdio'; document.querySelector('#connector-transport').dispatchEvent(new Event('change'))");
+    assert.equal(await run("document.querySelector('#connector-http').hidden && !document.querySelector('#connector-local').hidden"), true);
+    fs.writeFileSync(path.resolve(__dirname, '../.scratch/connectors-editor.png'), (await window.webContents.capturePage()).toPNG());
+    await run("document.querySelector('#connector-env').value = 'TEMP_SECRET=not-saved'; document.querySelector('#connector-cancel').click()");
+    assert.equal(await run("document.querySelector('#connector-env').value"), '');
+    window.setSize(600, 850);
+    await new Promise(resolve => setTimeout(resolve, 150));
+    assert.equal(await run("document.querySelector('.settings-body').scrollWidth <= document.querySelector('.settings-body').clientWidth + 1"), true, 'no horizontal overflow at narrow width');
+    fs.writeFileSync(path.resolve(__dirname, '../.scratch/connectors-settings-narrow.png'), (await window.webContents.capturePage()).toPNG());
+    await run("[...document.querySelectorAll('#connector-list button')].find(b => b.textContent === 'Disconnect').click()");
+    await wait("document.querySelector('#connector-list').textContent.includes('Disabled')");
+    await run("[...document.querySelectorAll('#connector-list button')].find(b => b.textContent === 'Connect').click()");
+    await wait("document.querySelector('#connector-list').textContent.includes('Connected')");
+    await run("[...document.querySelectorAll('#connector-list button')].find(b => b.textContent === 'Remove').click()");
+    await wait("document.querySelector('#connector-list').textContent.includes('Add an MCP server')");
+    assert.equal(manager.snapshot().length, 0);
+    const external = { id: randomUUID(), name: 'Added by a bot', transport: 'http', url: server.url };
+    atomicWrite(manager.file, JSON.stringify({ version: 1, connectors: [external] }));
+    await wait("document.querySelector('#connector-list').textContent.includes('Added by a bot') && document.querySelector('#connector-list').textContent.includes('Connected')");
+    fs.writeFileSync(path.resolve(__dirname, '../.scratch/connectors-live-reload.png'), (await window.webContents.capturePage()).toPNG());
+    fs.writeFileSync(manager.file, '{');
+    await wait("document.querySelector('#connector-status').textContent.includes('Invalid connectors.json')");
+    assert.equal(await run("document.querySelector('#connector-list').textContent.includes('Added by a bot')"), true);
+    atomicWrite(manager.file, JSON.stringify({ version: 1, connectors: [{ ...external, name: 'Edited in JSON', enabled: false }] }));
+    await wait("document.querySelector('#connector-list').textContent.includes('Edited in JSON') && document.querySelector('#connector-list').textContent.includes('Disabled') && !document.querySelector('#connector-status').textContent");
+    atomicWrite(manager.file, JSON.stringify({ version: 1, connectors: [] }));
+    await wait("document.querySelector('#connector-list').textContent.includes('Add an MCP server')");
+    await run("document.querySelector('#tab-general').click(); document.querySelector('#settings-dialog').close()");
+    console.log('Shared connector Settings: save/connect, edit, credentials, narrow layout and live JSON add/edit/remove with invalid-write recovery passed.');
+  } finally { window.setSize(...size); await manager.close(); await server.close(); }
+};

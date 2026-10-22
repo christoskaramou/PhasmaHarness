@@ -18,6 +18,7 @@ const { Dictation } = require('./dictation.cjs');
 const { DocumentReader } = require('./documents.cjs');
 const { sweepAgentFiles } = require('./providers/antigravity.cjs');
 const { readSessionData, atomicWrite } = require('./session-store.cjs');
+const { Connectors } = require('./connectors.cjs');
 
 // The fixed wikis folder. The earlier one ("workspace-data") is renamed once; if that fails, it stays in use so no
 // project knowledge is lost.
@@ -54,8 +55,10 @@ async function createRunner({ app, data = app?.getPath('userData'), safeStorage,
   controller.trace = new DecisionLog(path.join(log.directory, 'decisions.jsonl'));
   controller.smartRouter.benchmarks = new BenchmarkStore(path.join(data, 'benchmarks.json'));
   const jevKey = new JevKey(path.join(data, 'jev-key.enc'), safeStorage);
+  const connectors = new Connectors(data, safeStorage);
   const jevReported = { model: null };
   const configure = async worker => {
+    worker.connectors = connectors;
     worker.log = log;
     worker.trace = controller.trace;
     worker.smartRouter.benchmarks = controller.smartRouter.benchmarks;
@@ -91,7 +94,7 @@ async function createRunner({ app, data = app?.getPath('userData'), safeStorage,
     quit: () => { log.info('Installing update', { from: version, to: updater.state.latest }); quit(); },
   });
   agents.checkUpdate = () => updater.checkFromAgent();
-  return { controller, agents, wikiStore, updater, voice, documents, containment,
+  return { controller, agents, wikiStore, updater, voice, documents, containment, connectors,
     async initialize() {
       sweepAgentFiles([...agents.allControllers().flatMap(context => [context.data.settings.workspace,
         ...context.data.sessions.map(session => session.workspace)]), ...(controller.data.agents || []).map(profile => profile.workspace),
@@ -108,7 +111,8 @@ async function createRunner({ app, data = app?.getPath('userData'), safeStorage,
     },
     async shutdown(options) {
       try {
-        const [work, speech, files] = await Promise.allSettled([agents.shutdown(options), voice.close(), documents.close()]);
+        const [work, speech, files, connections] = await Promise.allSettled([agents.shutdown(options), voice.close(), documents.close(), connectors.close()]);
+        if (connections.status === 'rejected') throw connections.reason;
         if (files.status === 'rejected') throw files.reason;
         if (speech.status === 'rejected') throw speech.reason;
         if (work.status === 'rejected') throw work.reason;

@@ -21,6 +21,17 @@ if (wrapper) {
   child.once('close', async code => {
     clearTimeout(timer);
     await stopTree(child);
+    if (code === 0) {
+      try {
+        assert.equal(fs.readFileSync(path.join(root, 'install-quit-verified'), 'utf8'), 'cleanup completed');
+        const { spawnSync } = require('node:child_process');
+        const probe = spawnSync(require('electron'), [__filename, '--probe-client', '--quit-for-install'], {
+          windowsHide: true, timeout: 15000, encoding: 'utf8', env: { ...process.env, PHASMA_RUNNER_TEST_ROOT: root },
+        });
+        assert.equal(probe.status, 0, probe.stderr || probe.error?.message);
+        assert.equal(fs.readFileSync(path.join(root, 'control-only'), 'utf8'), 'no runner started');
+      } catch (error) { console.error(error.stack); process.exitCode = 1; }
+    }
     try { fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
     catch (error) { console.error(error.message); process.exitCode = 1; }
     if (timedOut || code !== 0) {
@@ -36,6 +47,10 @@ Controller.prototype.warmRouter = () => {};
 let shows = 0;
 BrowserWindow.prototype.show = function () { shows++; };
 const main = require('../src/main.cjs');
+if (childClient && process.argv.includes('--quit-for-install')) {
+  assert.equal(main.controller, undefined, 'a shutdown-only client never initializes a runner');
+  fs.writeFileSync(path.join(root, 'control-only'), 'no runner started');
+}
 
 if (!childClient) {
   const watchdog = setTimeout(() => { console.error('Runner lifecycle check timed out.'); app.exit(1); }, 30000);
@@ -82,11 +97,25 @@ if (!childClient) {
     untrusted.destroy();
     controller.busy = null;
     controller.requests.clear();
-    console.log('Runner lifecycle passed: close/reconnect preserves draft, work and approvals; one owner; untrusted clients rejected.');
+    app.emit('second-instance', {}, [], root, { quitForInstall: path.join(root, 'other-install', 'electron.exe') });
+    assert.equal(window.isDestroyed(), false, 'a request for another installation must not quit this runner');
+    const { spawnOwned } = require('../src/process-tree.cjs');
+    const worker = spawnOwned(spawn, process.execPath, ['-e', "console.log('ready'); setInterval(() => {}, 1000)"], {
+      windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    });
+    worker.stderr.resume();
+    await new Promise((resolve, reject) => { worker.once('error', reject); worker.stdout.once('data', resolve); });
+    worker.stdout.resume();
     app.once('will-quit', () => {
+      assert.throws(() => process.kill(worker.pid, 0), 'installer quit must finish owned-worker cleanup');
+      fs.writeFileSync(path.join(root, 'install-quit-verified'), 'cleanup completed');
+      console.log('Runner lifecycle passed: close/reconnect preserves work; installer request waits for worker cleanup; other installations stay open.');
       clearTimeout(watchdog);
     });
-    app.quit();
+    const request = spawn(process.execPath, [__filename, '--probe-client', '--quit-for-install'], {
+      windowsHide: true, stdio: 'ignore', env: { ...process.env, PHASMA_RUNNER_TEST_ROOT: root },
+    });
+    request.once('error', error => { console.error(error); app.exit(1); });
   }).catch(error => { clearTimeout(watchdog); console.error(error.stack); app.exit(1); });
 }
 }

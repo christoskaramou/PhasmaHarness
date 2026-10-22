@@ -141,6 +141,8 @@ app.whenReady().then(async () => {
   // A cold Windows runner can spend 10+ seconds starting Chromium before any checks run.
   deadline.refresh(); phase = 'settings checks';
   console.log(`Renderer ready after ${Date.now() - startedAt} ms; starting UI checks`);
+  await require('./connector-ui-check.cjs')(window, root);
+  deadline.refresh();
   const result = await window.webContents.executeJavaScript(`(() => {
     const errors = [];
     window.addEventListener('error', event => errors.push(event.message));
