@@ -181,7 +181,11 @@ test('local MCP processes use isolated bot workspaces, minimal env and owned cle
     assert.equal(result.cwd, workspace); assert.equal(result.secret, 'injected'); assert.equal(result.inherited, null); pids.push(result.pid);
   }
   assert.notEqual(pids[0], pids[1]); await manager.action(saved.id, 'disconnect');
-  for (const pid of pids) assert.throws(() => process.kill(pid, 0));
+  // Linux may still expose an exited process until Node reaps it on a later event-loop turn.
+  await waitFor(() => pids.every(pid => {
+    try { process.kill(pid, 0); return false; }
+    catch (error) { assert.equal(error.code, 'ESRCH'); return true; }
+  }));
 });
 test('connector settings reject unsafe URLs, malformed fields and extra authority', () => {
   for (const url of ['http://example.com/mcp', 'https://user:password@example.com/mcp', 'file:///secret', 'https://example.com/#token']) assert.throws(() => validate({ name: 'Bad', transport: 'http', url }));

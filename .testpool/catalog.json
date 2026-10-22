@@ -1017,7 +1017,7 @@
       "timeoutSec": 40,
       "origin": {
         "problem": "MCP connections belonged to individual CLIs and were unavailable across models.",
-        "fix": "Harness hosts shared MCP tools and enforces approvals, credentials, task lifetime and local process ownership. Settings refresh and bot requests reread validated connector JSON without a runner restart. Failed saves preserve encrypted credentials; Disconnect and shutdown await cleanup already started by Stop.",
+        "fix": "Harness hosts shared MCP tools and enforces approvals, credentials, task lifetime and local process ownership. Settings refresh and bot requests reread validated connector JSON without a runner restart. Failed saves preserve encrypted credentials; Disconnect and shutdown await cleanup already started by Stop. Cleanup tests wait for exited Linux children to be reaped before checking PID removal.",
         "date": "2026-10-23"
       }
     }

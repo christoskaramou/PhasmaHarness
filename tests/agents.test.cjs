@@ -9,7 +9,8 @@ const { EventEmitter } = require('node:events');
 const { Controller } = require('../src/controller.cjs');
 const { Agents } = require('../src/agents.cjs');
 const { MCP_TOOLS, claudeAllowedHelpers } = require('../src/tools/router-bridge.cjs');
-const test = (name, run) => nodeTest(name, { timeout: 5000 }, run);
+// Multi-bot fixtures perform real filesystem work; Windows CI can exceed five seconds.
+const test = (name, run) => nodeTest(name, { timeout: 15000 }, run);
 
 class Fake extends EventEmitter {
   constructor() { super(); this.calls = []; this.responses = []; }

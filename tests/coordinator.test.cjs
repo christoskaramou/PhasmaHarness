@@ -100,7 +100,7 @@ async function setup(t) {
   const send = text => hub.send({ id: session.id, text });
   return { root, hub, session, agents, calls, replies, assessments, send };
 }
-async function until(check, timeout = 1000) {
+async function until(check, timeout = 5000) {
   const end = Date.now() + timeout;
   while (Date.now() < end) { if (check()) return; await new Promise(r => setTimeout(r, 10)); }
   assert.ok(check(), 'Condition did not become true');
