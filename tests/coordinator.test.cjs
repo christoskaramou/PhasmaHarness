@@ -1,3 +1,4 @@
+const { readSessionData } = require('../src/session-store.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -29,7 +30,7 @@ test('completed worker survives a Main Bot follow-up timeout without replaying t
   assert.equal(work.delegation.delivered, true);
   assert.equal(session.items.filter(item => item.type === 'agentResult').length, 1);
   assert.equal(session.agentDelegations, 1);
-  const saved = JSON.parse(fs.readFileSync(hub.filename));
+  const saved = readSessionData(hub.filename);
   assert.equal(saved.sessions.find(chat => chat.id === session.id).status, 'completed');
 });
 const action = (tool, args) => ({ reply: '', action: { tool, arguments: args } });
@@ -556,8 +557,8 @@ test('Hub keeps its chat model, preserves old history and never starts a native 
   await send('How does this work?');
   assert.equal(calls[1].choice.id, model);
   assert.deepEqual(session.routes.map(route => route.source), ['hub-auto', 'hub-auto'], 'initial and pinned Auto turns keep their selection origin');
-  assert.deepEqual(JSON.parse(fs.readFileSync(hub.filename)).sessions.find(s => s.id === session.id).routes.map(route => route.source), ['hub-auto', 'hub-auto']);
-  assert.equal(JSON.parse(fs.readFileSync(hub.filename)).hubMode, model);
+  assert.deepEqual(readSessionData(hub.filename).sessions.find(s => s.id === session.id).routes.map(route => route.source), ['hub-auto', 'hub-auto']);
+  assert.equal(readSessionData(hub.filename).hubMode, model);
   assert.match(calls[1].request.prompt, /Existing conversation/);
   assert.equal(hub.client.calls.some(c => c.method.startsWith('thread/') || c.method === 'turn/start'), false);
   assert.equal(agents.snapshot().agents[0].name, 'Hub');
@@ -592,7 +593,7 @@ test('Hub Auto replaces a disconnected Claude pin with OpenAI and retains the co
   assert.notEqual(hub.data.hubMode, oldPin);
   assert.equal(hub.data.hubModeSource, 'auto');
   assert.equal(hub.data.settings.mode, 'auto');
-  assert.equal(JSON.parse(fs.readFileSync(hub.filename)).hubMode, calls[1].choice.id);
+  assert.equal(readSessionData(hub.filename).hubMode, calls[1].choice.id);
   await send('Continue again');
   assert.equal(selections, 2, 'the healthy replacement stays pinned');
   assert.equal(calls[2].choice.id, calls[1].choice.id);
@@ -708,7 +709,7 @@ test('Hub Auto switches to LM Studio alone, retains default effort and reuses it
   assert.equal(local.provider, 'lm-studio'); assert.equal(local.model, 'new-local-model');
   assert.equal(local.effort, null); assert.equal(local.source, 'hub-auto');
   assert.match(calls[1].request.prompt, /Remember our plan/);
-  assert.equal(JSON.parse(fs.readFileSync(hub.filename)).hubMode, local.id);
+  assert.equal(readSessionData(hub.filename).hubMode, local.id);
   await send('Continue again');
   assert.equal(selections, 1, 'default effort remains a valid Auto pin');
   assert.equal(calls[2].choice.id, local.id); assert.equal(calls[2].choice.effort, null);
@@ -896,7 +897,7 @@ test('Hub saves its effective mode and resumes old worker results with its pinne
     await hub.send({ id: session.id, text: 'Hello', mode });
     const selected = calls.at(-1).choice.id;
     assert.equal(hub.data.settings.mode, mode);
-    assert.equal(JSON.parse(fs.readFileSync(hub.filename)).settings.mode, mode);
+    assert.equal(readSessionData(hub.filename).settings.mode, mode);
     hub.smartRouter.chooseHub = async () => assert.fail('A returned result must reuse the pin');
     session.queuePaused = true;
     session.queue = [{ id: 'old-result', text: 'The review completed.', mode: 'removed-local-model', task: 'off', agentReply: true }];
@@ -1062,7 +1063,7 @@ test('Hub compacts older context without removing visible history and retains th
   await send('Continue our plan');
   assert.ok(calls.some(c => c.request.schema.properties.summary));
   assert.deepEqual(session.items.slice(0, 12).map(i => i.id), before);
-  assert.ok(JSON.parse(fs.readFileSync(hub.filename)).sessions.find(s => s.id === session.id).hubSummary);
+  assert.ok(readSessionData(hub.filename).sessions.find(s => s.id === session.id).hubSummary);
   assert.match(calls.at(-1).request.prompt, /User intent and pending work retained/);
   await hub.compact(session.id);
   assert.equal(session.compacting, false);
@@ -1135,7 +1136,7 @@ test('a tracked job that runs on the Hub is marked admitted before its first mod
   };
   await send('Do the assigned work');
   assert.equal(typeof admittedAtFirstCall, 'number');
-  const saved = JSON.parse(fs.readFileSync(hub.filename, 'utf8')).sessions.find(entry => entry.id === session.id);
+  const saved = readSessionData(hub.filename).sessions.find(entry => entry.id === session.id);
   assert.equal(saved.delegation.admittedAt, admittedAtFirstCall, 'saved to disk before the model call');
 });
 
@@ -1171,7 +1172,7 @@ test('Hub dispatches four configured reviewers in two background slots and waits
   const batchId = session.items.find(item => item.hubBatch)?.hubBatch.id;
   assert.ok(batchId);
   assert.ok(hub.data.agents.every(profile => profile.temporaryBatch === batchId));
-  assert.ok(JSON.parse(fs.readFileSync(hub.filename)).agents.every(profile => profile.temporaryBatch === batchId));
+  assert.ok(readSessionData(hub.filename).agents.every(profile => profile.temporaryBatch === batchId));
   const workers = hub.data.agents.map(profile => agents.execution(profile.id));
   assert.equal(agents.snapshot().batchReports[batchId].summary, '4 waiting');
   await until(() => workers.filter(worker => worker.activeTurns.size > 0).length === 2, 20000);
@@ -1206,7 +1207,7 @@ test('Hub dispatches four configured reviewers in two background slots and waits
   const synthesis = JSON.parse(calls.at(-1).request.prompt);
   assert.equal(synthesis.batchResults.length, 4);
   assert.ok(synthesis.batchResults.every((result, i) => result.text.includes(`file${i + 1}.c:12`)));
-  const saved = JSON.parse(fs.readFileSync(hub.filename)).sessions.find(s => s.id === session.id);
+  const saved = readSessionData(hub.filename).sessions.find(s => s.id === session.id);
   assert.equal(saved.items.filter(item => item.hubBatchResult).length, 4);
   assert.equal(session.hubCompletion.fulfilled, true);
   assert.equal(fs.readFileSync(path.join(project, 'code.c'), 'utf8'), 'dirty source at setup');
@@ -1664,7 +1665,7 @@ test('Hub preserves the original request for routing, execution, disk and result
   await until(() => worker.activeTurns.size > 0);
   assert.equal(routed, original);
   assert.equal(work.delegation.originalRequest.text, original);
-  assert.equal(JSON.parse(fs.readFileSync(worker.filename)).sessions[0].delegation.originalRequest.text, original);
+  assert.equal(readSessionData(worker.filename).sessions[0].delegation.originalRequest.text, original);
   const input = worker.client.calls.find(call => call.method === 'turn/start').params.input[0].text;
   assert.ok(input.includes(original));
   assert.ok(input.indexOf(original) < input.indexOf('Identify what PE means'));

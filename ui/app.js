@@ -645,25 +645,13 @@ let deletingAgent = false;
 
 // A bot another bot made works for it (batch workers in a project copy excepted): it sits under its creator, follows its
 // settings, and its chat is watched, not typed into.
-const isSubBot = agent => !!agent?.createdBy && agent.createdBy !== 'main' && !agent.temporaryBatch;
+const { isSubBot, backgroundView } = HarnessAgentState;
 function subBotCreator(id = selectedAgent) {
   const profile = state?.agents?.find(agent => agent.id === id);
   return isSubBot(profile) ? state.agents.find(agent => agent.id === profile.createdBy)?.name || 'the bot that made it' : null;
 }
 // Active delegated work uses the read-only execution view. Completed work also appears in the direct chat below.
 // Sub-bots always use the read-only execution view.
-function backgroundView(next, id) {
-  const background = next?.executionStates?.[id];
-  const conversation = background?.sessions.find(session => session.id === background.conversationId);
-  if (!conversation?.items?.length)
-    return null;
-
-  // A job from its own chat (a resumed direct task) is not another bot's work.
-  const job = conversation.delegation;
-  const own = next.agentStates?.[id]?.sessions.some(session => session.id === (job?.owner || job?.source));
-  const working = !!job && !job.delivered && !own;
-  return isSubBot(next.agents?.find(agent => agent.id === id)) || working ? background : null;
-}
 function readOnlyNote() {
   const creator = subBotCreator();
   if (creator)
@@ -696,16 +684,7 @@ function notify(error) {
 
 function current() { return state?.sessions.find(s => s.id === selectedId); }
 function chatSessions(session) {
-  const background = fleetState?.executionStates?.[selectedAgent];
-  const work = background?.sessions.find(chat => chat.id === background.conversationId);
-  const own = state?.sessions.some(chat => chat.id === (work?.delegation?.owner || work?.delegation?.source));
-  const clearedAt = state?.sessions.some(chat => chat.archived) ? session?.created || 0 : 0;
-  let at = work?.created || 0;
-  return work?.delegation?.delivered && !own && !state?.watching && selectedAgent !== 'main'
-    ? [{ ...work, items: work.items.filter(item => {
-      at = Math.max(at, item.createdAt || 0);
-      return !clearedAt || at >= clearedAt;
-    }) }, session].filter(Boolean) : [session].filter(Boolean);
+  return [session].filter(Boolean);
 }
 function basename(value) { return value?.split(/[\\/]/).filter(Boolean).at(-1) || 'Choose a folder'; }
 function routerName(value, effort) {
@@ -1860,29 +1839,7 @@ function renderArtifacts(records, sessionId, receiptId) {
   return list;
 }
 
-function reportAnswer(item) {
-  if (item.finalReport) return item.text || '';
-  // Old receipts joined turns; quoted examples and fenced code are not turn boundaries.
-  const lines = (item.text || '').split('\n');
-  let fence = null, boundary = -1, ending = -1;
-  for (let i = 0; i < lines.length; i++) {
-    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(lines[i])?.[1];
-    if (marker) {
-      if (!fence) fence = marker;
-      else if (marker[0] === fence[0] && marker.length >= fence.length && !lines[i].trim().slice(marker.length).trim()) fence = null;
-      continue;
-    }
-    const status = !fence && /^ {0,3}\[task:\s*(done|pending|needs-input)\s*\]\s*$/i.exec(lines[i]);
-    if (status) {
-      ending = i;
-      if (status[1].toLowerCase() !== 'done') boundary = i;
-    }
-  }
-  const start = lines.slice(boundary + 1).some(line => line.trim()) ? boundary + 1 : 0;
-  const answer = lines.slice(start);
-  if (ending >= start && lines.slice(ending + 1).filter(line => line.trim()).length < 3) answer.splice(ending - start, 1);
-  return answer.join('\n').trimEnd();
-}
+const { reportAnswer } = HarnessReports;
 
 function renderMarkdown(body, text) {
   body.innerHTML = DOMPurify.sanitize(marked.parse(text, { breaks: true }), {
@@ -2350,12 +2307,13 @@ function renderSendButton() {
     : '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
   $('#attach-files').title = readingImages ? 'Reading attachments…' : 'Attach text/code files, PDF, DOCX or images';
   $('#attach-files').setAttribute('aria-busy', String(readingImages));
-  $('#send').hidden = busyHere && !hasDraft;
+  const watchingWork = state?.watching && current()?.delegation && !current().delegation.delivered;
+  $('#send').hidden = watchingWork || (busyHere && !hasDraft);
   $('#send').innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg>';
   $('#send').title = state?.busy ? 'Queue message' : 'Send message';
   $('#send').setAttribute('aria-label', $('#send').title);
   const checking = (current()?.tasks || []).some(task => task.state === 'checking' || task.state === 'correcting');
-  $('#stop').hidden = current()?.delegation?.state === 'queued' ? false : checking ? false : !busyHere || hasDraft;
+  $('#stop').hidden = watchingWork || current()?.delegation?.state === 'queued' || checking ? false : !busyHere || hasDraft;
   resizeComposer();
 }
 

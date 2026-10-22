@@ -419,26 +419,33 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
   },
 
   startTestPool(root, session) {
-    const running = poolRuns.get(root);
+    root = fs.realpathSync(root);
+    const key = process.platform === 'win32' ? root.toLowerCase() : root;
+    const request = { controller: this, session, last: session.items.at(-1) };
+    const running = poolRuns.get(key);
     if (running) {
-      running.again = () => this.startTestPool(root, session);
-      return;
+      const previous = running.waiters.findIndex(waiter => waiter.controller === this && waiter.session === session);
+      if (previous >= 0) running.waiters[previous] = request;
+      else running.waiters.push(request);
+      return running.promise;
     }
 
-    const entry = {};
-    poolRuns.set(root, entry);
-    this.runTestPool(root, session)
-      .catch(error => this.log?.warn('Test pool run failed', { message: error.message }))
-      .finally(() => {
-        poolRuns.delete(root);
-        entry.again?.();
-      });
+    const entry = { waiters: [request] };
+    poolRuns.set(key, entry);
+    entry.promise = (async () => {
+      while (entry.waiters.length) {
+        const next = entry.waiters.shift();
+        try { await next.controller.runTestPool(root, next.session, next.last); }
+        catch (error) { next.controller.log?.warn('Test pool run failed', { message: error.message }); }
+      }
+    })().finally(() => poolRuns.delete(key));
+    return entry.promise;
   },
 
   // The script's Stop-hook entry point keeps its own lock, change tracking and per-chat retry cap: exit 2 with the
   // report means "send it back to the bot", a systemMessage is a notice (passed, invalid, still failing), nothing means
   // there was nothing to run.
-  async runTestPool(root, session) {
+  async runTestPool(root, session, lastItem = session.items.at(-1)) {
     const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
     // Harness's own Jev key or none, so the script never reads one from the Windows credential store.
     try {
@@ -471,14 +478,18 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
     });
 
     const notice = text => {
-      session.notice = text;
-      session.noticeExpiresAt = /failed|invalid|error/i.test(text) ? null : Date.now() + 10000;
+      const retained = this.data?.sessions.find(chat => chat.id === session.id) || session;
+      retained.notice = text;
+      retained.noticeExpiresAt = /failed|invalid|error/i.test(text) ? null : Date.now() + 10000;
+      this.save?.();
       this.changed();
     };
     const report = stderr.trim();
     if (code === 2 && report) {
       // A job's or sub-bot's result has already gone back to the bot that asked for it, so the report only shows here.
-      if (this.executionContext)
+      if (this.executionContext || this.agents?.closing || session.archived ||
+          (this.data && !this.data.sessions.includes(session)) || this.busy || session.pendingMessage || session.queue?.length ||
+          session.items.at(-1) !== lastItem || session.access !== 'danger-full-access')
         return notice(report);
 
       try {

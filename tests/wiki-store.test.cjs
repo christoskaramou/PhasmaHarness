@@ -34,10 +34,16 @@ test('local wikis isolate same-name workspaces, retain edits, use explicit locat
   assert.equal((await search.search(a, 'Amberquartz', 'local')).hits.length, 0);
   assert.ok((await search.search(a, 'Existing project wiki', 'local')).hits.length);
   assert.throws(() => store.setLocation(a, 'relative'));
-  // A folder the user chose before wikis were fixed in one place is no longer used.
+  // Old custom content is imported once into the fixed folder without replacing current notes.
   fs.writeFileSync(store.settingsFile, JSON.stringify({ [store.identity(a)]: path.join(a, 'docs/wiki') }));
   assert.equal(new WikiStore(store.directory).ensure(a).root, first.root);
   assert.equal(fs.readFileSync(path.join(a, 'docs/wiki/index.md'), 'utf8'), '# Existing project wiki');
+  const imported = fs.readdirSync(first.root).find(name => name.startsWith('imported-'));
+  assert.equal(fs.readFileSync(path.join(first.root, imported, 'index.md'), 'utf8'), '# Existing project wiki');
+  assert.match(fs.readFileSync(first.index, 'utf8'), /Imported wiki/);
+  fs.writeFileSync(path.join(first.root, imported, 'index.md'), '# Updated imported notes');
+  new WikiStore(store.directory).ensure(a);
+  assert.equal(fs.readFileSync(path.join(first.root, imported, 'index.md'), 'utf8'), '# Updated imported notes');
 });
 
 // GitHub's Windows runners have a short (8.3) temp path, C:\Users\RUNNER~1\...; this reproduces that anywhere 8.3 names exist.

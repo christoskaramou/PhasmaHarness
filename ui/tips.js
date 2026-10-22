@@ -54,7 +54,7 @@
       text: 'When grey text appears after an answer, press → to take it as your next message.' },
     { id: 'routines', text: 'Ask a bot to do something on a schedule, for example "every weekday at 8:00, summarise new commits". It runs in that chat as a routine; it can also run once, or after each new commit.' },
     { id: 'copies', text: () => `Ask ${hub()} for several workers on one task and each works in its own copy of the project. In the job's details, "Apply changes to my project…" keeps the one you want.` },
-    { id: 'budgets', text: 'Each job\'s details have a Budget: active minutes, AI attempts and a token limit (120 minutes and 20 attempts unless you change them).' },
+    { id: 'budgets', text: 'Task bots have no default time, attempt or token limits. Provider usage limits can still pause their work.' },
 
     // What Auto does.
     { id: 'auto', text: 'Auto picks a model for every message to a bot: an economical one for simple asks, the strongest for hard ones, and the same one while you continue a task.' },

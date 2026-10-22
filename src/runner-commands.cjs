@@ -8,6 +8,16 @@ const WATCH_ONLY = 'This bot works for the bot that made it; only that bot gives
 
 function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolder, stopDownloads }) {
   const { controller, agents, wikiStore, documents, updater } = runner;
+  const register = handle;
+  const chatMutations = new Set(['create', 'permissions', 'rename', 'archive', 'deleteSession', 'queuedMessage', 'compact', 'clearConversation']);
+  handle = (name, handler) => register(name, (...args) => {
+    if (chatMutations.has(name)) {
+      const agentId = name === 'create' ? args[2] : name === 'clearConversation' ? args[0]
+        : agents.owner(args[0]).agentId;
+      if (agents.isSubBot(agents.profile(agentId))) throw new Error(WATCH_ONLY);
+    }
+    return handler(...args);
+  });
   const preparing = new Set();
   handle('bootstrap', () => agents.snapshot());
   handle('providerConnection', (id, action) => require('./provider-connection.cjs').providerConnection(runner, id, action));
@@ -51,11 +61,9 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
     return { data: controller.smartRouter.benchmarks.data, summary: controller.smartRouter.benchmarks.summary(workers) };
   });
   handle('create', (workspace, access, agentId) => {
-    if (agents.isSubBot(agents.profile(agentId))) throw new Error(WATCH_ONLY);
     return agents.conversation(agents.controller(agentId), true, workspace, access);
   });
   handle('permissions', (id, access) => {
-    if (agents.isSubBot(agents.profile(agents.owner(id).agentId))) throw new Error(WATCH_ONLY);
     return agents.owner(id).permissions(id, access);
   });
   handle('load', id => agents.owner(id).load(id));
@@ -102,7 +110,6 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
   handle('reconcileJob', args => agents.reconcileJob(args));
   handle('updateStatus', () => updater.state);
   handle('queuedMessage', (id, messageId, action) => {
-    if (agents.isSubBot(agents.profile(agents.owner(id).agentId))) throw new Error(WATCH_ONLY);
     return agents.owner(id).queuedMessage(id, messageId, action);
   });
   handle('compact', id => agents.owner(id).compact(id));

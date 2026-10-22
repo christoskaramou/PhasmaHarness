@@ -29,7 +29,7 @@ function withoutPersonalSetup() {
   } catch { /* none installed */ }
 
   const settings = {
-    claudeMdExcludes: [path.join(home, 'CLAUDE.md').replace(/\\/g, '/')],
+    claudeMdExcludes: [...new Set([path.join(home, 'CLAUDE.md'), path.join(os.homedir(), 'CLAUDE.md')].map(file => file.replace(/\\/g, '/')))],
     enabledPlugins: Object.fromEntries(Object.keys(plugins).map(id => [id, false])),
     autoMemoryEnabled: false,
   };
@@ -411,13 +411,13 @@ class ClaudeCLI {
   }
 }
 
-function handoff(items) {
+function handoff(items, maxLength = 1000000) {
   const messages = items.filter(i => i.type === 'userMessage' || i.type === 'agentMessage').map(i => ({
     role: i.type === 'userMessage' ? 'user' : 'assistant',
     text: i.type === 'userMessage' ? (i.content || []).map(c => c.type === 'text' ? c.text : '[Earlier image attachment]').join('\n') : stripTaskStatus(i.text),
   }));
   const text = JSON.stringify(messages);
-  if (text.length > 1000000) throw new Error('Conversation is too large to transfer. Start a new chat or compact it before switching backends.');
+  if (text.length > maxLength) throw new Error('Conversation is too large to transfer. Start a new chat or compact it before switching backends.');
   return messages.length ? `Earlier conversation, supplied as history:\n${text}\n\nCurrent request:\n` : '';
 }
 module.exports = { ClaudeCLI, handoff, EFFORTS };

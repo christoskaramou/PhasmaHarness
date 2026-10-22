@@ -1,3 +1,4 @@
+const { readSessionData } = require('../src/session-store.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -137,7 +138,7 @@ test('file attachments keep their snapshot and display metadata through queues, 
   const queued = session.queue[0];
   assert.deepEqual(queued.fileMessage.names, ['sample.cpp']);
   assert.equal(queued.fileMessage.displayText, 'Review this code.');
-  assert.match(JSON.parse(fs.readFileSync(controller.filename, 'utf8')).sessions[0].queue[0].text, /ATTACHMENT_EVIDENCE/);
+  assert.match(readSessionData(controller.filename).sessions[0].queue[0].text, /ATTACHMENT_EVIDENCE/);
   complete(controller, session, fake.turnIds[0]);
   await until(() => fake.turnIds.length === 2);
   const prompt = fake.calls.filter(call => call.method === 'turn/start').at(-1).params;
@@ -268,7 +269,7 @@ for (const stopped of [false, true]) test(`Claude ${stopped ? 'Stop' : 'completi
   await sent;
   await controller.gateDone;
   const status = stopped ? 'interrupted' : 'completed';
-  assert.equal(JSON.parse(fs.readFileSync(controller.filename, 'utf8')).sessions[0].status, status);
+  assert.equal(readSessionData(controller.filename).sessions[0].status, status);
   assert.deepEqual(await idle, { busy: null, status });
 });
 
@@ -760,7 +761,7 @@ test('after Stop, new work waits for worker cleanup and stays blocked, also acro
   await assert.rejects(controller.send({ id: session.id, text: 'blocked', mode: 'terra-light', task: 'off' }), /could not be confirmed stopped/);
   await assert.rejects(controller.compact(session.id), /could not be confirmed stopped/);
   assert.ok(controller.cleanupRetry, 'retried in the background');
-  assert.deepEqual(JSON.parse(fs.readFileSync(controller.filename, 'utf8')).workerCleanup.map(item => item.id), ['worker-2'], 'kept for a restart');
+  assert.deepEqual(readSessionData(controller.filename).workerCleanup.map(item => item.id), ['worker-2'], 'kept for a restart');
   const sweep = processTree.sweepRecord;
   processTree.sweepRecord = async record => ({ remaining: [-1], record });
   try { await controller.retryCleanupNow(); } finally { processTree.sweepRecord = sweep; }
@@ -2539,6 +2540,27 @@ test('task status lines stay out of handoffs to another provider', async t => {
   assert.equal(session.job.status, 'done');
   assert.ok(session.directContext.length);
   assert.ok(!JSON.stringify(session.directContext).includes('[task:'), JSON.stringify(session.directContext));
+});
+
+test('CLI follow-ups include delegated history arriving during a turn exactly once', async t => {
+  const { controller } = await setup(t);
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  const session = controller.create(); session.helperTools = false;
+  const prompts = [];
+  controller.claude.run = async ({ prompt, onEvent }) => {
+    prompts.push(prompt);
+    if (prompts.length === 1) session.items.push({ id: 'delegated-late', delegatedFrom: 'worker-chat', type: 'agentMessage', text: 'Late delegated history.' });
+    onEvent({ type: 'assistant', message: { id: 'reply-' + prompts.length, content: [{ type: 'text', text: 'Finished.' }] } });
+    return { result: 'Finished.' };
+  };
+  for (let turn = 0; turn < 3; turn++) {
+    await controller.send({ id: session.id, text: 'Continue ' + turn, mode: 'claude-cli:sonnet', task: 'off' });
+    await flush();
+  }
+  assert.doesNotMatch(prompts[0], /Late delegated history/);
+  assert.match(prompts[1], /Late delegated history/);
+  assert.doesNotMatch(prompts[2], /Late delegated history/);
 });
 
 test('decision trace and the log-only wiki check: turns, final checks and each wiki addition, with no text', async t => {

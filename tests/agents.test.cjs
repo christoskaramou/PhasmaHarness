@@ -1,3 +1,4 @@
+const { readSessionData } = require('../src/session-store.cjs');
 const { test: nodeTest } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -80,7 +81,7 @@ test('direct tracked tasks reserve their budget before routing and do not charge
   bot.smartRouter.choose = async () => {
     routedBudget = agents.budgets.forSession(chat);
     assert.ok(routedBudget, 'routing must already belong to the tracked task');
-    assert.ok(JSON.parse(fs.readFileSync(bot.filename, 'utf8')).sessions[0].tasks[0].budgetId);
+    assert.ok(readSessionData(bot.filename).sessions[0].tasks[0].budgetId);
     return { ...bot.resolveWorker('terra-light'), assessment: { needsChecks: false } };
   };
   await bot.send({ id: chat.id, text: 'Complete this direct task.', mode: 'auto', task: 'on' });
@@ -669,7 +670,7 @@ test('native Claude allowance admission holds workers before inference at a full
   assert.match(work.quotaWaiting.reason, /Claude Code.*100%/);
   assert.equal(lookups, 1);
   assert.equal(primary.limits.backgroundGuard('claude-cli', 100, 'sonnet', primary.claude.accountKey()).usedPercent, 100);
-  assert.equal(JSON.parse(fs.readFileSync(primary.filename, 'utf8')).providerQuotas['claude-cli'].seven_day.usedPercent, 100);
+  assert.equal(readSessionData(primary.filename).providerQuotas['claude-cli'].seven_day.usedPercent, 100);
   const bot = await add('Direct chat');
   const chat = agents.conversation(bot, true, primary.data.settings.workspace);
   await bot.send({ id: chat.id, text: 'A direct question', mode: 'terra-light', task: 'off' });
@@ -975,7 +976,7 @@ test('queued assignment changes persist once and become Applied only when the pr
   assert.throws(() => agents.tool(primary, source, 'agent_revise', { ...args, text: 'Different content.' }), /different change/);
   assert.throws(() => agents.tool(primary, source, 'agent_revise', { ...args, amendmentId: 'stale' }), /Refresh its revision/);
   assert.equal(chat.turnId, originalTurn);
-  assert.equal(JSON.parse(fs.readFileSync(worker.filename)).sessions[0].delegationQueue[0].revision, 2);
+  assert.equal(readSessionData(worker.filename).sessions[0].delegationQueue[0].revision, 2);
   complete(worker, chat, 'Unrelated foreground task finished.');
   await until(() => chat.delegation?.id === accepted.jobId && chat.turnId && chat.turnId !== originalTurn);
   assert.equal(chat.delegation.amendments[0].state, 'applied');
@@ -1198,7 +1199,7 @@ test('Apply now consumes a direct queued correction atomically and retains its a
   assert.match(JSON.stringify(agents.readContext(source, { agentId: worker.agentId })), /Change applied, revision 2/);
   const steer = worker.client.calls.find(call => call.method === 'turn/steer');
   assert.deepEqual(steer.params.input.at(-1), { type: 'image', url: image });
-  const saved = JSON.parse(fs.readFileSync(worker.filename)).sessions[0];
+  const saved = readSessionData(worker.filename).sessions[0];
   assert.equal(saved.queue.length, 0);
   assert.equal(saved.delegation.revision, 2);
 });
@@ -1371,7 +1372,7 @@ test('a failed ownership commit preserves the old owner and a saved acceptance c
   const args = { jobId: accepted.jobId, agentId: next.agentId, handoffId: 'commit-retry', expectedOwnerVersion: 1 };
   assert.throws(() => agents.tool(primary, source, 'agent_transfer_owner', args), /Commit disk failure/);
   assert.equal(chat.delegation.owner, source.id);
-  const saved = JSON.parse(fs.readFileSync(next.filename, 'utf8')).sessions.find(session => session.id === owner.id);
+  const saved = readSessionData(next.filename).sessions.find(session => session.id === owner.id);
   assert.equal(saved.items.find(item => item.handoff).handoff.state, 'accepted');
   assert.equal(saved.queue?.length || 0, 0, 'an uncommitted offer never wakes a model');
   assert.throws(() => agents.tool(primary, source, 'agent_transfer_owner', { ...args, agentId: 'main' }), /different offer/);
@@ -1450,7 +1451,9 @@ test('external ownership mail waits while the receiver processes its own helper 
   complete(review, work, 'Separate review finished using its helper.');
   await until(() => work.delegation.delivered);
   assert.match(source.items.find(item => item.type === 'agentResult').text, /Separate review finished using its helper/);
-  assert.equal(owner.items.filter(item => item.type === 'agentResult').length, 1);
+  assert.equal(owner.items.filter(item => item.type === 'agentResult' && !item.id.startsWith('delegated-')).length, 1);
+  assert.equal(owner.items.filter(item => item.type === 'agentResult' && item.id.startsWith('delegated-')).length, 1,
+    'the completed review also retains its helper report as history');
   assert.equal(work.items.filter(item => item.type === 'agentResult').length, 1);
 });
 
@@ -1687,7 +1690,7 @@ test('committed ownership survives notification failure and restart without repl
   assert.equal(transferred.notificationPending, true);
   assert.equal(owner.queue?.length || 0, 0, 'an unsaved notice cannot start a model turn');
   assert.equal(owner.items.find(item => item.handoff).handoff.state, 'accepted');
-  assert.equal(JSON.parse(fs.readFileSync(worker.filename, 'utf8')).sessions[0].delegation.owner, owner.id);
+  assert.equal(readSessionData(worker.filename).sessions[0].delegation.owner, owner.id);
   next.save = save;
   agents.closing = true;
   const restarted = new Agents(factory(path.join(directory, 'sessions.json'), workspace), async () => {}, factory);
@@ -1760,7 +1763,7 @@ test('Main creates a persistent idle agent through a dynamic tool using conversa
   assert.equal(profile.access, 'read-only');
   assert.equal(profile.mode, 'auto');
   assert.ok(agents.snapshot().agents.some(agent => agent.id === profile.id));
-  assert.ok(JSON.parse(fs.readFileSync(primary.filename)).agents.some(agent => agent.id === profile.id));
+  assert.ok(readSessionData(primary.filename).agents.some(agent => agent.id === profile.id));
   const child = agents.controller(profile.id);
   await agents.initializeController(child);
   assert.equal(child.busy, null);
@@ -1835,7 +1838,7 @@ test('the Hub can be renamed; it keeps the name, and no bot can take it, "hub" o
   assert.equal(agents.hubName(), 'Hub', 'a failed save keeps the old name');
 
   assert.equal(agents.renameHub('  Atlas '), 'Atlas');
-  assert.equal(JSON.parse(fs.readFileSync(primary.filename, 'utf8')).hubName, 'Atlas');
+  assert.equal(readSessionData(primary.filename).hubName, 'Atlas');
   assert.equal(agents.snapshot().agents[0].name, 'Atlas');
   assert.equal(agents.agentName('main'), 'Atlas');
   assert.equal(require('../src/group-chats.cjs').members(agents, { group: { members: [helper.id] } })[0].name, 'Atlas');
@@ -1868,7 +1871,7 @@ test('Hub edits validate and atomically save the name and explicit model', async
   assert.equal(agents.hubName(), 'Hub');
   assert.equal(primary.data.settings.mode, previousMode);
   agents.renameHub({ name: 'Atlas', mode: model.id });
-  const saved = JSON.parse(fs.readFileSync(primary.filename, 'utf8'));
+  const saved = readSessionData(primary.filename);
   assert.equal(saved.hubName, 'Atlas');
   assert.equal(saved.settings.mode, model.id);
 });
@@ -1913,7 +1916,7 @@ test('agents discover available models and create children with default or reque
         assert.equal(selected.effort, effort || choice.effort);
         assert.equal(profile.access, 'read-only');
         assert.equal(agents.controller(profile.id).data.settings.mode, profile.mode);
-        assert.equal(JSON.parse(fs.readFileSync(primary.filename)).agents.find(a => a.id === profile.id).mode, profile.mode);
+        assert.equal(readSessionData(primary.filename).agents.find(a => a.id === profile.id).mode, profile.mode);
         if (provider === 'codex' && effort) codexChild = profile;
       }
     }
@@ -1939,12 +1942,12 @@ test('agent model requests fail without creating profiles when unavailable, malf
   await assert.rejects(primary.bridgeTool(source.id, 'agent_models', {}), /no active turn/);
   await start(primary, source);
   await assert.rejects(primary.bridgeTool(source.id, 'agent_models', { extra: true }), /Invalid/);
-  const disk = fs.readFileSync(primary.filename, 'utf8');
+  const disk = JSON.stringify(readSessionData(primary.filename));
   for (const selection of [{ mode: 'missing' }, { mode: null }, { mode: 1 }, { mode: {} }, { effort: 'high' }, { mode: 'auto', effort: 'low' }, ...['high', '', null, 1, {}].map(effort => ({ mode: 'terra-light', effort }))]) {
     await assert.rejects(primary.bridgeTool(source.id, 'agent_create', { name: 'Invalid', instructions: '', ...selection }));
   }
   assert.equal(agents.primary.data.agents.length, 0);
-  assert.equal(fs.readFileSync(primary.filename, 'utf8'), disk);
+  assert.equal(JSON.stringify(readSessionData(primary.filename)), disk);
   primary.data.settings.disabledCodexModels = ['gpt-5.6-terra'];
   assert.deepEqual(await primary.bridgeTool(source.id, 'agent_models', {}), [{ mode: 'auto', model: 'Auto', efforts: [] }]);
   await assert.rejects(primary.bridgeTool(source.id, 'agent_create', { name: 'Disabled', instructions: '', mode: 'terra-light' }), /unavailable/);
@@ -2019,7 +2022,7 @@ test('saving an agent returns while startup is pending and reuses provider disco
     assert.ok(profile, 'Saving must not wait for provider startup');
     assert.equal(agents.snapshot().agentStates[profile.id].connection, 'connecting');
     assert.equal(agents.controller(profile.id).client.calls.length, 0);
-    assert.equal(JSON.parse(fs.readFileSync(primary.filename)).agents[0].id, profile.id);
+    assert.equal(readSessionData(primary.filename).agents[0].id, profile.id);
   } finally { release(); }
   const worker = agents.controller(profile.id);
   await agents.initializeController(worker);
@@ -2079,9 +2082,9 @@ test('clear requires confirmation, archives history and starts fresh context for
     old.items.push({ id: 'history', type: 'agentMessage', text: 'OLD_CONTEXT_MUST_NOT_BE_SENT' });
     old.usage = { total: { inputTokens: 90000 } }; controller.save();
     controller.loaded.add(old.id); controller.sessionAllows.set(old.id, new Set(['old-approval']));
-    const before = fs.readFileSync(controller.filename, 'utf8');
+    const before = JSON.stringify(readSessionData(controller.filename));
     assert.equal(await agents.clearConversation(controller.agentId, () => false), null);
-    assert.equal(fs.readFileSync(controller.filename, 'utf8'), before);
+    assert.equal(JSON.stringify(readSessionData(controller.filename)), before);
     const fresh = await agents.clearConversation(controller.agentId, name => { assert.equal(name, controller === primary ? 'Hub' : 'Reviewer'); return true; });
     assert.notEqual(fresh.id, old.id);
     assert.equal(fresh.workspace, workspace); assert.equal(fresh.access, 'read-only');
@@ -2124,11 +2127,11 @@ test('clear rejects pending work, rechecks after confirmation and rolls back a f
   const clearing = agents.clearConversation('main', () => new Promise(resolve => { answer = resolve; }));
   primary.busy = old.id; answer(true);
   await assert.rejects(clearing, /pending work/); primary.busy = null;
-  const previous = primary.data.sessions, before = fs.readFileSync(primary.filename, 'utf8'), save = primary.save;
+  const previous = primary.data.sessions, before = JSON.stringify(readSessionData(primary.filename)), save = primary.save;
   primary.save = () => { throw new Error('Disk full'); };
   await assert.rejects(agents.clearConversation('main', confirm), /Disk full/); primary.save = save;
   assert.equal(primary.data.sessions, previous); assert.equal(primary.data.agentSessionId, old.id);
-  assert.equal(fs.readFileSync(primary.filename, 'utf8'), before); assert.equal(old.archived, false);
+  assert.equal(JSON.stringify(readSessionData(primary.filename)), before); assert.equal(old.archived, false);
 });
 
 test('clear archives delivered reports awaiting review without replaying or losing history', async t => {
@@ -2198,8 +2201,8 @@ test('agent deletion protects Main and pending work, persists removal, and keeps
   primary.save = save;
   await agents.deleteAgent(worker.agentId);
   assert.throws(() => agents.controller(worker.agentId), /Unknown agent/);
-  assert.equal(JSON.parse(fs.readFileSync(primary.filename)).agents.length, 0);
-  assert.equal(JSON.parse(fs.readFileSync(worker.filename)).sessions[0].id, chat.id);
+  assert.equal(readSessionData(primary.filename).agents.length, 0);
+  assert.equal(readSessionData(worker.filename).sessions[0].id, chat.id);
 });
 
 test('a bot that inherits follows its creator’s workspace down a chain, live; sub-bots follow everything and go with their creator', async t => {
@@ -2258,6 +2261,92 @@ test('a broken chain never grants more: a sub-bot whose creator is missing or lo
   agents.primary.data.agents.splice(-2);
 });
 
+test('composer permissions update inherited access and management checks the effective chat access', async t => {
+  const { agents, primary, add } = await setup(t);
+  const lead = await add('Access lead'), chat = agents.conversation(lead, true);
+  const sub = await agents.tool(lead, chat, 'agent_create', { name: 'Access helper', instructions: 'Help.' });
+  lead.permissions(chat.id, 'read-only');
+  assert.equal(agents.profile(lead.agentId).access, 'read-only');
+  assert.equal(agents.profile(sub.id).access, 'read-only');
+  agents.controller(sub.id).busy = 'busy';
+  assert.throws(() => lead.permissions(chat.id, 'danger-full-access'), /follows.*busy/);
+  assert.equal(chat.access, 'read-only');
+  agents.controller(sub.id).busy = null;
+  // Reproduce a pre-fix saved chat whose composer access differed from its profile.
+  chat.access = 'danger-full-access';
+  const source = primary.create(undefined, 'workspace-write');
+  await start(primary, source);
+  await assert.rejects(agents.updateAgent(primary, source, { agentId: lead.agentId, name: 'Changed' }), /more access/);
+  await assert.rejects(agents.manageAgent(primary, source, 'agent_set_access', { agentId: lead.agentId, access: 'read-only' }), /more access/);
+  assert.equal(chat.access, 'danger-full-access');
+});
+
+test('delegated history belongs to the direct chat for follow-ups, export, clear and retry', async t => {
+  const { agents, primary, addWorker } = await setup(t);
+  const source = primary.create(); source.queuePaused = true;
+  const worker = await addWorker('History worker'), direct = agents.controller(worker.agentId);
+  const accepted = agents.delegate(primary, source, worker.agentId, 'Remember the code word amber.');
+  const work = worker.session(accepted.sessionId);
+  await until(() => worker.activeTurns.has(work.id));
+  complete(worker, work, 'The code word is amber.');
+  await until(() => work.delegation.delivered);
+  const chat = agents.conversation(direct);
+  assert.ok(chat);
+  const markdown = require('../src/conversation-export.cjs').conversationMarkdown(chat);
+  assert.match(markdown, /Remember the code word amber/);
+  assert.match(markdown, /The code word is amber/);
+  const count = chat.items.length;
+  agents.retainDelegatedChat(worker, work);
+  assert.equal(chat.items.length, count, 'delivery retries never duplicate history');
+  work.items.push({ id: 'late-detail', type: 'agentMessage', text: 'Keep the complete detail too.' });
+  const save = direct.save;
+  direct.save = () => { throw new Error('Disk full'); };
+  assert.throws(() => agents.retainDelegatedChat(worker, work), /Disk full/);
+  assert.equal(chat.items.length, count, 'a failed history save rolls back');
+  direct.save = save;
+  agents.retainDelegatedChat(worker, work);
+  assert.equal(chat.items.length, count + 1, 'a save retry imports the missing part once');
+  const call = direct.client.call.bind(direct.client);
+  direct.client.call = async (method, params) => {
+    const result = await call(method, params);
+    if (method === 'turn/start') {
+      work.items.push({ id: 'during-submit', type: 'agentMessage', text: 'Arrived during submission.' });
+      agents.retainDelegatedChat(worker, work);
+    }
+    return result;
+  };
+  await direct.send({ id: chat.id, text: 'What was the code word?', mode: 'terra-light', task: 'off' });
+  assert.match(direct.client.calls.findLast(call => call.method === 'turn/start').params.input[0].text, /The code word is amber/);
+  assert.match(JSON.stringify(chat.directContext), /Arrived during submission/, 'history arriving after input was built remains for the next turn');
+  direct.client.call = call;
+  complete(direct, chat, 'Amber.');
+  await until(() => !direct.busy);
+  const fresh = await agents.clearConversation(direct.agentId, () => true);
+  agents.retainDelegatedChat(worker, work);
+  assert.deepEqual(fresh.items, []);
+  assert.match(require('../src/conversation-export.cjs').conversationMarkdown(direct.session(chat.id)), /The code word is amber/);
+  await assert.rejects(direct.send({ id: chat.id, text: 'Late task', task: 'off' }), /archived/);
+});
+
+test('worker reports keep substantive answers before a status-only turn and legacy multipart answers', async t => {
+  const { agents, primary, addWorker } = await setup(t);
+  const owner = primary.create(); owner.queuePaused = true;
+  const worker = await addWorker('Report worker'), chat = agents.conversation(worker, true);
+  for (const legacy of [false, true]) {
+    const id = randomUUID();
+    chat.delegation = { id, source: owner.id, task: 'Report', startIndex: 0 };
+    chat.status = 'completed';
+    chat.items = [
+      { id: 'question', type: 'userMessage', content: [{ type: 'text', text: 'Report' }] },
+      { id: 'one', type: 'agentMessage', ...(legacy ? {} : { turnId: 'answer' }), text: 'Part one.' },
+      { id: 'two', type: 'agentMessage', ...(legacy ? {} : { turnId: 'answer' }), text: 'Part two.' },
+      { id: 'status', type: 'agentMessage', ...(legacy ? {} : { turnId: 'status' }), text: '[task: done]' },
+    ];
+    agents.deliver(worker, chat);
+    assert.equal(owner.items.find(item => item.deliveryId === id).text, 'Part one.\n\nPart two.');
+  }
+});
+
 test('a sub-bot made while its creator works on a job records that creator, never gets more access than the chat, and only its creator gives it work', async t => {
   const { agents, primary, addWorker } = await setup(t);
   const creator = await addWorker('Creator', undefined, 'danger-full-access');
@@ -2314,14 +2403,14 @@ test('all provider bridges can change another agent access and stop it, but neve
     assert.equal(worker.data.settings.access, 'workspace-write');
     assert.equal(worker.loaded.has(chat.id), false);
     assert.equal(worker.sessionAllows.has(chat.id), false);
-    assert.equal(JSON.parse(fs.readFileSync(primary.filename)).agents.find(a => a.id === worker.agentId).access, 'workspace-write');
-    assert.equal(JSON.parse(fs.readFileSync(worker.filename)).sessions.find(s => s.id === chat.id).access, 'workspace-write');
+    assert.equal(readSessionData(primary.filename).agents.find(a => a.id === worker.agentId).access, 'workspace-write');
+    assert.equal(readSessionData(worker.filename).sessions.find(s => s.id === chat.id).access, 'workspace-write');
     const stopped = await primary.bridgeTool(source.id, 'agent_stop', { agentId: worker.agentId });
     assert.equal(stopped.status, 'stopped');
     assert.equal(chat.queuePaused, true);
     await assert.rejects(primary.bridgeTool(source.id, 'agent_delete', { agentId: worker.agentId }), /Only agent tools|Unsupported or inactive/);
     assert.ok(agents.profile(worker.agentId));
-    assert.equal(JSON.parse(fs.readFileSync(worker.filename)).sessions[0].items[0].text, 'Conversation retained for recovery.');
+    assert.equal(readSessionData(worker.filename).sessions[0].items[0].text, 'Conversation retained for recovery.');
   }
   source.activeProvider = 'codex'; complete(primary, source);
 });
@@ -2360,7 +2449,7 @@ test('named agents can stop Main and change its access but cannot delete Main', 
   const changed = await manager.bridgeTool(source.id, 'agent_set_access', { agentId: 'main', access: 'read-only' });
   assert.equal(changed.name, 'Hub'); assert.equal(main.access, 'read-only');
   assert.equal(primary.data.settings.access, 'read-only');
-  assert.equal(JSON.parse(fs.readFileSync(primary.filename)).settings.access, 'read-only');
+  assert.equal(readSessionData(primary.filename).settings.access, 'read-only');
   complete(manager, source);
 });
 
@@ -2381,6 +2470,7 @@ test('management rejects escalation, self-targeting, inactive calls and pending 
     for (const invalid of [{ ...args, agentId: 'main' }, { ...args, agentId: '../sessions.json' }, { ...args, agentId: '' }, { ...args, workspace }, {}]) await assert.rejects(primary.bridgeTool(source.id, name, invalid));
   }
   await assert.rejects(primary.bridgeTool(source.id, 'agent_set_access', { agentId: worker.agentId, access: 'admin' }), /Unknown access/);
+  source.access = 'workspace-write';
   chat.queue = [{ id: 'pending', text: 'Keep this task.' }]; chat.queuePaused = true;
   await assert.rejects(agents.deleteAgent(worker.agentId), /queued/, 'the user\'s delete also waits for queued work');
   await assert.rejects(primary.bridgeTool(source.id, 'agent_set_access', { agentId: worker.agentId, access: 'read-only' }), /pending work/);
@@ -2446,7 +2536,7 @@ test('successive delegated tasks reuse the conversation and deliver only their o
   assert.equal(receipts[0].agentId, worker.agentId);
   assert.equal(receipts[0].sessionId, chat.id);
   assert.notEqual(receipts[0].deliveryId, receipts[1].deliveryId);
-  assert.equal(JSON.parse(fs.readFileSync(primary.filename, 'utf8')).sessions.find(s => s.id === source.id)
+  assert.equal(readSessionData(primary.filename).sessions.find(s => s.id === source.id)
     .items.filter(item => item.type === 'agentResult').length, 2, 'receipts persist before the owner resumes');
 });
 
@@ -2488,7 +2578,7 @@ test('a full owner queue retains a visible result once, and a failed save can re
   assert.equal(source.queue.filter(message => message.agentReply).length, 1);
   assert.equal(source.items[0].pendingReply, undefined);
   assert.equal(source.queuePaused, true);
-  assert.equal(JSON.parse(fs.readFileSync(primary.filename)).sessions.find(s => s.id === source.id).queue.at(-1).id, source.items[0].id);
+  assert.equal(readSessionData(primary.filename).sessions.find(s => s.id === source.id).queue.at(-1).id, source.items[0].id);
 });
 
 test('restart retains a deferred report without automatically reviewing it', async t => {
@@ -2574,7 +2664,7 @@ test('busy recipients persist FIFO assignments without changing active work or p
   assert.equal(first.status, 'queued');
   assert.deepEqual({ turn: chat.turnId, title: chat.title, access: chat.access }, active);
   assert.deepEqual(chat.delegationQueue.map(job => job.id), [first.jobId, second.jobId]);
-  assert.equal(JSON.parse(fs.readFileSync(worker.filename, 'utf8')).sessions.find(s => s.id === chat.id).delegationQueue.length, 2);
+  assert.equal(readSessionData(worker.filename).sessions.find(s => s.id === chat.id).delegationQueue.length, 2);
   await assert.rejects(agents.clearConversation(worker.agentId, async () => true), /pending|delegated/);
   assert.throws(() => agents.settings({ access: 'danger-full-access' }, worker.agentId), /Stop/);
   complete(worker, chat, 'Original task');
@@ -2626,7 +2716,7 @@ test('a cancelled queued job never starts when delivering its cancellation recei
   primary.save = () => { throw new Error('Disk full'); };
   try {
     await assert.rejects(agents.stop(job.jobId), /Disk full/);
-    assert.equal(JSON.parse(fs.readFileSync(worker.filename, 'utf8')).sessions.find(s => s.id === chat.id).delegationQueue[0].cancelled, true);
+    assert.equal(readSessionData(worker.filename).sessions.find(s => s.id === chat.id).delegationQueue[0].cancelled, true);
     complete(worker, chat);
     await until(() => !worker.busy);
     assert.equal(worker.client.calls.filter(call => call.method === 'turn/start').length, 1);
@@ -2669,7 +2759,7 @@ test('mailbox questions reach a waiting owner, with correlated answers and dupli
   assert.equal(duplicate.messageId, question.messageId);
   assert.equal(duplicate.duplicate, true);
   assert.equal(source.items.filter(item => item.type === 'agentMail').length, 1);
-  assert.equal(JSON.parse(fs.readFileSync(primary.filename, 'utf8')).sessions.find(s => s.id === source.id).items.filter(item => item.type === 'agentMail').length, 1);
+  assert.equal(readSessionData(primary.filename).sessions.find(s => s.id === source.id).items.filter(item => item.type === 'agentMail').length, 1);
   await until(() => !!source.turnId);
   assert.equal(chat.delegation.delivered, false, 'the helper is still working while the owner reads its question');
   const answer = await primary.bridgeTool(source.id, 'agent_message', { agentId: worker.agentId, messageId: 'answer-1', kind: 'answer', replyTo: question.messageId, text: 'Use JSON.' });
@@ -3090,7 +3180,7 @@ test('restarting legacy delegated work requires review instead of resending it',
   restored.pump();
   assert.equal(restored.owner(sessionId).client.calls.length, 0, 'restart does not silently replay queued assignments');
   assert.ok(restored.snapshot().agentStates.main.waitingForAgents.includes(source.id));
-  assert.equal(JSON.parse(fs.readFileSync(worker.filename)).sessions.find(s => s.id === sessionId).delegation.delivered, false);
+  assert.equal(readSessionData(worker.filename).sessions.find(s => s.id === sessionId).delegation.delivered, false);
   for (const c of restored.allControllers()) c.close();
 });
 
@@ -3255,7 +3345,7 @@ test('work a restart interrupted mid-run returns to its owner only by the user d
   assert.equal(results.length, 1);
   assert.equal(results[0].status, 'interrupted');
   assert.match(results[0].error, /not run again.*inspect its workspace/);
-  const saved = JSON.parse(fs.readFileSync(target.filename)).sessions.find(s => s.id === chat.id).delegation;
+  const saved = readSessionData(target.filename).sessions.find(s => s.id === chat.id).delegation;
   assert.deepEqual([saved.delivered, saved.recovery.decision.action], [true, 'return']);
   assert.throws(() => restored.reconcileJob({ jobId: accepted.jobId, action: 'return' }), /already returned|Unknown assignment/);
   assert.equal(target.client.calls.filter(call => call.method === 'turn/start').length, 0, 'nothing was run again');
@@ -3313,7 +3403,7 @@ test('a never-started assignment held after restart starts once on the user deci
   assert.deepEqual([job.state, chat.queuePaused, job.recovery.resumed], ['interrupted', true, undefined]);
   assert.equal(target.client.calls.filter(call => call.method === 'turn/start').length, 0);
   assert.deepEqual(restored.reconcileJob({ jobId: accepted.jobId, action: 'start' }), { jobId: accepted.jobId, status: 'queued' });
-  assert.equal(JSON.parse(fs.readFileSync(target.filename)).sessions.find(s => s.id === chat.id).delegation.recovery.decision.action, 'start');
+  assert.equal(readSessionData(target.filename).sessions.find(s => s.id === chat.id).delegation.recovery.decision.action, 'start');
   await until(() => target.activeTurns.has(chat.id));
   assert.equal(target.client.calls.filter(call => call.method === 'turn/start').length, 1);
   assert.equal(job.executionAttempts, 1);
@@ -3363,8 +3453,8 @@ test('a durable Stop intent prevents resurrection when the crash precedes child-
   let saves = 0;
   primary.save = () => { if (++saves > 1) throw new Error('Crash before child cancellation'); return save(); };
   await assert.rejects(agents.stop(source.id), /Crash before child cancellation/);
-  assert.ok(JSON.parse(fs.readFileSync(primary.filename)).cancelledAgentJobs.includes(accepted.jobId));
-  assert.equal(JSON.parse(fs.readFileSync(worker.filename)).sessions.find(s => s.id === accepted.sessionId).delegation.cancelled, undefined);
+  assert.ok(readSessionData(primary.filename).cancelledAgentJobs.includes(accepted.jobId));
+  assert.equal(readSessionData(worker.filename).sessions.find(s => s.id === accepted.sessionId).delegation.cancelled, undefined);
   primary.save = save;
   const root = factory(primary.filename, workspace);
   root.runnerRecoverySafe = true;
@@ -3414,7 +3504,7 @@ test('failure to persist execution start preserves the accepted queue without a 
   assert.equal(chat.delegation.delivered, false);
   assert.match(chat.delegation.error, /Accepted and saved/);
   assert.equal(worker.client.calls.filter(call => call.method === 'turn/start').length, 0);
-  assert.equal(JSON.parse(fs.readFileSync(worker.filename)).sessions[0].delegation.id, accepted.jobId);
+  assert.equal(readSessionData(worker.filename).sessions[0].delegation.id, accepted.jobId);
   worker.save = save;
   agents.pump();
   await until(() => worker.activeTurns.size);
@@ -3522,7 +3612,7 @@ test('Jev plug state persists, keeps preferences and keys, and stops calls acros
   Object.assign(primary.data.settings, { routing: 'jev', contextRanking: 'jev', toolSelection: 'jev', jevCompare: true, wikiAssessment: true });
   assert.throws(() => agents.settings({ jevEnabled: 'false' }), /Invalid Jev enabled/);
   agents.settings({ jevEnabled: false }, child.agentId);
-  assert.equal(JSON.parse(fs.readFileSync(primary.filename, 'utf8')).settings.jevEnabled, false);
+  assert.equal(readSessionData(primary.filename).settings.jevEnabled, false);
   assert.equal(primary.snapshot().jev.keySaved, true);
   assert.equal(primary.snapshot().jev.configured, false);
   assert.equal(primary.routingProvider, 'smart');

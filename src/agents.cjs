@@ -7,6 +7,7 @@ const { ACCESS_MODES, PROVIDER_NAMES } = require('./controller/shared.cjs');
 const { readText } = require('./tools/tool-helpers.cjs');
 const { stripTaskStatus } = require('./routing/task-state.cjs');
 const { capabilities } = require('./providers/capabilities.cjs');
+const { handoff } = require('./providers/claude.cjs');
 const artifacts = require('./artifacts.cjs');
 const { ArtifactDownloads } = require('./artifact-downloads.cjs');
 const { FINAL, validateChecks } = require('./tasks.cjs');
@@ -17,6 +18,7 @@ const { prepareCopy: prepareComparisonCopy } = require('./comparisons.cjs');
 const groupChats = require('./group-chats.cjs');
 const { Routines } = require('./routines.cjs');
 const { UNKNOWN_RESET_MS } = require('./providers/limits.cjs');
+const { readSessionData } = require('./session-store.cjs');
 
 function canonical(workspace) {
   const result = fs.realpathSync(workspace);
@@ -24,7 +26,7 @@ function canonical(workspace) {
 }
 
 // The settings a bot can take from its creator, and the profile flag that says it does.
-const INHERITED = { workspace: 'inheritWorkspace', access: 'inheritAccess', mode: 'inheritMode' };
+const { INHERITED, isSubBot, inheritedSource } = require('../ui/agent-state.js');
 
 function sameFolder(first, second) {
   try {
@@ -218,7 +220,7 @@ class Agents extends EventEmitter {
     this.controller(id);
     const filename = path.join(path.dirname(this.primary.filename), 'workers', id, 'sessions.json');
     if (fs.existsSync(filename) && !this.primary.data.workerContexts?.includes(id)) {
-      const saved = JSON.parse(fs.readFileSync(filename, 'utf8'));
+      const saved = readSessionData(filename);
       if (!Array.isArray(saved.sessions) || saved.sessions.length) {
         throw new Error('An unregistered worker conversation is retained for review. No assignment was replayed.');
       }
@@ -250,25 +252,14 @@ class Agents extends EventEmitter {
   // A bot another bot made works for it: it follows its creator's settings and is not edited directly. Batch workers in
   // a project copy have their own folder and cleanup, so they are not sub-bots.
   isSubBot(profile) {
-    return !!profile?.createdBy && profile.createdBy !== 'main' && !profile.temporaryBatch;
+    return isSubBot(profile);
   }
 
   // Where an inheriting bot's setting comes from: up its creators (a creator can inherit too) to a bot with its own. A
   // chain that reaches the Main Bot, a deleted creator or a loop ends at the Main Bot's workspace, at Auto for the model
   // and at Ask for access, so a broken chain never grants more. `chain` lists the creators on the way.
   inheritedSource(profile, key) {
-    const flag = INHERITED[key];
-    const chain = [];
-    let current = profile;
-    while (current?.[flag]) {
-      const creator = current.createdBy && current.createdBy !== 'main' ? this.profile(current.createdBy) : null;
-      if (!creator || creator.id === profile.id || chain.includes(creator.id))
-        return { chain: [...chain, 'main'], value: { workspace: this.primary.data.settings.workspace, access: 'read-only', mode: 'auto' }[key] };
-
-      chain.push(creator.id);
-      current = creator;
-    }
-    return { chain, value: current[key] };
+    return inheritedSource(profile, key, this.primary.data.agents, this.primary.data.settings.workspace);
   }
 
   // Bots whose inherited settings (all, or only `keys`) come through this one, directly or down a chain.
@@ -502,6 +493,39 @@ class Agents extends EventEmitter {
     }
   }
 
+  retainDelegatedChat(controller, work) {
+    const target = this.controller(controller.agentId), job = work.delegation;
+    if (!controller.executionContext || controller.agentId === 'main' || this.isSubBot(this.profile(controller.agentId)) ||
+        !job || target.data.sessions.some(chat => chat.id === (job.owner || job.source))) return;
+    const retained = target.data.retainedExecutions?.[work.id] || [];
+    const seen = new Set(retained);
+    if (work.items.every(item => seen.has(item.id))) return;
+    const chat = this.conversation(target, true);
+    const clearedAt = !retained.length && target.data.sessions.some(session => session.archived) ? chat.created : 0;
+    let at = work.created || 0;
+    const items = work.items.filter(item => {
+      at = Math.max(at, item.createdAt || 0);
+      return !seen.has(item.id) && (!clearedAt || at >= clearedAt);
+    }).map(item => {
+      const { pendingReply, ...saved } = structuredClone(item);
+      const maintenance = work.routes?.some(route => route.wikiMaintenanceTaskId &&
+        (route.messageId === (item.clientId || item.id) || (route.turnId && route.turnId === item.turnId)));
+      return { ...saved, id: `delegated-${work.id}-${item.id}`, delegatedFrom: work.id, localOnly: true, createdAt: item.createdAt || at,
+        ...(pendingReply ? { notified: true } : {}), ...(maintenance ? { internal: true } : {}) };
+    });
+    const context = items.length ? handoff(items, Infinity) : '';
+    const previous = { items: chat.items, directContext: chat.directContext, retained: target.data.retainedExecutions };
+    chat.items = [...chat.items, ...items];
+    if (items.length) chat.directContext = [...(chat.directContext || []),
+      { question: 'Completed delegated conversation (history, not a new task).', answer: context }];
+    target.data.retainedExecutions = { ...target.data.retainedExecutions, [work.id]: [...new Set([...retained, ...work.items.map(item => item.id)])] };
+    try { target.save(); }
+    catch (error) {
+      chat.items = previous.items; chat.directContext = previous.directContext; target.data.retainedExecutions = previous.retained;
+      throw error;
+    }
+  }
+
   migrateConversations() {
     for (const controller of [...this.controllers.values()]) {
       const keep = this.conversation(controller);
@@ -646,6 +670,8 @@ class Agents extends EventEmitter {
     // Comparisons still waiting for a pick settle now; then bots of comparisons that ended before this start go.
     await this.primary.settleWaitingComparisons();
     await this.primary.removeComparisonBots();
+    for (const controller of this.executions.values()) for (const session of controller.data.sessions)
+      if (session.delegation?.delivered) this.retainDelegatedChat(controller, session);
     this.pump();
     this.emit('state', this.snapshot());
   }
@@ -1276,9 +1302,13 @@ class Agents extends EventEmitter {
     const deliveryId = job.id || session.id;
     const delivered = source.agentDeliveries ||= [];
     if (!delivered.includes(deliveryId)) {
-      const answers = session.items.slice(job.startIndex || 0).filter(item => item.type === 'agentMessage' && item.phase !== 'commentary');
-      const last = answers.at(-1);
-      const report = (last?.turnId ? answers.filter(item => item.turnId === last.turnId) : last ? [last] : [])
+      const items = session.items.slice(job.startIndex || 0);
+      const end = items.findLastIndex(item => item.type === 'agentMessage' && item.phase !== 'commentary' && stripTaskStatus(item.text || '').trim());
+      const last = items[end];
+      const start = items.slice(0, end).findLastIndex(item => item.type === 'userMessage');
+      const answers = items.filter((item, index) => item.type === 'agentMessage' && item.phase !== 'commentary' &&
+        (last?.turnId ? item.turnId === last.turnId : index > start && index <= end && !item.turnId));
+      const report = answers
         .map(item => stripTaskStatus(item.text || '')).filter(Boolean).join('\n\n');
       const result = report.slice(-16000);
       const budgetSummary = this.budgets.summary(job.budgetId);
@@ -1324,6 +1354,7 @@ class Agents extends EventEmitter {
       sourceController.changed();
       if (!source.queuePaused) sourceController.settle(source);
     }
+    this.retainDelegatedChat(controller, session);
     job.state = session.status; job.delivered = true; delete job.deliveryError; controller.save();
   }
 
@@ -1957,15 +1988,17 @@ class Agents extends EventEmitter {
       throw new Error('Choose another bot from agents_list.');
     if (this.isSubBot(profile))
       throw new Error(`${profile.name} works for the bot that made it and follows its settings.`);
-    if (source.access !== 'danger-full-access' && !this.workspaces.same(profile.workspace, source.workspace))
+    const current = this.conversation(this.controller(profile.id));
+    const workspace = current?.workspace || profile.workspace, access = current?.access || profile.access;
+    if (source.access !== 'danger-full-access' && !this.workspaces.same(workspace, source.workspace))
       throw new Error('Changing a bot in another workspace requires Full access.');
-    if (ACCESS_MODES.findIndex(a => a.id === source.access) < ACCESS_MODES.findIndex(a => a.id === profile.access))
+    if ([access, profile.access].some(value => ACCESS_MODES.findIndex(a => a.id === source.access) < ACCESS_MODES.findIndex(a => a.id === value)))
       throw new Error('This bot has more access than this conversation. Ask the user to change it in its Edit dialog.');
 
     const changesModel = args.mode !== undefined || args.effort !== undefined;
     const mode = changesModel ? this.agentMode(args.mode ?? profile.mode, args.effort) : profile.mode;
     const saved = await this.saveAgent({ id: profile.id, name: args.name ?? profile.name, instructions: args.instructions ?? profile.instructions,
-      workspace: profile.workspace, access: profile.access, mode });
+      workspace, access, mode });
     return { agentId: saved.id, name: saved.name, instructions: saved.instructions, mode: saved.mode };
   }
 
@@ -1993,6 +2026,8 @@ class Agents extends EventEmitter {
     if (level < 0 || ceiling < 0) throw new Error('Unknown access mode.');
     if (level > ceiling) throw new Error('Cannot grant more access than your current conversation. Ask the user to change it in the UI.');
     const session = this.conversation(target), workspace = session?.workspace || target.data.settings.workspace;
+    if ([session?.access, target.data.settings.access].filter(Boolean).some(access => ACCESS_MODES.findIndex(mode => mode.id === access) > ceiling))
+      throw new Error('This bot has more access than this conversation. Ask the user to change it in the UI.');
     if (source.access !== 'danger-full-access' && canonical(workspace) !== canonical(source.workspace)) throw new Error('Changing access in a different workspace requires Full access.');
     this.requireIdle(target);
     this.settings({ access: args.access }, target.agentId);

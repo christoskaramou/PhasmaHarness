@@ -23,7 +23,9 @@
         "src/main.cjs",
         "tests/agents.test.cjs",
         "src/image-input.cjs",
-        "src/runner-commands.cjs"
+        "src/runner-commands.cjs",
+        "src/session-store.cjs",
+        "ui/agent-state.js"
       ],
       "command": "node --test tests/agents.test.cjs",
       "cost": "medium",
@@ -47,7 +49,10 @@
         "src/tools/router-mcp.cjs",
         "src/preload.cjs",
         "ui/app.js",
-        "tests/agent-tools-smoke.cjs"
+        "tests/agent-tools-smoke.cjs",
+        "src/session-store.cjs",
+        "ui/agent-state.js",
+        "ui/report-format.js"
       ],
       "command": "node -e \"const {spawnSync}=require('node:child_process');const file='tests/agent-tools-smoke.cjs';const check=spawnSync(process.execPath,['--check',file],{stdio:'inherit',windowsHide:true});if(check.status!==0)process.exit(check.status||1);const env={...process.env};delete env.ELECTRON_RUN_AS_NODE;const result=spawnSync(require('electron'),[file],{env,stdio:'inherit',windowsHide:true});process.exit(result.status??1)\"",
       "cost": "expensive",
@@ -80,7 +85,9 @@
         "src/tools/agent-tools.cjs",
         "ui/attachments.js",
         "src/routines.cjs",
-        "src/routine-time.cjs"
+        "src/routine-time.cjs",
+        "ui/agent-state.js",
+        "ui/report-format.js"
       ],
       "command": "node -e \"const {spawnSync}=require('node:child_process');const check=spawnSync(process.execPath,['--check','tests/ui-startup-smoke.cjs'],{stdio:'inherit',windowsHide:true});if(check.status!==0)process.exit(check.status||1);const env={...process.env};delete env.ELECTRON_RUN_AS_NODE;const result=spawnSync(require('electron'),['tests/ui-startup-smoke.cjs'],{env,stdio:'inherit',windowsHide:true});process.exit(result.status??1)\"",
       "cost": "expensive",
@@ -121,7 +128,8 @@
         "src/routing/task-state.cjs",
         "tests/conversation-export.test.cjs",
         "tests/core.test.cjs",
-        "tests/providers-optional.test.cjs"
+        "tests/providers-optional.test.cjs",
+        "src/session-store.cjs"
       ],
       "command": "node --test --test-name-pattern=\"compaction|export\" tests/conversation-export.test.cjs tests/core.test.cjs tests/providers-optional.test.cjs",
       "cost": "medium",
@@ -143,7 +151,8 @@
         "src/main.cjs",
         "src/routing/smart-router.cjs",
         "tests/local-models.test.cjs",
-        "tests/core.test.cjs"
+        "tests/core.test.cjs",
+        "src/session-store.cjs"
       ],
       "command": "node --test tests/api-agent.test.cjs tests/local-models.test.cjs tests/core.test.cjs",
       "cost": "medium",
@@ -163,7 +172,8 @@
         "src/controller/providers.cjs",
         "src/controller/turns.cjs",
         "src/main.cjs",
-        "tests/core.test.cjs"
+        "tests/core.test.cjs",
+        "src/session-store.cjs"
       ],
       "command": "node --test --test-name-pattern=\"provider connecting\" tests/core.test.cjs",
       "cost": "cheap",
@@ -190,7 +200,9 @@
         "src/providers/jev.cjs",
         "src/routing/effort-cap.cjs",
         "src/providers/providers.cjs",
-        "src/controller/turns.cjs"
+        "src/controller/turns.cjs",
+        "src/session-store.cjs",
+        "ui/agent-state.js"
       ],
       "command": "node --test tests/coordinator.test.cjs",
       "cost": "medium",
@@ -274,7 +286,8 @@
         "src/image-input.cjs",
         "src/controller/shared.cjs",
         "src/runner.cjs",
-        "tests/core.test.cjs"
+        "tests/core.test.cjs",
+        "src/session-store.cjs"
       ],
       "command": "node --test tests/native-cli.test.cjs tests/muse.test.cjs tests/antigravity.test.cjs tests/deepseek.test.cjs tests/native-coordination.test.cjs && node --test --test-name-pattern=\"Allow for this session\" tests/core.test.cjs",
       "cost": "cheap",
@@ -329,7 +342,9 @@
         "src/controller.cjs",
         "src/controller/providers.cjs",
         "tests/limits.test.cjs",
-        "tests/agents.test.cjs"
+        "tests/agents.test.cjs",
+        "src/session-store.cjs",
+        "ui/agent-state.js"
       ],
       "command": "node --test --test-name-pattern=\"quota|allowance limit|exhausted provider|background routing limit\" tests/limits.test.cjs tests/agents.test.cjs",
       "cost": "cheap",
@@ -356,7 +371,10 @@
         "src/conversation-export.cjs",
         "tests/attachments.test.cjs",
         "tests/core.test.cjs",
-        "tests/coordinator.test.cjs"
+        "tests/coordinator.test.cjs",
+        "src/session-store.cjs",
+        "ui/agent-state.js",
+        "ui/report-format.js"
       ],
       "command": "node --test --test-name-pattern=\"attachment|file snapshots\" tests/attachments.test.cjs tests/core.test.cjs tests/coordinator.test.cjs",
       "cost": "cheap",
@@ -387,7 +405,9 @@
         "tests/artifact-downloads.test.cjs",
         "tests/agents.test.cjs",
         "tests/runner.test.cjs",
-        "tests/ui-startup-smoke.cjs"
+        "tests/ui-startup-smoke.cjs",
+        "ui/agent-state.js",
+        "ui/report-format.js"
       ],
       "command": "node --test tests/artifacts.test.cjs tests/artifact-downloads.test.cjs tests/agents.test.cjs tests/runner.test.cjs tests/conversation-export.test.cjs",
       "cost": "cheap",
@@ -424,7 +444,10 @@
         "tests/ui-startup-smoke.cjs",
         "src/controller/task-gate.cjs",
         "src/runner.cjs",
-        "tests/runner.test.cjs"
+        "tests/runner.test.cjs",
+        "src/session-store.cjs",
+        "ui/agent-state.js",
+        "ui/report-format.js"
       ],
       "command": "node --test --test-concurrency=2 tests/job-budgets.test.cjs tests/agents.test.cjs tests/coordinator.test.cjs tests/local-models.test.cjs tests/runner.test.cjs",
       "cost": "medium",
@@ -451,7 +474,9 @@
         "tests/job-workspaces.test.cjs",
         "tests/coordinator.test.cjs",
         "tests/runner.test.cjs",
-        "tests/ui-startup-smoke.cjs"
+        "tests/ui-startup-smoke.cjs",
+        "ui/agent-state.js",
+        "ui/report-format.js"
       ],
       "command": "node --test --test-concurrency=2 tests/job-workspaces.test.cjs tests/coordinator.test.cjs tests/conversation-export.test.cjs tests/runner.test.cjs",
       "cost": "cheap",
@@ -483,7 +508,9 @@
         "tests/agents.test.cjs",
         "tests/coordinator.test.cjs",
         "tests/conversation-export.test.cjs",
-        "tests/ui-startup-smoke.cjs"
+        "tests/ui-startup-smoke.cjs",
+        "ui/agent-state.js",
+        "ui/report-format.js"
       ],
       "command": "node --test --test-concurrency=2 tests/job-reports.test.cjs tests/tasks.test.cjs tests/agents.test.cjs tests/coordinator.test.cjs tests/conversation-export.test.cjs",
       "cost": "cheap",
@@ -513,7 +540,10 @@
         "tests/coordinator.test.cjs",
         "tests/agents.test.cjs",
         "tests/conversation-export.test.cjs",
-        "tests/ui-startup-smoke.cjs"
+        "tests/ui-startup-smoke.cjs",
+        "src/session-store.cjs",
+        "ui/agent-state.js",
+        "ui/report-format.js"
       ],
       "command": "node --test --test-concurrency=2 --test-name-pattern=group tests/group-chats.test.cjs tests/coordinator.test.cjs",
       "cost": "cheap",
@@ -545,7 +575,10 @@
         "tests/routine-time.test.cjs",
         "tests/coordinator.test.cjs",
         "tests/runner.test.cjs",
-        "tests/ui-startup-smoke.cjs"
+        "tests/ui-startup-smoke.cjs",
+        "src/session-store.cjs",
+        "ui/agent-state.js",
+        "ui/report-format.js"
       ],
       "command": "node --test --test-concurrency=2 --test-name-pattern=\"routine|Routine|assigned input\" tests/routine-time.test.cjs tests/coordinator.test.cjs tests/runner.test.cjs",
       "cost": "cheap",
@@ -572,7 +605,9 @@
         "ui/app.js",
         "ui/index.html",
         "tests/dictation.test.cjs",
-        "tests/ui-startup-smoke.cjs"
+        "tests/ui-startup-smoke.cjs",
+        "ui/agent-state.js",
+        "ui/report-format.js"
       ],
       "command": "node --test tests/dictation.test.cjs",
       "cost": "cheap",
@@ -624,7 +659,9 @@
         "tests/fixtures/documents.cjs",
         "tests/fixtures/protected-pdf.base64",
         "tests/ui-startup-smoke.cjs",
-        "src/document-job.ps1"
+        "src/document-job.ps1",
+        "ui/agent-state.js",
+        "ui/report-format.js"
       ],
       "command": "node --test tests/documents.test.cjs tests/attachments.test.cjs",
       "cost": "cheap",
@@ -650,7 +687,10 @@
         "tests/claude-models.test.cjs",
         "tests/limits.test.cjs",
         "tests/agents.test.cjs",
-        "tests/ui-startup-smoke.cjs"
+        "tests/ui-startup-smoke.cjs",
+        "src/session-store.cjs",
+        "ui/agent-state.js",
+        "ui/report-format.js"
       ],
       "command": "node --test --test-concurrency=2 --test-name-pattern=\"native Claude|Claude usage|Claude allowance|Claude CLI/SDK|streaming allowance\" tests/agents.test.cjs tests/limits.test.cjs tests/claude-usage.test.cjs",
       "cost": "cheap",
@@ -731,7 +771,9 @@
         "ui/remote-api.js",
         "tests/provider-connection.test.cjs",
         "tests/runner-commands.test.cjs",
-        "tests/agents.test.cjs"
+        "tests/agents.test.cjs",
+        "src/session-store.cjs",
+        "ui/agent-state.js"
       ],
       "command": "node --test tests/provider-connection.test.cjs tests/runner-commands.test.cjs && node --test --test-name-pattern=\"provider metadata holds\" tests/agents.test.cjs",
       "cost": "cheap",
@@ -771,7 +813,9 @@
         "tests/runner-commands.test.cjs",
         "tests/remote.test.cjs",
         "tests/remote-live.cjs",
-        "tests/fixtures/documents.cjs"
+        "tests/fixtures/documents.cjs",
+        "ui/agent-state.js",
+        "ui/report-format.js"
       ],
       "command": "node --test tests/artifact-downloads.test.cjs tests/remote.test.cjs && node tests/remote-live.cjs",
       "cost": "medium",
@@ -793,7 +837,8 @@
         "src/tasks.cjs",
         "src/log.cjs",
         "tests/lessons.test.cjs",
-        "tests/core.test.cjs"
+        "tests/core.test.cjs",
+        "src/session-store.cjs"
       ],
       "command": "node --test tests/lessons.test.cjs && node --test --test-name-pattern=\"becomes a lesson\" tests/core.test.cjs",
       "cost": "cheap",
@@ -807,7 +852,7 @@
     {
       "id": "bot-setup",
       "name": "Bots load Harness rules, not the personal setup; the pool runs after turns",
-      "covers": "Claude and Codex bots leave out the user's hooks, personal skills, plugins and home CLAUDE.md but keep user MCP servers; the worker defaults carry the request rules under 4,000 characters; Harness runs the test pool after Full-access and Read-only turns, sends failures back as a Test pool message and only notices for jobs.",
+      "covers": "Claude and Codex bots leave out personal hooks, skills, plugins and both home CLAUDE.md locations while keeping user MCP servers. Harness runs its bundled test pool only after Full-access turns; tests never receive the Jev key. Late failures cannot send into archived, busy, changed or lower-access chats. Per-repository serialization canonicalizes Windows aliases and retains all waiting chats with their original turn identity.",
       "paths": [
         "src/providers/claude.cjs",
         "src/providers/codex.cjs",
@@ -817,7 +862,8 @@
         "src/controller.cjs",
         "skills/**",
         "tests/worker-defaults.test.cjs",
-        "tests/testpool-harness.test.cjs"
+        "tests/testpool-harness.test.cjs",
+        "src/session-store.cjs"
       ],
       "command": "node --test tests/worker-defaults.test.cjs tests/testpool-harness.test.cjs",
       "cost": "cheap",
@@ -831,12 +877,15 @@
     {
       "id": "delegation-result-retained",
       "name": "Delegation history and Main Bot review recovery",
-      "covers": "Completed worker result is retained and removed from the delivery queue after a Main Bot follow-up timeout; no duplicate delegation and no false verified completion. Batch receipts remain counted, storage and budget errors stay visible, and invalid verification and Stop remain safe. Delivery uses the final answer instead of accumulated pending turns. Clear can archive completed saved reports awaiting review without replaying them; cancellation, save rollback and unfinished-work protection preserve history.",
+      "covers": "Completed worker results survive Main review failure without replay. Delegated instructions and answers persist in the direct chat, reach model follow-ups and exports, survive retries and save rollback, and stay archived after clear. History arriving during submission remains for the next turn. Reports retain multipart answers and substantive text before status-only final turns. Composer access updates inheriting bots; management checks effective chat access before editing or lowering permissions.",
       "paths": [
         "src/controller/coordinator.cjs",
-        "src/agents.cjs"
+        "src/controller.cjs",
+        "src/agents.cjs",
+        "src/session-store.cjs",
+        "ui/agent-state.js"
       ],
-      "command": "node --test --test-name-pattern=\"completed worker survives|failed worker reviews count|invalid completion checks|clear |host check facts reach\" tests/coordinator.test.cjs tests/agents.test.cjs",
+      "command": "node --test --test-name-pattern=\"completed worker survives|failed worker reviews count|invalid completion checks|clear |host check facts reach|composer permissions|delegated history belongs|worker reports keep|CLI follow-ups include delegated\" tests/coordinator.test.cjs tests/agents.test.cjs tests/core.test.cjs",
       "cost": "cheap",
       "timeoutSec": 30,
       "origin": {
@@ -846,12 +895,30 @@
       }
     },
     {
+      "id": "wiki-import-and-chat-guards",
+      "name": "Custom wiki preservation and read-only sub-bot commands",
+      "covers": "Old custom wiki content is imported once under the fixed wiki folder without replacing existing or original notes. Sub-bot chats refuse user mutations through the shared local and remote command handlers, while approval answers remain available.",
+      "paths": [
+        "src/workspace/wiki-store.cjs",
+        "src/runner-commands.cjs"
+      ],
+      "command": "node --test tests/wiki-store.test.cjs tests/runner-commands.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 30,
+      "origin": {
+        "problem": "Custom wiki content became unreachable and read-only chats allowed IPC mutations.",
+        "fix": "Preserve custom content and guard chat mutations.",
+        "date": "2026-10-22"
+      }
+    },
+    {
       "id": "task-bots-unlimited",
       "name": "Task bots default to unlimited execution",
       "covers": "Default task bots and nested helpers exceed old time and attempt caps without pausing; usage is tracked, explicit limits remain enforced, and legacy default caps migrate without removing customized or previously edited limits. Paused unlimited tasks resume without caps only after cleanup.",
       "paths": [
         "src/job-budgets.cjs",
-        "src/agents.cjs"
+        "src/agents.cjs",
+        "ui/agent-state.js"
       ],
       "command": "node --test tests/job-budgets.test.cjs",
       "cost": "cheap",
@@ -859,6 +926,66 @@
       "origin": {
         "problem": "Task bots received default maintenance-style limits",
         "fix": "Opt-in limits with retained usage accounting",
+        "date": "2026-10-22"
+      }
+    },
+    {
+      "id": "session-journal",
+      "name": "Recoverable incremental session persistence",
+      "covers": "Preserves acknowledged work across restart and failed writes; small appends avoid rewriting history, corrupted records fail closed, and backups include journal-only workers.",
+      "paths": [
+        "src/session-store.cjs",
+        "src/controller.cjs",
+        "src/runner.cjs",
+        "tests/session-store.test.cjs"
+      ],
+      "command": "node --test tests/session-store.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 30,
+      "origin": {
+        "problem": "Every save rewrote the whole history without an fsync.",
+        "fix": "Flushed journal deltas and atomic checkpoints, including shared readers and backups.",
+        "date": "2026-10-22"
+      }
+    },
+    {
+      "id": "shared-state-contracts",
+      "name": "Shared ownership, report and provider contracts",
+      "covers": "Queued tasks lock chat before messages exist; completed normal tasks unlock it; sub-bots remain creator-managed and missing/cyclic ownership fails closed. Report markers retain substantive answers; missing CLI flags are detected.",
+      "paths": [
+        "ui/agent-state.js",
+        "ui/report-format.js",
+        "src/providers/contracts.cjs",
+        "tests/shared-contracts.test.cjs"
+      ],
+      "command": "node --test tests/shared-contracts.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 15,
+      "origin": {
+        "problem": "Shared state rules lived in large scripts without a checked boundary.",
+        "fix": "Extracted shared ownership and report rules with deterministic contract tests.",
+        "date": "2026-10-22"
+      }
+    },
+    {
+      "id": "checked-core",
+      "name": "Strict checks for extracted shared modules",
+      "covers": "Strict JavaScript type checks for persistence, shared agent-state rules, report parsing and provider contracts.",
+      "paths": [
+        "src/session-store.cjs",
+        "src/providers/contracts.cjs",
+        "ui/agent-state.js",
+        "ui/report-format.js",
+        "tsconfig.json",
+        "package.json",
+        "package-lock.json"
+      ],
+      "command": "npm run check",
+      "cost": "cheap",
+      "timeoutSec": 30,
+      "origin": {
+        "problem": "Shared session and ownership state had no static checking.",
+        "fix": "Checked extracted modules using JSDoc and TypeScript without a build step.",
         "date": "2026-10-22"
       }
     }

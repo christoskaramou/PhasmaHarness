@@ -104,3 +104,50 @@ test('pooled tests get neither Harness’s Electron-as-Node switch nor its Jev k
   assert.equal(bot.sent.length, 0, bot.sent[0]?.text);
   assert.match(session.notice, /^Test pool: 1 passed/);
 });
+
+test('late pool failures never send into cleared, busy, changed or restricted chats', async () => {
+  for (const change of ['clear', 'busy', 'new turn', 'access']) {
+    const root = repo(), session = chat(root), bot = controller({ data: { sessions: [session] } });
+    await bot.runTestPool(root, session);
+    const file = path.join(root, '.testpool', 'catalog.json');
+    const pool = JSON.parse(fs.readFileSync(file));
+    pool.tests[0].command = 'node hold.cjs';
+    fs.writeFileSync(file, JSON.stringify(pool));
+    fs.writeFileSync(path.join(root, 'hold.cjs'), "const fs = require('fs'); fs.writeFileSync('started', ''); setInterval(() => { if (fs.existsSync('release')) process.exit(1); }, 10);");
+    fs.writeFileSync(path.join(root, 'src.txt'), 'BROKEN');
+    const running = bot.runTestPool(root, session);
+    for (let i = 0; i < 300 && !fs.existsSync(path.join(root, 'started')); i++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(fs.existsSync(path.join(root, 'started')));
+    if (change === 'clear') bot.data.sessions = [{ ...session, archived: true }];
+    if (change === 'busy') bot.busy = session.id;
+    if (change === 'new turn') session.items.push({ type: 'agentMessage', text: 'A newer answer.' });
+    if (change === 'access') session.access = 'read-only';
+    fs.writeFileSync(path.join(root, 'release'), '');
+    await running;
+    assert.deepEqual(bot.sent, [], change);
+    assert.match(bot.data.sessions[0].notice, /FAILED src-ok/, change);
+  }
+});
+
+test('pool serialization keeps every waiting chat and treats Windows case aliases as one repository', async () => {
+  const root = repo(), calls = [], releases = [];
+  const make = name => controller({ runTestPool: async (_root, session, last) => {
+    calls.push([name, session.id, last]);
+    await new Promise(resolve => releases.push(resolve));
+  } });
+  const first = make('first'), second = make('second'), third = make('third');
+  const sessions = [chat(root), { ...chat(root), id: 'two' }, { ...chat(root), id: 'three' }];
+  const pending = first.startTestPool(root, sessions[0]);
+  const alias = process.platform === 'win32' ? root.toUpperCase() : root;
+  second.startTestPool(alias, sessions[1]);
+  third.startTestPool(root, sessions[2]);
+  assert.equal(calls.length, 1, 'aliases share the active run');
+  const last = sessions[1].items.at(-1);
+  sessions[1].items.push({ type: 'agentMessage', text: 'Newer turn while waiting' });
+  releases.shift()(); await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls[1], ['second', 'two', last], 'queued work retains its original turn identity');
+  releases.shift()(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls[2][0], 'third');
+  releases.shift()(); await pending;
+  assert.equal(calls.length, 3);
+});

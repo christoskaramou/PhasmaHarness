@@ -1,3 +1,4 @@
+const { readSessionData } = require('../src/session-store.cjs');
 // Explicit paid probe, excluded from *.test.cjs. Compares a saved router source with current code.
 // node tests/routing-cost-live.cjs <before-smart-router.cjs> <results.json>
 const fs = require('node:fs');
@@ -16,7 +17,7 @@ async function main() {
   const baseline = fs.readFileSync(baselinePath, 'utf8');
   const module = { exports: {} };
   new Function('require', 'module', 'exports', '__dirname', baseline)(createRequire(sourcePath), module, module.exports, path.dirname(sourcePath));
-  const settings = JSON.parse(fs.readFileSync(path.join(process.env.APPDATA || path.join(os.homedir(), '.config'), 'Phasma Harness', 'sessions.json'))).settings;
+  const settings = readSessionData(path.join(process.env.APPDATA || path.join(os.homedir(), '.config'), 'Phasma Harness', 'sessions.json')).settings;
   const match = /^codex:(.+):([^:]+)$/.exec(settings.routerPreset || '');
   if (!match) throw new Error('This probe requires a configured Codex Smart classifier.');
   const choice = { provider: 'codex', model: match[1], effort: match[2] === 'default' ? null : match[2] };

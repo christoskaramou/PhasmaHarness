@@ -2,10 +2,16 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
-const { ClaudeCLI } = require('../src/providers/claude.cjs');
+const { ClaudeCLI, handoff } = require('../src/providers/claude.cjs');
 const { CursorCLI } = require('../src/providers/cursor.cjs');
 const { WORKER_INSTRUCTIONS } = require('../src/worker-instructions.cjs');
 const { withoutPersonalSetup } = require('../src/providers/codex.cjs');
+
+test('saving delegated history preserves large answers without removing the provider transfer limit', () => {
+  const items = [{ type: 'agentMessage', text: 'x'.repeat(1000001) }];
+  assert.throws(() => handoff(items), /too large to transfer/);
+  assert.ok(handoff(items, Infinity).includes(items[0].text));
+});
 
 test('workers are told rtk starts programs only: shell built-ins and PowerShell cmdlets run without it', () => {
   const skill = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'skills', 'rtk', 'SKILL.md'), 'utf8');
@@ -126,7 +132,7 @@ test('Claude bots leave out the personal setup: user settings, home CLAUDE.md, a
     await cli.run({ model: 'test', prompt: 'hello', access: 'danger-full-access', schema });
     assert.equal(args[args.indexOf('--setting-sources') + 1], 'project,local', 'user settings (hooks, skills, subagents) stay out');
     assert.deepEqual(JSON.parse(args[args.indexOf('--settings') + 1]), {
-      claudeMdExcludes: [path.join(config, 'CLAUDE.md').replace(/\\/g, '/')],
+      claudeMdExcludes: [path.join(config, 'CLAUDE.md'), path.join(require('node:os').homedir(), 'CLAUDE.md')].map(file => file.replace(/\\/g, '/')),
       enabledPlugins: { 'superpowers@official': false },
       autoMemoryEnabled: false,
     });

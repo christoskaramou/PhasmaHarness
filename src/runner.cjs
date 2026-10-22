@@ -17,6 +17,7 @@ const { Updater } = require('./updater.cjs');
 const { Dictation } = require('./dictation.cjs');
 const { DocumentReader } = require('./documents.cjs');
 const { sweepAgentFiles } = require('./providers/antigravity.cjs');
+const { readSessionData, atomicWrite } = require('./session-store.cjs');
 
 // The fixed wikis folder. The earlier one ("workspace-data") is renamed once; if that fails, it stays in use so no
 // project knowledge is lost.
@@ -156,7 +157,7 @@ function updateBlockedReason(agents) {
 
 function backupStores(filename) {
   if (!fs.existsSync(filename)) return;
-  const data = JSON.parse(fs.readFileSync(filename, 'utf8'));
+  const data = readSessionData(filename);
   const files = [filename];
   for (const profile of data.agents || []) {
     if (!/^[a-f0-9-]{36}$/.test(profile.id)) throw new Error('Invalid saved agent ID; recovery backup was not changed.');
@@ -176,7 +177,7 @@ function backupStores(filename) {
         // Verified before it takes the backup name: an interrupted copy or an unreadable store never leaves a backup that blocks startup.
         const temporary = backup + '.' + randomUUID() + '.tmp';
         try {
-          fs.copyFileSync(file, temporary, fs.constants.COPYFILE_EXCL);
+          atomicWrite(temporary, JSON.stringify(readSessionData(file)));
           JSON.parse(fs.readFileSync(temporary, 'utf8'));
           fs.renameSync(temporary, backup);
         } finally { fs.rmSync(temporary, { force: true }); }

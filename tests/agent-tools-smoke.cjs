@@ -1,3 +1,4 @@
+const { readSessionData } = require('../src/session-store.cjs');
 // Electron + installed Codex, with a local Responses server; no login or model inference.
 const { app, BrowserWindow, ipcMain } = require('electron');
 const assert = require('node:assert/strict');
@@ -57,6 +58,9 @@ app.whenReady().then(async () => {
     ipcMain.handle('updateStatus', () => ({ status: 'idle' }));
     ipcMain.handle('load', () => session);
     ipcMain.handle('browseWorkspace', () => ({ available: false, entries: [] }));
+    ipcMain.handle('voiceInfo', () => ({ supported: false }));
+    ipcMain.handle('setAppearance', () => {});
+    ipcMain.handle('replySuggestion', () => null);
     window = new BrowserWindow({ show: false, webPreferences: { preload: path.resolve(__dirname, '../src/preload.cjs'), contextIsolation: true, sandbox: true } });
     agents.on('state', state => { if (!window.isDestroyed()) window.webContents.send('state', state); });
     await window.loadFile(path.resolve(__dirname, '../ui/index.html'));
@@ -76,7 +80,7 @@ app.whenReady().then(async () => {
     assert.equal(profile.mode, 'auto');
     assert.equal(profile.workspace, root);
     assert.equal(agents.controller(profile.id).busy, null);
-    assert.equal(JSON.parse(fs.readFileSync(primary.filename)).agents[0].id, profile.id);
+    assert.equal(readSessionData(primary.filename).agents[0].id, profile.id);
     await window.webContents.executeJavaScript(`new Promise((resolve, reject) => {
       let attempts = 0;
       const check = () => {

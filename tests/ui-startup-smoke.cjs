@@ -1,3 +1,4 @@
+const { readSessionData } = require('../src/session-store.cjs');
 // Run with Electron, not Node. No provider login or inference is performed.
 const { app, BrowserWindow, ipcMain, nativeTheme } = require('electron');
 const fs = require('node:fs');
@@ -29,6 +30,7 @@ app.whenReady().then(async () => {
   const imageRequests = [];
   ipcMain.handle('image', (_event, ...args) => { imageRequests.push(args); return 'data:image/jpeg;base64,/9j/4AAQ'; });
   ipcMain.handle('setAppearance', () => {});
+  ipcMain.handle('replySuggestion', () => null);
   ipcMain.handle('benchmarkData', () => ({ data: { records: [] },
     summary: { records: 0, matched: 0, workers: 0, updatedAt: 'fixture', sources: [] } }));
   const sent = [];
@@ -1804,7 +1806,8 @@ app.whenReady().then(async () => {
     const job = agents.conversation(execution, true);
     job.items = [{ id: `task-${profile.id}`, type: 'userMessage', content: [{ type: 'text', text: 'Task from agent: say hello.' }], createdAt: Date.now() },
       { id: `answer-${profile.id}`, type: 'agentMessage', phase: 'final_answer', text: 'Hello from the background.', createdAt: Date.now() }];
-    job.delegation = { id: `job-${profile.id}`, state: 'running', delivered };
+    job.delegation = { id: `job-${profile.id}`, source: agents.conversation(controller, true).id, state: 'running', delivered };
+    if (!delivered) execution.busy = job.id;
     return job;
   };
   const shown = () => window.webContents.executeJavaScript(`[document.querySelector('#messages').textContent.includes('Hello from the background.'),
@@ -1814,10 +1817,11 @@ app.whenReady().then(async () => {
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.deepEqual(await shown(), [true, true, 'Read only: Researcher gives this bot its work.'], 'a sub-bot’s chat shows its work, read only');
   delete reviewer.createdBy;
+  agents.retainDelegatedChat(agents.execution(reviewer.id), agents.conversation(agents.execution(reviewer.id)));
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); selectAgent(' + JSON.stringify(reviewer.id) + ')');
   assert.deepEqual((await shown()).slice(0, 2), [true, false], 'a normal bot without a direct chat retains completed work and accepts input');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#welcome").hidden'), true);
-  const ownChat = agents.conversation(agents.controller(researcher.id), true);
+  let ownChat = agents.conversation(agents.controller(researcher.id), true);
   ownChat.items.push({ id: 'own-message', type: 'agentMessage', phase: 'final_answer', text: 'Written in my own chat.', createdAt: Date.now() });
   const researcherJob = await giveWork(researcher, false);
   delete researcherJob.items[1].createdAt;
@@ -1830,10 +1834,15 @@ app.whenReady().then(async () => {
   queuedView.executionStates[researcher.id].sessions.find(chat => chat.id === researcherJob.id).items = [];
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(queuedView) + ')');
   assert.equal((await shown())[1], true, 'typing is disabled even before the delegated worker emits its first message');
+  assert.deepEqual(await window.webContents.executeJavaScript('[selectedId, document.querySelector("#stop").hidden]'),
+    [researcherJob.id, false], 'the empty queued execution retains its targeted Stop button');
   researcherJob.delegation.delivered = true;
+  agents.execution(researcher.id).busy = null;
+  agents.retainDelegatedChat(agents.execution(researcher.id), researcherJob);
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); new Promise(r => setTimeout(r, 100))');
   const back = await shown();
   assert.deepEqual([back[0], back[1]], [true, false], 'once its result returns, work remains visible and the bot’s own chat is writable');
+  assert.doesNotMatch(await window.webContents.executeJavaScript('document.body.textContent'), /Agent coordination failed/);
   assert.deepEqual(await window.webContents.executeJavaScript(`[selectedId, document.querySelector('#messages').textContent.includes('Written in my own chat.')]`),
     [ownChat.id, true], 'Send goes to the bot’s own chat again, with its messages');
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/delegated-chat-completed.png'), (await window.webContents.capturePage()).toPNG());
@@ -1843,22 +1852,19 @@ app.whenReady().then(async () => {
   })()`), true, 'messages without timestamps retain their position after delegated instructions');
   await window.webContents.executeJavaScript('selectAgent("main"); selectAgent(' + JSON.stringify(researcher.id) + ')');
   assert.deepEqual((await shown()).slice(0, 2), [true, false], 'completed work survives navigating away and back');
-  const clearedView = agents.snapshot();
-  const clearedState = clearedView.agentStates[researcher.id];
-  clearedState.sessions.push({ id: 'previous-cleared-chat', archived: true });
-  clearedState.sessions.find(chat => chat.id === ownChat.id).created = Date.now() + 1000;
-  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(clearedView) + ')');
+  ownChat = await agents.clearConversation(researcher.id, () => true);
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + ')');
   assert.equal((await shown())[0], false, 'clearing a direct chat does not resurrect old delegated history');
-  const freshWork = clearedView.executionStates[researcher.id].sessions.find(chat => chat.id === researcherJob.id);
-  freshWork.items[0].createdAt = Date.now() + 2000;
-  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(clearedView) + ')');
+  researcherJob.items = researcherJob.items.map(item => ({ ...item, id: 'new-' + item.id, createdAt: Date.now() }));
+  agents.retainDelegatedChat(agents.execution(researcher.id), researcherJob);
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + ')');
   assert.equal((await shown())[0], true, 'new delegated answers without timestamps remain visible after a clear');
   // A task resumed from the bot's own chat is not another bot's work (shown to the UI only, nothing runs).
   const ownView = agents.snapshot(), ownBackground = ownView.executionStates[researcher.id];
   ownBackground.sessions.find(chat => chat.id === ownBackground.conversationId).delegation = { id: 'own-resumed-task', state: 'running', owner: ownChat.id, source: ownChat.id };
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(ownView) + '); new Promise(r => setTimeout(r, 100))');
   const own = await shown();
-  assert.deepEqual([own[0], own[1]], [false, false], 'a task resumed from the bot’s own chat keeps that chat writable');
+  assert.deepEqual([own[0], own[1]], [true, false], 'a task resumed from the bot’s own chat keeps its retained history and stays writable');
   for (const profile of [reviewer, researcher])
     agents.conversation(agents.execution(profile.id), true).items = [];
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); selectAgent(' + JSON.stringify(researcher.id) + ')');
@@ -2395,7 +2401,7 @@ app.whenReady().then(async () => {
       const receipt = await controller.send({ id: ownerChat.id, text: `Make game two cooperative ${index}`, task: 'off' });
       samples.receipt.push(performance.now() - receiptStart);
       assert.equal(receipt.queued, true);
-      const stored = JSON.parse(fs.readFileSync(controller.filename, 'utf8')).sessions.find(chat => chat.id === ownerChat.id);
+      const stored = readSessionData(controller.filename).sessions.find(chat => chat.id === ownerChat.id);
       assert.match(stored.queue.at(-1).text, /Make game two cooperative/);
       ownerChat.queue.pop();
     }
@@ -3125,6 +3131,7 @@ app.whenReady().then(async () => {
   phase = 'reply suggestions';
   // One call per answer; grey text while the draft matches its start; Right arrow at the end accepts; off hides it.
   const suggestionCalls = [];
+  ipcMain.removeHandler('replySuggestion');
   ipcMain.handle('replySuggestion', (_event, id) => { suggestionCalls.push(id); return { itemId: 'suggest-answer', text: 'Now add tests for it.' }; });
   const suggestionUi = await window.webContents.executeJavaScript(`(async () => {
     document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());

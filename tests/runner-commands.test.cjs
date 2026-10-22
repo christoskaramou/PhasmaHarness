@@ -154,6 +154,8 @@ test('a sub-bot’s chat is watched: sending, the queue, access and new chats ar
   assert.throws(() => commands.get('queuedMessage')('chat', 'message', 'steer'), watchOnly);
   assert.throws(() => commands.get('permissions')('chat', 'danger-full-access'), watchOnly);
   assert.throws(() => commands.get('create')('C:/project', 'danger-full-access', 'sub'), watchOnly);
+  for (const name of ['compact', 'rename', 'archive', 'deleteSession', 'clearConversation'])
+    assert.throws(() => commands.get(name)(name === 'clearConversation' ? 'sub' : 'chat'), watchOnly, name);
   await commands.get('answer')('chat', { id: 'request', decision: 'accept' }, 'sub');
   assert.equal(answered.length, 1, 'approval answers reach the sub-bot');
 });

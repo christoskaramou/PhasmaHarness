@@ -1,3 +1,4 @@
+const { readSessionData } = require('../src/session-store.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -266,7 +267,7 @@ test('setup restart remains held and cancellation never creates a ready empty pr
   const restored = new JobWorkspaces(agents);
   assert.equal(restored.record(record.workspace).state, 'failed');
   assert.match(record.error, /interrupted by a restart/);
-  assert.equal(JSON.parse(fs.readFileSync(primary.filename, 'utf8')).jobWorkspaces[record.workspace].state, 'failed');
+  assert.equal(readSessionData(primary.filename).jobWorkspaces[record.workspace].state, 'failed');
   assert.equal(git(source, 'status', '--porcelain=v1'), '');
   const next = workspaces.reserve(source, { id: randomUUID(), index: 1 });
   let started = false;

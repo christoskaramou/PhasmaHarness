@@ -40,6 +40,7 @@ jobs:
           $testTemp = node -p "require('fs').realpathSync.native(require('os').tmpdir())"
           "TEMP=$testTemp" >> $env:GITHUB_ENV
           "TMP=$testTemp" >> $env:GITHUB_ENV
+      - run: npm run check
       - run: npm test
       - name: Installer script test
         if: runner.os == 'Windows'

@@ -1,3 +1,4 @@
+const { readSessionData } = require('../src/session-store.cjs');
 // Explicit live evaluation only; excluded from *.test.cjs and the unattended test pool.
 // electron tests/routing-decisions-live.cjs --list
 // electron tests/routing-decisions-live.cjs --router=<catalog-id> [--router=<catalog-id> ...]
@@ -54,7 +55,7 @@ async function main() {
   app.setPath('userData', home);
   await app.whenReady();
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'phasma-routing-decisions-'));
-  const settings = JSON.parse(fs.readFileSync(path.join(home, 'sessions.json'), 'utf8')).settings;
+  const settings = readSessionData(path.join(home, 'sessions.json')).settings;
   const filename = path.join(directory, 'sessions.json');
   // Never load the user's conversations or change their routing preferences.
   fs.writeFileSync(filename, JSON.stringify({ version: 1, settings: { ...settings, workspace: directory, jevEnabled: false, jevQuickAnswers: false, checks: {} }, sessions: [] }));

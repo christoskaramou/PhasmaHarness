@@ -1,3 +1,4 @@
+const { readSessionData } = require('../src/session-store.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -208,7 +209,7 @@ test('check ownership is saved before the command starts; a failed save starts n
 
   let onDisk;
   const running = runOne('danger-full-access', check('setTimeout(() => {}, 1500)'), () => setTimeout(() => {
-    onDisk = JSON.parse(fs.readFileSync(controller.filename, 'utf8')).executionBlock;
+    onDisk = readSessionData(controller.filename).executionBlock;
   }, 600));
   assert.equal((await running).status, 'passed');
   assert.ok(onDisk?.processId && Number.isInteger(onDisk.pid) && onDisk.runtime.local, 'the running check must be recorded on disk');
@@ -268,7 +269,7 @@ test('a real CIM enumeration error fails the scan, and the execution block is re
     const result = await runOne('danger-full-access', check('console.log("ok")'));
     assert.deepEqual([result.status, result.detail], ['unknown', 'check execution unconfirmed']);
     assert.ok(controller.data.executionBlock?.runtime.local, 'an unverified check keeps its execution block');
-    assert.ok(JSON.parse(fs.readFileSync(controller.filename, 'utf8')).executionBlock, 'and it is on disk for restart');
+    assert.ok(readSessionData(controller.filename).executionBlock, 'and it is on disk for restart');
     assert.equal(controller.recoverExecutionBlock(), false, 'recovery cannot clear it while scans fail');
 
     scan.run = run;
@@ -283,7 +284,7 @@ test('a missing executable fails the check without leaving an execution block', 
   assert.equal(result.status, 'blocked');
   assert.match(result.detail, /phasma-no-such-program-xyz was not found/);
   assert.ok(!controller.data.executionBlock);
-  assert.ok(!JSON.parse(fs.readFileSync(controller.filename, 'utf8')).executionBlock);
+  assert.ok(!readSessionData(controller.filename).executionBlock);
 });
 
 test('recorded descendants reach disk even when the tree stops changing (Windows watcher)', { skip: process.platform !== 'win32' && 'Linux finds descendants by environment tag' }, async t => {
@@ -291,7 +292,7 @@ test('recorded descendants reach disk even when the tree stops changing (Windows
   const { check, runOne } = localRunner(controller);
   let onDisk;
   const result = await runOne('danger-full-access', check(`setTimeout(() => { ${DETACHED} }, 300); setTimeout(() => {}, 5000)`), () => setTimeout(() => {
-    onDisk = JSON.parse(fs.readFileSync(controller.filename, 'utf8')).executionBlock;
+    onDisk = readSessionData(controller.filename).executionBlock;
   }, 4200));
   const child = Number(result.stdout.match(/child (\d+)/)[1]);
   assert.ok(onDisk.children.some(entry => entry.pid === child && entry.exact), 'the detached child must be saved for crash recovery');

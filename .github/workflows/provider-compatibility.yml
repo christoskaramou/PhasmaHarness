@@ -1,0 +1,30 @@
+name: Provider compatibility
+
+on:
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  latest-cli:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install current provider CLIs
+        run: npm install --global @openai/codex@latest @anthropic-ai/claude-code@latest
+      - run: npm run check
+      - name: Check installed CLI interfaces (no inference)
+        run: npm run check:providers -- codex claude
+      - name: Codex protocol, MCP and transcript integration against local Responses fixture
+        run: xvfb-run -a npx electron --no-sandbox tests/agent-tools-smoke.cjs
+      - name: Provider adapter regression contracts
+        run: node --test tests/claude-*.test.cjs tests/cursor-*.test.cjs tests/muse.test.cjs tests/antigravity.test.cjs tests/deepseek.test.cjs tests/shared-contracts.test.cjs
