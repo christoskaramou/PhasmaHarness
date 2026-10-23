@@ -323,18 +323,26 @@ test('skill settlement and Undo preserve the current workspace permission ceilin
 test('skill body comparisons require observed use, including native CLI reads; descriptions alone do not', t => {
   const { store, candidate, prepare, current } = fixture(t), skill = prepare();
   assert.equal(skill.requiresRead, true);
+  assert.equal(skill.descriptionChanged, false);
   const run = (variant, skillReads = []) => ({ variant, label: variant ? 'B' : 'A', result: { status: 'completed', checks: { test: 'passed' },
     corrections: variant ? 0 : 1, setups: [{ provider: 'codex', skills: { workflow: variant ? 'new' : 'old' } }], skillReads } });
   assert.equal(comparisons.pairVerdict(run(false), run(true), { skill: 'workflow' }).verdict, 'confounded');
-  assert.equal(comparisons.pairVerdict(run(false), run(true, ['workflow']), { skill: 'workflow' }).verdict, 'helped');
+  assert.equal(comparisons.pairVerdict(run(false), run(true, ['workflow']), { skill: 'workflow' }).verdict, 'confounded');
+  assert.equal(comparisons.pairVerdict(run(false, ['workflow']), run(true, ['workflow']), { skill: 'workflow' }).verdict, 'helped');
+  assert.equal(comparisons.pairVerdict(run(false), run(true, ['workflow']), { skill: 'workflow', descriptionChanged: true }).verdict, 'helped');
   assert.equal(comparisons.pairVerdict(run(false), run(true), { skill: 'workflow', requiresRead: false }).verdict, 'helped');
   const adoptionHost = { session: () => ({ access: 'danger-full-access' }) };
   assert.match(controller.adoptRule.call(adoptionHost, { target: 'skill', verdict: 'helped', skill, runs: [run(false), run(true)] }).error, /not observed being read/);
+  assert.match(controller.adoptRule.call(adoptionHost, { target: 'skill', verdict: 'helped', skill, runs: [run(false), run(true, ['workflow'])] }).error, /not observed being read/);
   const host = { comparisonOf: () => ({ record: { target: 'skill', skill } }), skillDirectories: () => skill.runs[1].dirs };
   const entry = path.join(skill.runs[1].dirs.workflow, 'SKILL.md'), body = fs.readFileSync(entry, 'utf8');
   for (const item of [
     { type: 'commandExecution', command: `cat "${entry}"`, exitCode: 0, aggregatedOutput: body },
     { type: 'mcpToolCall', arguments: { file_path: entry }, result: body.split('\n').map((line, i) => `${i + 1}\t${line}`).join('\n') },
+    { type: 'mcpToolCall', arguments: { file_path: entry }, result: [{ type: 'content', content: { type: 'text', text: body } }] },
+    { type: 'mcpToolCall', arguments: { file_path: path.dirname(entry).replace(/\\/g, '/') + '/./SKILL.md' }, result: { content: [{ type: 'text', text: body }] } },
+    { type: 'commandExecution', command: `sed -n '1,2p' "${entry}"`, exitCode: 0, aggregatedOutput: body },
+    { type: 'commandExecution', command: `rg . SKILL.md`, arguments: { cmd: 'rg . SKILL.md', workdir: path.dirname(entry) }, exitCode: 0, aggregatedOutput: body },
   ]) {
     const session = { items: [{ ...item, turnId: 'turn', status: 'completed' }] };
     assert.deepEqual(controller.comparisonSkillReads.call(host, session, { turnId: 'turn' }), ['workflow']);
@@ -344,15 +352,62 @@ test('skill body comparisons require observed use, including native CLI reads; d
     assert.deepEqual(controller.comparisonSkillReads.call(host, session, { turnId: 'another-turn' }), []);
     session.items[0].aggregatedOutput = 'only a partial read';
     assert.deepEqual(controller.comparisonSkillReads.call(host, session, { turnId: 'turn' }), []);
+    session.items[0].aggregatedOutput = '# New workflow';
+    assert.deepEqual(controller.comparisonSkillReads.call(host, session, { turnId: 'turn' }), []);
+    session.items[0].aggregatedOutput = body;
+    session.items[0].exitCode = 1;
+    assert.deepEqual(controller.comparisonSkillReads.call(host, session, { turnId: 'turn' }), []);
   }
   assert.deepEqual(controller.comparisonSkillReads.call(host, { items: [] }, { skillReads: ['workflow'] }), ['workflow']);
   assert.deepEqual(comparisons.runResult({ attempts: [{ skillReads: ['workflow'] }] }).skillReads, ['workflow']);
   const { skillContent } = require('../src/worker-instructions.cjs');
   fs.writeFileSync(path.join(candidate, 'SKILL.md'), '---\ndescription: A different trigger.\n---\n' + skillContent(readSkill('workflow', current)).body);
   for (const file of ['helper.cjs', 'asset.bin']) fs.unlinkSync(path.join(candidate, file));
-  assert.equal(prepare().requiresRead, false);
+  const descriptionOnly = prepare();
+  assert.equal(descriptionOnly.requiresRead, false);
+  assert.equal(descriptionOnly.descriptionChanged, true);
   fs.writeFileSync(path.join(candidate, 'helper.cjs'), 'changed resource');
   assert.equal(prepare().requiresRead, true);
+  assert.equal(prepare().descriptionChanged, true);
+});
+
+test('skill reads inside nested shell quotes retain evidence and the comparison verdict', t => {
+  const { root } = fixture(t), folder = path.join(root, 'skill with spaces');
+  fs.mkdirSync(folder);
+  const entry = path.join(folder, 'SKILL.md'), body = '# Workflow\nRead the source before editing.\nRun the affected tests.\n';
+  fs.writeFileSync(entry, body);
+  const otherFolder = path.join(root, 'other skill with spaces');
+  fs.mkdirSync(otherFolder);
+  fs.writeFileSync(path.join(otherFolder, 'SKILL.md'), body);
+  const output = process.platform === 'win32'
+    ? require('node:child_process').execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `Get-Content -LiteralPath '${entry}'`],
+      { encoding: 'utf8', timeout: 10000, windowsHide: true })
+    : fs.readFileSync(entry, 'utf8');
+  const host = { comparisonOf: () => ({ record: { target: 'skill', skill: { name: 'workflow' } } }), skillDirectories: () => ({ workflow: folder }) };
+  const run = (variant, skillReads) => ({ variant, result: { status: 'completed', checks: { test: 'passed' }, corrections: variant ? 0 : 1,
+    setups: [{ provider: 'codex', skills: { workflow: variant ? 'new' : 'old' } }], skillReads } });
+  for (const command of [
+    `Get-Content -LiteralPath '${entry}'`,
+    `powershell.exe -NoProfile -Command "Get-Content -LiteralPath '${entry}'"`,
+    `bash -lc 'cat "${entry}"'`,
+  ]) for (const tool of [
+    { type: 'commandExecution', command, exitCode: 0, aggregatedOutput: output },
+    { type: 'dynamicToolCall', arguments: { command }, result: { content: [{ type: 'text', text: output }] } },
+  ]) {
+    const item = { ...tool, status: 'completed', turnId: 'turn' }, session = { workspace: root, items: [item] };
+    const reads = () => controller.comparisonSkillReads.call(host, session, { turnId: 'turn' });
+    assert.deepEqual(reads(), ['workflow'], command);
+    assert.equal(comparisons.pairVerdict(run(false, reads()), run(true, reads()), { skill: 'workflow' }).verdict, 'helped');
+    item.exitCode = 1;
+    assert.deepEqual(reads(), [], 'a failed nested command still cannot supply evidence');
+    item.exitCode = 0;
+    item.aggregatedOutput = '# Workflow';
+    assert.deepEqual(reads(), [], 'a nested path does not bypass complete-body verification');
+    item.aggregatedOutput = output;
+    item.command = command.replace(folder, otherFolder);
+    if (item.arguments) item.arguments = { command: item.command };
+    assert.deepEqual(reads(), [], 'the same body read from a different package is not evidence');
+  }
 });
 
 test('skill descriptions stay short, including legacy overrides; oversized candidates create no snapshots', t => {
@@ -364,6 +419,25 @@ test('skill descriptions stay short, including legacy overrides; oversized candi
   fs.writeFileSync(path.join(candidate, 'SKILL.md'), text);
   assert.throws(prepare, /300 characters/);
   assert.equal(fs.existsSync(store), false);
+});
+
+test('skill read evidence requires the whole body, possibly across successful partial reads in one turn', t => {
+  const { candidate } = fixture(t);
+  const lines = ['Read the relevant source before changing behavior.', 'Exercise the affected callers after the change.'];
+  fs.writeFileSync(path.join(candidate, 'SKILL.md'), '# Workflow\n' + lines.join('\n'));
+  const host = { comparisonOf: () => ({ record: { target: 'skill', skill: { name: 'workflow' } } }), skillDirectories: () => ({ workflow: candidate }) };
+  const read = text => ({ type: 'commandExecution', command: `rg text "${path.join(candidate, 'SKILL.md')}"`,
+    turnId: 'turn', status: 'completed', exitCode: 0, aggregatedOutput: text });
+  const session = { items: [read(lines[0])] }, submission = { turnId: 'turn' };
+  assert.deepEqual(controller.comparisonSkillReads.call(host, session, submission), [], 'one genuine body line is insufficient');
+  session.items.push({ ...read(lines[1]), turnId: 'old' });
+  assert.deepEqual(controller.comparisonSkillReads.call(host, session, submission), [], 'old turns cannot fill gaps');
+  session.items[1].turnId = 'turn'; session.items[1].exitCode = 1;
+  assert.deepEqual(controller.comparisonSkillReads.call(host, session, submission), [], 'failed reads cannot fill gaps');
+  session.items[1].exitCode = 0;
+  assert.deepEqual(controller.comparisonSkillReads.call(host, session, submission), [], 'headings are part of the required body too');
+  session.items.push(read('# Workflow'));
+  assert.deepEqual(controller.comparisonSkillReads.call(host, session, submission), ['workflow']);
 });
 
 test('skill overrides notice bundled drift without replacing the override, including legacy metadata', t => {
@@ -386,6 +460,86 @@ test('skill candidate errors distinguish non-Git projects and accept local Git e
   assert.throws(() => skills.requireIgnoredCandidate(root, candidate), /\.git\/info\/exclude/);
   fs.appendFileSync(path.join(root, '.git/info/exclude'), '\n/candidate/\n');
   skills.requireIgnoredCandidate(root, candidate);
+});
+
+test('skill pins isolate Hub workspaces and retain cross-workspace helpers until the turn ends', t => {
+  const { root, candidate } = fixture(t), { Controller } = require('../src/controller.cjs');
+  const wikiStore = new (require('../src/workspace/wiki-store.cjs').WikiStore)(path.join(root, 'knowledge'));
+  const a = path.join(root, 'a'), b = path.join(root, 'b');
+  fs.mkdirSync(a); fs.mkdirSync(b);
+  const storage = workspace => path.join(wikiStore.location(workspace).root, '..', 'skills');
+  const override = skills.adopt(skills.prepare(storage(a), 'rtk', candidate, skills.directories(null), []));
+  const hub = { id: 'hub', workspace: b, items: [] };
+  const host = { ...controller, busy: hub.id, data: { sessions: [hub] }, wikiStore, comparisonOf: () => null,
+    lessonWorkspace: value => value, save() {}, log: { warn() {} }, skillDirectories: Controller.prototype.skillDirectories };
+  const dirsA = host.skillDirectories({ ...hub, workspace: a }), dirsB = host.skillDirectories(hub);
+  assert.notEqual(dirsA.rtk, dirsB.rtk);
+  assert.equal(dirsB.rtk, skillDir('rtk'));
+  assert.equal(host.skillDirectories({ ...hub, workspace: path.join(a, '.') }), dirsA);
+  if (process.platform === 'win32') assert.equal(host.skillDirectories({ ...hub, workspace: a.toUpperCase() }), dirsA);
+  const snapshot = skills.prepare(storage(b), 'workflow', candidate, dirsB, [{ index: 1, variant: false }]);
+  assert.equal(readSkill('rtk', snapshot.runs[0].dirs), readSkill('rtk'));
+  host.comparisonOf = () => ({ record: { target: 'skill', skill: snapshot }, copy: { index: 1 } });
+  assert.equal(host.skillDirectories(hub), snapshot.runs[0].dirs, 'frozen comparison paths take precedence over ordinary pins');
+  host.comparisonOf = () => null;
+  skills.undo(override);
+  host.pruneSkillStore(a);
+  assert.ok(fs.existsSync(dirsA.rtk), 'a Hub based in B retains the pinned helpers from A');
+  host.busy = null; host.turnSkillDirectories.delete(hub.id);
+  host.pruneSkillStore(a);
+  assert.equal(fs.existsSync(dirsA.rtk), false);
+});
+
+test('skill notices persist across chats, dismissal and restart but new bundled versions notify again', t => {
+  const { root, store, prepare } = fixture(t), { Controller } = require('../src/controller.cjs');
+  const adopted = skills.adopt(prepare()), metadata = path.join(store, 'revisions', adopted.revision + '.json');
+  fs.unlinkSync(metadata);
+  const first = { id: 'one', workspace: root, items: [] }, second = { id: 'two', workspace: root, items: [] };
+  const host = { data: { sessions: [first, second] }, comparisonOf: () => null, lessonWorkspace: value => value,
+    wikiStore: { location: () => ({ root: path.join(store, '..', 'wiki') }) }, save() {}, changed() {}, log: { warn() {} },
+    session(id) { return this.data.sessions.find(session => session.id === id); }, skillDirectories: Controller.prototype.skillDirectories };
+  host.skillDirectories(first); host.skillDirectories(second);
+  assert.equal(first.items.length, 1); assert.equal(second.items.length, 0);
+  Controller.prototype.dismissSkillNotice.call(host, first.id, first.items[0].id);
+  host.data = JSON.parse(JSON.stringify(host.data));
+  host.skillDirectories(host.session(first.id)); host.skillDirectories(host.session(second.id));
+  assert.equal(host.data.sessions.flatMap(session => session.items).length, 0);
+  fs.writeFileSync(metadata, JSON.stringify({ bundledHash: 'old-release' }));
+  host.skillDirectories(host.session(second.id));
+  assert.equal(host.session(second.id).items.length, 1);
+  assert.match(host.session(second.id).items[0].text, /bundled workflow skill changed/);
+});
+
+test('workspace skill notices reach the Hub and broken-store Dismiss sticks until recovery or a different error', t => {
+  const { root, store, prepare } = fixture(t), { Controller } = require('../src/controller.cjs');
+  const adopted = skills.adopt(prepare());
+  fs.unlinkSync(path.join(store, 'revisions', adopted.revision + '.json'));
+  const hub = { id: 'hub', items: [], workspace: root }, worker = { id: 'worker', items: [], workspace: root };
+  const primary = { data: { sessions: [hub] }, session: () => primary.data.sessions[0], save() {}, changed() {} };
+  const host = { data: { sessions: [worker] }, agents: { primary, conversation: () => primary.session() },
+    comparisonOf: () => null, lessonWorkspace: value => value, wikiStore: { location: () => ({ root: path.join(store, '..', 'wiki') }) },
+    log: { warn() {} }, skillDirectories: Controller.prototype.skillDirectories };
+  host.skillDirectories(worker);
+  assert.equal(worker.items.length, 0);
+  assert.equal(hub.items.length, 1);
+  assert.match(hub.items[0].text, /predates bundled-version tracking/);
+  fs.writeFileSync(path.join(store, 'active.json'), '{broken');
+  host.skillDirectories(worker);
+  const failure = hub.items.find(item => item.skillStoreWarning.startsWith('unavailable:'));
+  assert.ok(failure);
+  Controller.prototype.dismissSkillNotice.call(primary, hub.id, failure.id);
+  primary.data = JSON.parse(JSON.stringify(primary.data));
+  host.skillDirectories(worker);
+  assert.equal(primary.session().items.length, 1, 'Dismiss survives restart while the same failure remains');
+  fs.writeFileSync(path.join(store, 'active.json'), '{}');
+  host.skillDirectories(worker);
+  fs.writeFileSync(path.join(store, 'active.json'), '{broken');
+  host.skillDirectories(worker);
+  assert.equal(primary.session().items.length, 2, 'a failure after an observed recovery notifies again');
+  Controller.prototype.dismissSkillNotice.call(primary, hub.id, primary.session().items[1].id);
+  fs.writeFileSync(path.join(store, 'active.json'), '[]');
+  host.skillDirectories(worker);
+  assert.equal(primary.session().items.length, 2, 'a different failure is not suppressed');
 });
 
 test('skill Undo preserves running helpers and reports history errors without undoing its success', async t => {

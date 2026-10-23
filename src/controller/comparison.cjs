@@ -27,16 +27,37 @@ module.exports = {
     const folder = this.skillDirectories(session)[name], entry = path.join(folder, 'SKILL.md');
     const normalize = text => String(text).replace(/^\s*\d+(?:[\t:|]|→)\s?/gm, '').replace(/\s+/g, ' ').trim();
     let body;
-    try { body = normalize(skillContent(fs.readFileSync(entry, 'utf8')).body); } catch { return [...reads]; }
-    const file = entry.replace(/\\/g, '/').toLowerCase();
+    try { body = skillContent(fs.readFileSync(entry, 'utf8')).body; } catch { return [...reads]; }
+    const identity = file => {
+      try {
+        const real = fs.realpathSync(file);
+        return process.platform === 'win32' ? real.toLowerCase() : real;
+      } catch { return null; }
+    };
+    const file = identity(entry);
+    // ACP wraps text in content blocks; MCP and native tools also return arrays and numbered lines.
+    const outputText = value => typeof value === 'string' ? value : Array.isArray(value) ? value.map(outputText).join('\n')
+      : value && typeof value === 'object' ? outputText(value.text ?? value.content ?? value.resource?.text ?? '') : '';
+    const strings = value => typeof value === 'string' ? [value] : value && typeof value === 'object' ? Object.values(value).flatMap(strings) : [];
+    const missing = new Set(body.split(/\r?\n/).map(normalize).filter(Boolean));
+    const hasBody = missing.size > 0;
     for (const item of session.items) {
       if (item.turnId !== submission.turnId || item.status !== 'completed' ||
           !['commandExecution', 'mcpToolCall', 'dynamicToolCall'].includes(item.type) || (item.exitCode != null && item.exitCode !== 0)) continue;
-      const input = JSON.stringify(item.arguments || item.command || '').replace(/\\\\/g, '/').replace(/\\/g, '/').toLowerCase();
+      const args = item.arguments || {}, location = args.workdir || args.cwd;
+      const cwd = typeof location === 'string' ? location : session.workspace || folder;
+      const paths = new Set(strings(item.arguments || item.command || ''));
+      // Revisit quoted operands: shell wrappers can contain another quoted path.
+      for (const input of paths) {
+        for (const match of input.matchAll(/"([^"]+)"|'([^']+)'|([^\s"'`;|<>]+)/g)) paths.add(match[1] || match[2] || match[3]);
+      }
+      if (![...paths].some(input => /(?:^|[\\/])SKILL\.md$/i.test(input) && identity(path.resolve(cwd, input)) === file)) continue;
       const output = item.aggregatedOutput ?? item.result;
-      const text = typeof output === 'string' ? output : Array.isArray(output) ? output.map(part => part.text || '').join('\n')
-        : output?.content?.map(part => part.text || '').join('\n') || output?.text || '';
-      if (body && input.includes(file) && normalize(text).includes(body)) reads.add(name);
+      if (output?.isError) continue;
+      const text = normalize(outputText(output));
+      // Partial reads may accumulate, but one matching line must not stand in for the whole body.
+      for (const line of missing) if (text.includes(line)) missing.delete(line);
+      if ((normalize(body) && text.includes(normalize(body))) || (hasBody && !missing.size)) reads.add(name);
     }
     return [...reads];
   },
@@ -306,8 +327,9 @@ module.exports = {
         if (owner.access === 'read-only' || (owner.access !== 'danger-full-access' && !this.agents.workspaces.same(owner.workspace, record.project)))
           throw new Error('The owner no longer has write access to this workspace.');
         if (record.skill?.requiresRead !== false && (!record.runs.some(run => run.variant) ||
-            record.runs.some(run => run.variant && !run.result?.skillReads?.includes(record.skill.name))))
-          throw new Error('The changed skill was not observed being read; it was not kept.');
+            (record.skill?.descriptionChanged !== true && !record.runs.some(run => !run.variant)) ||
+            record.runs.some(run => (run.variant || record.skill?.descriptionChanged !== true) && !run.result?.skillReads?.includes(record.skill.name))))
+          throw new Error('The skill was not observed being read in every required run; it was not kept.');
         return skillPackages.adopt(record.skill);
       } catch (error) { return { error: error.message }; }
     }
@@ -453,6 +475,8 @@ module.exports = {
       };
       if (controllers.some(controller => {
         if (controller.cleanupPending?.size || controller.data.workerCleanup?.length) return true;
+        const wikiKey = process.platform === 'win32' ? wiki.toLowerCase() : wiki;
+        if (controller.busy && controller.turnSkillDirectories?.get(controller.busy)?.has(wikiKey)) return true;
         const active = controller.data.sessions.filter(session => session.id &&
           ((controller.busy && controller.busy === session.id) || controller.activeTurns?.has(session.id)));
         return ((controller.busy || controller.activeTurns?.size) && !active.length) ||

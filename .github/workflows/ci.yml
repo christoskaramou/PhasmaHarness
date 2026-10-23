@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Cold document-worker startup intermittently times out on windows-2025-vs2026.
+        # Keep release tests stable; the separate document job also checks the newest Windows image.
         os: [windows-2022, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -57,9 +57,22 @@ jobs:
         if: runner.os == 'Linux'
         run: xvfb-run -a npx electron --no-sandbox tests/quit-live.cjs
 
+  documents-current-windows:
+    name: Document startup (current Windows image)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node --test tests/documents.test.cjs
+
   package:
     name: Windows installer
-    needs: test
+    needs: [test, documents-current-windows]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: windows-2022
     timeout-minutes: 30

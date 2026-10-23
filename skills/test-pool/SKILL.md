@@ -1,6 +1,6 @@
 ---
 name: test-pool
-description: After a code fix or task, add its regression test to .testpool/catalog.json. Also use for adding, listing or running pooled tests and handling "Test pool:" failure reports.
+description: 'After code changes, add regression tests to .testpool/catalog.json. Manage pooled tests and "Test pool:" failures.'
 ---
 
 # Test pool

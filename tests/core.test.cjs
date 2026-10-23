@@ -345,10 +345,22 @@ test('adopted skills refresh existing Codex and CLI instructions without restart
       controller.providerSettings({ action: 'enableDiscovered', provider: 'cursor-cli', model: 'fixture', label: 'Fixture' });
     }
     let received;
-    controller[provider].run = async request => { received = request; return { result: 'ok' }; };
+    controller[provider].run = async request => {
+      received = request;
+      const content = fs.readFileSync(path.join(activePath, 'SKILL.md'), 'utf8');
+      request.onEvent({ type: 'assistant', session_id: 'native-' + provider, message: { content: [{
+        type: 'tool_use', id: 'read-' + provider, name: 'Read', input: { file_path: path.join(activePath, 'SKILL.md') }
+      }] } });
+      request.onEvent({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'read-' + provider,
+        content: provider === 'cursor' ? [{ type: 'content', content: { type: 'text', text: content } }] : content }] } });
+      return { result: 'ok' };
+    };
     const mode = provider === 'claude' ? 'claude-cli:sonnet' : 'cursor-cli:fixture:default';
     await controller.send({ id: session.id, text: 'Continue.', mode, task: 'off' });
     assert.ok(received.instructions.includes(activePath), provider + ' receives the active package path with helpers disabled');
+    assert.equal(session.items.find(item => item.id === 'read-' + provider).turnId, session.submission.turnId);
+    const readHost = { comparisonOf: () => ({ record: { target: 'skill', skill: { name: 'workflow' } } }), skillDirectories: () => ({ workflow: activePath }) };
+    assert.deepEqual(controller.comparisonSkillReads.call(readHost, session, session.submission), ['workflow'], provider + ' native reads retain the Harness turn ID');
   }
   skills.undo(adopted);
   assert.ok(!controller.workerInstructions(session).includes(activePath));

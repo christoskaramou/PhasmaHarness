@@ -644,7 +644,7 @@
     {
       "id": "documents",
       "name": "Local PDF and DOCX text extraction and parser cleanup",
-      "covers": "Real PDF and DOCX inputs read in an isolated owned process, preserve bounded text or XML, reject mismatched formats, malformed data, excessive expansion and forged ZIP sizes, and confirm timeout or Quit cleanup before releasing the parser. PNG/JPEG/WebP use the same owned worker, preserve pixels, strip source metadata, reject disguised vectors, corrupt rasters and excessive pixel counts, and confirm cancellation before another read. Shared commands also bound normalized image output before submission. Extracted snapshots round-trip through the shared attachment format. Companion agents-ui checks exercise actual Electron extraction, Word Unicode and XML rejection, text-only labels and document Send. Images are downscaled to a 2048 px long edge before provider input. Opaque photos are sent as JPEG q85 when that is smaller; images with any transparency stay PNG. Each reader process runs under an OS memory cap (a Windows job-object commit limit through src/document-job.ps1, prlimit --data on Linux), so a 3 KB double-Flate PDF that expands to 1 GiB fails with a memory message near 768 MiB instead of committing GBs, and the reader stays usable. A 2 MiB DOCX part, larger than the IPC pipe buffer, reaches the parent whole because the worker disconnects only after its send completes.",
+      "covers": "Real PDF and DOCX inputs read in an isolated owned process, preserve bounded text or XML, reject mismatched formats, malformed data, excessive expansion and forged ZIP sizes, and confirm timeout or Quit cleanup before releasing the parser. PNG/JPEG/WebP use the same owned worker, preserve pixels, strip source metadata, reject disguised vectors, corrupt rasters and excessive pixel counts, and confirm cancellation before another read. Shared commands also bound normalized image output before submission. Extracted snapshots round-trip through the shared attachment format. Companion agents-ui checks exercise actual Electron extraction, Word Unicode and XML rejection, text-only labels and document Send. Images are downscaled to a 2048 px long edge before provider input. Opaque photos are sent as JPEG q85 when that is smaller; images with any transparency stay PNG. Each reader process runs under an OS memory cap (a Windows job-object commit limit through src/document-job.ps1, prlimit --data on Linux), so a 3 KB double-Flate PDF that expands to 1 GiB fails with a memory message near 768 MiB instead of committing GBs, and the reader stays usable. A 2 MiB DOCX part, larger than the IPC pipe buffer, reaches the parent whole because the worker disconnects only after its send completes. Windows loads a memory limiter compiled during dependency setup; cold-read timing is logged. Startup timeout/error fixtures reap both helper and parser, preserve causes, fail closed and permit a fresh retry. The current Windows runner image has a separate CI document gate. Source reader startup automatically builds the cached Windows DLL after a pull without reinstalling dependencies; installed apps use the shipped binary.",
       "paths": [
         "src/documents.cjs",
         "src/document-worker.cjs",
@@ -667,7 +667,11 @@
         "tests/ui-startup-smoke.cjs",
         "src/document-job.ps1",
         "ui/agent-state.js",
-        "ui/report-format.js"
+        "ui/report-format.js",
+        "src/document-job.cs",
+        "tools/build-document-job.cjs",
+        "tools/fetch.cjs",
+        ".github/workflows/ci.yml"
       ],
       "command": "node --test tests/documents.test.cjs tests/attachments.test.cjs",
       "cost": "cheap",
@@ -1032,7 +1036,7 @@
     {
       "id": "skill-comparisons",
       "name": "Workspace skill packages, comparisons and Undo",
-      "covers": "Compare complete SKILL.md packages and supporting files using the existing comparison flow; isolate frozen runs, reject confounded setup changes, adopt per workspace without restart, preserve bundled defaults and manual edits, and Undo the full package. Codex resume and Claude/Cursor handoffs use the current skill paths with helpers disabled. Invalid packages and Ask access fail before dispatch. Chained Undo restores revision identities and bundled-update inheritance. Broken stores fall back with one notice; reads and rejected candidates create no files. Ignored/untracked candidate isolation is rechecked before snapshots. Metadata descriptions and editable placeholders survive round trips, with normal on-demand activation in experiments. Cleanup retains active/in-flight revisions and the existing 50-comparison Undo history; automatic test-pool verification keeps its trusted checker. Body/resource changes require recorded skill use, including native CLI reads; description-only comparisons remain valid. Descriptions are capped at 300 characters. Bundled drift produces a notice. Ordinary running turns pin paths through Undo and defer cleanup, including stopping processes. Corrupt comparison history is backed up, recovered visibly and preserves snapshot retention. History write failures cannot turn a successful Undo into an error. Non-Git errors and local Git exclusions are covered.",
+      "covers": "Compare complete SKILL.md packages and supporting files using the existing comparison flow; isolate frozen runs, reject confounded setup changes, adopt per workspace without restart, preserve bundled defaults and manual edits, and Undo the full package. Codex resume and Claude/Cursor handoffs use the current skill paths with helpers disabled. Invalid packages and Ask access fail before dispatch. Chained Undo restores revision identities and bundled-update inheritance. Broken stores fall back with one notice; reads and rejected candidates create no files. Ignored/untracked candidate isolation is rechecked before snapshots. Metadata descriptions and editable placeholders survive round trips, with normal on-demand activation in experiments. Cleanup retains active/in-flight revisions and the existing 50-comparison Undo history; automatic test-pool verification keeps its trusted checker. Body/resource changes require recorded skill use, including native CLI reads; description-only comparisons remain valid. Descriptions are capped at 300 characters. Bundled drift produces a notice. Ordinary running turns pin paths through Undo and defer cleanup, including stopping processes. Corrupt comparison history is backed up, recovered visibly and preserves snapshot retention. History write failures cannot turn a successful Undo into an error. Non-Git errors and local Git exclusions are covered. Unchanged descriptions require reads in both runs, including adoption rechecks. Hub pins and cleanup are workspace-scoped; notices persist across chats/restarts and can be dismissed. Native evidence accepts canonical paths, nested shell quotes, partial body reads and nested Cursor ACP content; the default instruction index stays below its pre-comparison size. Partial native reads must collectively cover the entire skill body in the current turn; one body line cannot authorize adoption. Workspace warnings go to the Hub, and broken-store dismissal survives restart until recovery or a different failure. Fixed instruction text and descriptions have separate size allowances.",
       "paths": [
         "src/skill-packages.cjs",
         "src/worker-instructions.cjs",
@@ -1052,7 +1056,13 @@
         "tests/providers-optional.test.cjs",
         "tests/worker-defaults.test.cjs",
         "skills/ponytail/SKILL.md",
-        "skills/test-pool/SKILL.md"
+        "skills/test-pool/SKILL.md",
+        "src/preload.cjs",
+        "src/runner-commands.cjs",
+        "src/remote.cjs",
+        "ui/remote-api.js",
+        "ui/app.js",
+        "tests/ui-startup-smoke.cjs"
       ],
       "command": "node --test --test-concurrency=2 --test-name-pattern=\"skill|Hub compare starts\" tests/skill-packages.test.cjs tests/coordinator.test.cjs tests/core.test.cjs tests/job-workspaces.test.cjs tests/testpool-harness.test.cjs tests/providers-optional.test.cjs tests/worker-defaults.test.cjs",
       "cost": "medium",

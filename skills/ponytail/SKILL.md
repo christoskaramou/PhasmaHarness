@@ -1,9 +1,8 @@
 ---
 name: ponytail
 description: >
-  Use for coding, fixes, reviews, design and dependency choices, or requests
-  for Ponytail, simpler code or less complexity. Choose the smallest complete
-  solution. Supports lite, full and ultra. Excludes non-coding requests.
+  Coding, fixes, reviews, design and dependency choices: the smallest complete
+  solution. Ponytail lite/full/ultra; coding only.
 argument-hint: "[lite|full|ultra]"
 license: MIT
 ---

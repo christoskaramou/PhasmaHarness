@@ -3009,6 +3009,22 @@ app.whenReady().then(async () => {
   await until(() => undoRuleCalls.length === 2, 'Undo of a rollback reaches the runner');
   assert.deepEqual(undoRuleCalls[1], [ownerChat.id, 'rule-rolled-back']);
   console.log('Rule notices show kept, dropped, rolled-back, new trial and note notices, with Undo for all but dropped');
+  ownerChat.items.push({ id: 'skill-notice', type: 'notice', localOnly: true, createdAt: Date.now(),
+    text: 'Example workspace: using bundled workflow because its saved override is unavailable.',
+    skillStoreWarning: 'unavailable:workflow:fixture', skillStoreWorkspace: 'fixture-workspace' });
+  ipcMain.handle('dismissSkillNotice', (_event, ...args) => {
+    assert.deepEqual(args, [ownerChat.id, 'skill-notice']);
+    controller.dismissSkillNotice(...args);
+  });
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
+  await window.webContents.executeJavaScript(`document.querySelector('[aria-label="Dismiss skill notice"]').scrollIntoView({block: 'center', behavior: 'instant'});
+    new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/skill-notice.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript(`document.querySelector('[aria-label="Dismiss skill notice"]').click(); true`);
+  await until(() => !ownerChat.items.some(item => item.id === 'skill-notice'), 'skill notice dismissal reaches the runner');
+  assert.equal(controller.data.skillNotices['fixture-workspace']['unavailable:workflow'], 'unavailable:workflow:fixture');
+  await until(() => window.webContents.executeJavaScript(`!document.querySelector('[aria-label="Dismiss skill notice"]')`), 'dismissed notice leaves the chat');
+  console.log('Skill notice offers Dismiss and is removed from the saved chat');
   phase = 'send scrolls to the newest message';
   // A render from the Undo steps above may still land and keep the chat at its end; scroll up until it stays.
   const startScroll = await window.webContents.executeJavaScript(`(async () => {

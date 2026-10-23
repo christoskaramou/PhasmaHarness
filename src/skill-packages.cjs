@@ -39,7 +39,8 @@ function directories(root, { strict = false, onWarning = () => {} } = {}) {
   const defaults = Object.fromEntries(DEFAULT_SKILLS.map(name => [name, skillDir(name)]));
   const failed = (name, error) => {
     if (strict) throw error;
-    onWarning(`Using bundled ${name} because its saved skill override is unavailable (${error.message}). Override files in ${root} were left untouched.`);
+    onWarning(`Using bundled ${name} because its saved skill override is unavailable (${error.message}). Override files in ${root} were left untouched.`,
+      `unavailable:${name}:${error.message}`);
   };
   let saved;
   try { saved = root ? manifest(root) : {}; }
@@ -128,7 +129,9 @@ function prepare(root, name, candidate, current, runs) {
     const bodyFiles = files => files.map(file => file.relative === 'SKILL.md'
       ? { ...file, data: Buffer.from(skillContent(file.data.toString('utf8')).body) } : file);
     return { name, root, original, changed: changed.id, beforeHash: hash(baseline[name]), afterHash: hash(proposed),
-      bundledHash: folderHash(skillDir(name)), requiresRead: hash(bodyFiles(baseline[name])) !== hash(bodyFiles(proposed)), runs: frozen };
+      bundledHash: folderHash(skillDir(name)), requiresRead: hash(bodyFiles(baseline[name])) !== hash(bodyFiles(proposed)),
+      descriptionChanged: skillDescription(name, baseline[name].find(file => file.relative === 'SKILL.md').data.toString('utf8')) !==
+        skillDescription(name, proposed.find(file => file.relative === 'SKILL.md').data.toString('utf8')), runs: frozen };
   } catch (error) {
     for (const id of created) removeRevision(root, id);
     throw error;

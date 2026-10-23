@@ -133,6 +133,8 @@ function comparable(setup, { target = null, lessons = true } = {}) {
 function confounder(base, change, target) {
   if (target?.skill && target.requiresRead !== false && !change.result?.skillReads?.includes(target.skill))
     return 'the changed run has no recorded read of the changed skill; its body or resources could not be compared';
+  if (target?.skill && target.requiresRead !== false && target.descriptionChanged !== true && !base.result?.skillReads?.includes(target.skill))
+    return 'the baseline run has no recorded read of the skill and its description was unchanged; its body or resources could not be compared';
   for (const run of [base, change]) {
     const result = run.result;
     if (result?.skillError) return result.skillError;
@@ -218,7 +220,7 @@ function finish(record) {
   for (let pair = 1; pair <= record.pairs; pair++) {
     const runs = record.runs.filter(run => run.pair === pair);
     const base = runs.find(run => !run.variant), change = runs.find(run => run.variant);
-    pairVerdicts.push({ pair, ...pairVerdict(base, change, record.target === 'skill' ? { skill: record.skill?.name, requiresRead: record.skill?.requiresRead } : record.target, record.threshold) });
+    pairVerdicts.push({ pair, ...pairVerdict(base, change, record.target === 'skill' ? { skill: record.skill?.name, requiresRead: record.skill?.requiresRead, descriptionChanged: record.skill?.descriptionChanged } : record.target, record.threshold) });
   }
   // Nothing waits on the user: the verdict and which run had the change show as soon as the last run is back.
   Object.assign(record, { state: 'finished', finishedAt: Date.now(), revealedAt: Date.now(), pairVerdicts, ...overallVerdict(pairVerdicts) });

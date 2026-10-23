@@ -1,7 +1,7 @@
 {
   "name": "phasma-harness",
   "productName": "Phasma Harness",
-  "version": "0.3.11",
+  "version": "0.3.12",
   "private": true,
   "description": "A local Windows desktop client for Codex, Claude Code, and Cursor.",
   "author": "Christos Karamoustos",
@@ -16,6 +16,7 @@
     "check:providers": "node tools/check-providers.cjs",
     "test": "node --test --test-concurrency=2 tests/*.test.cjs",
     "smoke": "electron tests/ui-startup-smoke.cjs",
+    "predist": "node tools/build-document-job.cjs",
     "dist": "npx --yes electron-builder@26.15.3 --win nsis --x64 --publish never",
     "postinstall": "node tools/fetch.cjs"
   },

@@ -2001,6 +2001,16 @@ function renderNotice(item, node, session) {
   node.className = 'message notice';
   const notice = item.ruleNotice || {};
   const line = element('p', 'muted', notice.undoneAt ? `${item.text} Undone.` : item.text);
+  if (item.skillStoreWarning) {
+    const dismiss = element('button', 'compact-action', 'Dismiss'); dismiss.type = 'button';
+    dismiss.setAttribute('aria-label', 'Dismiss skill notice');
+    dismiss.onclick = async () => {
+      dismiss.disabled = true;
+      try { await api.dismissSkillNotice(session.id, item.id); }
+      catch (error) { dismiss.disabled = false; notify(error); }
+    };
+    line.append(' ', dismiss);
+  }
   const undoLabel = { kept: 'Undo the kept rule', rolledBack: 'Put the rule back', trialStarted: 'Stop trying the rule', noteAdded: 'Remove the note',
     setupPreferred: 'Stop preferring this model' }[notice.kind];
   if (undoLabel && !notice.undoneAt) {

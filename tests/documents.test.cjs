@@ -10,7 +10,9 @@ const files = require('../ui/attachments.js');
 
 test('PDF and DOCX read in a separate process and retain complete text or bounded XML without persisting originals', async t => {
   const reader = new DocumentReader(); t.after(() => reader.close());
+  const started = Date.now();
   const result = await reader.read({ name: 'brief.pdf', bytes: pdf() });
+  t.diagnostic(`Cold PDF read: ${Date.now() - started} ms (${process.platform}, ${process.version})`);
   assert.deepEqual(result, { format: 'pdf', text: 'Build three small games.' });
   assert.equal(reader.busy, false);
   const word = await reader.read({ name: 'brief.docx', bytes: docx() });
@@ -67,6 +69,63 @@ test('Windows limiter startup does not consume the parsing timeout', { skip: pro
     await limit(entry);
   };
   assert.deepEqual(await reader.read({ name: 'brief.pdf', bytes: pdf() }), { text: 'ready' });
+});
+
+test('Windows limiter startup timeout reaps the helper and untouched parser, then a fresh read succeeds', { skip: process.platform !== 'win32' }, async t => {
+  const reader = new DocumentReader({ startupTimeoutMs: 50 }); t.after(() => reader.close());
+  const start = reader.startLimiter.bind(reader);
+  let stalled;
+  reader.startLimiter = () => {
+    stalled = start();
+    stalled.ready = new Promise(() => {});
+    return stalled;
+  };
+  await assert.rejects(reader.read({ name: 'brief.pdf', bytes: pdf() }), /memory limiter startup timed out/);
+  assert.equal(reader.busy, false);
+  assert.ok(stalled.helper.exitCode !== null || stalled.helper.signalCode !== null, 'the stalled limiter is dead before retry');
+  assert.equal(reader.limiter, null);
+  reader.startLimiter = start; reader.startupTimeoutMs = 60000;
+  assert.deepEqual(await reader.read({ name: 'brief.pdf', bytes: pdf() }), { format: 'pdf', text: 'Build three small games.' });
+});
+
+test('Windows limiter startup errors retain their cause and fail closed', { skip: process.platform !== 'win32' }, async t => {
+  const reader = new DocumentReader(); t.after(() => reader.close());
+  const start = reader.startLimiter.bind(reader);
+  let failed;
+  reader.startLimiter = () => {
+    failed = start();
+    failed.errorText = 'Fixture: assembly could not be loaded';
+    failed.ready = Promise.resolve(null);
+    return failed;
+  };
+  await assert.rejects(reader.read({ name: 'brief.pdf', bytes: pdf() }), /could not limit.*assembly could not be loaded/);
+  assert.equal(reader.busy, false);
+  assert.ok(failed.helper.exitCode !== null || failed.helper.signalCode !== null);
+});
+
+test('document memory limiter build caches unchanged source and preserves the last build on compiler errors', { skip: process.platform !== 'win32' }, t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-document-build-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, 'tools')); fs.mkdirSync(path.join(root, 'src'));
+  fs.copyFileSync(path.join(__dirname, '../tools/build-document-job.cjs'), path.join(root, 'tools/build-document-job.cjs'));
+  const source = path.join(root, 'src/document-job.cs'), dll = path.join(root, 'tools/bin/document-job.dll');
+  fs.copyFileSync(path.join(__dirname, '../src/document-job.cs'), source);
+  fs.copyFileSync(path.join(__dirname, '../src/documents.cjs'), path.join(root, 'src/documents.cjs'));
+  fs.writeFileSync(path.join(root, 'src/artifacts.cjs'), 'exports.gameEnvironment = () => ({});');
+  const { buildDocumentJob } = require(path.join(root, 'tools/build-document-job.cjs'));
+  const { DocumentReader: SourceReader } = require(path.join(root, 'src/documents.cjs'));
+  assert.equal(fs.existsSync(dll), false, 'a pulled checkout has no DLL yet');
+  new SourceReader();
+  const built = fs.readFileSync(dll), stamp = fs.readFileSync(dll + '.source', 'utf8');
+  assert.ok(built.length > 1000);
+  fs.utimesSync(dll, 123, 123);
+  new SourceReader();
+  assert.equal(fs.statSync(dll).mtimeMs, 123000);
+  fs.writeFileSync(source, 'injected invalid C#');
+  assert.throws(buildDocumentJob, /memory limiter build failed/);
+  assert.deepEqual(fs.readFileSync(dll), built);
+  assert.equal(fs.readFileSync(dll + '.source', 'utf8'), stamp);
+  assert.equal(fs.existsSync(dll + '.tmp.dll'), false);
 });
 
 test('document timeout and Quit stop the owned parser before allowing another read', async t => {

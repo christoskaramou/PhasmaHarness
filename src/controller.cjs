@@ -24,7 +24,7 @@ const { TOOL: CONTEXT_TOOL } = require('./workspace/context-search.cjs');
 const { INSTRUCTIONS: HELPER_INSTRUCTIONS, TOOLS: HELPER_TOOLS, ToolHelpers } = require('./tools/tool-helpers.cjs');
 const { RouterBridge } = require('./tools/router-bridge.cjs');
 const { FINAL, canProposeWiki, hasProjectWiki, restartReason, summaryLine } = require('./tasks.cjs');
-const { WORKER_INSTRUCTIONS, workerInstructions } = require('./worker-instructions.cjs');
+const { WORKER_INSTRUCTIONS, workerInstructions, DEFAULT_SKILLS } = require('./worker-instructions.cjs');
 const skillPackages = require('./skill-packages.cjs');
 const { setupFingerprint, textHash, skillHashes, checksHash } = require('./setup-fingerprint.cjs');
 const { projectInstructions, projectBody } = require('./workspace/project-instructions.cjs');
@@ -879,8 +879,6 @@ class Controller extends EventEmitter {
   }
 
   skillDirectories(session) {
-    const pinned = this.turnSkillDirectories?.get(session.id);
-    if (this.busy === session.id && pinned) return pinned;
     const comparison = this.comparisonOf(session);
     if (comparison?.record.target === 'skill') {
       const run = comparison.record.skill?.runs.find(run => run.index === comparison.copy.index);
@@ -888,14 +886,50 @@ class Controller extends EventEmitter {
       return run.dirs;
     }
     const wiki = this.wikiStore?.location(this.lessonWorkspace(session.workspace));
+    const location = wiki?.root || fs.realpathSync(session.workspace);
+    const workspace = process.platform === 'win32' ? location.toLowerCase() : location;
+    const pins = this.turnSkillDirectories?.get(session.id);
+    if (this.busy === session.id && pins?.has(workspace)) return pins.get(workspace);
+    const owner = this.agents?.primary || this, failures = new Set();
     const directories = skillPackages.directories(wiki ? path.join(wiki.root, '..', 'skills') : null, { onWarning: (message, key = message) => {
-      if (session.items.some(item => item.skillStoreWarning === key)) return;
-      session.items.push({ id: randomUUID(), type: 'notice', localOnly: true, createdAt: Date.now(), text: message, skillStoreWarning: key });
-      this.log.warn('Skill override notice', { message });
-      this.save();
+      const name = key.split(':')[0], persistent = DEFAULT_SKILLS.includes(name), failed = name === 'unavailable';
+      const slot = failed ? key.split(':').slice(0, 2).join(':') : name;
+      if (failed) failures.add(slot);
+      if (owner.data.skillNotices?.[workspace]?.[slot] === key) return;
+      const chat = this.agents?.conversation?.(owner, true) || session;
+      const shown = chat.items.some(item => item.skillStoreWarning === key && (!item.skillStoreWorkspace || item.skillStoreWorkspace === workspace));
+      if (shown && !persistent) return;
+      if (!shown) chat.items.push({ id: randomUUID(), type: 'notice', localOnly: true, createdAt: Date.now(),
+        text: `${path.basename(this.lessonWorkspace(session.workspace))}: ${message}`, skillStoreWarning: key, skillStoreWorkspace: workspace });
+      if (persistent) {
+        ((owner.data.skillNotices ||= {})[workspace] ||= {})[slot] = key;
+      }
+      if (!shown) this.log.warn('Skill override notice', { message });
+      owner.save(); owner.changed();
     } });
-    if (this.busy === session.id) (this.turnSkillDirectories ||= new Map()).set(session.id, directories);
+    let recovered = false;
+    for (const slot of Object.keys(owner.data.skillNotices?.[workspace] || {})) {
+      if (slot.startsWith('unavailable:') && !failures.has(slot)) { delete owner.data.skillNotices[workspace][slot]; recovered = true; }
+    }
+    if (recovered) owner.save();
+    if (this.busy === session.id) {
+      const workspaces = pins || new Map();
+      workspaces.set(workspace, directories);
+      (this.turnSkillDirectories ||= new Map()).set(session.id, workspaces);
+    }
     return directories;
+  }
+
+  dismissSkillNotice(id, itemId) {
+    const session = this.session(id), item = session.items.find(item => item.id === itemId && item.skillStoreWarning);
+    if (!item) throw new Error('This skill notice is no longer available.');
+    if (item.skillStoreWarning.startsWith('unavailable:') && item.skillStoreWorkspace) {
+      const owner = this.agents?.primary || this, slot = item.skillStoreWarning.split(':').slice(0, 2).join(':');
+      ((owner.data.skillNotices ||= {})[item.skillStoreWorkspace] ||= {})[slot] = item.skillStoreWarning;
+      if (owner !== this) owner.save();
+    }
+    session.items.splice(session.items.indexOf(item), 1);
+    this.save(); this.changed();
   }
 
   projectContextInstructions(session) {

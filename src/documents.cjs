@@ -2,6 +2,7 @@
 const { fork, spawn } = require('node:child_process');
 const path = require('node:path');
 const { gameEnvironment } = require('./artifacts.cjs');
+const fs = require('node:fs');
 const MAX_SOURCE = 10 * 1024 * 1024;
 // pdf.js and canvas buffers live outside the 192 MB V8 heap. On 2026-10-19 a 10 MB, 200-page PDF and a 25 MP image peaked
 // at 150-250 MB committed, while a 3 KB double-Flate PDF reached 3.5 GB without an OS limit.
@@ -9,8 +10,11 @@ const MAX_MEMORY = 768 * 1024 * 1024;
 const LIMIT_FAILED = 'Harness could not limit the reader memory, so the file was not read.';
 
 class DocumentReader {
-  constructor({ timeoutMs = 15000, workerFile = path.join(__dirname, 'document-worker.cjs') } = {}) {
-    this.timeoutMs = timeoutMs; this.workerFile = workerFile; this.active = new Set(); this.closed = false;
+  constructor({ timeoutMs = 15000, startupTimeoutMs = 60000, workerFile = path.join(__dirname, 'document-worker.cjs') } = {}) {
+    // Source pulls can introduce a new helper without npm install. The build script is absent from installed apps.
+    const builder = path.join(__dirname, '../tools/build-document-job.cjs');
+    if (process.platform === 'win32' && fs.existsSync(builder)) require(builder).buildDocumentJob();
+    this.timeoutMs = timeoutMs; this.startupTimeoutMs = startupTimeoutMs; this.workerFile = workerFile; this.active = new Set(); this.closed = false;
   }
   get busy() { return this.active.size > 0; }
 
@@ -47,14 +51,21 @@ class DocumentReader {
       const entry = { child, label, error: null, result: null, limiting: false };
       entry.ended = new Promise(done => { entry.done = done; });
       // While its PID is with the limiter the worker stays alive, so the helper can never open a reused PID.
-      entry.kill = () => entry.limiting ? this.limiter?.helper.kill() : child.kill();
+      entry.kill = () => {
+        const helper = entry.limiter?.helper;
+        if (!entry.ready && helper && helper.exitCode === null && helper.signalCode === null) {
+          helper.once('close', () => child.kill());
+          helper.kill();
+        } else child.kill();
+      };
       this.active.add(entry);
       const timedOut = () => {
-        entry.error = new Error(label + ' timed out. Try a smaller file.');
+        entry.error = new Error(process.platform === 'win32' && !entry.ready
+          ? 'Document reader memory limiter startup timed out.' + (entry.limiter?.errorText ? ' ' + entry.limiter.errorText : '')
+          : label + ' timed out. Try a smaller file.');
         entry.kill();
       };
-      // Cold Windows hosts can take over 15 seconds to compile the memory limiter.
-      let timer = setTimeout(timedOut, process.platform === 'win32' ? 60000 : this.timeoutMs);
+      let timer = setTimeout(timedOut, process.platform === 'win32' ? this.startupTimeoutMs : this.timeoutMs);
       timer.unref?.();
       const abort = () => { entry.error = new Error(label + ' cancelled.'); entry.kill(); };
       signal?.addEventListener('abort', abort, { once: true });
@@ -73,18 +84,20 @@ class DocumentReader {
       });
       (process.platform === 'win32' ? this.limit(entry) : Promise.resolve()).then(() => {
         if (entry.error || !this.active.has(entry)) return void child.kill();
+        entry.ready = true;
         clearTimeout(timer);
         timer = setTimeout(timedOut, this.timeoutMs);
         timer.unref?.();
         child.send(data, error => { if (error) { entry.error = error; child.kill(); } });
-      }, error => { entry.error ??= error; child.kill(); });
+      }, error => { entry.error ??= error; entry.kill(); });
     });
   }
 
   // Windows: one helper holds a job object that caps each worker's committed memory (document-job.ps1).
   async limit(entry) {
     const limiter = this.limiter ||= this.startLimiter();
-    if (await limiter.ready !== 'ready') throw new Error(LIMIT_FAILED);
+    entry.limiter = limiter;
+    if (await limiter.ready !== 'ready') throw new Error(LIMIT_FAILED + (limiter.errorText ? ' ' + limiter.errorText : ''));
     const { child } = entry;
     if (entry.error || child.exitCode !== null || child.signalCode !== null) return;
     entry.limiting = true;
@@ -97,8 +110,10 @@ class DocumentReader {
     const shell = path.join(process.env.WINDIR || 'C:/Windows', 'System32', 'WindowsPowerShell', 'v1.0');
     const helper = spawn(path.join(shell, 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
       '-File', path.join(__dirname, 'document-job.ps1'), '-LimitBytes', String(MAX_MEMORY)],
-      { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'], env: { ...gameEnvironment(), PSModulePath: path.join(shell, 'Modules') } });
-    const limiter = { helper, replies: [] };
+      { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: { ...gameEnvironment(), PSModulePath: path.join(shell, 'Modules') } });
+    const limiter = { helper, replies: [], errorText: '' };
+    helper.stderr.setEncoding('utf8');
+    helper.stderr.on('data', text => { limiter.errorText = (limiter.errorText + text).slice(-1000).trim(); });
     limiter.ready = new Promise(resolve => limiter.replies.push(resolve));
     let buffer = '';
     helper.stdout.setEncoding('utf8');
@@ -110,13 +125,14 @@ class DocumentReader {
         buffer = buffer.slice(end + 1);
       }
     });
-    const ended = () => {
+    const ended = error => {
+      if (error instanceof Error) limiter.errorText = error.message;
       if (this.limiter === limiter) this.limiter = null;
       for (const reply of limiter.replies.splice(0)) reply(null);
     };
     helper.once('error', ended); helper.once('close', ended); helper.stdin.on('error', ended);
     // An idle helper must not keep the process alive; closing its input ends it and its job.
-    helper.unref(); helper.stdout.unref?.(); helper.stdin.unref?.();
+    helper.unref(); helper.stdout.unref?.(); helper.stdin.unref?.(); helper.stderr.unref?.();
     return limiter;
   }
 

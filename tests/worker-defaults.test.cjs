@@ -44,7 +44,10 @@ test('a relocated checkout loads full bundled skills without global skill folder
     assert.equal(loaded.readSkill(name), body, `${name} is readable on demand from the relocated checkout`);
     assert.ok(loaded.WORKER_INSTRUCTIONS.includes(path.join(directory, 'SKILL.md').replace(/\\/g, '/')), `${name} is indexed with its relocated path`);
   }
-  assert.ok(loaded.WORKER_INSTRUCTIONS.length < 5000, 'workers get the short defaults and index, not full skill bodies');
+  const withoutPaths = loaded.WORKER_INSTRUCTIONS.replaceAll(root.replace(/\\/g, '/'), '<root>');
+  const descriptions = loaded.DEFAULT_SKILLS.map(name => loaded.skillDescription(name, loaded.readSkill(name)));
+  assert.ok(withoutPaths.length - descriptions.join('').length < 3100, 'fixed defaults and index scaffolding have their own budget');
+  assert.ok(withoutPaths.length < 3100 + 300 * loaded.DEFAULT_SKILLS.length, 'each skill has its documented description allowance');
   for (const name of loaded.DEFAULT_SKILLS) assert.ok(loaded.skillDescription(name, loaded.readSkill(name)).length <= 300);
   assert.match(loaded.WORKER_INSTRUCTIONS, /caveman: OPT-IN/);
   assert.ok(!/[\\/]\.(agents|codex)[\\/]skills/.test(loaded.WORKER_INSTRUCTIONS));

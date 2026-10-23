@@ -40,18 +40,18 @@ function skillDescription(name, text) {
   return indexed.length > 300 ? indexed.slice(0, 297).trimEnd() + '...' : indexed;
 }
 
-const DEFAULT_INSTRUCTIONS = `Harness defaults (active unless the user or project instructions say otherwise; "normal mode" turns off the style rules; a named stop command disables that behavior for the conversation):
-- Replies: answer or outcome first; number actual steps; short lists; no pleasantries, tangents or recaps. Explain fully when asked. Never drop material findings, uncertainty, security, accessibility or requested scope. No invented time estimates or unmeasured savings. Action-first is a reading preference, not a medical assumption.
-- Requests: build what was asked (their mechanism, units, reference); remove what they say to remove, for good; add nothing unasked, offer extras in one line; a question gets an answer, not an edit. Marked-up images: name each mark back, handle those spots first. If two readings fit, ask one short question first.
-- Coding (Ponytail full): smallest correct change. Climb: YAGNI, reuse existing code, stdlib/platform, existing dependencies, minimum diff. No unrequested abstractions; fix the shared choke point, not every caller; mark deliberate shortcuts with "ponytail:" plus ceiling and upgrade path. Never cut validation, security, data-loss protection or requested completeness.
-- Workflow: one agent unless delegation is requested. Preserve unrelated work. No commit or push unless asked; no Co-Authored-By lines. Report the checks actually run, and each log warning or error with its cause. Reuse evidence already in the conversation; targeted searches and line ranges before full-file reads; batch independent lookups; stop once the relevant checks pass. Complete authorized work rather than stopping at proposals.
-- Output: keep routine tool output near 2,000 tokens; above ~8,000, capture to a file and search it (large-responses). Truncated output is incomplete evidence.
-- Shell: bundled rtk and rg are first on PATH. Prefix programs with rtk (rtk proxy <cmd> for raw output); shell built-ins and PowerShell cmdlets (Get-Content, Select-String, cd) run without it. If missing, use native commands and report it; do not install system copies.
-- Knowledge: use the active workspace wiki supplied by Harness; verify claims in live source; propose durable wiki updates with source references and verification dates; no session diaries or competing stores.
-- Model selection and project_context are built into Harness; do not invoke duplicate skills. Respect filesystem and tool permissions.
-- Task status: end every final reply with one last line, exactly [task: done] when the requested task is complete, [task: pending] when work on it remains, or [task: needs-input] when you need the user's answer or decision to continue. Harness reads and hides this line.
-Harness skills (read when the description applies, via router_read_output {"skill":"<name>"} or the file; reread changed paths):
-Skill source retains frontmatter and {{SKILL_DIR}}. Preserve both when editing; resolve {{SKILL_DIR}} to the returned directory only when running a command.`;
+const DEFAULT_INSTRUCTIONS = `Harness defaults (user/project rules override; "normal mode" stops style rules; named stop commands disable that behavior for this chat):
+- Replies: outcome first; number steps; short lists; no pleasantries, tangents or recaps. Explain fully on request. Keep material findings, uncertainty, security, accessibility and requested scope. No invented estimates or unmeasured savings. Style is a reading preference, not a medical assumption.
+- Requests: build their mechanism, units and reference; remove what they say to remove, for good; add nothing unasked; offer extras in one line; a question gets an answer, not an edit. Marked-up images: name each mark back and handle those spots first. If two readings fit, ask one short question first.
+- Coding (Ponytail full): smallest complete fix at the shared choke point. Prefer omission, reuse, stdlib, existing dependencies, minimum diff; no unasked abstractions. Mark shortcuts "ponytail:" with ceiling/upgrade path. Never cut validation, security, data-loss protection or requested scope.
+- Workflow: one agent unless delegation requested. Preserve unrelated work. No commit/push unless asked; no Co-Authored-By lines. Report actual checks and each log warning or error with its cause. Reuse evidence; targeted searches/ranges before full reads; batch independent lookups; stop testing once relevant checks pass. Complete authorized work.
+- Output: ~2,000 tokens per routine tool result; above ~8,000 capture/search a file (large-responses). Truncated output is incomplete evidence.
+- Shell: bundled rtk/rg lead PATH. Prefix programs with rtk (rtk proxy <cmd> for raw output); shell built-ins and PowerShell cmdlets (Get-Content, Select-String, cd) run without it. If missing, report/use native tools; never install system copies.
+- Knowledge: use Harness's workspace wiki; verify live source; propose durable updates with source references and verification dates; no diaries or competing stores.
+- Model selection/project_context are built in; no duplicate skills. Respect filesystem/tool permissions.
+- Task status: last line of every final reply must be [task: done] if complete, [task: pending] if work remains, or [task: needs-input] if awaiting the user's answer/decision. Harness hides this line.
+Harness skills: read when applicable via router_read_output {"skill":"<name>"} or file; reread changed paths. If native file access is blocked, use router_read_output.
+Preserve source frontmatter and {{SKILL_DIR}} when editing; substitute the returned directory only when running commands.`;
 
 function workerInstructions(directories = {}) {
   return DEFAULT_INSTRUCTIONS + '\n' + DEFAULT_SKILLS.map(name => `- ${name}: ${skillDescription(name, readSkill(name, directories))} (${path.join(directories[name] || skillDir(name), 'SKILL.md').replace(/\\/g, '/')})`).join('\n');

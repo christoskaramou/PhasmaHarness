@@ -1,6 +1,6 @@
 ---
 name: large-responses
-description: Capture and retrieve bulky tool output without flooding context, with exact original file paths and line references. Use before verbose builds, logs, document batches or repeated large-output reads; keep small focused source searches direct.
+description: Capture/search verbose builds, logs, document batches and repeated large output with exact paths and lines. Small reads stay direct.
 ---
 
 # Large responses

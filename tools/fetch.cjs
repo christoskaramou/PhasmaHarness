@@ -39,6 +39,7 @@ async function install(name, build, target) {
 }
 
 async function main() {
+  require('./build-document-job.cjs').buildDocumentJob();
   const platform = `${process.platform}-${process.arch}`;
   fs.mkdirSync(BIN, { recursive: true });
   let stamp = {};
