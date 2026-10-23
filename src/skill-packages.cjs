@@ -49,6 +49,12 @@ function directories(root, { strict = false, onWarning = () => {} } = {}) {
       const folder = revision(root, id);
       packageFiles(folder);
       defaults[name] = folder;
+      let bundledHash;
+      try { bundledHash = JSON.parse(fs.readFileSync(folder + '.json', 'utf8')).bundledHash; } catch { /* older revisions have no provenance */ }
+      const currentBundle = folderHash(skillDir(name));
+      if (!bundledHash || bundledHash !== currentBundle)
+        onWarning(bundledHash ? `The bundled ${name} skill changed in this Harness release. Your workspace override is still active; review it before replacing it.`
+          : `The ${name} override predates bundled-version tracking or its metadata is unavailable. Your override is still active; review it against the bundled skill.`, `${name}:${currentBundle}:${bundledHash || 'unknown'}`);
     } catch (error) { failed(name, error); }
   }
   return defaults;
@@ -96,6 +102,8 @@ function prepare(root, name, candidate, current, runs) {
   if (folderHash(active[name]) !== folderHash(current[name])) throw new Error('The active skill changed before the comparison.');
   const baseline = Object.fromEntries(Object.entries(current).map(([key, folder]) => [key, packageFiles(folder)]));
   const proposed = packageFiles(candidate);
+  if (skillContent(proposed.find(file => file.relative === 'SKILL.md').data.toString('utf8')).description.length > 300)
+    throw new Error('Keep the skill description under 300 characters; put detailed instructions in the body.');
   const digest = value => createHash('sha256').update(value).digest('hex').slice(0, 16);
   const hash = (files, effective = false) => digest([...files].sort((a, b) => a.relative < b.relative ? -1 : a.relative > b.relative ? 1 : 0).map(file => {
     let data = file.data;
@@ -117,7 +125,10 @@ function prepare(root, name, candidate, current, runs) {
         [key, snapshot(root, run.variant && key === name ? proposed : files, created).folder]));
       return { index: run.index, dirs, hashes: skillHashes(dirs) };
     });
-    return { name, root, original, changed: changed.id, beforeHash: hash(baseline[name]), afterHash: hash(proposed), runs: frozen };
+    const bodyFiles = files => files.map(file => file.relative === 'SKILL.md'
+      ? { ...file, data: Buffer.from(skillContent(file.data.toString('utf8')).body) } : file);
+    return { name, root, original, changed: changed.id, beforeHash: hash(baseline[name]), afterHash: hash(proposed),
+      bundledHash: folderHash(skillDir(name)), requiresRead: hash(bodyFiles(baseline[name])) !== hash(bodyFiles(proposed)), runs: frozen };
   } catch (error) {
     for (const id of created) removeRevision(root, id);
     throw error;
@@ -144,6 +155,11 @@ function adopt(skill) {
     packageFiles(folder);
     if (folderHash(folder) !== hash) throw new Error('A saved skill snapshot changed during the comparison.');
   }
+  const metadata = revision(root, skill.changed) + '.json', temporary = metadata + '.' + randomUUID() + '.tmp';
+  try {
+    fs.writeFileSync(temporary, JSON.stringify({ bundledHash: skill.bundledHash || null }), { flag: 'wx' });
+    fs.renameSync(temporary, metadata);
+  } finally { fs.rmSync(temporary, { force: true }); }
   publish(root, name, skill.changed);
   return { skill: name, root, revision: skill.changed, previous: skill.original, hash: skill.afterHash, previousHash: skill.beforeHash };
 }
@@ -164,12 +180,15 @@ function removeRevision(root, id) {
   const folder = revision(root, id), parent = path.resolve(root, 'revisions');
   if (path.dirname(folder) !== parent || fs.realpathSync(parent) !== parent) throw new Error('Invalid skill cleanup path.');
   fs.rmSync(folder, { recursive: true });
+  fs.rmSync(folder + '.json', { force: true });
 }
 
 // Use the existing 50-comparison history for Undo retention, plus active and in-flight packages.
 function prune(root, records, pending = []) {
   const keep = new Set(Object.values(manifest(root)));
   for (const record of records) {
+    if (record.recovery?.skillRoot === root)
+      for (const id of record.recovery.skillRevisions || []) keep.add(id);
     if (record.adopted?.root === root && !record.adopted.undoneAt) {
       keep.add(record.adopted.revision);
       keep.add(record.adopted.previous);
@@ -185,6 +204,8 @@ function prune(root, records, pending = []) {
   for (const id of fs.readdirSync(parent)) if (/^[0-9a-f-]{36}$/.test(id) && !keep.has(id)) {
     removeRevision(root, id); removed.push(id);
   }
+  for (const file of fs.readdirSync(parent)) if (/^[0-9a-f-]{36}\.json$/.test(file) && !fs.existsSync(path.join(parent, file.slice(0, -5))))
+    fs.rmSync(path.join(parent, file), { force: true });
   return removed;
 }
 
@@ -192,12 +213,14 @@ function requireIgnoredCandidate(workspace, candidate) {
   const relative = path.relative(workspace, candidate).replace(/\\/g, '/');
   if (!relative || relative === '..' || relative.startsWith('../') || path.isAbsolute(relative)) throw new Error('The candidate must be inside the workspace.');
   const git = args => spawnSync('git', ['-C', workspace, ...args], { encoding: 'utf8', windowsHide: true, timeout: 10000 });
+  if (git(['rev-parse', '--show-toplevel']).status !== 0)
+    throw new Error('Skill comparisons require a Git workspace with Git available. Initialize or open a repository first.');
   const ignored = git(['check-ignore', '--quiet', '--', relative + '/']);
   const tracked = git(['ls-files', '--', relative + '/']);
   const committed = git(['ls-tree', '-r', '--name-only', 'HEAD', '--', relative + '/']);
   if (ignored.status !== 0 || tracked.status !== 0 || tracked.stdout.trim() || committed.stdout?.trim() ||
       (committed.status !== 0 && git(['rev-parse', '--verify', 'HEAD']).status === 0))
-    throw new Error('Put the candidate skill in an ignored, untracked folder (add it to .gitignore) so it cannot reach the baseline run.');
+    throw new Error('Put the candidate skill in an ignored, untracked folder (use .gitignore or .git/info/exclude) so it cannot reach the baseline run.');
 }
 
 module.exports = { directories, packageFiles, prepare, adopt, undo, prune, requireIgnoredCandidate };

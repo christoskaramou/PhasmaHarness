@@ -1,6 +1,6 @@
 ---
 name: test-pool
-description: After finishing a fix or a task that changed code in a repository, add a small regression test for the problem you solved to the project's test pool (.testpool/catalog.json), so Jev can rerun it automatically after later replies. Also use when asked to add, list, check or run pooled tests, or when a "Test pool:" failure report arrives.
+description: After a code fix or task, add its regression test to .testpool/catalog.json. Also use for adding, listing or running pooled tests and handling "Test pool:" failure reports.
 ---
 
 # Test pool

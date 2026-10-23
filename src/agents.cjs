@@ -1340,7 +1340,7 @@ class Agents extends EventEmitter {
         // A comparison measures corrections and checks every attempt's setup (src/comparisons.cjs); its card shows
         // the run, so this receipt stays out of the chat.
         ...(job.originalRequest?.comparison ? { internal: true, corrections: task?.corrections ?? null,
-          attempts: (task?.attempts || []).map(attempt => ({ setup: attempt.setup || null, restored: attempt.restored || [], diff: attempt.evidence?.diff || null })) } : {}),
+          attempts: (task?.attempts || []).map(attempt => ({ setup: attempt.setup || null, skillReads: attempt.skillReads || [], restored: attempt.restored || [], diff: attempt.evidence?.diff || null })) } : {}),
         ...(hasRoom || superseded ? { notified: true } : { pendingReply: reply }) });
       if (hasRoom) (source.queue ||= []).push(reply);
       delivered.push(deliveryId);

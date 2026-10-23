@@ -1032,7 +1032,7 @@
     {
       "id": "skill-comparisons",
       "name": "Workspace skill packages, comparisons and Undo",
-      "covers": "Compare complete SKILL.md packages and supporting files using the existing comparison flow; isolate frozen runs, reject confounded setup changes, adopt per workspace without restart, preserve bundled defaults and manual edits, and Undo the full package. Codex resume and Claude/Cursor handoffs use the current skill paths with helpers disabled. Invalid packages and Ask access fail before dispatch. Chained Undo restores revision identities and bundled-update inheritance. Broken stores fall back with one notice; reads and rejected candidates create no files. Ignored/untracked candidate isolation is rechecked before snapshots. Metadata descriptions and editable placeholders survive round trips, with normal on-demand activation in experiments. Cleanup retains active/in-flight revisions and the existing 50-comparison Undo history; automatic test-pool verification keeps its trusted checker.",
+      "covers": "Compare complete SKILL.md packages and supporting files using the existing comparison flow; isolate frozen runs, reject confounded setup changes, adopt per workspace without restart, preserve bundled defaults and manual edits, and Undo the full package. Codex resume and Claude/Cursor handoffs use the current skill paths with helpers disabled. Invalid packages and Ask access fail before dispatch. Chained Undo restores revision identities and bundled-update inheritance. Broken stores fall back with one notice; reads and rejected candidates create no files. Ignored/untracked candidate isolation is rechecked before snapshots. Metadata descriptions and editable placeholders survive round trips, with normal on-demand activation in experiments. Cleanup retains active/in-flight revisions and the existing 50-comparison Undo history; automatic test-pool verification keeps its trusted checker. Body/resource changes require recorded skill use, including native CLI reads; description-only comparisons remain valid. Descriptions are capped at 300 characters. Bundled drift produces a notice. Ordinary running turns pin paths through Undo and defer cleanup, including stopping processes. Corrupt comparison history is backed up, recovered visibly and preserves snapshot retention. History write failures cannot turn a successful Undo into an error. Non-Git errors and local Git exclusions are covered.",
       "paths": [
         "src/skill-packages.cjs",
         "src/worker-instructions.cjs",
@@ -1049,9 +1049,12 @@
         "src/controller/task-gate.cjs",
         "tests/job-workspaces.test.cjs",
         "tests/testpool-harness.test.cjs",
-        "tests/providers-optional.test.cjs"
+        "tests/providers-optional.test.cjs",
+        "tests/worker-defaults.test.cjs",
+        "skills/ponytail/SKILL.md",
+        "skills/test-pool/SKILL.md"
       ],
-      "command": "node --test --test-concurrency=2 --test-name-pattern=\"skill|Hub compare starts\" tests/skill-packages.test.cjs tests/coordinator.test.cjs tests/core.test.cjs tests/job-workspaces.test.cjs tests/testpool-harness.test.cjs tests/providers-optional.test.cjs",
+      "command": "node --test --test-concurrency=2 --test-name-pattern=\"skill|Hub compare starts\" tests/skill-packages.test.cjs tests/coordinator.test.cjs tests/core.test.cjs tests/job-workspaces.test.cjs tests/testpool-harness.test.cjs tests/providers-optional.test.cjs tests/worker-defaults.test.cjs",
       "cost": "medium",
       "timeoutSec": 120,
       "origin": {

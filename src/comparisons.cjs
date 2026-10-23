@@ -107,6 +107,7 @@ function runResult(item, cancelled) {
     checks,
     corrections: item?.corrections ?? null,
     setups: (item?.attempts || []).map(attempt => attempt.setup || null),
+    skillReads: [...new Set((item?.attempts || []).flatMap(attempt => attempt.skillReads || []))],
     restored: [...new Set((item?.attempts || []).flatMap(attempt => attempt.restored || []))],
     diff: item?.attempts?.at(-1)?.diff || null,
     text: excerpt(item?.text || '', 4000),
@@ -130,6 +131,8 @@ function comparable(setup, { target = null, lessons = true } = {}) {
 // Why a pair cannot be compared, or null. Every attempt of a run must share one setup (lessons ride only on the
 // first), and the two runs' first setups must differ in the changed instructions and nothing else.
 function confounder(base, change, target) {
+  if (target?.skill && target.requiresRead !== false && !change.result?.skillReads?.includes(target.skill))
+    return 'the changed run has no recorded read of the changed skill; its body or resources could not be compared';
   for (const run of [base, change]) {
     const result = run.result;
     if (result?.skillError) return result.skillError;
@@ -215,7 +218,7 @@ function finish(record) {
   for (let pair = 1; pair <= record.pairs; pair++) {
     const runs = record.runs.filter(run => run.pair === pair);
     const base = runs.find(run => !run.variant), change = runs.find(run => run.variant);
-    pairVerdicts.push({ pair, ...pairVerdict(base, change, record.target === 'skill' ? { skill: record.skill?.name } : record.target, record.threshold) });
+    pairVerdicts.push({ pair, ...pairVerdict(base, change, record.target === 'skill' ? { skill: record.skill?.name, requiresRead: record.skill?.requiresRead } : record.target, record.threshold) });
   }
   // Nothing waits on the user: the verdict and which run had the change show as soon as the last run is back.
   Object.assign(record, { state: 'finished', finishedAt: Date.now(), revealedAt: Date.now(), pairVerdicts, ...overallVerdict(pairVerdicts) });
@@ -246,7 +249,7 @@ function publicView(record) {
 function readComparisons(root, { strict = false } = {}) {
   try {
     const records = JSON.parse(fs.readFileSync(path.join(root, RECORDS), 'utf8'));
-    if (strict && (!Array.isArray(records) || records.some(record => !record?.id))) throw new Error('Invalid comparison history; skill cleanup was deferred.');
+    if (strict && (!Array.isArray(records) || records.some(record => !record?.id))) throw new SyntaxError('Invalid comparison history; skill cleanup was deferred.');
     return Array.isArray(records) ? records.filter(record => record?.id) : [];
   } catch (error) {
     if (strict && error.code !== 'ENOENT') throw error;
@@ -303,13 +306,28 @@ function renderPage(records) {
     `this page is rewritten from them. One pair is weak evidence.\n\n${entries.join('\n\n')}\n`;
 }
 
-function saveComparison(root, record) {
+function saveComparison(root, record, { recovered = [], onWarning = () => {} } = {}) {
   fs.mkdirSync(root, { recursive: true });
   const { lessonBlock, ...saved } = record;
-  const records = [saved, ...readComparisons(root, { strict: true }).filter(entry => entry.id !== record.id)].sort((a, b) => b.at - a.at);
+  let previous, warning;
+  try { previous = readComparisons(root, { strict: true }); }
+  catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    const backup = path.join(root, RECORDS + '.corrupt-' + require('node:crypto').randomUUID());
+    fs.copyFileSync(path.join(root, RECORDS), backup, fs.constants.COPYFILE_EXCL);
+    const skillRoot = path.join(root, '..', 'skills'), revisions = path.join(skillRoot, 'revisions');
+    saved.recovery = { backup, at: Date.now(), skillRoot, skillRevisions: fs.existsSync(revisions) ? fs.readdirSync(revisions).filter(id => /^[0-9a-f-]{36}$/.test(id)) : [] };
+    previous = recovered.filter(entry => entry?.id && entry.id !== record.id);
+    warning = `Comparison history was damaged. The original is preserved at ${backup}. Available chat records were restored; older skill snapshots are retained for 50 comparisons.`;
+  }
+  saved.recovery ||= previous.find(entry => entry.id === record.id)?.recovery;
+  const records = [saved, ...previous.filter(entry => entry.id !== record.id)]
+    .sort((a, b) => Math.max(b.at || 0, b.recovery?.at || 0) - Math.max(a.at || 0, a.recovery?.at || 0));
   records.length = Math.min(records.length, MAX_RECORDS);
+  const page = renderPage(records);
   writeAtomic(path.join(root, RECORDS), JSON.stringify(records, null, 2));
-  writeAtomic(path.join(root, PAGE), renderPage(records));
+  if (warning) onWarning(warning);
+  writeAtomic(path.join(root, PAGE), page);
 }
 
 module.exports = { RECORDS, PAGE, MAX_RECORDS, THRESHOLD, TARGETS, planRuns, protectedFiles, restoreCheckFiles, prepareCopy, runResult,

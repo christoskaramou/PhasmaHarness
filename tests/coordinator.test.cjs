@@ -1944,7 +1944,7 @@ test('Hub compare starts on request with one Auto model, keeps only the change d
       assert.ok(loaded().includes(change), 'adoption is visible immediately without restarting Harness');
       assert.ok(hub.workerInstructions(session).includes(hub.skillDirectories(session).workflow.replace(/\\/g, '/')));
       assert.ok(card.adopted.root.startsWith(path.join(root, 'Wikis')), 'the package is outside the installation');
-      assert.deepEqual(fs.readdirSync(path.join(card.adopted.root, 'revisions')), [card.adopted.revision], 'finished run snapshots are released');
+      assert.deepEqual(fs.readdirSync(path.join(card.adopted.root, 'revisions')).sort(), [card.adopted.revision, card.adopted.revision + '.json'].sort(), 'only the active package and its bundled provenance remain');
       await hub.undoComparison(session.id, record.id, 'skill');
       assert.ok(!loaded().includes(change), 'Undo restores the complete old package');
       assert.deepEqual(fs.readdirSync(path.join(card.adopted.root, 'revisions')), [], 'Undo releases the unused candidate revision');

@@ -58,6 +58,10 @@ class Controller extends EventEmitter {
     this.smartRouter.nativeCLIs = this.nativeCLIs;
     this.toolHelpers = new ToolHelpers(path.join(path.dirname(filename), 'tool-outputs'), client, null);
     this.toolHelpers.skillDirectories = session => this.skillDirectories(session);
+    this.toolHelpers.skillRead = (session, name) => {
+      if (session.submission && session.submission.state !== 'completed')
+        session.submission.skillReads = [...new Set([...(session.submission.skillReads || []), name])];
+    };
     this.bridge = new RouterBridge((sessionId, tool, args, signal) => this.bridgeTool(sessionId, tool, args, signal));
     this.helperApprovals = new Map();
     // "Allow for this session": Claude/Cursor tool targets the user allowed, per chat session, kept in memory only.
@@ -639,6 +643,7 @@ class Controller extends EventEmitter {
     const provider = this.routingProvider;
     const useSmart = !this.planPreset() && chosenMode === 'auto';
     const previousState = { status: session.status, error: session.error };
+    this.turnSkillDirectories?.delete(id);
     this.busy = id; session.status = 'running'; session.error = null; session.turnId = null;
     session.agentReplyActive = agentReply === true;
     if (!agentReply && !failover) { session.agentDelegations = 0; session.agentMessages = 0; }
@@ -874,6 +879,8 @@ class Controller extends EventEmitter {
   }
 
   skillDirectories(session) {
+    const pinned = this.turnSkillDirectories?.get(session.id);
+    if (this.busy === session.id && pinned) return pinned;
     const comparison = this.comparisonOf(session);
     if (comparison?.record.target === 'skill') {
       const run = comparison.record.skill?.runs.find(run => run.index === comparison.copy.index);
@@ -881,12 +888,14 @@ class Controller extends EventEmitter {
       return run.dirs;
     }
     const wiki = this.wikiStore?.location(this.lessonWorkspace(session.workspace));
-    return skillPackages.directories(wiki ? path.join(wiki.root, '..', 'skills') : null, { onWarning: message => {
-      if (session.items.some(item => item.skillStoreWarning === message)) return;
-      session.items.push({ id: randomUUID(), type: 'notice', localOnly: true, createdAt: Date.now(), text: message, skillStoreWarning: message });
-      this.log.warn('Skill override unavailable', { message });
+    const directories = skillPackages.directories(wiki ? path.join(wiki.root, '..', 'skills') : null, { onWarning: (message, key = message) => {
+      if (session.items.some(item => item.skillStoreWarning === key)) return;
+      session.items.push({ id: randomUUID(), type: 'notice', localOnly: true, createdAt: Date.now(), text: message, skillStoreWarning: key });
+      this.log.warn('Skill override notice', { message });
       this.save();
     } });
+    if (this.busy === session.id) (this.turnSkillDirectories ||= new Map()).set(session.id, directories);
+    return directories;
   }
 
   projectContextInstructions(session) {
@@ -989,7 +998,7 @@ class Controller extends EventEmitter {
             if (body) assistant(event.message.id || current || `${turnId}-answer`).text = body;
             for (const tool of content.filter(c => c.type === 'tool_use')) {
               if (!session.items.some(i => i.id === tool.id)) session.items.push({
-                id: tool.id, type: 'mcpToolCall', server: backendLabel, tool: tool.name,
+                id: tool.id, turnId, type: 'mcpToolCall', server: backendLabel, tool: tool.name,
                 arguments: tool.input, status: 'inProgress', localOnly: true, createdAt: Date.now()
               });
             }
@@ -1061,6 +1070,9 @@ class Controller extends EventEmitter {
   }
 
   settle(session) {
+    if (session && this.busy !== session.id) this.turnSkillDirectories?.delete(session.id);
+    const primary = this.agents?.primary || this;
+    for (const project of [...(primary.skillCleanupDue || [])]) this.pruneSkillStore(project);
     if (session)
       this.testPoolAfterTurn(session);
 

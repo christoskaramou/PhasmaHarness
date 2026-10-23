@@ -299,6 +299,7 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
     const attempt = { token: submission.token, turnId: submission.turnId, workerOutcome, results: [], at: Date.now(), evidence: null,
       assignmentId: submission.assignmentId || null, assignmentRevision: submission.assignmentRevision || null,
       setup: session.routes?.findLast(route => route.turnId === submission.turnId)?.setup || null,
+      skillReads: this.comparisonSkillReads(session, submission),
       // Amendments carry no time; their count per attempt tells a lesson whether the assignment changed in between.
       amendments: task.amendments.length };
     task.attempts.push(attempt);

@@ -292,6 +292,30 @@ test('changed project instructions refresh an existing worker; unchanged entry d
   assert.equal(fake.calls.filter(c => c.method === 'thread/resume').length, count);
 });
 
+test('skill paths remain pinned until an ordinary worker finishes after Undo', async t => {
+  const { controller } = await setup(t), session = controller.create();
+  const skills = require('../src/skill-packages.cjs');
+  controller.wikiStore = new (require('../src/workspace/wiki-store.cjs').WikiStore)(path.join(path.dirname(controller.filename), 'Workspaces'));
+  const candidate = path.join(session.workspace, 'candidate');
+  fs.mkdirSync(candidate, { recursive: true });
+  fs.writeFileSync(path.join(candidate, 'SKILL.md'), '# Pinned skill\nUse this version throughout the turn.');
+  fs.writeFileSync(path.join(candidate, 'helper.cjs'), 'process.stdout.write("pinned");');
+  const root = path.join(controller.wikiStore.location(session.workspace).root, '..', 'skills');
+  const skill = skills.prepare(root, 'workflow', candidate, controller.skillDirectories(session), []), adopted = skills.adopt(skill);
+  await controller.send({ id: session.id, text: 'Use the skill.', mode: 'terra-light', task: 'off' });
+  const pinned = controller.skillDirectories(session).workflow;
+  controller.toolHelpers.read(session, { skill: 'workflow' });
+  assert.deepEqual(session.submission.skillReads, ['workflow']);
+  skills.undo(adopted);
+  controller.pruneSkillStore(session.workspace);
+  assert.equal(controller.skillDirectories(session).workflow, pinned);
+  assert.ok(fs.existsSync(path.join(pinned, 'helper.cjs')));
+  complete(controller, session, session.turnId);
+  await flush();
+  assert.equal(controller.skillDirectories(session).workflow, require('../src/worker-instructions.cjs').skillDir('workflow'));
+  assert.ok(!fs.existsSync(pinned));
+});
+
 test('adopted skills refresh existing Codex and CLI instructions without restarting or changing bundled files', async t => {
   const { controller, fake } = await setup(t), session = controller.create();
   const skills = require('../src/skill-packages.cjs');

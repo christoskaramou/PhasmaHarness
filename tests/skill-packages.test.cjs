@@ -172,7 +172,7 @@ test('skill cleanup bounds retained history and preserves active and in-flight s
     skills.prune(store, history);
   }
   assert.equal(fs.existsSync(path.join(store, 'revisions', first)), false);
-  assert.ok(fs.readdirSync(path.join(store, 'revisions')).length <= comparisons.MAX_RECORDS + 1);
+  assert.ok(fs.readdirSync(path.join(store, 'revisions')).filter(id => /^[0-9a-f-]{36}$/.test(id)).length <= comparisons.MAX_RECORDS + 1);
   fs.appendFileSync(path.join(candidate, 'SKILL.md'), '\nIn flight.');
   const pending = prepare();
   skills.prune(store, history, [{ skill: pending }]);
@@ -215,8 +215,11 @@ test('skill cleanup preserves unsaved cards and busy snapshots, defers corrupt h
   controller.pruneSkillStore.call(host, root);
   assert.ok(fs.existsSync(orphan.runs[0].dirs.workflow), 'corrupt history cannot authorize deletion');
   assert.equal(warnings.length, 1);
-  assert.throws(() => comparisons.saveComparison(wiki, saved));
-  assert.equal(fs.readFileSync(file, 'utf8'), '{broken', 'a later save must not replace unreadable retention evidence');
+  comparisons.saveComparison(wiki, { at: Date.now(), task: 'Recover', pairVerdicts: [], runs: [], change: 'Recover', ...saved });
+  const backup = fs.readdirSync(wiki).find(name => name.startsWith(comparisons.RECORDS + '.corrupt-'));
+  assert.equal(fs.readFileSync(path.join(wiki, backup), 'utf8'), '{broken', 'recovery preserves unreadable retention evidence');
+  skills.prune(store, comparisons.readComparisons(wiki));
+  assert.ok(fs.existsSync(orphan.runs[0].dirs.workflow), 'recovery retains potentially referenced packages for the history window');
   fs.writeFileSync(file, JSON.stringify(Array.from({ length: comparisons.MAX_RECORDS }, (_, i) => ({ id: 'new-' + i, number: i + 3 }))));
   controller.pruneSkillStore.call(host, root);
   assert.ok(!fs.existsSync(path.join(store, 'revisions', first.revision)));
@@ -259,7 +262,7 @@ test('skill candidates must be ignored and untracked before project snapshots ar
 test('only the selected skill may differ; other skills, providers, edits between turns or missing setups confound', () => {
   const setup = (workflow, other = 'same') => ({ instructions: { harness: 'same', bot: 'same' }, skills: { workflow, other }, provider: 'codex' });
   const run = (variant, extra = {}) => ({ label: variant ? 'B' : 'A', result: { status: 'completed', checks: { test: 'passed' }, corrections: variant ? 0 : 1,
-    setups: [setup(variant ? 'new' : 'old')], ...extra } });
+    setups: [setup(variant ? 'new' : 'old')], skillReads: ['workflow'], ...extra } });
   const verdict = (a, b) => comparisons.pairVerdict(a, b, { skill: 'workflow' });
   assert.equal(verdict(run(false), run(true)).verdict, 'helped');
   assert.equal(verdict(run(false), run(true, { setups: [setup('old')] })).verdict, 'confounded');
@@ -315,4 +318,128 @@ test('skill settlement and Undo preserve the current workspace permission ceilin
     assert.match(controller.adoptRule.call(host, record).error, /write access/);
     await assert.rejects(controller.undoComparison.call(host, 'owner', 'comparison', 'skill'), /write access/);
   }
+});
+
+test('skill body comparisons require observed use, including native CLI reads; descriptions alone do not', t => {
+  const { store, candidate, prepare, current } = fixture(t), skill = prepare();
+  assert.equal(skill.requiresRead, true);
+  const run = (variant, skillReads = []) => ({ variant, label: variant ? 'B' : 'A', result: { status: 'completed', checks: { test: 'passed' },
+    corrections: variant ? 0 : 1, setups: [{ provider: 'codex', skills: { workflow: variant ? 'new' : 'old' } }], skillReads } });
+  assert.equal(comparisons.pairVerdict(run(false), run(true), { skill: 'workflow' }).verdict, 'confounded');
+  assert.equal(comparisons.pairVerdict(run(false), run(true, ['workflow']), { skill: 'workflow' }).verdict, 'helped');
+  assert.equal(comparisons.pairVerdict(run(false), run(true), { skill: 'workflow', requiresRead: false }).verdict, 'helped');
+  const adoptionHost = { session: () => ({ access: 'danger-full-access' }) };
+  assert.match(controller.adoptRule.call(adoptionHost, { target: 'skill', verdict: 'helped', skill, runs: [run(false), run(true)] }).error, /not observed being read/);
+  const host = { comparisonOf: () => ({ record: { target: 'skill', skill } }), skillDirectories: () => skill.runs[1].dirs };
+  const entry = path.join(skill.runs[1].dirs.workflow, 'SKILL.md'), body = fs.readFileSync(entry, 'utf8');
+  for (const item of [
+    { type: 'commandExecution', command: `cat "${entry}"`, exitCode: 0, aggregatedOutput: body },
+    { type: 'mcpToolCall', arguments: { file_path: entry }, result: body.split('\n').map((line, i) => `${i + 1}\t${line}`).join('\n') },
+  ]) {
+    const session = { items: [{ ...item, turnId: 'turn', status: 'completed' }] };
+    assert.deepEqual(controller.comparisonSkillReads.call(host, session, { turnId: 'turn' }), ['workflow']);
+    session.items[0].status = 'failed';
+    assert.deepEqual(controller.comparisonSkillReads.call(host, session, { turnId: 'turn' }), []);
+    session.items[0].status = 'completed';
+    assert.deepEqual(controller.comparisonSkillReads.call(host, session, { turnId: 'another-turn' }), []);
+    session.items[0].aggregatedOutput = 'only a partial read';
+    assert.deepEqual(controller.comparisonSkillReads.call(host, session, { turnId: 'turn' }), []);
+  }
+  assert.deepEqual(controller.comparisonSkillReads.call(host, { items: [] }, { skillReads: ['workflow'] }), ['workflow']);
+  assert.deepEqual(comparisons.runResult({ attempts: [{ skillReads: ['workflow'] }] }).skillReads, ['workflow']);
+  const { skillContent } = require('../src/worker-instructions.cjs');
+  fs.writeFileSync(path.join(candidate, 'SKILL.md'), '---\ndescription: A different trigger.\n---\n' + skillContent(readSkill('workflow', current)).body);
+  for (const file of ['helper.cjs', 'asset.bin']) fs.unlinkSync(path.join(candidate, file));
+  assert.equal(prepare().requiresRead, false);
+  fs.writeFileSync(path.join(candidate, 'helper.cjs'), 'changed resource');
+  assert.equal(prepare().requiresRead, true);
+});
+
+test('skill descriptions stay short, including legacy overrides; oversized candidates create no snapshots', t => {
+  const { store, candidate, prepare } = fixture(t);
+  const { skillDescription } = require('../src/worker-instructions.cjs');
+  const text = '---\ndescription: ' + 'x'.repeat(2000) + '\n---\nFull instructions remain here.';
+  assert.ok(skillDescription('workflow', text).length <= 300);
+  assert.ok(skillDescription('caveman', text).startsWith('OPT-IN'));
+  fs.writeFileSync(path.join(candidate, 'SKILL.md'), text);
+  assert.throws(prepare, /300 characters/);
+  assert.equal(fs.existsSync(store), false);
+});
+
+test('skill overrides notice bundled drift without replacing the override, including legacy metadata', t => {
+  const { store, prepare } = fixture(t), adopted = skills.adopt(prepare());
+  const folder = path.join(store, 'revisions', adopted.revision), notices = [];
+  assert.equal(skills.directories(store, { onWarning: text => notices.push(text) }).workflow, folder);
+  assert.deepEqual(notices, []);
+  fs.writeFileSync(folder + '.json', JSON.stringify({ bundledHash: 'previous-release' }));
+  assert.equal(skills.directories(store, { onWarning: text => notices.push(text) }).workflow, folder);
+  assert.match(notices.at(-1), /bundled workflow skill changed/);
+  fs.unlinkSync(folder + '.json');
+  assert.equal(skills.directories(store, { onWarning: text => notices.push(text) }).workflow, folder);
+  assert.match(notices.at(-1), /predates bundled-version tracking/);
+});
+
+test('skill candidate errors distinguish non-Git projects and accept local Git exclusions', t => {
+  const { root, candidate } = fixture(t);
+  assert.throws(() => skills.requireIgnoredCandidate(root, candidate), /require a Git workspace/);
+  require('node:child_process').execFileSync('git', ['init', '-q', root]);
+  assert.throws(() => skills.requireIgnoredCandidate(root, candidate), /\.git\/info\/exclude/);
+  fs.appendFileSync(path.join(root, '.git/info/exclude'), '\n/candidate/\n');
+  skills.requireIgnoredCandidate(root, candidate);
+});
+
+test('skill Undo preserves running helpers and reports history errors without undoing its success', async t => {
+  for (const brokenHistory of [false, true]) await t.test(`history write fails: ${brokenHistory}`, async t => {
+    const { root, store, prepare } = fixture(t), skill = prepare(), adopted = skills.adopt(skill);
+    const wiki = path.join(store, '..', 'wiki');
+    const record = { id: 'saved', at: Date.now(), task: 'Use skill', change: 'New body', target: 'skill', project: root,
+      pairs: 1, pairVerdicts: [], runs: [], adopted, skill };
+    comparisons.saveComparison(wiki, record);
+    const owner = { id: 'owner', workspace: root, access: 'workspace-write', items: [{ hubComparison: record }] };
+    let saves = 0, changes = 0;
+    const host = { ...controller, busy: 'owner', data: { sessions: [owner], comparisons: {} }, session: () => owner,
+      wikiStore: { location: () => ({ root: wiki }), ensure: () => ({ root: wiki }) }, lessonWorkspace: value => value,
+      log: { warn: () => {} }, save: () => saves++, changed: () => changes++ };
+    host.agents = { primary: host, allControllers: () => [host], pendingJobs: () => [], workspaces: { same: (a, b) => a === b } };
+    const save = comparisons.saveComparison;
+    if (brokenHistory) comparisons.saveComparison = () => { throw new Error('Injected history write failure'); };
+    try { await host.undoComparison('owner', record.id, 'skill'); } finally { comparisons.saveComparison = save; }
+    assert.equal(skills.directories(store).workflow, skillDir('workflow'));
+    assert.ok(record.adopted.undoneAt);
+    assert.ok(saves > 0 && changes > 0);
+    assert.equal(owner.items.some(item => item.type === 'notice'), brokenHistory);
+    const helper = path.join(store, 'revisions', adopted.revision, 'helper.cjs');
+    assert.ok(fs.existsSync(helper), 'a busy ordinary worker retains its package');
+    host.busy = null; host.cleanupPending = new Set(['worker']);
+    host.pruneSkillStore(root);
+    assert.ok(fs.existsSync(helper), 'a stopping worker also retains its package');
+    host.cleanupPending.clear();
+    host.agents.allControllers = () => [host, { busy: 'elsewhere', data: { sessions: [{ id: 'elsewhere', workspace: path.join(root, 'unrelated'), items: [] }] } }];
+    host.pruneSkillStore(root);
+    assert.ok(!fs.existsSync(helper), 'idle cleanup eventually reclaims the undone package');
+  });
+});
+
+test('skill history recovery preserves corrupt bytes, restores chat cards and allows every target to save', t => {
+  const { root, store, prepare } = fixture(t), skill = prepare(), wiki = path.join(store, '..', 'wiki');
+  fs.mkdirSync(wiki);
+  const record = { id: 'from-chat', at: Date.now(), task: 'Task', change: 'Change', project: root, pairVerdicts: [], runs: [] };
+  const session = { id: 'owner', workspace: root, items: [{ hubComparison: record }] }, warnings = [];
+  const host = { ...controller, data: { sessions: [session] }, lessonWorkspace: value => value,
+    wikiStore: { ensure: () => ({ root: wiki }) }, log: { warn: message => warnings.push(message) } };
+  for (const target of ['bot', 'project', 'skill']) {
+    fs.writeFileSync(path.join(wiki, comparisons.RECORDS), '{broken');
+    assert.equal(host.saveComparisonRecord({ ...record, id: target, target }), true);
+    const saved = comparisons.readComparisons(wiki);
+    assert.ok(saved.some(entry => entry.id === 'from-chat'));
+    const recovered = saved.find(entry => entry.id === target);
+    assert.equal(fs.readFileSync(recovered.recovery.backup, 'utf8'), '{broken');
+    skills.prune(store, saved);
+    assert.ok(fs.existsSync(skill.runs[0].dirs.workflow));
+  }
+  assert.equal(warnings.length, 3);
+  assert.equal(session.items.filter(item => item.type === 'notice').length, 3);
+  for (let i = 0; i <= comparisons.MAX_RECORDS; i++) comparisons.saveComparison(wiki, { ...record, id: 'later-' + i, at: Date.now() + i + 1 });
+  skills.prune(store, comparisons.readComparisons(wiki));
+  assert.ok(!fs.existsSync(skill.runs[0].dirs.workflow), 'recovery retention expires with the normal history window');
 });

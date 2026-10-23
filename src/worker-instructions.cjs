@@ -36,7 +36,8 @@ function skillContent(text) {
 
 function skillDescription(name, text) {
   const description = skillContent(text).description || SKILLS[name];
-  return name === 'caveman' && !description.startsWith('OPT-IN') ? 'OPT-IN: ' + description : description;
+  const indexed = name === 'caveman' && !description.startsWith('OPT-IN') ? 'OPT-IN: ' + description : description;
+  return indexed.length > 300 ? indexed.slice(0, 297).trimEnd() + '...' : indexed;
 }
 
 const DEFAULT_INSTRUCTIONS = `Harness defaults (active unless the user or project instructions say otherwise; "normal mode" turns off the style rules; a named stop command disables that behavior for the conversation):

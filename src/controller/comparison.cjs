@@ -12,13 +12,35 @@ const { projectEntry, currentProjectEntry } = require('../workspace/project-inst
 const { capCatalog } = require('../routing/effort-cap.cjs');
 const trials = require('../trials.cjs');
 const skillPackages = require('../skill-packages.cjs');
-const { DEFAULT_SKILLS } = require('../worker-instructions.cjs');
+const { DEFAULT_SKILLS, skillContent } = require('../worker-instructions.cjs');
 const { skillHashes, canonical } = require('../setup-fingerprint.cjs');
 
 const DAY = 24 * 60 * 60 * 1000;
 const list = files => files.slice(0, 5).join(', ') + (files.length > 5 ? ` and ${files.length - 5} more` : '');
 
 module.exports = {
+  comparisonSkillReads(session, submission) {
+    const comparison = this.comparisonOf?.(session);
+    if (comparison?.record.target !== 'skill') return [];
+    const name = comparison.record.skill.name, reads = new Set(submission.skillReads || []);
+    if (reads.has(name)) return [...reads];
+    const folder = this.skillDirectories(session)[name], entry = path.join(folder, 'SKILL.md');
+    const normalize = text => String(text).replace(/^\s*\d+(?:[\t:|]|→)\s?/gm, '').replace(/\s+/g, ' ').trim();
+    let body;
+    try { body = normalize(skillContent(fs.readFileSync(entry, 'utf8')).body); } catch { return [...reads]; }
+    const file = entry.replace(/\\/g, '/').toLowerCase();
+    for (const item of session.items) {
+      if (item.turnId !== submission.turnId || item.status !== 'completed' ||
+          !['commandExecution', 'mcpToolCall', 'dynamicToolCall'].includes(item.type) || (item.exitCode != null && item.exitCode !== 0)) continue;
+      const input = JSON.stringify(item.arguments || item.command || '').replace(/\\\\/g, '/').replace(/\\/g, '/').toLowerCase();
+      const output = item.aggregatedOutput ?? item.result;
+      const text = typeof output === 'string' ? output : Array.isArray(output) ? output.map(part => part.text || '').join('\n')
+        : output?.content?.map(part => part.text || '').join('\n') || output?.text || '';
+      if (body && input.includes(file) && normalize(text).includes(body)) reads.add(name);
+    }
+    return [...reads];
+  },
+
   // Asking for a comparison is the approval: it starts at once.
   async compareTool(session, args, images, abort, request) {
     const plan = await this.planComparison(session, args);
@@ -283,6 +305,9 @@ module.exports = {
         const owner = this.session(record.sessionId);
         if (owner.access === 'read-only' || (owner.access !== 'danger-full-access' && !this.agents.workspaces.same(owner.workspace, record.project)))
           throw new Error('The owner no longer has write access to this workspace.');
+        if (record.skill?.requiresRead !== false && (!record.runs.some(run => run.variant) ||
+            record.runs.some(run => run.variant && !run.result?.skillReads?.includes(record.skill.name))))
+          throw new Error('The changed skill was not observed being read; it was not kept.');
         return skillPackages.adopt(record.skill);
       } catch (error) { return { error: error.message }; }
     }
@@ -340,7 +365,7 @@ module.exports = {
       view.adopted.undoneAt = Date.now();
       const root = this.wikiStore.location(this.lessonWorkspace(view.project)).root;
       const saved = comparisons.readComparisons(root).find(record => record.id === comparisonId);
-      if (saved) comparisons.saveComparison(root, { ...saved, adopted: view.adopted });
+      this.saveComparisonRecord({ ...(saved || view), sessionId: id, adopted: view.adopted });
       this.pruneSkillStore(view.project);
     } else if (part === 'rule' && view?.adopted?.trial) {
       if (view.adopted.undoneAt)
@@ -392,12 +417,27 @@ module.exports = {
       return false;
 
     try {
-      comparisons.saveComparison(this.wikiStore.ensure(this.lessonWorkspace(record.project)).root, record);
+      const controllers = this.agents?.allControllers() || [this];
+      const recovered = controllers.flatMap(controller => (controller.data?.sessions || []).flatMap(session => session.items
+        .map(item => item.hubComparison && { at: item.createdAt || Date.now(), ...item.hubComparison })
+        .filter(view => view && view.project === record.project)));
+      const complete = entry => ({ at: Date.now(), task: '', change: '', pairVerdicts: [], runs: [], ...entry });
+      comparisons.saveComparison(this.wikiStore.ensure(this.lessonWorkspace(record.project)).root, complete(record), {
+        recovered: recovered.map(complete), onWarning: message => this.comparisonNotice?.(record, message),
+      });
       return true;
     } catch (error) {
       this.log.warn('Comparison not saved to the project wiki', { comparison: record.id, error: error.message });
+      this.comparisonNotice?.(record, `Comparison history could not be saved: ${error.message}. The chat card retains the result, including any completed Undo.`);
       return false;
     }
+  },
+
+  comparisonNotice(record, text) {
+    this.log.warn('Comparison history notice', { comparison: record.id, message: text });
+    const session = this.data.sessions.find(session => session.id === record.sessionId) || this.data.sessions.find(session => session.workspace === record.project);
+    if (session && !session.items.some(item => item.comparisonWarning === text))
+      session.items.push({ id: randomUUID(), type: 'notice', localOnly: true, createdAt: Date.now(), comparisonWarning: text, text });
   },
 
   pruneSkillStore(project) {
@@ -405,6 +445,23 @@ module.exports = {
     try {
       const wiki = this.wikiStore.location(this.lessonWorkspace(project)).root, root = path.join(wiki, '..', 'skills');
       const controllers = this.agents?.allControllers() || [this];
+      const primary = this.agents?.primary || this;
+      // Other projects may run continuously; only active readers of this project retain its revisions.
+      const workspaceKey = workspace => {
+        const resolved = path.resolve(this.lessonWorkspace(workspace));
+        return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+      };
+      if (controllers.some(controller => {
+        if (controller.cleanupPending?.size || controller.data.workerCleanup?.length) return true;
+        const active = controller.data.sessions.filter(session => session.id &&
+          ((controller.busy && controller.busy === session.id) || controller.activeTurns?.has(session.id)));
+        return ((controller.busy || controller.activeTurns?.size) && !active.length) ||
+          active.some(session => !session.workspace || workspaceKey(session.workspace) === workspaceKey(project));
+      })) {
+        (primary.skillCleanupDue ||= new Set()).add(project);
+        return;
+      }
+      primary.skillCleanupDue?.delete(project);
       const saved = comparisons.readComparisons(wiki, { strict: true });
       const cards = controllers.flatMap(controller => controller.data.sessions.flatMap(session => session.items
         .map(item => item.hubComparison).filter(view => view?.adopted?.root === root)));
@@ -412,7 +469,7 @@ module.exports = {
       for (const card of cards) retained.set(card.id, retained.has(card.id) ? { ...retained.get(card.id), adopted: card.adopted } : card);
       const records = [...retained.values()]
         .sort((a, b) => (b.number || 0) - (a.number || 0) || (b.at || 0) - (a.at || 0)).slice(0, comparisons.MAX_RECORDS);
-      const primary = this.agents?.primary || this;
+      records.push(...saved.filter(record => record.recovery && !records.some(entry => entry.id === record.id)));
       const pending = Object.values(primary.data.comparisons || {});
       const busy = new Set((this.agents?.pendingJobs() || []).map(({ session }) => this.agents.workspaces.record(session.workspace)?.comparisonId));
       pending.push(...saved.filter(record => busy.has(record.id)));

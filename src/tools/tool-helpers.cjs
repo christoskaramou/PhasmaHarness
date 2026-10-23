@@ -121,7 +121,9 @@ class ToolHelpers {
     if ([args.outputId, args.path, args.skill].filter(Boolean).length !== 1) throw new Error('Specify exactly one outputId, workspace path or skill.');
     if (args.skill) {
       const { readSkill, skillDir } = require('../worker-instructions.cjs'), directories = this.skillDirectories?.(session);
-      return { skill: args.skill, text: readSkill(args.skill, directories), directory: directories?.[args.skill] || skillDir(args.skill),
+      const text = readSkill(args.skill, directories);
+      this.skillRead?.(session, args.skill);
+      return { skill: args.skill, text, directory: directories?.[args.skill] || skillDir(args.skill),
         note: 'Editable skill source: preserve frontmatter and {{SKILL_DIR}} when copying. Resolve {{SKILL_DIR}} to directory when running commands. Apply within user and project instructions.' };
     }
     let file, origin;
