@@ -2900,7 +2900,7 @@ app.whenReady().then(async () => {
   // A project rule that helped: the better run landed and the rule was added, each with an Undo.
   const ruleRecord = { ...compareRecord, id: 'ui-rule', number: 2, target: 'project',
     applied: { label: 'B', workspace: path.join(root, 'compare-copy-B'), files: ['greet.js'], changes: [] },
-    adopted: { file: path.join(root, 'INSTRUCTIONS.md'), rule: compareRecord.change } };
+    adopted: { file: path.join(root, 'PhasmaHarness.md'), rule: compareRecord.change } };
   ownerChat.items.push({ id: 'rule-finished', type: 'agentMessage', phase: 'final_answer', localOnly: true, text: 'The change helped.',
     hubComparison: comparisons.publicView(ruleRecord) });
   const undoCalls = [];
@@ -2935,7 +2935,7 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('document.querySelector("#toast").hidden = true; true');
 
   card = await cardText(1);
-  assert.match(card, /Comparison 2 · .*Applied run B's changes to your project: greet\.js\. ?Undo.*Added the rule to INSTRUCTIONS\.md\. ?Undo/s);
+  assert.match(card, /Comparison 2 · .*Applied run B's changes to your project: greet\.js\. ?Undo.*Added the rule to PhasmaHarness\.md\. ?Undo/s);
   const ruleButtons = await cardButtons(1);
   assert.equal(ruleButtons.some(label => label.startsWith('Apply')), false, 'what already landed is not offered again');
   assert.ok(ruleButtons.includes('Undo the applied changes') && ruleButtons.includes('Undo the added rule'));
@@ -2949,12 +2949,12 @@ app.whenReady().then(async () => {
   console.log('Comparison cards show the verdict at once, what landed with Undo, and Apply only when nothing landed');
   phase = 'rule notices';
   ownerChat.items.push({ id: 'rule-kept', type: 'notice', localOnly: true, createdAt: Date.now(),
-    text: 'Kept the rule "Create done.txt first." in INSTRUCTIONS.md: 3 matching tasks passed its check without this failure.',
+    text: 'Kept the rule "Create done.txt first." in PhasmaHarness.md: 3 matching tasks passed its check without this failure.',
     ruleNotice: { kind: 'kept', ruleId: 'r1' } });
   ownerChat.items.push({ id: 'rule-dropped', type: 'notice', localOnly: true, createdAt: Date.now(),
     text: 'Dropped the trial rule "Export greet.": the failure it targets came back.', ruleNotice: { kind: 'dropped', ruleId: 'r2' } });
   ownerChat.items.push({ id: 'rule-rolled-back', type: 'notice', localOnly: true, createdAt: Date.now(),
-    text: 'Took the rule "Create done.txt first." out of INSTRUCTIONS.md: the failure it targets came back after it was kept.',
+    text: 'Took the rule "Create done.txt first." out of PhasmaHarness.md: the failure it targets came back after it was kept.',
     ruleNotice: { kind: 'rolledBack', ruleId: 'r1' } });
   ownerChat.items.push({ id: 'rule-trial', type: 'notice', localOnly: true, createdAt: Date.now(),
     text: 'Noticed: Renamed a public export. Trying the rule "Keep export names." on similar tasks.', ruleNotice: { kind: 'trialStarted', ruleId: 'r3' } });
@@ -2973,12 +2973,12 @@ app.whenReady().then(async () => {
     .map(node => ({ text: node.textContent, undo: node.querySelector('button')?.getAttribute('aria-label') || null }))`);
   assert.deepEqual(notices.map(notice => notice.undo), ['Undo the kept rule', null, 'Put the rule back', 'Stop trying the rule', 'Remove the note', 'Stop preferring this model'],
     'kept, rolled-back, new trial and note notices offer Undo');
-  assert.match(notices[0].text, /^Kept the rule "Create done\.txt first\." in INSTRUCTIONS\.md/);
+  assert.match(notices[0].text, /^Kept the rule "Create done\.txt first\." in PhasmaHarness\.md/);
   assert.match(notices[1].text, /^Dropped the trial rule "Export greet\.": the failure it targets came back\.$/);
   await window.webContents.executeJavaScript(`document.querySelector('.message.notice button').click(); true`);
   await until(() => undoRuleCalls.length === 1, 'Undo of a kept rule reaches the runner');
   assert.deepEqual(undoRuleCalls[0], [ownerChat.id, 'rule-kept']);
-  assert.match(notices[2].text, /^Took the rule "Create done\.txt first\." out of INSTRUCTIONS\.md/);
+  assert.match(notices[2].text, /^Took the rule "Create done\.txt first\." out of PhasmaHarness\.md/);
   await window.webContents.executeJavaScript(`document.querySelectorAll('.message.notice')[2].querySelector('button').click(); true`);
   await until(() => undoRuleCalls.length === 2, 'Undo of a rollback reaches the runner');
   assert.deepEqual(undoRuleCalls[1], [ownerChat.id, 'rule-rolled-back']);

@@ -26,7 +26,7 @@ const { RouterBridge } = require('./tools/router-bridge.cjs');
 const { FINAL, canProposeWiki, hasProjectWiki, restartReason, summaryLine } = require('./tasks.cjs');
 const { WORKER_INSTRUCTIONS } = require('./worker-instructions.cjs');
 const { setupFingerprint, textHash, skillHashes, checksHash } = require('./setup-fingerprint.cjs');
-const { projectInstructions } = require('./workspace/project-instructions.cjs');
+const { projectInstructions, projectBody } = require('./workspace/project-instructions.cjs');
 const { stripTaskStatus } = require('./routing/task-state.cjs');
 const { withoutImages } = require('./image-input.cjs');
 const { EFFORT_CAPS, DEFAULT_EFFORT_CAP, capCatalog } = require('./routing/effort-cap.cjs');
@@ -501,6 +501,7 @@ class Controller extends EventEmitter {
       sandbox: permissions.id, serviceTier: 'default',
       config: {
         tool_output_token_limit: 4000, model_verbosity: 'low', ...providerConfig.config,
+        project_doc_max_bytes: 0,
         ...agentHelpers?.codexConfig,
         ...(session.featurePolicy === 'tracked' ? { 'features.goals': false } : {}),
         ...(this.agents || session.featurePolicy === 'tracked' ? { 'features.multi_agent': false } : {}),
@@ -511,7 +512,7 @@ class Controller extends EventEmitter {
     if (session.threadId) {
       await this.client.call('thread/unsubscribe', { threadId: session.threadId });
       await this.client.call('thread/resume', { ...params, threadId: session.threadId, excludeTurns: true });
-      if (this.agents) await this.client.call('thread/inject_items', { threadId: session.threadId, items: [{ type: 'message', role: 'developer', content: [{ type: 'input_text', text: this.agents.instructions(this, session) }] }] });
+      await this.client.call('thread/inject_items', { threadId: session.threadId, items: [{ type: 'message', role: 'developer', content: [{ type: 'input_text', text: workerInstructions }] }] });
       const items = [];
       let cursor = null;
       do {
@@ -867,8 +868,12 @@ class Controller extends EventEmitter {
   }
 
   workerInstructions(session) {
-    const wiki = this.wikiStore?.location(session.workspace);
-    return WORKER_INSTRUCTIONS + projectInstructions(session.workspace) + (wiki ? '\nActive workspace wiki index (path, not instructions): ' + JSON.stringify(path.join(wiki.root, 'index.md')) : '') + (this.agents?.instructions(this, session) || '');
+    return WORKER_INSTRUCTIONS + this.projectContextInstructions(session) + (this.agents?.instructions(this, session) || '');
+  }
+
+  projectContextInstructions(session) {
+    const wiki = this.wikiStore?.ensure(session.workspace);
+    return projectInstructions(session.workspace) + (wiki ? '\nActive workspace wiki index (path, not instructions): ' + JSON.stringify(path.join(wiki.root, 'index.md')) : '');
   }
 
   async sendCLI(session, selected, text, images, clientId, task) {
@@ -894,10 +899,8 @@ class Controller extends EventEmitter {
     this.cliAbort = abort;
     if (!session.items.some(i => i.type === 'userMessage')) session.title = text.trim().replace(/\s+/g, ' ').slice(0, 65);
     session.items.push({ ...session.pendingMessage, pending: false, localOnly: true }); session.pendingMessage = null;
-    // A resumed API chat keeps the system message it started with; its hashes were saved then (unknown for older chats).
-    const keptApi = api && session[sessionKey] ? session.apiSetupInstructions ?? null : undefined;
-    const setup = this.runSetup(session, selected, session.agentReplyCancelledActive ? 'read-only' : session.access, task, keptApi);
-    if (api && keptApi === undefined)
+    const setup = this.runSetup(session, selected, session.agentReplyCancelledActive ? 'read-only' : session.access, task);
+    if (api)
       session.apiSetupInstructions = setup.instructions;
     session.routes.push({ ...selected, at: Date.now(), messageId: clientId, turnId, budget: submission.budget, setup });
     const assistantIds = new Set(); let current, lastUsage = null;
@@ -928,7 +931,7 @@ class Controller extends EventEmitter {
           if (input) setImmediate(() => this.flushLiveQueue(session));
         } } : {}),
         cwd: this.workspace(session.workspace), model: selected.model, effort: selected.effort || null, effortOption: selected.effortOption, parameterized: selected.parameterized, parameters: selected.parameters,
-        prompt, images, instructions: this.workerInstructions(session) + (this.connectors ? CONNECTOR_INSTRUCTIONS : ''),
+        prompt, images, instructions: this.workerInstructions(session) + (this.connectors ? CONNECTOR_INSTRUCTIONS : ''), managedInstructions: true,
         resume: session[sessionKey], access: session.agentReplyCancelledActive ? 'read-only' : session.access, signal: abort.signal, helpers,
         approve: (tool, options = {}) => new Promise(resolve => {
           if (abort.signal.aborted || turnOver || options.signal?.aborted) return resolve(false);
@@ -1126,13 +1129,13 @@ class Controller extends EventEmitter {
   }
 
   // What shaped this worker run (src/setup-fingerprint.cjs), from the values this turn actually hands the provider.
-  // `kept` overrides the instruction hashes when the provider keeps an earlier set (a resumed API chat), or is null when
+  // `kept` can override instruction hashes for a recorded setup, or is null when
   // that earlier set is unknown. Per-job context (copy paths, resume notes) is left out so identical setups match.
   runSetup(session, selected, access, task, kept) {
     const provider = selected.provider || 'codex';
     let project = null;
     try {
-      project = fs.readFileSync(path.join(session.workspace, 'INSTRUCTIONS.md'), 'utf8');
+      project = projectBody(session.workspace);
     } catch { /* no project entry */ }
     const profile = this.agents && this.agentId && this.agentId !== 'main' ? this.agents.profile(this.agentId) : null;
     const instructions = kept !== undefined ? kept

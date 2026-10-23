@@ -3,6 +3,7 @@
 // its proposal lands on the lesson. These are Controller methods (see ../controller.cjs); `this` is the Controller.
 const fs = require('node:fs');
 const path = require('node:path');
+const { projectBody } = require('../workspace/project-instructions.cjs');
 const { capabilities } = require('../providers/capabilities.cjs');
 const { SCHEMA, INSTRUCTIONS, reflectionInput, checkReflection } = require('../reflection.cjs');
 const { readLessons, saveReflection, lessonKey, sameLesson } = require('../lessons.cjs');
@@ -21,7 +22,7 @@ module.exports = {
 
     let rules = '';
     try {
-      rules = fs.readFileSync(path.join(project, 'INSTRUCTIONS.md'), 'utf8');
+      rules = projectBody(project);
     } catch { /* no project entry yet */ }
     const { prompt, plain, hash } = reflectionInput(task, session.items.slice(task.startIndex || 0), rules);
     const key = lessonKey(lesson);

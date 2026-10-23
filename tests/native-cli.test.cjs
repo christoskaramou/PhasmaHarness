@@ -60,6 +60,8 @@ test('native binary discovery handles standard installs and missing executables 
 
 test('a native-only account becomes ready, dispatches without Codex and keeps missing usage unknown', async t => {
   const { controller, calls, root } = await controllerFixture(t, true);
+  controller.wikiStore = new (require('../src/workspace/wiki-store.cjs').WikiStore)(path.join(root, 'Workspaces'));
+  fs.writeFileSync(path.join(root, 'AGENTS.md'), 'Native managed instruction marker.');
   assert.equal(controller.connection, 'ready');
   assert.equal(controller.data.settings.routerPreset, 'native:deepseek:model-a');
   const session = controller.create(root, 'read-only');
@@ -67,6 +69,9 @@ test('a native-only account becomes ready, dispatches without Codex and keeps mi
   const run = calls.find(call => typeof call === 'object');
   assert.equal(run.model, 'model-a');
   assert.equal(run.access, 'read-only');
+  assert.match(run.instructions, /Native managed instruction marker/);
+  assert.ok(run.instructions.includes(JSON.stringify(path.join(controller.wikiStore.location(root).root, 'index.md'))));
+  assert.equal(run.managedInstructions, true);
   assert.equal(session['native:deepseekSessionId'], 'native-session');
   assert.equal(session.usage.total, undefined);
   assert.equal(session.usage.incomplete, true);

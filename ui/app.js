@@ -1909,7 +1909,7 @@ function renderComparison(view, sessionId, opened = true) {
     confounded: 'Could not compare fairly', 'no observed effect': 'No clear difference' };
   const status = view.state === 'running' ? `Running · ${returned} of ${view.runs.length} back`
     : view.revealed ? verdicts[view.verdict] || view.verdict : view.state;
-  const targets = { bot: 'worker instructions', project: 'project INSTRUCTIONS.md' };
+  const targets = { bot: 'worker instructions', project: 'project PhasmaHarness.md' };
   details.append(element('summary', '', `Comparison${view.number ? ' ' + view.number : ''} · ${view.pairs * 2} runs on ${view.model} · ${status}`),
     element('p', '', `Task: ${view.task}`), element('p', '', `Change to the ${targets[view.target]}: ${view.change}`));
   if (view.error)
@@ -1982,8 +1982,8 @@ function renderComparison(view, sessionId, opened = true) {
       : 'Put the rule on trial: matching tasks carry it, and it is kept after 3 of them pass that check without this failure.',
     !view.adopted.undoneAt, sessionId, view.id, 'rule'));
   else if (view.adopted?.file)
-    details.append(comparisonOutcome(view.adopted.undoneAt ? 'The rule was taken out of INSTRUCTIONS.md again.'
-      : view.adopted.existing ? 'The rule was already in INSTRUCTIONS.md.' : 'Added the rule to INSTRUCTIONS.md.',
+    details.append(comparisonOutcome(view.adopted.undoneAt ? 'The rule was taken out of PhasmaHarness.md again.'
+      : view.adopted.existing ? 'The rule was already in PhasmaHarness.md.' : 'Added the rule to PhasmaHarness.md.',
     !view.adopted.undoneAt && !view.adopted.existing, sessionId, view.id, 'rule'));
   else if (view.adopted?.error)
     details.append(element('p', '', `The rule was not added: ${view.adopted.error}`));

@@ -13,6 +13,7 @@ const { stripTaskStatus } = require('../routing/task-state.cjs');
 const { readWiki, assessWikiUpdate } = require('../workspace/wiki-assess.cjs');
 const { lessonFromTask, recordLesson, readLessons, relevantLessons, lessonsOffer, sameLesson, diffHashes } = require('../lessons.cjs');
 const { restoreCheckFiles } = require('../comparisons.cjs');
+const { projectEntry } = require('../workspace/project-instructions.cjs');
 
 const TEST_POOL = path.resolve(__dirname, '..', '..', 'skills', 'test-pool', 'scripts', 'testpool.cjs');
 // One test pool run per repository at a time; a turn that ends meanwhile gets one more run afterwards.
@@ -112,7 +113,7 @@ module.exports = {
     const turnId = task.attempts.at(-1).turnId;
     const answer = stripTaskStatus(session.items.filter(i => i.type === 'agentMessage' && i.turnId === turnId && i.phase !== 'commentary').at(-1)?.text) || '';
     const evidence = {
-      taskId, projectEntry: path.join(session.workspace, 'INSTRUCTIONS.md'), wikiIndex: wiki.index, goal: task.goal.slice(0, 4000), amendments: task.amendments.slice(-6).map(a => a.text.slice(0, 1000)),
+      taskId, projectEntry: projectEntry(session.workspace), wikiIndex: wiki.index, goal: task.goal.slice(0, 4000), amendments: task.amendments.slice(-6).map(a => a.text.slice(0, 1000)),
       result: answer.slice(0, 8000), state: task.state,
       checks: task.attempts.at(-1).results.map(r => ({ name: r.name, status: r.status, exitCode: r.exitCode })),
     };

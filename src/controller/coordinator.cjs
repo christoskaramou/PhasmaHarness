@@ -15,7 +15,7 @@ const HUB_CREATE = { ...CREATE,
   inputSchema: { ...CREATE.inputSchema, required: ['instructions'], properties: { ...CREATE.inputSchema.properties,
     names: { type: 'array', items: { type: 'string', minLength: 1, maxLength: 60 }, description: 'Two to ten distinct names.' } } } };
 // Hub only: workers never get it, so a comparison cannot start another one.
-const COMPARE = { name: 'compare', description: 'Only when the user explicitly asks to compare an instruction change: run the same task in identical project copies, one run with the change and one without, then Harness measures which did better. target "bot" adds the change to the worker instructions; "project" adds it to the project INSTRUCTIONS.md. It starts at once: the request from the user is the approval, so do not ask to confirm. Needs configured checks. Omit mode for Auto, which picks one model for every run; set mode (and effort) only when the user names a model. Harness always runs the checks itself to score the runs; a request that workers not run checks applies only to the workers, so pass it on in task and do not ask about it. When both runs are back Harness applies the better run to the project and keeps a project rule that helped. pairs is 1 unless the user asks for repeats (up to 3).',
+const COMPARE = { name: 'compare', description: 'Only when the user explicitly asks to compare an instruction change: run the same task in identical project copies, one run with the change and one without, then Harness measures which did better. target "bot" adds the change to the worker instructions; "project" adds it to the project PhasmaHarness.md. It starts at once: the request from the user is the approval, so do not ask to confirm. Needs configured checks. Omit mode for Auto, which picks one model for every run; set mode (and effort) only when the user names a model. Harness always runs the checks itself to score the runs; a request that workers not run checks applies only to the workers, so pass it on in task and do not ask about it. When both runs are back Harness applies the better run to the project and keeps a project rule that helped. pairs is 1 unless the user asks for repeats (up to 3).',
   inputSchema: { type: 'object', properties: { task: { type: 'string', maxLength: 14000 }, change: { type: 'string', maxLength: 4000 },
     target: { type: 'string', enum: ['bot', 'project'] }, pairs: { type: 'integer', minimum: 1, maximum: 3 }, workspace: { type: 'string' },
     mode: { type: 'string' }, effort: { type: 'string' } }, additionalProperties: false } };
@@ -372,7 +372,7 @@ module.exports = {
       for (let step = 0; !reply && step < 6; step++) {
         reviewingResult = true;
         // The chat id keys its kept Codex thread, so later calls send only what changed.
-        const { decision, usage } = await this.smartRouter.complete({ instructions: INSTRUCTIONS(this.agents.hubName()), prompt: JSON.stringify(context), schema: SCHEMA, images,
+        const { decision, usage } = await this.smartRouter.complete({ instructions: this.projectContextInstructions(session) + '\n\n' + INSTRUCTIONS(this.agents.hubName()), prompt: JSON.stringify(context), schema: SCHEMA, images,
           timeoutMs: 120000, conversation: { key: session.id, context } }, choice, abort);
         abort.signal.throwIfAborted();
         recordUsage(session, usage);

@@ -63,9 +63,9 @@ test('trial rules ride only matching tasks that run their check, in a capped blo
   assert.equal(trials.trialBlock([]).block, null);
 });
 
-test('a kept rule joins INSTRUCTIONS.md under one heading as one dated line, once', t => {
+test('a kept rule joins PhasmaHarness.md under one heading as one dated line, once', t => {
   const root = tempRoot(t);
-  const file = path.join(root, 'INSTRUCTIONS.md');
+  const file = path.join(root, 'PhasmaHarness.md');
   fs.writeFileSync(file, '# Project instructions\n\nStay small.\n\n## Other\n\nKeep this.\n');
   const record = { rule: 'Export fetchUser by name.', keptAt: Date.parse('2026-10-21T10:00:00Z') };
   assert.equal(trials.keepInInstructions(file, record), '- Export fetchUser by name. (kept 2026-10-21)');
@@ -103,7 +103,7 @@ test('with ten always-on rules a winner takes the place of the one tasks matched
   }));
   const [onDemand] = win('Second winner.');
   assert.deepEqual([onDemand.state, onDemand.onDemand, onDemand.displaces], ['kept', true, undefined], 'pinned rules never move out');
-  assert.match(fs.readFileSync(path.join(root, trials.PAGE), 'utf8'), /\*\*Kept\*\* · Second winner\.\n.*for the tasks it matches \(not in INSTRUCTIONS\.md\)/);
+  assert.match(fs.readFileSync(path.join(root, trials.PAGE), 'utf8'), /\*\*Kept\*\* · Second winner\.\n.*for the tasks it matches \(not in PhasmaHarness\.md\)/);
 });
 
 test('on-demand rules ride matching tasks after the trials, two at most; past thirty the least used makes room and may come back', t => {
@@ -123,7 +123,7 @@ test('on-demand rules ride matching tasks after the trials, two at most; past th
 
 test('undoing the last kept line removes the heading', t => {
   const root = tempRoot(t);
-  const file = path.join(root, 'INSTRUCTIONS.md');
+  const file = path.join(root, 'PhasmaHarness.md');
   fs.writeFileSync(file, '# Project instructions\n\nStay small.\n');
   const line = trials.keepInInstructions(file, { rule: 'Only rule.', keptAt: Date.parse('2026-10-21T10:00:00Z') });
   assert.equal(trials.removeKeptLine(fs.readFileSync(file, 'utf8'), line), '# Project instructions\n\nStay small.\n');
@@ -150,7 +150,7 @@ test('a kept rule a task carried rolls back on a hit unless pinned; a line delet
 
   trials.forgetDeletedKept(root, body);
   assert.deepEqual(trials.readRules(root).map(record => [record.id, record.state]), [['kept', 'rolled back'], ['pinned', 'removed']],
-    'a kept line missing from INSTRUCTIONS.md was deleted by hand');
+    'a kept line missing from PhasmaHarness.md was deleted by hand');
   trials.updateRules(root, entries => entries.push({ ...rule, id: 'dropped', rule: 'Dropped rule.', state: 'dropped', reason: 'the failure it targets came back' }));
   for (const text of [rule.rule, 'Pinned rule.', 'Dropped rule.'])
     assert.equal(trials.startTrial(root, { rule: text, lessonKey: 'k', check: 'unit', error: rule.error, goal: rule.goal, source: 'a reflection' }), null,
@@ -185,7 +185,7 @@ test('a chat rule rides only tasks that share two words with its request, one at
   assert.deepEqual([dropped.state, dropped.reason], ['dropped', 'the mistake it targets came back']);
 });
 
-test('a kept chat rule is carried from INSTRUCTIONS.md only by close matches, stamped when matched, and rolled back by the scanner', t => {
+test('a kept chat rule is carried from PhasmaHarness.md only by close matches, stamped when matched, and rolled back by the scanner', t => {
   const root = tempRoot(t);
   const line = '- Keep public export names. (kept 2026-10-21)';
   trials.updateRules(root, records => records.push({ ...rule, id: 'k', rule: 'Keep public export names.', check: null, error: 'renamed a public export',

@@ -74,6 +74,25 @@ function complete(c, s, text = 'Verified result.') {
 }
 const start = (c, s) => c.send({ id: s.id, text: 'Inspect this project', mode: 'terra-light', task: 'off' });
 
+test('direct bots and delegated execution use the same managed instructions and wiki', async t => {
+  const { primary, agents, addWorker, workspace, directory } = await setup(t);
+  primary.wikiStore = new (require('../src/workspace/wiki-store.cjs').WikiStore)(path.join(directory, 'Workspaces'));
+  fs.writeFileSync(path.join(workspace, 'AGENTS.md'), 'Delegated managed instruction marker.');
+  const worker = await addWorker('Managed worker');
+  const source = primary.create();
+  await start(primary, source);
+  const receipt = agents.delegate(primary, source, worker.agentId, 'Read the managed project guidance.');
+  assert.ok(receipt.sessionId);
+  await until(() => worker.activeTurns.has(receipt.sessionId));
+  const direct = primary.client.calls.find(call => call.method === 'thread/start').params.developerInstructions;
+  const delegated = worker.client.calls.find(call => call.method === 'thread/start').params.developerInstructions;
+  for (const instructions of [direct, delegated]) {
+    assert.match(instructions, /Delegated managed instruction marker/);
+    assert.ok(instructions.includes(JSON.stringify(path.join(primary.wikiStore.location(workspace).root, 'index.md'))));
+  }
+  assert.equal(fs.existsSync(path.join(workspace, 'INSTRUCTIONS.md')), false);
+});
+
 test('direct tracked tasks reserve their budget before routing and do not charge later chat to it', async t => {
   const { agents, add } = await setup(t);
   const bot = await add('Direct task');

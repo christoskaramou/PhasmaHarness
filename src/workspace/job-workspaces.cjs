@@ -10,7 +10,7 @@ const { PRIVATE_PATH } = require('../tasks.cjs');
 const { STARTER } = require('./project-instructions.cjs');
 const run = promisify(execFile);
 const MAX_FILES = 50000, MAX_BYTES = 8 * 1024 ** 3;
-const INSTRUCTIONS = ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md', 'HERMES.md', 'INSTRUCTIONS.md', '.github/copilot-instructions.md'];
+const INSTRUCTIONS = ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md', 'HERMES.md', 'INSTRUCTIONS.md', 'PhasmaHarness.md', '.github/copilot-instructions.md'];
 const identity = filename => process.platform === 'win32' ? filename.toLowerCase() : filename;
 const inside = (root, filename) => { const relative = path.relative(root, filename); return !path.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..' + path.sep); };
 // A project-relative path with no empty, dot or .git parts, no drive and no absolute form, resolved inside root.
@@ -408,13 +408,13 @@ class JobWorkspaces {
     try { current = await this.inventory(record.workspace); }
     catch (error) { throw new Error(`Apply needs ordinary files in the project copy. ${error.message}`); }
 
-    const skipped = file => file.split('/')[0] === JOB_WIKI || (file === 'INSTRUCTIONS.md' && !!record.comparisonId);
+    const skipped = file => file.split('/')[0] === JOB_WIKI || (['PhasmaHarness.md', 'INSTRUCTIONS.md'].includes(file) && !!record.comparisonId);
     const before = new Map(input.files.map(file => [file.path, file]));
     const after = new Map(current.files.map(file => [file.path, file]));
     const changes = [];
     for (const [file, entry] of after) {
       const base = before.get(file);
-      const starter = !base && file === 'INSTRUCTIONS.md' && entry.hash === STARTER_HASH;
+      const starter = !base && file === 'PhasmaHarness.md' && entry.hash === STARTER_HASH;
       if (!skipped(file) && !starter && base?.hash !== entry.hash)
         changes.push({ path: file, kind: base ? 'modified' : 'added', base: base?.hash || null, copy: entry.hash, mode: entry.mode });
     }

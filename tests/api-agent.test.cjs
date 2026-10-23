@@ -32,6 +32,18 @@ const run = (agent, workspace, access, approvals, prompt = 'Do the task.') => ag
   approve: async tool => { approvals.push(tool); return tool.toolName !== 'read_file'; }, onEvent: () => {},
 });
 
+test('resumed API work refreshes instructions while retaining its conversation', async t => {
+  const reply = [{ choices: [{ delta: { content: 'ok' } }] }];
+  const { agent, workspace, requests } = fixture(t, [reply, reply]);
+  const options = { provider: 'local', model: 'test', cwd: workspace, access: 'read-only', signal: new AbortController().signal, onEvent() {} };
+  const first = await agent.run({ ...options, prompt: 'Remember this request.', instructions: 'Old project rule.' });
+  await agent.run({ ...options, resume: first.session_id, prompt: 'Continue.', instructions: 'Current managed project rule.' });
+  assert.match(requests[1].messages[0].content, /Current managed project rule/);
+  assert.doesNotMatch(requests[1].messages[0].content, /Old project rule/);
+  assert.ok(requests[1].messages.some(message => message.content === 'Remember this request.'));
+  assert.equal(requests[1].messages.filter(message => message.role === 'system').length, 1);
+});
+
 test('the API loop reads and edits inside the workspace, asks for commands and outside reads, and returns tool results', async t => {
   const { agent, workspace, requests } = fixture(t, outside => [
     [call(0, 'a', 'read_file', { path: 'notes.txt' }), call(1, 'b', 'edit_file', { path: 'notes.txt', old_text: 'beta', new_text: 'gamma' }),

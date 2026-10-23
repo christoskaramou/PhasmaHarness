@@ -185,8 +185,11 @@ class ApiAgent {
     const { provider, model, effort, cwd, prompt, images = [], instructions, resume, access, signal, approve, onEvent, bridge, onInput } = options;
     const previous = resume ? this.load(resume) : null;
     const id = previous ? resume : randomUUID();
-    const messages = previous || [{ role: 'system', content: `${instructions || ''}\n\nYou work in ${cwd} on ${process.platform}. ` +
-      'Use the tools to inspect and change files and to run commands; relative paths start at the workspace. Report what you changed and verified.' }];
+    const messages = previous || [];
+    const system = { role: 'system', content: `${instructions || ''}\n\nYou work in ${cwd} on ${process.platform}. ` +
+      'Use the tools to inspect and change files and to run commands; relative paths start at the workspace. Report what you changed and verified.' };
+    if (messages[0]?.role === 'system') messages[0] = system;
+    else messages.unshift(system);
     const userContent = (text, urls) => urls.length ? [{ type: 'text', text }, ...urls.map(url => ({ type: 'image_url', image_url: { url } }))] : text;
     messages.push({ role: 'user', content: userContent(prompt, images) });
     const tools = [...TOOLS, ...(bridge?.tools || []).map(tool => ({ name: tool.name, description: tool.description, parameters: tool.inputSchema }))]

@@ -82,8 +82,8 @@
       text: 'Settings → General → Browser access opens Harness in a browser. For your phone or another computer it needs an HTTPS address through your own proxy, and the link is the key, so keep it private.' },
 
     // Getting better results.
-    { id: 'instructions', text: 'Put your project\'s rules in INSTRUCTIONS.md at the project root: every model reads it before each turn.' },
-    { id: 'rules', text: 'Rules Harness learns go into your project\'s INSTRUCTIONS.md under "Rules Harness learned", and each one\'s line in the chat has an Undo.' },
+    { id: 'instructions', text: 'Put your project\'s rules in PhasmaHarness.md at the project root: every model reads it before each turn.' },
+    { id: 'rules', text: 'Rules Harness learns go into your project\'s PhasmaHarness.md under "Rules Harness learned", and each one\'s line in the chat has an Undo.' },
     { id: 'learned', text: 'To see what Harness has learned, open the project\'s wiki folder (Settings → Wiki → Show in folder): lessons.md, rules.md, notes.md and setups.md.' },
     { id: 'wiki', text: 'Each project has a wiki that Harness keeps up to date after tasks whose checks pass. Settings → Wiki shows where it is, and Show in folder opens it.' },
     { id: 'correction', when: () => projectChecks().length > 0,

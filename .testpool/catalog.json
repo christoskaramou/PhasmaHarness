@@ -903,18 +903,26 @@
     {
       "id": "wiki-import-and-chat-guards",
       "name": "Custom wiki preservation and read-only sub-bot commands",
-      "covers": "Old custom wiki content is imported once under the fixed wiki folder without replacing existing or original notes. Sub-bot chats refuse user mutations through the shared local and remote command handlers, while approval answers remain available.",
+      "covers": "Custom wiki content is imported once without replacing notes. Read-only sub-bot chats reject user mutations. PhasmaHarness.md consolidates legacy mirrors, scoped subfolder rules and Cursor rules; current contents replace old prompt snapshots in API/Claude continuations, native Claude subagents receive the same prompt, and read-only turns never create a workspace entry. Wiki and project rules survive reopening outside the application folder. Legacy kept rules and old Undo cards survive migration, and a disk-full write cannot publish partial instructions.",
       "paths": [
         "src/workspace/wiki-store.cjs",
-        "src/runner-commands.cjs"
+        "src/runner-commands.cjs",
+        "src/workspace/project-instructions.cjs",
+        "src/providers/claude.cjs",
+        "src/providers/api-agent.cjs",
+        "tests/project-instructions.test.cjs",
+        "tests/worker-defaults.test.cjs",
+        "tests/api-agent.test.cjs",
+        "src/controller/trials.cjs",
+        "src/controller/chat-scan.cjs"
       ],
-      "command": "node --test tests/wiki-store.test.cjs tests/runner-commands.test.cjs",
+      "command": "node --test tests/wiki-store.test.cjs tests/runner-commands.test.cjs tests/project-instructions.test.cjs tests/worker-defaults.test.cjs tests/api-agent.test.cjs",
       "cost": "cheap",
       "timeoutSec": 30,
       "origin": {
         "problem": "Custom wiki content became unreachable and read-only chats allowed IPC mutations.",
-        "fix": "Preserve custom content and guard chat mutations.",
-        "date": "2026-10-22"
+        "fix": "Preserve custom wiki content, guard chat mutations and feed all worker adapters from one workspace PhasmaHarness.md.",
+        "date": "2026-10-23"
       }
     },
     {

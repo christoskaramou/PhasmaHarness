@@ -13,6 +13,22 @@ const { SmartRouter, conversationDelta } = require('../src/routing/smart-router.
 
 const answer = reply => ({ reply, action: null });
 
+test('Main Bot receives current shared project rules and the active AppData wiki without worker-only defaults', async t => {
+  const { hub, session, calls, send, root } = await setup(t);
+  hub.wikiStore = new (require('../src/workspace/wiki-store.cjs').WikiStore)(path.join(root, 'Wikis'));
+  const entry = path.join(session.workspace, 'PhasmaHarness.md');
+  fs.writeFileSync(entry, 'Main project rule first.');
+  await send('Hello');
+  const instructions = () => calls.findLast(call => call.request.schema.properties.action).request.instructions;
+  assert.match(instructions(), /Main project rule first/);
+  assert.ok(instructions().includes(JSON.stringify(path.join(hub.wikiStore.location(session.workspace).root, 'index.md'))));
+  assert.doesNotMatch(instructions(), /Harness skills/);
+  fs.writeFileSync(entry, 'Main project rule updated.');
+  await send('Continue');
+  assert.match(instructions(), /Main project rule updated/);
+  assert.doesNotMatch(instructions(), /Main project rule first/);
+});
+
 test('completed worker survives a Main Bot follow-up timeout without replaying the assignment', async t => {
   const { hub, session, agents, replies, send } = await setup(t);
   replies.push(action('agent_work', { name: 'Worker', task: 'Say hello.' }));
@@ -986,7 +1002,7 @@ test('a renamed Hub answers to its name and keeps that name reserved for new wor
   agents.renameHub('Atlas');
   replies.push(answer('I am Atlas.'));
   await send('What is your name?');
-  assert.match(calls.at(-1).request.instructions, /^You are Atlas, the Hub:/);
+  assert.match(calls.at(-1).request.instructions, /(?:^|\n)You are Atlas, the Hub:/);
   replies.push(action('agent_create', { name: 'atlas', instructions: 'Help' }));
   await assert.rejects(send('Create a worker called atlas'), /belongs to the Hub/);
   assert.equal(hub.data.agents.length, 0, 'a worker never takes the Hub name');
@@ -1836,7 +1852,7 @@ test('Hub compare starts on request with one Auto model, keeps only the change d
       const developer = worker.client.calls.find(call => call.method === 'thread/start').params.developerInstructions;
       // Bot instructions and the project entry both travel in the developer instructions.
       assert.equal(developer.includes(change), run.variant, 'the change reaches only its run\'s provider');
-      const entry = fs.readFileSync(path.join(work.workspace, 'INSTRUCTIONS.md'), 'utf8');
+      const entry = fs.readFileSync(path.join(work.workspace, 'PhasmaHarness.md'), 'utf8');
       assert.equal(entry.includes(change), target === 'project' && run.variant);
     }
 
@@ -1867,7 +1883,7 @@ test('Hub compare starts on request with one Auto model, keeps only the change d
     assert.deepEqual(holders, [session.items.at(-1)], 'the card moved down to the newest comparison message');
     const label = changed.run.label;
     assert.equal(session.items.at(-1).text, `The change helped (the change needed fewer corrections (0 instead of 1)). Applied run ${label}'s changes to the project: done.txt.` +
-      (target === 'project' ? ` Added the rule to ${path.join(fs.realpathSync(project), 'INSTRUCTIONS.md')}.` : ''));
+      (target === 'project' ? ` Added the rule to ${path.join(fs.realpathSync(project), 'PhasmaHarness.md')}.` : ''));
     const visible = session.items.filter(item => !item.internal);
     assert.equal(visible.filter(item => item.type === 'agentResult' || item.agentReply).length, 0, 'no per-run receipts or handoffs in the chat');
     const card = holders[0].hubComparison;
@@ -1883,7 +1899,7 @@ test('Hub compare starts on request with one Auto model, keeps only the change d
     assert.equal(calls.filter(call => call.request.schema.properties.action).length, 1, 'one Hub call: the request');
     assert.equal(hub.data.comparisons[record.id], undefined);
     assert.deepEqual(hub.data.agents, [], 'the finished comparison\'s bots are removed');
-    const entryFile = path.join(fs.realpathSync(project), 'INSTRUCTIONS.md');
+    const entryFile = path.join(fs.realpathSync(project), 'PhasmaHarness.md');
     if (target === 'project') {
       assert.ok(fs.readFileSync(entryFile, 'utf8').trimEnd().endsWith(change), 'the rule that helped joins the project entry');
       await hub.undoComparison(session.id, record.id, 'rule');
@@ -1926,7 +1942,7 @@ test('a lesson that did not stick tests a permanent rule on the next matching ta
   const request = session.items.findLast(item => item.type === 'userMessage');
   assert.equal(request.comparisonId, record.id, 'the batch hangs on the original request');
   assert.deepEqual(hub.data.agents.map(agent => agent.name).sort(), ['Comparison 1 · A', 'Comparison 1 · B', 'Poet']);
-  assert.match(session.items.at(-1).text, /^This kind of task failed the same way before, even with the saved lesson \("Done check": done\.txt is missing\)\. So I am running it twice on .+: as usual, and with this rule in INSTRUCTIONS\.md:/);
+  assert.match(session.items.at(-1).text, /^This kind of task failed the same way before, even with the saved lesson \("Done check": done\.txt is missing\)\. So I am running it twice on .+: as usual, and with this rule in PhasmaHarness\.md:/);
   assert.equal(session.items.at(-1).hubComparison.state, 'running');
   assert.ok(lesson().suggestedAt, 'tested once per lesson');
   assert.equal(calls.filter(call => call.request.schema.properties.action).length, 2, 'no extra Hub call to start it');
@@ -1979,7 +1995,7 @@ test('a reflected rule is what a lesson that did not stick tests, and a reflecti
     });
 });
 
-test('a suggested comparison that helped puts its rule on trial, not into INSTRUCTIONS.md, and Undo takes it off', async t => {
+test('a suggested comparison that helped puts its rule on trial, not into PhasmaHarness.md, and Undo takes it off', async t => {
   const { WikiStore } = require('../src/workspace/wiki-store.cjs');
   const trials = require('../src/trials.cjs');
   const { root, hub, session } = await setup(t);
@@ -2000,10 +2016,10 @@ test('a suggested comparison that helped puts its rule on trial, not into INSTRU
   const rulesRoot = hub.wikiStore.location(project).root;
   assert.deepEqual(trials.readRules(rulesRoot).map(rule => [rule.rule, rule.state, rule.check, rule.source]),
     [['Create done.txt first.', 'trial', 'Done check', 'a suggested comparison']], 'one pair is weak evidence: the rule goes on trial');
-  assert.equal(fs.existsSync(path.join(project, 'INSTRUCTIONS.md')) && fs.readFileSync(path.join(project, 'INSTRUCTIONS.md'), 'utf8').includes('Create done.txt first.'), false);
+  assert.equal(fs.existsSync(path.join(project, 'PhasmaHarness.md')) && fs.readFileSync(path.join(project, 'PhasmaHarness.md'), 'utf8').includes('Create done.txt first.'), false);
   assert.equal(item.hubComparison.adopted.trial, true);
-  // Kept since then: Undo takes its line out of INSTRUCTIONS.md too.
-  const file = path.join(project, 'INSTRUCTIONS.md');
+  // Kept since then: Undo takes its line out of PhasmaHarness.md too.
+  const file = require('../src/workspace/project-instructions.cjs').projectEntry(project, true);
   fs.writeFileSync(file, '# Project instructions\n\nStay small.\n');
   const line = trials.keepInInstructions(file, { rule: 'Create done.txt first.', keptAt: Date.now() });
   trials.updateRules(rulesRoot, records => Object.assign(records[0], { state: 'kept', keptAt: Date.now(), line }));

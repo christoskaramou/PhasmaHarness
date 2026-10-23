@@ -19,9 +19,9 @@ const INTERACTIVE_TOOLS = ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'];
 const ASK_NOTE = '\nHarness access: tool calls outside the pre-approved set wait for the user\'s approval. Prefer Read/Glob/Grep for inspection and group shell commands to keep approvals few.';
 
 // Bots get Harness's rules and skills, not the user's personal Claude Code setup: user settings (their hooks,
-// permissions, skills and subagents), the home CLAUDE.md and auto-memory stay out, and every plugin is off. The project's CLAUDE.md,
-// settings and hooks still load, and worker turns keep the user's MCP servers (personalMcp).
-function withoutPersonalSetup() {
+// permissions, skills and subagents), the home CLAUDE.md and auto-memory stay out, and every plugin is off.
+// Managed workers also exclude native project entries; project settings/hooks and MCP servers remain available.
+function withoutPersonalSetup(managedInstructions = false) {
   const home = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
   let plugins = {};
   try {
@@ -29,7 +29,8 @@ function withoutPersonalSetup() {
   } catch { /* none installed */ }
 
   const settings = {
-    claudeMdExcludes: [...new Set([path.join(home, 'CLAUDE.md'), path.join(os.homedir(), 'CLAUDE.md')].map(file => file.replace(/\\/g, '/')))],
+    claudeMdExcludes: [...new Set([path.join(home, 'CLAUDE.md'), path.join(os.homedir(), 'CLAUDE.md')].map(file => file.replace(/\\/g, '/'))),
+      ...(managedInstructions ? ['**/CLAUDE.md', '**/CLAUDE.local.md', '**/AGENTS.md'] : [])],
     enabledPlugins: Object.fromEntries(Object.keys(plugins).map(id => [id, false])),
     autoMemoryEnabled: false,
   };
@@ -228,17 +229,25 @@ class ClaudeCLI {
     }
     return await this.refresh();
   }
-  run({ cwd, model, effort, prompt, images = [], resume, access, signal, onEvent = () => {}, approve, schema, helpers, onInput, instructions = WORKER_INSTRUCTIONS }) {
+  run({ cwd, model, effort, prompt, images = [], resume, access, signal, onEvent = () => {}, approve, schema, helpers, onInput, instructions = WORKER_INSTRUCTIONS, managedInstructions = false }) {
+    let promptDirectory;
     return new Promise((resolve, reject) => {
       if (signal?.aborted) return reject(new Error('Claude stopped.'));
       const args = ['-p', '--verbose', '--input-format', 'stream-json', '--output-format', 'stream-json', '--include-partial-messages', '--model', model,
-        ...withoutPersonalSetup()];
+        ...withoutPersonalSetup(managedInstructions)];
       if (onInput && !schema) args.push('--replay-user-messages');
       if (EFFORTS.includes(effort)) args.push('--effort', effort);
       // With an approval callback, the Harness access setting applies: pre-approved tools run, anything else asks the user in the Harness.
       const ask = !schema && typeof approve === 'function' && ['read-only', 'workspace-write'].includes(access);
       const basePrompt = 'Preserve unrelated changes. Do not commit or push unless explicitly requested. Use one agent unless delegation is requested. Report permission denials clearly.';
-      args.push('--append-system-prompt', (schema ? basePrompt : instructions) + (!schema && helpers?.instructions ? helpers.instructions : '') + (ask ? ASK_NOTE : ''));
+      const systemPrompt = (schema ? basePrompt : instructions) + (!schema && helpers?.instructions ? helpers.instructions : '') + (ask ? ASK_NOTE : '');
+      if (managedInstructions && !schema) {
+        // File flags avoid Windows' command-line limit and pass the same rules to native nested agents.
+        promptDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'phasma-claude-instructions-'));
+        const file = path.join(promptDirectory, 'instructions.txt');
+        fs.writeFileSync(file, systemPrompt, { mode: 0o600, flag: 'wx' });
+        args.push('--append-system-prompt-file', file, '--append-subagent-system-prompt-file', file, '--system-prompt-snapshot', 'off');
+      } else args.push('--append-system-prompt', systemPrompt);
       if (resume) args.push('--resume', resume);
       if (schema) args.push('--tools', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--no-session-persistence', '--json-schema', JSON.stringify(schema));
       else {
@@ -403,6 +412,8 @@ class ClaudeCLI {
           });
         });
       });
+    }).finally(() => {
+      if (promptDirectory) fs.rmSync(promptDirectory, { recursive: true, force: true });
     });
   }
   close() {

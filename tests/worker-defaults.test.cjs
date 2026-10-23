@@ -54,9 +54,10 @@ test('a relocated checkout loads full bundled skills without global skill folder
 
 test('Claude and Cursor workers receive defaults; classifiers remain isolated', async () => {
   const claude = new ClaudeCLI();
-  let args;
+  let args, managedPrompt;
   claude.start = values => {
     args = values;
+    if (args.includes('--append-system-prompt-file')) managedPrompt = require('node:fs').readFileSync(args[args.indexOf('--append-system-prompt-file') + 1], 'utf8');
     const child = new EventEmitter();
     child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
     setImmediate(() => {
@@ -81,6 +82,16 @@ test('Claude and Cursor workers receive defaults; classifiers remain isolated', 
     assert.equal(prompt.includes('Harness skills'), !schema);
     if (!schema) assert.ok(prompt.includes(WORKER_INSTRUCTIONS));
   }
+  await claude.run({ model: 'test', prompt: 'continue', access: 'read-only', resume: 'old-chat',
+    managedInstructions: true, instructions: 'Managed instruction marker.' });
+  assert.equal(managedPrompt, 'Managed instruction marker.');
+  assert.equal(args[args.indexOf('--append-subagent-system-prompt-file') + 1], args[args.indexOf('--append-system-prompt-file') + 1]);
+  assert.equal(args[args.indexOf('--system-prompt-snapshot') + 1], 'off');
+  assert.equal(require('node:fs').existsSync(args[args.indexOf('--append-system-prompt-file') + 1]), false);
+  const exclusions = JSON.parse(args[args.indexOf('--settings') + 1]).claudeMdExcludes;
+  assert.ok(exclusions.includes('**/CLAUDE.md') && exclusions.includes('**/AGENTS.md'));
+  await cursor.run({ model: 'test', prompt: 'continue', access: 'read-only', instructions: 'Managed instruction marker.' });
+  assert.match(prompt, /Managed instruction marker/);
 });
 
 // A stand-in home with a personal CLAUDE.md, one installed plugin, user MCP servers and personal Codex skills.

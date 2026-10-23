@@ -92,18 +92,24 @@ test('a project-instructions comparison gives every copy the same base and only 
   const copies = [1, 2].map(index => ({ index, workspace: path.join(root, String(index)) }));
   copies.forEach(copy => fs.mkdirSync(copy.workspace));
   const record = { target: 'project', change: 'Always handle empty names.', runs: [{ index: 1, variant: false }, { index: 2, variant: true }] };
-  const read = copy => fs.readFileSync(path.join(copy.workspace, 'INSTRUCTIONS.md'), 'utf8');
+  const read = copy => fs.readFileSync(path.join(copy.workspace, 'PhasmaHarness.md'), 'utf8');
   for (const copy of copies)
     comparisons.prepareCopy(record, copy, input);
   assert.equal(read(copies[0]), STARTER);
   assert.equal(read(copies[1]), `${STARTER.trimEnd()}\n\nAlways handle empty names.\n`);
-  fs.writeFileSync(path.join(input, 'INSTRUCTIONS.md'), '# Rules\n');
+  fs.writeFileSync(path.join(input, 'AGENTS.md'), 'Keep legacy source rules.');
+  comparisons.prepareCopy(record, copies[0], input);
+  assert.match(read(copies[0]), /Keep legacy source rules/);
+  fs.writeFileSync(path.join(input, 'PhasmaHarness.md'), '# Rules\n');
   comparisons.prepareCopy(record, copies[1], input);
   comparisons.prepareCopy(record, copies[1], input);
   assert.equal(read(copies[1]), '# Rules\n\nAlways handle empty names.\n', 'running it again writes the same file');
-  fs.rmSync(path.join(copies[0].workspace, 'INSTRUCTIONS.md'));
+  fs.writeFileSync(path.join(input, 'PhasmaHarness.md'), 'x'.repeat(65530));
+  assert.throws(() => comparisons.prepareCopy(record, copies[1], input), /exceed 64 KiB/);
+  assert.equal(read(copies[1]), '# Rules\n\nAlways handle empty names.\n', 'oversized variants preserve the existing copy');
+  fs.rmSync(path.join(copies[0].workspace, 'PhasmaHarness.md'));
   comparisons.prepareCopy({ ...record, target: 'bot' }, copies[0], input);
-  assert.equal(fs.existsSync(path.join(copies[0].workspace, 'INSTRUCTIONS.md')), false);
+  assert.equal(fs.existsSync(path.join(copies[0].workspace, 'PhasmaHarness.md')), false);
 });
 
 test('a finished comparison shows its verdict at once, picks the run to apply, and the wiki keeps the records and a page', t => {

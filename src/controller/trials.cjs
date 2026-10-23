@@ -1,5 +1,5 @@
 'use strict';
-// Trial rules on real work (src/trials.cjs): carried by matching tasks, decided by their checks, kept in INSTRUCTIONS.md,
+// Trial rules on real work (src/trials.cjs): carried by matching tasks, decided by their checks, kept in PhasmaHarness.md,
 // dropped, or rolled back once kept, with a line in the chat. These are Controller methods (see ../controller.cjs); `this`
 // is the Controller.
 const fs = require('node:fs');
@@ -8,7 +8,7 @@ const { randomUUID } = require('node:crypto');
 const trials = require('../trials.cjs');
 const chatScan = require('../chat-scan.cjs');
 const setups = require('../setups.cjs');
-const { projectInstructions } = require('../workspace/project-instructions.cjs');
+const { projectEntry, currentProjectEntry, projectBody } = require('../workspace/project-instructions.cjs');
 
 const readText = file => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '');
 
@@ -17,7 +17,7 @@ const keptBecause = record => (record.check ? `${trials.KEEP_AFTER} matching tas
 
 module.exports = {
   // The trial and on-demand rules a new task carries, each as its own capped block, and the kept rules its
-  // INSTRUCTIONS.md gives it.
+  // PhasmaHarness.md gives it.
   trialRulesFor(workspace, text, checks) {
     const none = { block: null, ids: [], keptIds: [], lessonKeys: [] };
     if (!this.wikiStore)
@@ -27,11 +27,11 @@ module.exports = {
       const project = this.lessonWorkspace(workspace);
       const root = this.wikiStore.location(project).root;
       const names = checks.map(check => check.name);
-      const records = trials.forgetDeletedKept(root, readText(path.join(project, 'INSTRUCTIONS.md')));
+      const records = trials.forgetDeletedKept(root, projectBody(project));
       const onTrial = trials.trialBlock(trials.matchingTrials(records, text, names));
       const onDemand = trials.keptBlock(trials.matchingOnDemand(records, text, names));
-      // A batch copy's worker reads the copy's own INSTRUCTIONS.md.
-      const kept = [...trials.carriedKept(records, readText(path.join(workspace, 'INSTRUCTIONS.md')), names, text), ...onDemand.records];
+      // A batch copy's worker reads the copy's own PhasmaHarness.md.
+      const kept = [...trials.carriedKept(records, projectBody(workspace), names, text), ...onDemand.records];
       return {
         block: [onTrial.block, onDemand.block].filter(Boolean).join('\n\n') || null,
         ids: onTrial.records.map(record => record.id),
@@ -72,20 +72,20 @@ module.exports = {
 
     if (record.onDemand) {
       this.ruleNotice(session, { text: `Kept the rule "${record.rule}" for the tasks it matches: ${keptBecause(record)}, and the ${trials.MAX_KEPT} rules ` +
-        'in INSTRUCTIONS.md are all ones you put back.', root, ruleId: record.id, kind: 'kept' });
+        'in PhasmaHarness.md are all ones you put back.', root, ruleId: record.id, kind: 'kept' });
       return;
     }
 
     this.keepRule(session, root, project, record);
   },
 
-  // A won trial's line joins INSTRUCTIONS.md. A rule it displaces is marked on demand before its line leaves the file,
+  // A won trial's line joins PhasmaHarness.md. A rule it displaces is marked on demand before its line leaves the file,
   // so the next task never mistakes the missing line for a hand deletion.
   keepRule(session, root, project, record) {
-    const file = path.join(project, 'INSTRUCTIONS.md');
+    const file = projectEntry(project);
     let line;
     try {
-      projectInstructions(project, true);
+      projectEntry(project, true);
       line = trials.keepInInstructions(file, record);
     } catch (error) {
       trials.updateRules(root, records => Object.assign(records.find(entry => entry.id === record.id) || {}, { state: 'trial', keptAt: null, reason: error.message }));
@@ -107,16 +107,16 @@ module.exports = {
       try {
         fs.writeFileSync(file, trials.removeKeptLine(readText(file), moved.movedLine));
       } catch (error) {
-        this.log.warn('Moved rule left in INSTRUCTIONS.md', { rule: moved.id, error: error.message });
+        this.log.warn('Moved rule left in PhasmaHarness.md', { rule: moved.id, error: error.message });
       }
     }
 
-    const note = moved ? ` "${moved.rule}" moved out of INSTRUCTIONS.md to keep it at ${trials.MAX_KEPT} rules; it is still used on the tasks it matches.` : '';
-    this.ruleNotice(session, { text: `Kept the rule "${record.rule}" in INSTRUCTIONS.md: ${keptBecause(record)}.${note}`,
+    const note = moved ? ` "${moved.rule}" moved out of PhasmaHarness.md to keep it at ${trials.MAX_KEPT} rules; it is still used on the tasks it matches.` : '';
+    this.ruleNotice(session, { text: `Kept the rule "${record.rule}" in PhasmaHarness.md: ${keptBecause(record)}.${note}`,
       root, ruleId: record.id, kind: 'kept', file, line, displacedId: moved?.id || null });
   },
 
-  // A kept rule whose failure came back leaves INSTRUCTIONS.md, or stops riding the tasks it matches. A line already
+  // A kept rule whose failure came back leaves PhasmaHarness.md, or stops riding the tasks it matches. A line already
   // gone was deleted by hand: no notice.
   rollBackRule(session, root, project, record) {
     if (record.onDemand) {
@@ -125,12 +125,12 @@ module.exports = {
       return;
     }
 
-    const file = path.join(project, 'INSTRUCTIONS.md');
+    const file = projectEntry(project);
     const restate = change => trials.updateRules(root, records => Object.assign(records.find(entry => entry.id === record.id) || {}, change));
     try {
       const body = readText(file);
       if (!body.includes(record.line)) {
-        restate({ state: 'removed', reason: 'deleted from INSTRUCTIONS.md by hand' });
+        restate({ state: 'removed', reason: 'deleted from PhasmaHarness.md by hand' });
         return;
       }
 
@@ -141,7 +141,7 @@ module.exports = {
       return;
     }
 
-    this.ruleNotice(session, { text: `Took the rule "${record.rule}" out of INSTRUCTIONS.md: ${record.reason}.`,
+    this.ruleNotice(session, { text: `Took the rule "${record.rule}" out of PhasmaHarness.md: ${record.reason}.`,
       root, ruleId: record.id, kind: 'rolledBack', file, line: record.line });
   },
 
@@ -179,15 +179,16 @@ module.exports = {
     return item;
   },
 
-  // Undo of a kept rule: its line leaves INSTRUCTIONS.md (if it had one), the rule is marked removed, and a rule it moved
+  // Undo of a kept rule: its line leaves PhasmaHarness.md (if it had one), the rule is marked removed, and a rule it moved
   // out goes back in, if it is still kept for matching tasks.
   undoKeep({ file, line, root, ruleId, displacedId }) {
-    // A rule moved out of INSTRUCTIONS.md since then has no line left there.
+    file = currentProjectEntry(file);
+    // A rule moved out of PhasmaHarness.md since then has no line left there.
     const record = trials.readRules(root).find(entry => entry.id === ruleId);
     if (line && !record?.onDemand) {
       const body = fs.readFileSync(file, 'utf8');
       if (!body.includes(line))
-        throw new Error('The rule is no longer in INSTRUCTIONS.md as it was added; edit the file by hand.');
+        throw new Error('The rule is no longer in PhasmaHarness.md as it was added; edit the file by hand.');
 
       fs.writeFileSync(file, trials.removeKeptLine(body, line));
     }
@@ -215,9 +216,10 @@ module.exports = {
   // Undo of a rollback puts the rule back (its line, or on demand) and pins it, so it is never rolled back automatically
   // again; the user's choice may go past MAX_KEPT.
   undoRollback({ file, root, ruleId }) {
+    file = currentProjectEntry(file);
     const record = trials.readRules(root).find(entry => entry.id === ruleId);
     if (record?.state !== 'rolled back')
-      throw new Error('The rule changed since it was taken out; edit INSTRUCTIONS.md by hand.');
+      throw new Error('The rule changed since it was taken out; edit PhasmaHarness.md by hand.');
 
     const line = record.onDemand ? null : trials.keepInInstructions(file, record);
     trials.updateRules(root, records => Object.assign(records.find(entry => entry.id === ruleId) || {},

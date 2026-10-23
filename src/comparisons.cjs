@@ -7,14 +7,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { canonical } = require('./setup-fingerprint.cjs');
-const { STARTER } = require('./workspace/project-instructions.cjs');
+const { projectEntry, legacyInstructionFiles, consolidatedInstructions } = require('./workspace/project-instructions.cjs');
 
 const RECORDS = 'comparisons.json';
 const PAGE = 'comparisons.md';
 const MAX_RECORDS = 50;
 // When checks and corrections tie, tokens (or active time) must be at least this much lower to count as "cheaper".
 const THRESHOLD = 0.2;
-const TARGETS = { bot: 'worker instructions', project: 'project INSTRUCTIONS.md' };
+const TARGETS = { bot: 'worker instructions', project: 'project PhasmaHarness.md' };
 
 const excerpt = (text, limit) => (String(text).length > limit ? String(text).slice(0, limit - 1) + '…' : String(text));
 const fileHash = file => {
@@ -79,18 +79,21 @@ function prepareCopy(record, copy, input) {
   if (!run)
     throw new Error('This project copy is not part of its comparison.');
 
-  let base = STARTER;
+  let base;
   try {
-    base = fs.readFileSync(path.join(input, 'INSTRUCTIONS.md'), 'utf8');
-  } catch { /* the project has no entry yet; every copy gets the starter */ }
+    base = fs.readFileSync(projectEntry(input), 'utf8');
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    base = consolidatedInstructions(legacyInstructionFiles(input));
+  }
 
-  const file = path.join(copy.workspace, 'INSTRUCTIONS.md');
-  if (fs.lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink())
-    throw new Error('INSTRUCTIONS.md must be a regular file, not a link.');
+  const file = projectEntry(copy.workspace);
 
-  fs.writeFileSync(file, run.variant ? `${base.trimEnd()}\n\n${record.change.trim()}\n` : base);
+  const body = run.variant ? `${base.trimEnd()}\n\n${record.change.trim()}\n` : base;
+  if (Buffer.byteLength(body) > 64 * 1024) throw new Error('Comparison instructions exceed 64 KiB.');
+  fs.writeFileSync(file, body);
   // A tracked entry would show the edit in git diff and tell the runs apart; skip-worktree hides it in both copies.
-  spawnSync('git', ['update-index', '--skip-worktree', '--', 'INSTRUCTIONS.md'], { cwd: copy.workspace, windowsHide: true, timeout: 4000 });
+  spawnSync('git', ['update-index', '--skip-worktree', '--', 'PhasmaHarness.md'], { cwd: copy.workspace, windowsHide: true, timeout: 4000 });
 }
 
 // What a returned run measured, from its delivered result item.
