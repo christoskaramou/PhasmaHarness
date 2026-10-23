@@ -56,7 +56,7 @@ function folderHash(root) {
   }
 }
 
-const skillHashes = () => Object.fromEntries(DEFAULT_SKILLS.map(name => [name, folderHash(skillDir(name))]));
+const skillHashes = (directories = {}) => Object.fromEntries(DEFAULT_SKILLS.map(name => [name, folderHash(directories[name] || skillDir(name))]));
 
 // Checks decide a task's verdict. Paths inside the workspace are written relative to it, so batch copies match.
 function checksHash(checks, workspace) {

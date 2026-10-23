@@ -24,7 +24,8 @@ const { TOOL: CONTEXT_TOOL } = require('./workspace/context-search.cjs');
 const { INSTRUCTIONS: HELPER_INSTRUCTIONS, TOOLS: HELPER_TOOLS, ToolHelpers } = require('./tools/tool-helpers.cjs');
 const { RouterBridge } = require('./tools/router-bridge.cjs');
 const { FINAL, canProposeWiki, hasProjectWiki, restartReason, summaryLine } = require('./tasks.cjs');
-const { WORKER_INSTRUCTIONS } = require('./worker-instructions.cjs');
+const { WORKER_INSTRUCTIONS, workerInstructions } = require('./worker-instructions.cjs');
+const skillPackages = require('./skill-packages.cjs');
 const { setupFingerprint, textHash, skillHashes, checksHash } = require('./setup-fingerprint.cjs');
 const { projectInstructions, projectBody } = require('./workspace/project-instructions.cjs');
 const { stripTaskStatus } = require('./routing/task-state.cjs');
@@ -56,6 +57,7 @@ class Controller extends EventEmitter {
     this.nativeCLIs = options.nativeCLIs || new Map([['native:muse', new MuseCLI()], ['native:antigravity', new AntigravityCLI()], ['native:deepseek', new DeepSeekCLI()]]);
     this.smartRouter.nativeCLIs = this.nativeCLIs;
     this.toolHelpers = new ToolHelpers(path.join(path.dirname(filename), 'tool-outputs'), client, null);
+    this.toolHelpers.skillDirectories = session => this.skillDirectories(session);
     this.bridge = new RouterBridge((sessionId, tool, args, signal) => this.bridgeTool(sessionId, tool, args, signal));
     this.helperApprovals = new Map();
     // "Allow for this session": Claude/Cursor tool targets the user allowed, per chat session, kept in memory only.
@@ -868,7 +870,23 @@ class Controller extends EventEmitter {
   }
 
   workerInstructions(session) {
-    return WORKER_INSTRUCTIONS + this.projectContextInstructions(session) + (this.agents?.instructions(this, session) || '');
+    return workerInstructions(this.skillDirectories(session)) + this.projectContextInstructions(session) + (this.agents?.instructions(this, session) || '');
+  }
+
+  skillDirectories(session) {
+    const comparison = this.comparisonOf(session);
+    if (comparison?.record.target === 'skill') {
+      const run = comparison.record.skill?.runs.find(run => run.index === comparison.copy.index);
+      if (!run) throw new Error('The comparison skill snapshot is unavailable.');
+      return run.dirs;
+    }
+    const wiki = this.wikiStore?.location(this.lessonWorkspace(session.workspace));
+    return skillPackages.directories(wiki ? path.join(wiki.root, '..', 'skills') : null, { onWarning: message => {
+      if (session.items.some(item => item.skillStoreWarning === message)) return;
+      session.items.push({ id: randomUUID(), type: 'notice', localOnly: true, createdAt: Date.now(), text: message, skillStoreWarning: message });
+      this.log.warn('Skill override unavailable', { message });
+      this.save();
+    } });
   }
 
   projectContextInstructions(session) {
@@ -1146,7 +1164,7 @@ class Controller extends EventEmitter {
     return setupFingerprint({
       provider, model: selected.model || null, effort: selected.effort || null, access,
       providerVersion: (provider === 'codex' ? this.client.version : this.nativeCLIs.get(provider)?.status?.version) || null,
-      instructions, lessons, skills: skillHashes(),
+      instructions, lessons, skills: skillHashes(this.skillDirectories(session)),
       tools: { helpers, context: helpers && (session.contextTool ?? !!this.contextSearch?.supports(session.workspace)),
         toolSelection: this.data.settings.toolSelection || 'off', largeResponses: this.data.settings.largeResponses !== false },
       checks: task ? checksHash(task.checks, session.workspace) : null,

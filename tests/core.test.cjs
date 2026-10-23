@@ -292,6 +292,63 @@ test('changed project instructions refresh an existing worker; unchanged entry d
   assert.equal(fake.calls.filter(c => c.method === 'thread/resume').length, count);
 });
 
+test('adopted skills refresh existing Codex and CLI instructions without restarting or changing bundled files', async t => {
+  const { controller, fake } = await setup(t), session = controller.create();
+  const skills = require('../src/skill-packages.cjs');
+  controller.wikiStore = new (require('../src/workspace/wiki-store.cjs').WikiStore)(path.join(path.dirname(controller.filename), 'Workspaces'));
+  await controller.send({ id: session.id, text: 'hello', mode: 'terra-light', task: 'off' });
+  complete(controller, session, session.turnId);
+  await flush();
+  const candidate = path.join(session.workspace, 'candidate');
+  fs.mkdirSync(candidate);
+  fs.writeFileSync(path.join(candidate, 'SKILL.md'), 'Refreshed skill marker. {{SKILL_DIR}}/helper.cjs');
+  fs.writeFileSync(path.join(candidate, 'helper.cjs'), 'process.exit(0);');
+  const root = path.join(controller.wikiStore.location(session.workspace).root, '..', 'skills');
+  const snapshot = skills.prepare(root, 'workflow', candidate, controller.skillDirectories(session), []);
+  const adopted = skills.adopt(snapshot), activePath = controller.skillDirectories(session).workflow.replace(/\\/g, '/');
+  await controller.send({ id: session.id, text: 'continue', mode: 'terra-light', task: 'off' });
+  assert.ok(fake.calls.filter(c => c.method === 'thread/resume').at(-1).params.developerInstructions.includes(activePath));
+  assert.ok(JSON.stringify(fake.calls.filter(c => c.method === 'thread/inject_items').at(-1)).includes(activePath));
+  assert.match(controller.toolHelpers.read(session, { skill: 'workflow' }).text, /Refreshed skill marker/);
+  complete(controller, session, session.turnId);
+  await flush();
+  session.helperTools = false;
+  for (const provider of ['claude', 'cursor']) {
+    controller.data.settings[provider + 'Enabled'] = true;
+    controller[provider].status = { installed: true, loggedIn: true };
+    if (provider === 'cursor') {
+      controller.cursor.models = [{ id: 'fixture', label: 'Fixture' }];
+      controller.providerSettings({ action: 'enableDiscovered', provider: 'cursor-cli', model: 'fixture', label: 'Fixture' });
+    }
+    let received;
+    controller[provider].run = async request => { received = request; return { result: 'ok' }; };
+    const mode = provider === 'claude' ? 'claude-cli:sonnet' : 'cursor-cli:fixture:default';
+    await controller.send({ id: session.id, text: 'Continue.', mode, task: 'off' });
+    assert.ok(received.instructions.includes(activePath), provider + ' receives the active package path with helpers disabled');
+  }
+  skills.undo(adopted);
+  assert.ok(!controller.workerInstructions(session).includes(activePath));
+});
+
+test('damaged skill stores keep normal turns working with one persistent fallback notice', async t => {
+  const { controller, fake } = await setup(t), session = controller.create();
+  controller.wikiStore = new (require('../src/workspace/wiki-store.cjs').WikiStore)(path.join(path.dirname(controller.filename), 'Workspaces'));
+  const root = path.join(controller.wikiStore.location(session.workspace).root, '..', 'skills');
+  fs.mkdirSync(root, { recursive: true });
+  for (const saved of ['{broken', JSON.stringify({ workflow: '11111111-1111-4111-8111-111111111111' })]) {
+    fs.writeFileSync(path.join(root, 'active.json'), saved);
+    const before = session.items.filter(item => item.skillStoreWarning).length;
+    for (let i = 0; i < 2; i++) {
+      await controller.send({ id: session.id, text: 'Continue working.', mode: 'terra-light', task: 'off' });
+      assert.ok(fake.calls.some(call => call.method === 'turn/start'));
+      complete(controller, session, session.turnId);
+      await flush();
+    }
+    assert.equal(session.items.filter(item => item.skillStoreWarning).length, before + 1);
+    assert.equal(fs.readFileSync(path.join(root, 'active.json'), 'utf8'), saved);
+  }
+});
+
 test('shared worker defaults reach Codex and CLI with the selected workspace wiki', async t => {
   const { controller, fake } = await setup(t);
   const session = controller.create();

@@ -119,7 +119,11 @@ class ToolHelpers {
   read(session, args) {
     if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).some(key => !['outputId', 'path', 'skill', 'query', 'line', 'column'].includes(key))) throw new Error('Invalid output request.');
     if ([args.outputId, args.path, args.skill].filter(Boolean).length !== 1) throw new Error('Specify exactly one outputId, workspace path or skill.');
-    if (args.skill) return { skill: args.skill, text: require('../worker-instructions.cjs').readSkill(args.skill), note: 'Bundled Harness skill. Apply it within the user and project instructions.' };
+    if (args.skill) {
+      const { readSkill, skillDir } = require('../worker-instructions.cjs'), directories = this.skillDirectories?.(session);
+      return { skill: args.skill, text: readSkill(args.skill, directories), directory: directories?.[args.skill] || skillDir(args.skill),
+        note: 'Editable skill source: preserve frontmatter and {{SKILL_DIR}} when copying. Resolve {{SKILL_DIR}} to directory when running commands. Apply within user and project instructions.' };
+    }
     let file, origin;
     if (args.outputId) {
       if (!/^[0-9a-f-]{36}$/.test(args.outputId)) throw new Error('Invalid output ID.');

@@ -1909,7 +1909,7 @@ function renderComparison(view, sessionId, opened = true) {
     confounded: 'Could not compare fairly', 'no observed effect': 'No clear difference' };
   const status = view.state === 'running' ? `Running · ${returned} of ${view.runs.length} back`
     : view.revealed ? verdicts[view.verdict] || view.verdict : view.state;
-  const targets = { bot: 'worker instructions', project: 'project PhasmaHarness.md' };
+  const targets = { bot: 'worker instructions', project: 'project PhasmaHarness.md', skill: `${view.skill} skill` };
   details.append(element('summary', '', `Comparison${view.number ? ' ' + view.number : ''} · ${view.pairs * 2} runs on ${view.model} · ${status}`),
     element('p', '', `Task: ${view.task}`), element('p', '', `Change to the ${targets[view.target]}: ${view.change}`));
   if (view.error)
@@ -1977,7 +1977,11 @@ function renderComparison(view, sessionId, opened = true) {
       : `Applied run ${view.applied.label}'s changes to your project: ${view.applied.files.join(', ')}.`, !view.applied.undoneAt, sessionId, view.id, 'apply'));
   else if (view.applied?.error)
     details.append(element('p', '', view.applied.error));
-  if (view.adopted?.trial)
+  if (view.adopted?.skill)
+    details.append(comparisonOutcome(view.adopted.undoneAt ? `Restored the previous ${view.adopted.skill} skill.`
+      : `Kept the ${view.adopted.skill} skill for this workspace.${view.adopted.expiredAt ? ' Undo expired with the 50-comparison history.' : ''}`,
+    !view.adopted.undoneAt && !view.adopted.expiredAt, sessionId, view.id, 'skill'));
+  else if (view.adopted?.trial)
     details.append(comparisonOutcome(view.adopted.undoneAt ? 'The rule was taken off its trial.'
       : 'Put the rule on trial: matching tasks carry it, and it is kept after 3 of them pass that check without this failure.',
     !view.adopted.undoneAt, sessionId, view.id, 'rule'));
@@ -1986,7 +1990,7 @@ function renderComparison(view, sessionId, opened = true) {
       : view.adopted.existing ? 'The rule was already in PhasmaHarness.md.' : 'Added the rule to PhasmaHarness.md.',
     !view.adopted.undoneAt && !view.adopted.existing, sessionId, view.id, 'rule'));
   else if (view.adopted?.error)
-    details.append(element('p', '', `The rule was not added: ${view.adopted.error}`));
+    details.append(element('p', '', `The change was not kept: ${view.adopted.error}`));
   details.append(element('p', 'muted', 'One pair is weak evidence.'));
   return details;
 }
@@ -2021,7 +2025,7 @@ function comparisonOutcome(text, undoable, sessionId, comparisonId, part) {
   const line = element('p', 'comparison-outcome', text);
   if (undoable) {
     const undo = element('button', 'compact-action', 'Undo'); undo.type = 'button';
-    undo.setAttribute('aria-label', part === 'apply' ? 'Undo the applied changes' : 'Undo the added rule');
+    undo.setAttribute('aria-label', part === 'apply' ? 'Undo the applied changes' : part === 'skill' ? 'Undo the skill change' : 'Undo the added rule');
     undo.onclick = async () => {
       undo.disabled = true;
       try {

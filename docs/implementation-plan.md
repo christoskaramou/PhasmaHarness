@@ -253,7 +253,7 @@ The library feeds the improver, never the workers. Always-on text is capped (8,0
    - Rules are handled by trials (steps 2 to 4), so this step is about the model only.
    - Without checks (added 2026-10-21 at the user's request: learning should not need checks), the chat checker judges each task from the user's next message: accepted counts as first time, corrected as needing a correction. It needs the chat checker on.
    - Limits: without checks it learns only while the chat checker is on, and only where Auto already used several setups for the same kind of work (no exploration while a preference holds).
-7. **Skills in comparisons** (the earlier v2), once rules work end to end.
+7. **Skills in comparisons** (built 2026-10-23). The existing comparison tool accepts an existing Harness skill and a complete candidate package in the workspace. Each run gets frozen files and normal description-based, on-demand loading; candidates must be ignored and untracked. Checks decide the result. A skill that helped is kept per workspace in AppData, with Undo on the same card. Undo restores the previous revision or bundled defaults; unused snapshots are cleaned up and history retains 50 comparisons. Corrupt stores fall back with a notice. Instruction comparisons remain unchanged. This does not add an autonomous skill author or paid exploration runs. See `src/skill-packages.cjs`, `src/controller/comparison.cjs` and the skill comparison regressions.
 
 Not adopted from harness2: repeated rollouts per task, the blind LLM selector, parallel improver fan-out, an append-only library without pruning, and unsandboxed workers.
 

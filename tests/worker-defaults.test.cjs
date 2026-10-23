@@ -40,13 +40,11 @@ test('a relocated checkout loads full bundled skills without global skill folder
   const loaded = require(path.join(root, 'src/worker-instructions.cjs'));
   for (const name of loaded.DEFAULT_SKILLS) {
     const directory = path.join(root, 'skills', name);
-    const body = fs.readFileSync(path.join(directory, 'SKILL.md'), 'utf8')
-      .replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '')
-      .replaceAll('{{SKILL_DIR}}', directory.replace(/\\/g, '/'));
+    const body = fs.readFileSync(path.join(directory, 'SKILL.md'), 'utf8');
     assert.equal(loaded.readSkill(name), body, `${name} is readable on demand from the relocated checkout`);
     assert.ok(loaded.WORKER_INSTRUCTIONS.includes(path.join(directory, 'SKILL.md').replace(/\\/g, '/')), `${name} is indexed with its relocated path`);
   }
-  assert.ok(loaded.WORKER_INSTRUCTIONS.length < 4000, 'workers get the short defaults and index, not full skill bodies');
+  assert.ok(loaded.WORKER_INSTRUCTIONS.length < 6500, 'workers get the short defaults and index, not full skill bodies');
   assert.match(loaded.WORKER_INSTRUCTIONS, /caveman: OPT-IN/);
   assert.ok(!/[\\/]\.(agents|codex)[\\/]skills/.test(loaded.WORKER_INSTRUCTIONS));
   assert.ok(fs.existsSync(path.join(root, 'skills/large-responses/scripts/output.cjs')));

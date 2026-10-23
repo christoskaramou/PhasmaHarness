@@ -1028,6 +1028,37 @@
         "fix": "Harness hosts shared MCP tools and enforces approvals, credentials, task lifetime and local process ownership. Settings refresh and bot requests reread validated connector JSON without a runner restart. Failed saves preserve encrypted credentials; Disconnect and shutdown await cleanup already started by Stop. Cleanup tests wait for exited Linux children to be reaped before checking PID removal.",
         "date": "2026-10-23"
       }
+    },
+    {
+      "id": "skill-comparisons",
+      "name": "Workspace skill packages, comparisons and Undo",
+      "covers": "Compare complete SKILL.md packages and supporting files using the existing comparison flow; isolate frozen runs, reject confounded setup changes, adopt per workspace without restart, preserve bundled defaults and manual edits, and Undo the full package. Codex resume and Claude/Cursor handoffs use the current skill paths with helpers disabled. Invalid packages and Ask access fail before dispatch. Chained Undo restores revision identities and bundled-update inheritance. Broken stores fall back with one notice; reads and rejected candidates create no files. Ignored/untracked candidate isolation is rechecked before snapshots. Metadata descriptions and editable placeholders survive round trips, with normal on-demand activation in experiments. Cleanup retains active/in-flight revisions and the existing 50-comparison Undo history; automatic test-pool verification keeps its trusted checker.",
+      "paths": [
+        "src/skill-packages.cjs",
+        "src/worker-instructions.cjs",
+        "src/setup-fingerprint.cjs",
+        "src/comparisons.cjs",
+        "src/controller/comparison.cjs",
+        "src/controller/coordinator.cjs",
+        "src/controller.cjs",
+        "src/tools/tool-helpers.cjs",
+        "tests/skill-packages.test.cjs",
+        "tests/coordinator.test.cjs",
+        "tests/core.test.cjs",
+        "src/workspace/job-workspaces.cjs",
+        "src/controller/task-gate.cjs",
+        "tests/job-workspaces.test.cjs",
+        "tests/testpool-harness.test.cjs",
+        "tests/providers-optional.test.cjs"
+      ],
+      "command": "node --test --test-concurrency=2 --test-name-pattern=\"skill|Hub compare starts\" tests/skill-packages.test.cjs tests/coordinator.test.cjs tests/core.test.cjs tests/job-workspaces.test.cjs tests/testpool-harness.test.cjs tests/providers-optional.test.cjs",
+      "cost": "medium",
+      "timeoutSec": 120,
+      "origin": {
+        "problem": "Skill changes could not be tested, adopted or undone through instruction comparisons.",
+        "fix": "Freeze complete skill packages, resolve active versions for every worker, and reuse comparison verdicts and Undo.",
+        "date": "2026-10-23"
+      }
     }
   ]
 }

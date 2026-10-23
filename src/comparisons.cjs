@@ -14,7 +14,7 @@ const PAGE = 'comparisons.md';
 const MAX_RECORDS = 50;
 // When checks and corrections tie, tokens (or active time) must be at least this much lower to count as "cheaper".
 const THRESHOLD = 0.2;
-const TARGETS = { bot: 'worker instructions', project: 'project PhasmaHarness.md' };
+const TARGETS = { bot: 'worker instructions', project: 'project PhasmaHarness.md', skill: 'skill package' };
 
 const excerpt = (text, limit) => (String(text).length > limit ? String(text).slice(0, limit - 1) + '…' : String(text));
 const fileHash = file => {
@@ -122,7 +122,8 @@ function runResult(item, cancelled) {
 function comparable(setup, { target = null, lessons = true } = {}) {
   const { hash, ...rest } = setup;
   return canonical({ ...rest,
-    instructions: { ...rest.instructions, ...(target ? { [target]: null } : {}) },
+    instructions: { ...rest.instructions, ...(typeof target === 'string' ? { [target]: null } : {}) },
+    ...(target?.skill ? { skills: { ...rest.skills, [target.skill]: null } } : {}),
     ...(lessons ? {} : { lessons: null }) });
 }
 
@@ -131,6 +132,7 @@ function comparable(setup, { target = null, lessons = true } = {}) {
 function confounder(base, change, target) {
   for (const run of [base, change]) {
     const result = run.result;
+    if (result?.skillError) return result.skillError;
     if (!result || result.status !== 'completed')
       return `run ${run.label} ${result?.status === 'cancelled' ? 'was cancelled' : 'did not complete'}`;
     if (result.corrections === null || !result.setups.length || result.setups.some(setup => !setup))
@@ -145,7 +147,8 @@ function confounder(base, change, target) {
   const [a, b] = [base, change].map(run => run.result.setups[0]);
   if (comparable(a, { target }) !== comparable(b, { target }))
     return 'the two runs differ in more than the change';
-  if (canonical(a.instructions?.[target] ?? null) === canonical(b.instructions?.[target] ?? null))
+  if (target?.skill ? a.skills?.[target.skill] === b.skills?.[target.skill]
+    : canonical(a.instructions?.[target] ?? null) === canonical(b.instructions?.[target] ?? null))
     return 'the change did not reach its run';
   return null;
 }
@@ -212,7 +215,7 @@ function finish(record) {
   for (let pair = 1; pair <= record.pairs; pair++) {
     const runs = record.runs.filter(run => run.pair === pair);
     const base = runs.find(run => !run.variant), change = runs.find(run => run.variant);
-    pairVerdicts.push({ pair, ...pairVerdict(base, change, record.target, record.threshold) });
+    pairVerdicts.push({ pair, ...pairVerdict(base, change, record.target === 'skill' ? { skill: record.skill?.name } : record.target, record.threshold) });
   }
   // Nothing waits on the user: the verdict and which run had the change show as soon as the last run is back.
   Object.assign(record, { state: 'finished', finishedAt: Date.now(), revealedAt: Date.now(), pairVerdicts, ...overallVerdict(pairVerdicts) });
@@ -235,16 +238,18 @@ function publicView(record) {
     ...(run.result ? { result: { ...run.result, setups: undefined, setup: run.result.setups[0]?.hash || null } } : {}),
     ...(revealed ? { changed: run.variant } : {}) }));
   return { id: record.id, number: record.number || null, state: record.state, project: record.project, task: excerpt(record.task, 400), target: record.target,
-    change: record.change, model: record.model, pairs: record.pairs, revealed, error: record.error || null, suggested: !!record.suggested,
+    change: record.change, skill: record.skill?.name || null, model: record.model, pairs: record.pairs, revealed, error: record.error || null, suggested: !!record.suggested,
     runs, ...(revealed ? { verdict: record.verdict, confidence: record.confidence, pairVerdicts: record.pairVerdicts,
       applied: record.applied || null, adopted: record.adopted || null } : {}) };
 }
 
-function readComparisons(root) {
+function readComparisons(root, { strict = false } = {}) {
   try {
     const records = JSON.parse(fs.readFileSync(path.join(root, RECORDS), 'utf8'));
+    if (strict && (!Array.isArray(records) || records.some(record => !record?.id))) throw new Error('Invalid comparison history; skill cleanup was deferred.');
     return Array.isArray(records) ? records.filter(record => record?.id) : [];
-  } catch {
+  } catch (error) {
+    if (strict && error.code !== 'ENOENT') throw error;
     return [];
   }
 }
@@ -271,12 +276,14 @@ function outcomeLines(record) {
     lines.push(`Applied run ${record.applied.label}'s changes to the project: ${record.applied.files.join(', ')}.`);
   else if (record.applied?.error)
     lines.push(record.applied.error);
-  if (record.adopted?.trial)
+  if (record.adopted?.skill)
+    lines.push(`Kept the ${record.adopted.skill} skill for this workspace.`);
+  else if (record.adopted?.trial)
     lines.push('Put the rule on trial: matching tasks carry it, and it is kept after 3 of them pass that check without this failure.');
   else if (record.adopted?.file)
     lines.push(`Added the rule to ${record.adopted.file}.`);
   else if (record.adopted?.error)
-    lines.push(`The rule was not added: ${record.adopted.error}`);
+    lines.push(`The change was not kept: ${record.adopted.error}`);
   return lines;
 }
 
@@ -299,11 +306,11 @@ function renderPage(records) {
 function saveComparison(root, record) {
   fs.mkdirSync(root, { recursive: true });
   const { lessonBlock, ...saved } = record;
-  const records = [saved, ...readComparisons(root).filter(entry => entry.id !== record.id)].sort((a, b) => b.at - a.at);
+  const records = [saved, ...readComparisons(root, { strict: true }).filter(entry => entry.id !== record.id)].sort((a, b) => b.at - a.at);
   records.length = Math.min(records.length, MAX_RECORDS);
   writeAtomic(path.join(root, RECORDS), JSON.stringify(records, null, 2));
   writeAtomic(path.join(root, PAGE), renderPage(records));
 }
 
-module.exports = { RECORDS, PAGE, THRESHOLD, TARGETS, planRuns, protectedFiles, restoreCheckFiles, prepareCopy, runResult,
+module.exports = { RECORDS, PAGE, MAX_RECORDS, THRESHOLD, TARGETS, planRuns, protectedFiles, restoreCheckFiles, prepareCopy, runResult,
   pairVerdict, overallVerdict, finish, bestRun, outcomeLines, publicView, readComparisons, saveComparison };

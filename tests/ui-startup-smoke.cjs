@@ -2946,6 +2946,32 @@ app.whenReady().then(async () => {
     .find(button => button.getAttribute('aria-label') === 'Undo the added rule').click(); true`);
   await until(() => undoCalls.length === 1, 'Undo reaches the runner');
   assert.deepEqual(undoCalls[0], [ownerChat.id, 'ui-rule', 'rule']);
+  const skillRecord = { ...ruleRecord, id: 'ui-skill', number: 3, target: 'skill', skill: { name: 'workflow' },
+    adopted: { skill: 'workflow' } };
+  ownerChat.items.push({ id: 'skill-finished', type: 'agentMessage', phase: 'final_answer', localOnly: true, text: 'The change helped.',
+    hubComparison: comparisons.publicView(skillRecord) });
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
+  assert.match(await cardText(2), /Change to the workflow skill:.*Kept the workflow skill for this workspace/s);
+  assert.ok((await cardButtons(2)).includes('Undo the skill change'));
+  await window.webContents.executeJavaScript(`document.querySelectorAll('.comparison-card')[2].scrollIntoView({ block: 'start', behavior: 'instant' });
+    new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/skill-comparison.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript(`[...document.querySelectorAll('.comparison-card')[2].querySelectorAll('button')]
+    .find(button => button.getAttribute('aria-label') === 'Undo the skill change').click(); true`);
+  await until(() => undoCalls.length === 2, 'Skill Undo reaches the shared runner');
+  assert.deepEqual(undoCalls[1], [ownerChat.id, 'ui-skill', 'skill']);
+  ownerChat.items.at(-1).hubComparison.adopted.undoneAt = Date.now();
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
+  assert.match(await cardText(2), /Restored the previous workflow skill/);
+  assert.ok(!(await cardButtons(2)).includes('Undo the skill change'));
+  delete ownerChat.items.at(-1).hubComparison.adopted.undoneAt;
+  ownerChat.items.at(-1).hubComparison.adopted.expiredAt = Date.now();
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
+  assert.match(await cardText(2), /Undo expired with the 50-comparison history/);
+  assert.ok(!(await cardButtons(2)).includes('Undo the skill change'));
+  await window.webContents.executeJavaScript(`document.querySelectorAll('.comparison-card')[2].scrollIntoView({ block: 'start', behavior: 'instant' });
+    new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/skill-comparison-expired.png'), (await window.webContents.capturePage()).toPNG());
   console.log('Comparison cards show the verdict at once, what landed with Undo, and Apply only when nothing landed');
   phase = 'rule notices';
   ownerChat.items.push({ id: 'rule-kept', type: 'notice', localOnly: true, createdAt: Date.now(),

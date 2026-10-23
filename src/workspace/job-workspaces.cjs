@@ -329,11 +329,20 @@ class JobWorkspaces {
     signal?.throwIfAborted();
     source = await fs.realpath(source);
     this.validateSource(source);
+    const copy = this.records[path.join(this.batchDirectory(batch.id), String(batch.index))];
+    const comparison = this.agents.primary.data.comparisons?.[copy?.comparisonId];
+    if (comparison?.target === 'skill') {
+      if (!comparison.skill?.candidateRelative) throw new Error('The skill candidate isolation record is unavailable.');
+      require('../skill-packages.cjs').requireIgnoredCandidate(source, path.resolve(source, comparison.skill.candidateRelative));
+    }
     await fs.mkdir(path.join(this.directory, 'empty-hooks'), { recursive: true });
     if (identity(await fs.realpath(this.directory)) !== identity(this.directory)) throw new Error('Job storage cannot be redirected through a link.');
     let input = this.inputs.get(batch.id);
     if (!input) {
       const manifest = await this.inventory(source, signal);
+      const candidate = comparison?.skill?.candidateRelative;
+      if (candidate && manifest.files.some(file => file.path === candidate || file.path.startsWith(candidate + '/')))
+        throw new Error('The candidate skill must not appear in comparison project copies.');
       const wiki = await this.wiki(source, signal);
       if (manifest.bytes + (wiki?.bytes || 0) > MAX_BYTES || manifest.files.length + (wiki?.files.length || 0) > MAX_FILES)
         throw new Error('Project and wiki inputs exceed the batch input limit.');

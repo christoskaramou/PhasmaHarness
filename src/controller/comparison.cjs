@@ -11,6 +11,9 @@ const { readLessons, relevantLessons, markSuggested, lessonKey } = require('../l
 const { projectEntry, currentProjectEntry } = require('../workspace/project-instructions.cjs');
 const { capCatalog } = require('../routing/effort-cap.cjs');
 const trials = require('../trials.cjs');
+const skillPackages = require('../skill-packages.cjs');
+const { DEFAULT_SKILLS } = require('../worker-instructions.cjs');
+const { skillHashes, canonical } = require('../setup-fingerprint.cjs');
 
 const DAY = 24 * 60 * 60 * 1000;
 const list = files => files.slice(0, 5).join(', ') + (files.length > 5 ? ` and ${files.length - 5} more` : '');
@@ -26,9 +29,9 @@ module.exports = {
     if (typeof args.task !== 'string' || !args.task.trim() || args.task.length > 14000)
       throw new Error('Give the comparison a task under 14,000 characters.');
     if (typeof args.change !== 'string' || !args.change.trim() || args.change.length > 4000)
-      throw new Error('Give the instruction change to test, under 4,000 characters.');
+      throw new Error('Describe the change to test, under 4,000 characters.');
     if (!Object.hasOwn(comparisons.TARGETS, args.target))
-      throw new Error('Choose whether the change goes into the worker instructions (bot) or the project PhasmaHarness.md (project).');
+      throw new Error('Choose worker instructions (bot), project PhasmaHarness.md (project), or a skill package (skill).');
 
     const pairs = args.pairs ?? 1;
     if (!Number.isInteger(pairs) || pairs < 1 || pairs > 3)
@@ -37,6 +40,20 @@ module.exports = {
     const workspace = this.workspace(args.workspace ?? session.workspace);
     if (session.access !== 'danger-full-access' && !this.agents.workspaces.same(session.workspace, workspace))
       throw new Error('Comparing in a different workspace requires Full access.');
+
+    let candidate;
+    if (args.target === 'skill') {
+      if (session.access === 'read-only') throw new Error('Comparing and adopting skills requires Workspace or Full access.');
+      if (!this.wikiStore) throw new Error('Workspace storage is required for skill comparisons.');
+      if (!DEFAULT_SKILLS.includes(args.skill)) throw new Error('Choose an existing Harness skill.');
+      if (typeof args.candidatePath !== 'string' || !args.candidatePath.trim()) throw new Error('Give the candidate skill folder inside the workspace.');
+      candidate = path.resolve(workspace, args.candidatePath);
+      const relative = path.relative(workspace, candidate);
+      if (!relative || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative))
+        throw new Error('The candidate skill folder must be inside the workspace.');
+      skillPackages.packageFiles(candidate);
+      skillPackages.requireIgnoredCandidate(workspace, candidate);
+    }
 
     const checks = this.data.settings.checks?.[workspace] || [];
     if (!checks.length)
@@ -51,7 +68,8 @@ module.exports = {
     this.agents.checkDelegationCapacity(this, session, pairs * 2);
     const mode = args.mode && args.mode !== 'auto' ? this.agents.agentMode(args.mode, args.effort) : await this.comparisonMode(session, args.task, workspace, checks);
     return {
-      args: { task: args.task.trim(), change: args.change.trim(), target: args.target, pairs, workspace, mode },
+      args: { task: args.task.trim(), change: args.change.trim(), target: args.target, pairs, workspace, mode,
+        ...(candidate ? { skill: args.skill, candidatePath: candidate } : {}) },
       summary: { runs: pairs * 2, model: this.resolveWorker(mode)?.label || mode, budgetMinutes: DEFAULT_MINUTES, budgetAttempts: DEFAULT_ATTEMPTS,
         checks: checks.map(check => check.name), protectedFiles: comparisons.protectedFiles(checks, workspace) },
     };
@@ -128,19 +146,38 @@ module.exports = {
       // Computed once, so both runs of every pair start with the same lessons.
       lessonBlock: this.lessonsFor(args.workspace, args.task, checks),
       runs: comparisons.planRuns(args.pairs), sessionId: session.id, requestId: request.id };
+    if (args.target === 'skill') {
+      this.pruneSkillStore(args.workspace);
+      const root = path.join(this.wikiStore.ensure(this.lessonWorkspace(args.workspace)).root, '..', 'skills');
+      record.skill = skillPackages.prepare(root, args.skill, args.candidatePath,
+        this.skillDirectories({ ...session, workspace: args.workspace }), record.runs);
+      record.skill.candidateRelative = path.relative(args.workspace, args.candidatePath).replace(/\\/g, '/');
+    }
     (this.data.comparisons ||= {})[record.id] = record;
     // Marks the request, so the chat hides this batch's report: the comparison card replaces it.
     message.comparisonId = record.id;
-    this.save();
 
     let result;
     try {
+      this.save();
       // The workers see only the task, never the user's compare message, which names the change.
       result = await this.coordinatorTool(session, 'agent_work', { task: args.task, count: args.pairs * 2, name: 'Compare',
         mode: args.mode, workspace: args.workspace }, images, abort, { ...request, text: args.task, comparison: { id: record.id } });
     } catch (error) {
+      if (record.skill) {
+        const pending = this.agents.pendingJobs().filter(({ session: work }) =>
+          this.agents.workspaces.record(work.workspace)?.comparisonId === record.id);
+        try { for (const { job } of pending) await this.agents.stopDurably(job.id); }
+        catch (failure) {
+          record.error = `Comparison dispatch failed; cleanup is pending: ${failure.message}`;
+          this.save();
+          throw new Error(record.error);
+        }
+      }
       delete this.data.comparisons[record.id];
+      delete message.comparisonId;
       this.save();
+      if (record.skill) this.pruneSkillStore(record.project);
       throw error;
     }
 
@@ -161,6 +198,14 @@ module.exports = {
 
     const item = session.items.findLast(entry => entry.type === 'agentResult' && entry.requestId === request.id && entry.batch?.index === run.index);
     run.result = comparisons.runResult(item, cancelled);
+    if (record.target === 'skill') {
+      const frozen = record.skill?.runs.find(entry => entry.index === run.index);
+      try {
+        if (!frozen || canonical(skillHashes(frozen.dirs)) !== canonical(frozen.hashes) ||
+            run.result.setups.some(setup => canonical(setup?.skills) !== canonical(frozen.hashes)))
+          run.result.skillError = 'the skill files differ from the frozen comparison setup';
+      } catch { run.result.skillError = 'the frozen skill files are unavailable'; }
+    }
     const returned = record.runs.filter(entry => entry.result).length;
     if (returned < record.runs.length) {
       this.comparisonCard(session, record);
@@ -180,10 +225,11 @@ module.exports = {
   async settleComparison(record) {
     record.applied = await this.applyBestRun(record);
     record.adopted = this.adoptRule(record);
-    this.saveComparisonRecord(record);
+    const recorded = this.saveComparisonRecord(record);
     delete this.data.comparisons[record.id];
     this.save();
     await this.removeComparisonBots();
+    if (record.skill && recorded) this.pruneSkillStore(record.project);
   },
 
   // At startup: comparisons that finished before results were automatic still wait for a pick nobody can give now.
@@ -198,10 +244,19 @@ module.exports = {
       if (session)
         this.comparisonCard(session, record);
     }
+    const projects = new Set(this.data.sessions.flatMap(session => session.items.filter(item => item.hubComparison?.target === 'skill').map(item => item.hubComparison.project)));
+    for (const project of projects) this.pruneSkillStore(project);
     this.save();
   },
 
   async applyBestRun(record) {
+    if (record.target === 'skill') {
+      const owner = this.session(record.sessionId);
+      if (owner.access === 'read-only' || (owner.access !== 'danger-full-access' && !this.agents.workspaces.same(owner.workspace, record.project)))
+        return { error: 'The owner no longer has write access to this workspace, so nothing was applied.' };
+    }
+    if (record.target === 'skill' && (record.verdict === 'confounded' || record.runs.some(run => run.result?.skillError)))
+      return { error: 'The skill comparison was not reliable, so nothing was applied.' };
     const run = comparisons.bestRun(record);
     if (!run)
       return { error: 'No run passed every check, so nothing was applied to the project.' };
@@ -222,6 +277,15 @@ module.exports = {
   // A project rule that helped: one the user asked to compare joins the project entry; one Harness found itself goes on
   // trial (src/trials.cjs), since a single pair is weak evidence and real tasks decide whether it stays.
   adoptRule(record) {
+    if (record.target === 'skill' && record.verdict === 'helped') {
+      try {
+        if (record.runs.some(run => run.result?.skillError)) throw new Error('A comparison snapshot changed.');
+        const owner = this.session(record.sessionId);
+        if (owner.access === 'read-only' || (owner.access !== 'danger-full-access' && !this.agents.workspaces.same(owner.workspace, record.project)))
+          throw new Error('The owner no longer has write access to this workspace.');
+        return skillPackages.adopt(record.skill);
+      } catch (error) { return { error: error.message }; }
+    }
     if (record.target !== 'project' || record.verdict !== 'helped')
       return null;
 
@@ -267,6 +331,17 @@ module.exports = {
 
       await this.agents.workspaces.undo(view.applied.workspace, view.applied.changes);
       view.applied.undoneAt = Date.now();
+    } else if (part === 'skill') {
+      if (!view?.adopted?.skill || view.adopted.undoneAt || view.adopted.expiredAt) throw new Error('There is no retained skill change to undo.');
+      const owner = this.session(id);
+      if (owner.access === 'read-only' || (owner.access !== 'danger-full-access' && !this.agents.workspaces.same(owner.workspace, view.project)))
+        throw new Error('Undoing a skill requires write access to its workspace.');
+      skillPackages.undo(view.adopted);
+      view.adopted.undoneAt = Date.now();
+      const root = this.wikiStore.location(this.lessonWorkspace(view.project)).root;
+      const saved = comparisons.readComparisons(root).find(record => record.id === comparisonId);
+      if (saved) comparisons.saveComparison(root, { ...saved, adopted: view.adopted });
+      this.pruneSkillStore(view.project);
     } else if (part === 'rule' && view?.adopted?.trial) {
       if (view.adopted.undoneAt)
         throw new Error('There is no added rule to undo.');
@@ -314,13 +389,45 @@ module.exports = {
 
   saveComparisonRecord(record) {
     if (!this.wikiStore)
-      return;
+      return false;
 
     try {
       comparisons.saveComparison(this.wikiStore.ensure(this.lessonWorkspace(record.project)).root, record);
+      return true;
     } catch (error) {
       this.log.warn('Comparison not saved to the project wiki', { comparison: record.id, error: error.message });
+      return false;
     }
+  },
+
+  pruneSkillStore(project) {
+    if (!this.wikiStore) return;
+    try {
+      const wiki = this.wikiStore.location(this.lessonWorkspace(project)).root, root = path.join(wiki, '..', 'skills');
+      const controllers = this.agents?.allControllers() || [this];
+      const saved = comparisons.readComparisons(wiki, { strict: true });
+      const cards = controllers.flatMap(controller => controller.data.sessions.flatMap(session => session.items
+        .map(item => item.hubComparison).filter(view => view?.adopted?.root === root)));
+      const retained = new Map(saved.map(record => [record.id, record]));
+      for (const card of cards) retained.set(card.id, retained.has(card.id) ? { ...retained.get(card.id), adopted: card.adopted } : card);
+      const records = [...retained.values()]
+        .sort((a, b) => (b.number || 0) - (a.number || 0) || (b.at || 0) - (a.at || 0)).slice(0, comparisons.MAX_RECORDS);
+      const primary = this.agents?.primary || this;
+      const pending = Object.values(primary.data.comparisons || {});
+      const busy = new Set((this.agents?.pendingJobs() || []).map(({ session }) => this.agents.workspaces.record(session.workspace)?.comparisonId));
+      pending.push(...saved.filter(record => busy.has(record.id)));
+      const removed = new Set(skillPackages.prune(root, records, pending));
+      for (const controller of controllers) {
+        let changed = false;
+        for (const session of controller.data.sessions) for (const item of session.items) {
+          const adopted = item.hubComparison?.adopted;
+          if (adopted?.root === root && !adopted.undoneAt && (removed.has(adopted.revision) || removed.has(adopted.previous))) {
+            adopted.expiredAt = Date.now(); changed = true;
+          }
+        }
+        if (changed) controller.save();
+      }
+    } catch (error) { this.log.warn('Skill snapshot cleanup deferred', { error: error.message }); }
   },
 
   // Removes the idle bots of comparisons that are over (finished, or no longer in Harness data), so they do not pile up

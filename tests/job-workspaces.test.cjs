@@ -51,6 +51,22 @@ test('workspace instructions are frozen per batch and isolated per copy', async 
   assert.equal(fs.existsSync(path.join(first.workspace, 'INSTRUCTIONS.md')), false);
 });
 
+test('skill candidate isolation is rechecked at snapshot time, after comparison planning', async t => {
+  const { source, primary, workspaces } = fixture(t);
+  const candidate = path.join(source, 'candidate');
+  fs.mkdirSync(candidate);
+  fs.writeFileSync(path.join(candidate, 'SKILL.md'), 'Candidate instructions');
+  fs.appendFileSync(path.join(source, '.gitignore'), '\n/candidate/\n');
+  require('../src/skill-packages.cjs').requireIgnoredCandidate(source, candidate);
+  const batch = { id: randomUUID(), index: 1 }, copy = workspaces.reserve(source, batch);
+  const record = workspaces.record(copy.workspace);
+  record.comparisonId = 'comparison';
+  primary.data.comparisons = { comparison: { target: 'skill', skill: { candidateRelative: 'candidate' } } };
+  fs.writeFileSync(path.join(source, '.gitignore'), 'build/\n');
+  await assert.rejects(workspaces.prepare(source, batch), /ignored, untracked/);
+  assert.equal(fs.existsSync(path.join(workspaces.batchDirectory(batch.id), 'input')), false);
+});
+
 test('plain project folders retain one independent frozen batch input, ignore rules, instructions and the active wiki without creating Git metadata', async t => {
   const { directory, source, primary, workspaces } = fixture(t, { repository: false });
   fs.writeFileSync(path.join(source, 'AGENTS.md'), 'Keep these ignored project instructions.');

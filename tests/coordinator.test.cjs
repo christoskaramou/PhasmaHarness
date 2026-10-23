@@ -1825,7 +1825,7 @@ test('a new delegation to an explicitly selected model starts its own task goal'
 
 
 test('Hub compare starts on request with one Auto model, keeps only the change different, restores edited checks, then applies the better run and keeps a rule that helped', async t => {
-  for (const target of ['bot', 'project']) await t.test(target, async t => {
+  for (const target of ['bot', 'project', 'skill']) await t.test(target, async t => {
     const { root, hub, session, agents, replies, calls, send } = await setup(t);
     const project = projectFixture(root, session);
     session.access = 'danger-full-access';
@@ -1833,8 +1833,18 @@ test('Hub compare starts on request with one Auto model, keeps only the change d
     hub.data.settings.checks[project] = [{ id: 'done-check', name: 'Done check', argv: [process.execPath, path.join(project, 'check.cjs')], cwd: project, timeoutMs: 10000 }];
     hub.lessonsFor = () => 'Lessons block for this comparison.';
     const change = 'Always create done.txt before anything else.';
+    let skillArgs = {};
+    if (target === 'skill') {
+      hub.wikiStore = new (require('../src/workspace/wiki-store.cjs').WikiStore)(path.join(root, 'Wikis'));
+      const candidate = path.join(project, 'candidate-skill');
+      fs.mkdirSync(candidate);
+      fs.writeFileSync(path.join(candidate, 'SKILL.md'), '---\ndescription: ' + change + '\n---\nRead {{SKILL_DIR}}/check.cjs');
+      fs.appendFileSync(path.join(project, '.gitignore'), '\n/candidate-skill/\n');
+      fs.writeFileSync(path.join(candidate, 'check.cjs'), 'process.stdout.write("skill helper");');
+      skillArgs = { skill: 'workflow', candidatePath: candidate };
+    }
     // No model named: Auto picks one for the request and both runs use it. The request itself is the approval.
-    replies.push(action('compare', { task: 'Create done.txt.', change, target }));
+    replies.push(action('compare', { task: 'Create done.txt.', change, target, ...skillArgs }));
     await send(`Compare creating done.txt with the instruction change "${change}"`);
     const record = Object.values(hub.data.comparisons)[0];
     assert.equal(record.state, 'running');
@@ -1866,6 +1876,19 @@ test('Hub compare starts on request with one Auto model, keeps only the change d
       assert.equal(developer.includes(change), run.variant, 'the change reaches only its run\'s provider');
       const entry = fs.readFileSync(path.join(work.workspace, 'PhasmaHarness.md'), 'utf8');
       assert.equal(entry.includes(change), target === 'project' && run.variant);
+      if (target === 'skill') {
+        const loaded = worker.toolHelpers.read(work, { skill: 'workflow' }).text;
+        assert.equal(loaded.includes(change), run.variant, 'helper reads the same frozen package as the provider');
+        assert.ok(!developer.includes('Read {{SKILL_DIR}}/check.cjs'), 'normal on-demand loading is also used during comparisons');
+        assert.ok(!fs.existsSync(path.join(work.workspace, 'candidate-skill')), 'neither run receives the candidate folder');
+        assert.ok(!fs.existsSync(path.join(agents.workspaces.batchDirectory(record.batchId), 'input', 'candidate-skill')), 'the frozen source snapshot also excludes it');
+        assert.equal(require('../src/setup-fingerprint.cjs').skillHashes(worker.skillDirectories(work)).workflow,
+          run.variant ? record.skill.afterHash : record.skill.beforeHash);
+        if (run.variant) {
+          const helper = path.join(worker.skillDirectories(work).workflow, 'check.cjs');
+          assert.equal(execFileSync(process.execPath, [helper], { encoding: 'utf8' }), 'skill helper');
+        }
+      }
     }
 
     const finish = async (worker, text) => {
@@ -1895,7 +1918,7 @@ test('Hub compare starts on request with one Auto model, keeps only the change d
     assert.deepEqual(holders, [session.items.at(-1)], 'the card moved down to the newest comparison message');
     const label = changed.run.label;
     assert.equal(session.items.at(-1).text, `The change helped (the change needed fewer corrections (0 instead of 1)). Applied run ${label}'s changes to the project: done.txt.` +
-      (target === 'project' ? ` Added the rule to ${path.join(fs.realpathSync(project), 'PhasmaHarness.md')}.` : ''));
+      (target === 'project' ? ` Added the rule to ${path.join(fs.realpathSync(project), 'PhasmaHarness.md')}.` : target === 'skill' ? ' Kept the workflow skill for this workspace.' : ''));
     const visible = session.items.filter(item => !item.internal);
     assert.equal(visible.filter(item => item.type === 'agentResult' || item.agentReply).length, 0, 'no per-run receipts or handoffs in the chat');
     const card = holders[0].hubComparison;
@@ -1916,6 +1939,16 @@ test('Hub compare starts on request with one Auto model, keeps only the change d
       assert.ok(fs.readFileSync(entryFile, 'utf8').trimEnd().endsWith(change), 'the rule that helped joins the project entry');
       await hub.undoComparison(session.id, record.id, 'rule');
       assert.equal(fs.readFileSync(entryFile, 'utf8').includes(change), false, 'Undo takes the rule out again');
+    } else if (target === 'skill') {
+      const loaded = () => hub.toolHelpers.read(session, { skill: 'workflow' }).text;
+      assert.ok(loaded().includes(change), 'adoption is visible immediately without restarting Harness');
+      assert.ok(hub.workerInstructions(session).includes(hub.skillDirectories(session).workflow.replace(/\\/g, '/')));
+      assert.ok(card.adopted.root.startsWith(path.join(root, 'Wikis')), 'the package is outside the installation');
+      assert.deepEqual(fs.readdirSync(path.join(card.adopted.root, 'revisions')), [card.adopted.revision], 'finished run snapshots are released');
+      await hub.undoComparison(session.id, record.id, 'skill');
+      assert.ok(!loaded().includes(change), 'Undo restores the complete old package');
+      assert.deepEqual(fs.readdirSync(path.join(card.adopted.root, 'revisions')), [], 'Undo releases the unused candidate revision');
+      await assert.rejects(hub.undoComparison(session.id, record.id, 'skill'), /no retained skill change/);
     } else assert.equal(card.adopted, null, 'only project rules are added to the project entry');
     await hub.undoComparison(session.id, record.id, 'apply');
     assert.equal(fs.existsSync(path.join(project, 'done.txt')), false, 'Undo removes what the comparison applied');

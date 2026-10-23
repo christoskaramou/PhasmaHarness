@@ -15,6 +15,7 @@ const { lessonFromTask, recordLesson, readLessons, relevantLessons, lessonsOffer
 const { restoreCheckFiles } = require('../comparisons.cjs');
 const { projectEntry } = require('../workspace/project-instructions.cjs');
 
+// Host verification stays on trusted bundled code; a compared worker skill must not replace its checker.
 const TEST_POOL = path.resolve(__dirname, '..', '..', 'skills', 'test-pool', 'scripts', 'testpool.cjs');
 // One test pool run per repository at a time; a turn that ends meanwhile gets one more run afterwards.
 const poolRuns = new Map();

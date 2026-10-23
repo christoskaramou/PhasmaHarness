@@ -42,6 +42,18 @@ function controller(fields = {}) {
 const chat = (root, access = 'danger-full-access') => ({ id: 'chat', access, workspace: root,
   items: [{ type: 'agentMessage', phase: 'final_answer', text: 'Edited src.txt.' }] });
 
+test('an editable test-pool skill cannot replace the trusted host checker', async () => {
+  const root = repo(), candidate = path.join(root, 'candidate'), marker = path.join(root, 'candidate-ran');
+  fs.mkdirSync(path.join(candidate, 'scripts'), { recursive: true });
+  fs.writeFileSync(path.join(candidate, 'scripts', 'testpool.cjs'), `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran');`);
+  const bot = controller({ skillDirectories: () => ({ 'test-pool': candidate }) }), session = chat(root);
+  await bot.runTestPool(root, session);
+  fs.writeFileSync(path.join(root, 'src.txt'), 'BROKEN');
+  await bot.runTestPool(root, session);
+  assert.equal(fs.existsSync(marker), false);
+  assert.match(bot.sent[0].text, /FAILED src-ok/);
+});
+
 test('a failing pool after a Full-access turn goes back to the bot as a Test pool message', async () => {
   const root = repo();
   const bot = controller();

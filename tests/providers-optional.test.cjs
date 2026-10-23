@@ -393,7 +393,10 @@ test('workers can read a full bundled skill on demand through router_read_output
   const helpers = new ToolHelpers(os.tmpdir());
   const result = helpers.read({ id: 's', workspace: process.cwd() }, { skill: 'large-responses' });
   assert.match(result.text, /scripts\/output\.cjs/);
-  assert.doesNotMatch(result.text, /\{\{SKILL_DIR\}\}/);
+  assert.match(result.text, /\{\{SKILL_DIR\}\}/, 'editable source preserves portable helper paths');
+  assert.match(result.text, /^---\r?\nname: large-responses/);
+  assert.equal(result.directory, require('../src/worker-instructions.cjs').skillDir('large-responses'));
+  assert.ok(fs.existsSync(path.join(result.directory, 'scripts', 'output.cjs')));
   assert.throws(() => helpers.read({ id: 's' }, { skill: '../../secrets' }), /Unknown Harness skill/);
   assert.throws(() => helpers.read({ id: 's' }, { skill: 'ponytail', path: 'a' }), /exactly one/);
 });
