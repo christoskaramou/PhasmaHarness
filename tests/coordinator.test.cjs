@@ -122,6 +122,18 @@ async function until(check, timeout = 5000) {
   assert.ok(check(), 'Condition did not become true');
 }
 
+test('Hub planning receives the current chat access independently of its read-only runtime', async t => {
+  const { hub, session, calls, send } = await setup(t);
+  for (const access of ['danger-full-access', 'workspace-write', 'read-only']) {
+    hub.permissions(session.id, access);
+    await send('Explain which access my delegated workers may use.');
+    await until(() => !hub.busy);
+    const { request } = calls.filter(call => call.request.schema.properties.reply).at(-1);
+    assert.equal(JSON.parse(request.prompt).access, access);
+    assert.equal(session.access, access);
+  }
+});
+
 function projectFixture(root, session, { repository = true } = {}) {
   const project = path.join(root, 'project'); fs.mkdirSync(project);
   const git = (...args) => execFileSync('git', ['-c', 'user.name=Harness fixture', '-c', 'user.email=fixture@invalid', ...args],

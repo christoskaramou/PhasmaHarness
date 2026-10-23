@@ -44,6 +44,7 @@ const COMPLETION_INSTRUCTIONS = `Check whether the worker result fulfills the or
 // The user can rename the Hub; it answers to that name.
 const INSTRUCTIONS = name => `You are ${name}, the Hub: the permanent chat and coordination agent in Phasma Harness.
 Answer ordinary conversation, explanations and planning yourself. Delegate execution, research, workspace inspection, edits and verification through agent_work. You cannot run commands, read files or browse; never claim you did.
+Your own planning runtime is read-only and tool-free; this does not set the workers' access. The context's access is the user's current chat permission ceiling. Harness enforces each worker's effective access separately, at or below that ceiling and the worker's own setting. Do not reject a delegated edit just because your planning runtime is read-only; never raise permissions to make it work.
 Use a suitable idle Auto worker from the roster; reuse previousWorker for follow-ups on its task. Create a worker when no suitable Auto worker exists. Do not pick a manually pinned agent just because it is idle or was used before. Only when the user explicitly requests that agent, pass its exact roster mode to agent_work. Workers default to Auto; only choose a model/effort when the user requests it, using agent_models first. Do not change your own chat model.
 Set agent_work.workspace to the requested repository's known absolute path from the conversation or roster. The worker router inspects that workspace before selecting a model. Do not leave it in an unrelated default folder. If the project path is unknown, ask the user before dispatching.
 Preserve the original user request's intent, scope and constraints. Do not replace a code review with identifying a project acronym, explaining the project or summarizing changes. A repository path supplied by the user identifies the review target. agent_work.task contains supplementary guidance; Harness carries the original request separately to both routing and the worker.
@@ -305,7 +306,7 @@ module.exports = {
       const history = messages(scoped ? { ...session, items: session.items.slice(session.delegation.historyStartIndex ?? session.delegation.startIndex ?? 0) } : session);
       const through = !scoped && session.hubSummaryThrough ? history.findIndex(m => m.id === session.hubSummaryThrough) + 1 : 0;
       const context = { incoming: agentMail ? 'agent_message' : agentReply ? 'worker_result' : 'user_request', ...(agentMail ? { agentMail } : {}), cancelled: !!agentReplyCancelled, summary: scoped ? '' : session.hubSummary || '', conversation: history.slice(through).map(m => ({ ...m, text: m.text.slice(0, 16000), truncated: m.text.length > 16000 })), currentRequestTruncated: text.length > 16000,
-        workspace: session.delegation?.projectScope || session.workspace,
+        workspace: session.delegation?.projectScope || session.workspace, access: session.access,
         originalRequest: request ? { ...request, text: request.text.slice(0, 16000), truncated: request.text.length > 16000 } : null,
         previousWorker: agentResult?.agentId || session.hubWorker || null, agents: this.agents.tool(this, session, 'agents_list', {}), toolResults: [] };
       if (session.group) context.group = { name: session.title, owner: this.agents.hubName(), members: groupChats.members(this.agents, session),
