@@ -40,7 +40,7 @@ function wikisFolder(base, log) {
 async function createRunner({ app, data = app?.getPath('userData'), safeStorage, fetch = globalThis.fetch, log, quit }) {
   if (!data || !path.isAbsolute(data)) throw new Error('Choose an absolute runner data directory.');
   const version = app?.getVersion() || require('../package.json').version;
-  const wikiStore = new WikiStore(wikisFolder(app && !app.isPackaged ? app.getAppPath() : data, log));
+  const wikiStore = new WikiStore(wikisFolder(data, log));
   const store = path.join(data, 'sessions.json');
   backupStores(store);
   const containment = await containRunner(data);

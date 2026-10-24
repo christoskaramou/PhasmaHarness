@@ -1123,7 +1123,9 @@ function renderAgents() {
     const waiting = activity.sessions.find(s => activity.waitingForAgents?.includes(s.id));
     const task = activity.sessions.find(s => s.id === activity.busy) || queued || waiting;
     const status = activity.requests.length ? 'Needs input' : task?.quotaWaiting || task?.delegation?.quotaPause ? 'Paused' : task?.capacityWaiting ? 'Queued' : task?.waitingForAgent || (!activity.busy && (queued || waiting)) ? 'Waiting' : activity.busy ? 'Working' : activity.connection === 'connecting' ? 'Starting' : activity.connection === 'ready' ? 'Ready' : 'Connection needed';
-    const latest = conversation?.items.findLast(item => item.type === 'agentMessage' && item.phase !== 'commentary' && item.text);
+    const latest = conversation?.items.findLast(item => item.text &&
+      ((item.type === 'agentMessage' && item.phase !== 'commentary') ||
+       (item.type === 'agentResult' && !item.internal && !item.superseded)));
     const preview = (task?.title || latest?.text || '').slice(0, 100).replace(/\s+/g, ' ');
     return { ...agent, status, preview, task: task?.title, waiting: task?.waitingForAgent, queued: !!queued || !!waiting,
       batchIdle: !!agent.temporaryBatch && !backgroundPending && !pendingWork(worker),

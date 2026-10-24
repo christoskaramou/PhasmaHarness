@@ -99,6 +99,65 @@ test('the deadline includes retries and cancels providers even when they never s
   assert.equal(router.timeoutMs, 180000);
 });
 
+test('an idle deadline permits active reasoning beyond the wall deadline and ignores activity after completion', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let finish;
+  const { router, calls, choice } = adapter('cursor-cli', () => new Promise(resolve => { finish = resolve; }));
+  const pending = router.complete({ ...request, timeoutMs: 50, idleTimeout: true }, choice, new AbortController());
+  await new Promise(setImmediate);
+  for (let i = 0; i < 5; i++) {
+    t.mock.timers.tick(40);
+    calls[0].onActivity();
+    assert.equal(calls[0].signal.aborted, false, 'ongoing output is not a hung provider');
+  }
+  finish({ decision: valid });
+  assert.deepEqual((await pending).decision, valid);
+  calls[0].onActivity();
+  t.mock.timers.tick(1000);
+  assert.equal(calls[0].signal.aborted, false, 'late activity cannot resurrect the cleared timer');
+});
+
+test('idle deadlines still stop silent providers and user Stop wins over continuing activity', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  for (const stop of [false, true]) {
+    const abort = new AbortController();
+    const { router, calls, choice } = adapter('cursor-cli', () => new Promise(() => {}));
+    const pending = router.complete({ ...request, timeoutMs: 50, idleTimeout: true }, choice, abort);
+    const rejected = assert.rejects(pending, { name: stop ? 'AbortError' : 'TimeoutError' });
+    await new Promise(setImmediate);
+    t.mock.timers.tick(40); calls[0].onActivity();
+    t.mock.timers.tick(40);
+    assert.equal(calls[0].signal.aborted, false);
+    if (stop) abort.abort();
+    else t.mock.timers.tick(10);
+    calls[0].onActivity();
+    await rejected;
+    assert.equal(calls[0].signal.aborted, true);
+    assert.equal(calls.length, 1, 'a stopped request is never retried');
+  }
+});
+
+test('CLI answer and thinking deltas renew idle time, but metadata and empty chunks do not', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { router, calls, choice } = adapter('claude-cli', () => new Promise(() => {}));
+  const pending = router.complete({ ...request, timeoutMs: 50, idleTimeout: true }, choice, new AbortController());
+  const rejected = assert.rejects(pending, { name: 'TimeoutError' });
+  await new Promise(setImmediate);
+  for (const event of [
+    { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'progress' } } },
+    { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: '{' } } },
+    { type: 'assistant', message: { content: [{ type: 'text', text: '}' }] } },
+  ]) {
+    t.mock.timers.tick(40); calls[0].onEvent(event);
+    assert.equal(calls[0].signal.aborted, false);
+  }
+  t.mock.timers.tick(40);
+  calls[0].onEvent({ type: 'system' });
+  calls[0].onEvent({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: '' } } });
+  t.mock.timers.tick(10);
+  await rejected;
+});
+
 test('Codex responses use the same validation and retry and release their listeners', async t => {
   const client = new EventEmitter();
   client.start = async () => {};
@@ -122,4 +181,30 @@ test('Codex responses use the same validation and retry and release their listen
   assert.deepEqual(result.decision, valid);
   assert.equal(turns, 2);
   assert.equal(client.listenerCount('notification'), 0);
+});
+
+test('only the active Codex thread can renew a structured review deadline', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  for (const threadId of ['active', 'unrelated']) {
+    const client = new EventEmitter(); client.start = async () => {}; client.close = () => {};
+    client.call = async method => method === 'config/read' ? { config: {} }
+      : method === 'thread/start' ? { thread: { id: 'active' } } : {};
+    const router = new SmartRouter(__dirname, () => client);
+    const pending = router.complete({ ...request, timeoutMs: 50, idleTimeout: true }, { provider: 'codex', model: 'test' }, new AbortController());
+    const rejected = threadId === 'unrelated' ? assert.rejects(pending, { name: 'TimeoutError' }) : null;
+    await new Promise(setImmediate);
+    for (const method of ['item/reasoning/summaryTextDelta', 'item/reasoning/textDelta', 'item/agentMessage/delta']) {
+      t.mock.timers.tick(40);
+      client.emit('notification', { method, params: { threadId, delta: 'progress' } });
+      if (rejected) break;
+    }
+    if (rejected) { t.mock.timers.tick(10); await rejected; }
+    else {
+      client.emit('notification', { method: 'item/completed', params: { threadId, item: { type: 'agentMessage', text: JSON.stringify(valid) } } });
+      client.emit('notification', { method: 'turn/completed', params: { threadId, turn: { status: 'completed' } } });
+      assert.deepEqual((await pending).decision, valid);
+    }
+    assert.equal(client.listenerCount('notification'), 0);
+    router.close();
+  }
 });

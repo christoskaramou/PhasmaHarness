@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
-const { TAG: PROCESS_TAG, Watch, stopLeftovers, spawnOwned } = require('../process-tree.cjs');
+const { TAG: PROCESS_TAG, Watch, stopLeftovers, spawnOwned, stopTree } = require('../process-tree.cjs');
 const { CHECKER: PHASMA_GAME_CHECKS, restoreMcpOptIn } = require('../phasma-game-checks.cjs');
 const { FINAL, OUTPUT_CAP, canProposeWiki, capStream, childBlocksClear, confirmTermination, correctionText, createTask, gateOutcome, hasProjectWiki, identityFromProbe, lookupState, parentExitReaps, parseChecklist, resolveCitations, shouldTrack, summaryLine, validateChecks } = require('../tasks.cjs');
 const { accessMode, sameEffort, treeEntries } = require('./shared.cjs');
@@ -422,6 +422,7 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
   },
 
   startTestPool(root, session) {
+    if (this.testPoolsClosed || this.agents?.closing) return;
     root = fs.realpathSync(root);
     const key = process.platform === 'win32' ? root.toLowerCase() : root;
     const request = { controller: this, session, last: session.items.at(-1) };
@@ -438,6 +439,7 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
     entry.promise = (async () => {
       while (entry.waiters.length) {
         const next = entry.waiters.shift();
+        if (next.controller.testPoolsClosed || next.controller.agents?.closing) continue;
         try { await next.controller.runTestPool(root, next.session, next.last); }
         catch (error) { next.controller.log?.warn('Test pool run failed', { message: error.message }); }
       }
@@ -445,10 +447,24 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
     return entry.promise;
   },
 
+  stopTestPools() {
+    this.testPoolsClosed = true;
+    return Promise.all([...(this.testPoolProcesses || [])].map(run => {
+      if (!run.stopping) {
+        run.cancelled = run.child.exitCode === null && run.child.signalCode === null;
+        run.stopping = stopTree(run.child).then(remaining => {
+          if (remaining.length) throw new Error('Test pool process cleanup is not confirmed.');
+        });
+      }
+      return run.stopping;
+    }));
+  },
+
   // The script's Stop-hook entry point keeps its own lock, change tracking and per-chat retry cap: exit 2 with the
   // report means "send it back to the bot", a systemMessage is a notice (passed, invalid, still failing), nothing means
   // there was nothing to run.
   async runTestPool(root, session, lastItem = session.items.at(-1)) {
+    if (this.testPoolsClosed || this.agents?.closing) return;
     const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
     // Harness's own Jev key or none, so the script never reads one from the Windows credential store.
     try {
@@ -463,6 +479,8 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
     const child = spawnOwned(spawn, process.execPath, [TEST_POOL, 'hook', '--agent', 'claude'], {
       cwd: root, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env,
     });
+    const run = { child, cancelled: false, stopping: null };
+    (this.testPoolProcesses ||= new Set()).add(run);
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', data => {
@@ -478,7 +496,8 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
     const code = await new Promise(resolve => {
       child.once('error', () => resolve(null));
       child.once('close', resolve);
-    });
+    }).finally(() => this.testPoolProcesses.delete(run));
+    if (run.stopping) await run.stopping;
 
     const notice = text => {
       const retained = this.data?.sessions.find(chat => chat.id === session.id) || session;
@@ -490,7 +509,7 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
     const report = stderr.trim();
     if (code === 2 && report) {
       // A job's or sub-bot's result has already gone back to the bot that asked for it, so the report only shows here.
-      if (this.executionContext || this.agents?.closing || session.archived ||
+      if (this.executionContext || this.testPoolsClosed || this.agents?.closing || session.archived ||
           (this.data && !this.data.sessions.includes(session)) || this.busy || session.pendingMessage || session.queue?.length ||
           session.items.at(-1) !== lastItem || session.access !== 'danger-full-access')
         return notice(report);
@@ -500,6 +519,11 @@ ${JSON.stringify({ goal: task.goal, amendments: task.amendments, wikiIndex: wiki
       } catch {
         notice(report);
       }
+      return;
+    }
+
+    if (run.cancelled && code !== 0) {
+      this.log?.info?.('Test pool cancelled during shutdown', { code, stderr: report.slice(-300) });
       return;
     }
 

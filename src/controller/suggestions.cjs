@@ -24,6 +24,9 @@ module.exports = {
     const session = this.session(id);
     if (this.busy === id || session.pendingMessage || session.queue?.length || session.compacting)
       return null;
+    // Returning a worker result must not add another model call after its direct or combined reply.
+    if (this.isCoordinator?.() && session.items.findLast(item => item.type === 'userMessage')?.agentReply)
+      return null;
 
     const visible = session.items.filter(item => !item.pending && visibleText(item).trim());
     const last = visible.at(-1);

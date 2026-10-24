@@ -7,6 +7,8 @@ const { imageData } = require('../image-input.cjs');
 const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
+const { atomicWrite } = require('../session-store.cjs');
+const { invalidResponse } = require('./structured.cjs');
 
 const stop = stopTree;
 
@@ -98,7 +100,17 @@ class CursorCLI {
       return this.models;
     } finally { rpc.close(); }
   }
-  connect({ cwd, model, signal, onUpdate = () => {}, onRequest = async () => ({ outcome: 'cancelled' }) }) {
+  connect({ cwd, model, signal, noTools = false, onUpdate = () => {}, onRequest = async () => ({ outcome: 'cancelled' }) }) {
+    if (noTools) {
+      cwd = path.join(cwd, 'cursor-review');
+      const directory = path.join(cwd, '.cursor');
+      fs.mkdirSync(directory, { recursive: true });
+      if (fs.realpathSync(directory) !== path.resolve(directory)) throw new Error('Cursor review settings must not be redirected through a link.');
+      // Ask mode still has read tools; keep classifiers in an empty directory with explicit denials.
+      const file = path.join(directory, 'cli.json');
+      const text = JSON.stringify({ permissions: { allow: [], deny: ['Read(**)', 'Write(**)', 'Shell(*)', 'WebFetch(*)', 'Mcp(*:*)'] } });
+      if (!fs.existsSync(file) || fs.readFileSync(file, 'utf8') !== text) atomicWrite(file, text);
+    }
     // CLI aliases differ from ACP model IDs. run() selects the exact ACP ID before prompting.
     const child = this.start(['--model', 'auto', 'acp'], cwd);
     const pending = new Map(); let next = 0, buffer = '', closed = false;
@@ -131,19 +143,26 @@ class CursorCLI {
     child.stderr.on('data', () => {});
     child.once('error', e => { fail(e); close(); }); child.once('close', () => { closed = true; fail(new Error('Cursor connection closed.')); signal?.removeEventListener('abort', close); });
     signal?.addEventListener('abort', close, { once: true }); if (signal?.aborted) close();
-    return { call, close, child, notify: (method, params) => write({ method, params }) };
+    return { call, close, child, cwd, notify: (method, params) => write({ method, params }) };
   }
-  async run({ cwd, model, effort, effortOption, parameterized, parameters = [], prompt, images = [], resume, access, signal, onEvent = () => {}, approve = async () => false, schema, helpers, onInput, instructions = WORKER_INSTRUCTIONS }) {
+  async run({ cwd, model, effort, effortOption, parameterized, parameters = [], prompt, images = [], resume, access, signal, onEvent = () => {}, onActivity, approve = async () => false, schema, helpers, onInput, instructions = WORKER_INSTRUCTIONS }) {
     // Models from cursor/list_available_models are base names with separate parameters: Cursor accepts them, and their
     // reasoning option, only from a client that declares the parameterized model picker.
     const setEffort = typeof effort === 'string' && effort && typeof effortOption === 'string' && effortOption;
     const picker = parameterized === true || setEffort;
     // Each prompt has its own reply id, approval signal and start time (Send now replaces the prompt in this session).
-    let sessionId, output = '', prompting = false, messageId = randomUUID(), promptAbort = new AbortController(), promptStartedAt = Date.now();
-    const rpc = this.connect({ cwd, model, signal,
+    let sessionId, output = '', prompting = false, toolError = null, messageId = randomUUID(), promptAbort = new AbortController(), promptStartedAt = Date.now();
+    const rpc = this.connect({ cwd, model, signal, noTools: !!schema,
       onUpdate: p => {
         if (!prompting || p.sessionId !== sessionId) return;
         const u = p.update;
+        if (schema && u?.sessionUpdate === 'tool_call') {
+          // Cursor can start read/search tools without a permission request. Never accept a tool-using classifier's result.
+          toolError = invalidResponse();
+          rpc.close();
+          return;
+        }
+        if (['agent_message_chunk', 'agent_thought_chunk'].includes(u?.sessionUpdate) && u.content?.type === 'text' && u.content.text) onActivity?.();
         if (u?.sessionUpdate === 'agent_message_chunk' && u.content?.type === 'text') {
           output += u.content.text;
           onEvent({ type: 'assistant', session_id: sessionId, message: { id: messageId, content: [{ type: 'text', text: output }] } });
@@ -171,7 +190,7 @@ class CursorCLI {
       // Authentication is completed by the official login command, never token extraction.
       // Classifiers keep an empty MCP list. Workers get the bundled helper MCP via session mcpServers.
       const mcpServers = (!schema && helpers?.cursorServers) ? helpers.cursorServers : [];
-      const s = await rpc.call(resume ? 'session/load' : 'session/new', { ...(resume ? { sessionId: resume } : {}), cwd, mcpServers });
+      const s = await rpc.call(resume ? 'session/load' : 'session/new', { ...(resume ? { sessionId: resume } : {}), cwd: rpc.cwd || cwd, mcpServers });
       sessionId = resume || s.sessionId;
       if (!sessionId) throw new Error('Cursor did not return a session ID.');
       onEvent({ type: 'system', session_id: sessionId });
@@ -249,7 +268,11 @@ class CursorCLI {
       const limit = cursorLimitText(output);
       if (limit) throw Object.assign(new Error(`Cursor: ${limit}.`), { limit: { until: null, reason: `Cursor: ${limit}.` } });
       return { result: output, session_id: sessionId };
-    } finally { rpc.close(); }
+    } catch (error) { throw toolError || error; }
+    finally {
+      rpc.close();
+      if (toolError && rpc.child && (await stopTree(rpc.child)).length) throw new Error('Cursor review process cleanup is not confirmed.');
+    }
   }
   close() { for (const c of this.children) stop(c); }
 }

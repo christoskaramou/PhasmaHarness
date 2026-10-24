@@ -185,6 +185,10 @@ Current voice slice (Whisper, 2026-10-21): the microphone button records in the 
 
 Current browser-access slice: the same runner exposes an opt-in loopback HTTP listener, authenticated command dispatch, revocable persisted sessions and reconnecting snapshots. A configured external origin requires HTTPS through a private proxy; its Host and Authorization headers must be preserved. Native IPC keeps its sender checks, and both paths reuse existing controller validation and job ownership. Settings controls start/stop, connection links and revocation. The shared frontend now works at phone width, including a held fake-model request, independent typing/Stop, request-scoped confirmation, actual local PDF extraction, UTF-8 streaming, enlarged Settings and local appearance. Browser keys never become provider credentials or child environment variables; reset invalidates prior connection links. Native account setup and Windows microphone controls stay on the desktop. Published files and ZIP folder snapshots now download through bounded private staging and one-use file capabilities; expiry, revocation, Stop and Quit release staged files. File fingerprints and receipt versions are rechecked, and active Harness writers block preparation. An actual browser download verifies included assets with fake model inference. Private Linux service recovery is verified with fake native inference. Public-host deployment and real phone/network acceptance remain unfinished, so the full remote gate stays open.
 
+## Immediate priority (24 October 2026)
+
+Finish the remaining live-provider acceptance with the user's help. Then beautify Harness's appearance before starting any larger roadmap feature, including bot computers, lead/sidekick pairs or server deployment. The appearance work follows live acceptance; it is not part of the current verification task.
+
 ## After the first release
 
 Recorded 20 October 2026, after v0.2.0. These are planned, not built. The first release still closes with the acceptance scenario in the design, a full review and a running preview.

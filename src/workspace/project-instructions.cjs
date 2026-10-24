@@ -1,10 +1,9 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const { execFileSync } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
-const RG = path.join(__dirname, '../../tools/bin', process.platform === 'win32' ? 'rg.exe' : 'rg');
 const ENTRY_NAME = 'PhasmaHarness.md';
 const LEGACY = /(^|\/)(AGENTS(?:\.override)?|CLAUDE(?:\.local)?|GEMINI|\.?HERMES|INSTRUCTIONS)\.md$|(^|\/)\.github\/copilot-instructions\.md$|(^|\/)\.cursor\/rules\/.*\.mdc$/i;
+const EXCLUDED = /^(?:\.git|node_modules|third_party|vendor|\.scratch|\.cache|build.*|dist|Wikis|Workspaces|workspace-data)$/;
 const STARTER = '# Project instructions\n\n' +
   'This is the shared entry point for every agent launched by Harness in this workspace.\n\n' +
   '## Working rules\n\n' +
@@ -25,19 +24,27 @@ function readEntry(root, relative) {
   return { relative, body };
 }
 
-function legacyInstructionFiles(workspace) {
-  const root = fs.realpathSync(workspace);
-  let names = [];
-  try {
-    names = execFileSync(RG, ['--files', '--hidden', '--no-ignore',
-      '-g', '*{AGENTS,AGENTS.override,CLAUDE,CLAUDE.local,GEMINI,HERMES,hermes,INSTRUCTIONS,copilot-instructions}.md',
-      '-g', '**/.cursor/rules/*.mdc',
-      '-g', '!**/{.git,node_modules,third_party,vendor,.scratch,.cache,build*,dist,Wikis,Workspaces}/**', '--', '.'],
-    { cwd: root, encoding: 'utf8', windowsHide: true, timeout: 10000, maxBuffer: 1024 * 1024 }).split(/\r?\n/);
-  } catch (error) { if (error.status !== 1 || error.stdout) throw error; }
-  names = names.map(name => name.replace(/\\/g, '/').replace(/^\.\//, '')).filter(name => LEGACY.test(name)).sort();
-  if (names.length > 200) throw new Error('Too many project instruction files.');
-  const entries = names.map(name => readEntry(root, name));
+function legacyInstructionFiles(workspace, { recursive = true } = {}) {
+  const root = fs.realpathSync(workspace), names = [], deadline = Date.now() + 10000;
+  const visit = relative => {
+    if (Date.now() > deadline) throw new Error('Project instruction discovery took too long.');
+    for (const entry of fs.readdirSync(path.join(root, relative), { withFileTypes: true })) {
+      const name = relative ? relative + '/' + entry.name : entry.name;
+      if (entry.isDirectory()) {
+        if (EXCLUDED.test(entry.name) || (!recursive && !['.cursor', '.cursor/rules', '.github'].includes(name))) continue;
+        // Prune independent projects before enumeration, not after collecting their files.
+        if (fs.lstatSync(path.join(root, name, '.git'), { throwIfNoEntry: false }) ||
+            fs.lstatSync(path.join(root, name, ENTRY_NAME), { throwIfNoEntry: false })) continue;
+        visit(name);
+      } else if (LEGACY.test(name) && (recursive || !name.includes('/') ||
+        /^\.cursor\/rules\/[^/]+\.mdc$/i.test(name) || /^\.github\/copilot-instructions\.md$/i.test(name))) {
+        names.push(name);
+        if (names.length > 200) throw new Error('Too many project instruction files.');
+      }
+    }
+  };
+  visit('');
+  const entries = names.sort().map(name => readEntry(root, name));
   if (entries.reduce((bytes, entry) => bytes + Buffer.byteLength(entry.body), 0) > 512 * 1024)
     throw new Error('Legacy project instructions exceed 512 KiB. Consolidate them before starting work.');
   return entries;
@@ -74,18 +81,18 @@ function projectEntry(workspace, create = false) {
   return file;
 }
 
-function projectBody(workspace, create = false) {
+function projectBody(workspace, create = false, options) {
   const file = projectEntry(workspace, create);
   try { return readEntry(path.dirname(file), ENTRY_NAME).body; }
   catch (error) {
     if (error.code !== 'ENOENT') throw error;
     // Ask mode must not write into the workspace just to initialize its entry.
-    return 'The shared entry is missing and was not created in read-only mode.\n' + consolidatedInstructions(legacyInstructionFiles(workspace));
+    return 'The shared entry is missing and was not created in read-only mode.\n' + consolidatedInstructions(legacyInstructionFiles(workspace, options));
   }
 }
 
-function projectInstructions(workspace, create = false) {
-  const body = projectBody(workspace, create), file = path.join(fs.realpathSync(workspace), ENTRY_NAME);
+function projectInstructions(workspace, create = false, options) {
+  const body = projectBody(workspace, create, options), file = path.join(fs.realpathSync(workspace), ENTRY_NAME);
   return '\nShared project entry: ' + JSON.stringify(file) +
     '\nThese are the current project rules for this turn, replacing earlier snapshots and legacy provider entry files. ' +
     'Maintain project instructions only in PhasmaHarness.md; do not recreate legacy entry files. ' +

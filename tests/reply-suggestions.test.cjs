@@ -50,3 +50,14 @@ test('no suggestion when the setting is off, a turn is running, the user spoke l
   failing.controller.smartRouter.complete = async () => { throw new Error('Model unavailable.'); };
   assert.equal(await failing.controller.replySuggestion('s'), null, 'a failed call shows nothing and does not throw');
 });
+
+test('Main Bot result returns make no extra suggestion call, while ordinary chats retain suggestions', async () => {
+  const { controller, session, calls } = chat();
+  controller.isCoordinator = () => true;
+  session.items[0].agentReply = true;
+  assert.equal(await controller.replySuggestion('s'), null);
+  assert.equal(calls.length, 0);
+  delete session.items[0].agentReply;
+  assert.ok(await controller.replySuggestion('s'));
+  assert.equal(calls.length, 1);
+});

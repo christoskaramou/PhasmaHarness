@@ -1320,7 +1320,8 @@ class Agents extends EventEmitter {
       if (job.budgetId) request.budgetId = job.budgetId;
       const reply = { id: `agent-result-${deliveryId}`, text, images: [], mode: sourceController.data.settings.mode, task: 'off', agentReply: true, agentReplyCancelled: !!job.cancelled,
         agentAssignmentId: (job.owner || job.source) === job.source ? job.ancestorJobIds?.at(-1) || null : null,
-        ...(request ? { agentResult: { request, agentId: controller.agentId, workspace: session.workspace, status: session.status, verification, truncated: report.length > 16000 } } : {}) };
+        ...(request ? { agentResult: { request, deliveryId, agentId: controller.agentId, workspace: session.workspace, status: session.status,
+          report: result, verification, truncated: report.length > 16000 } } : {}) };
       const superseded = job.source === source.id && source.delegation?.id === job.ancestorJobIds?.at(-1) &&
         job.parentRevision && job.parentRevision !== (source.delegation.revision || 1);
       const hasRoom = !superseded && (source.queue?.length || 0) < 10 && sourceController.canReceiveQueued(source, reply);

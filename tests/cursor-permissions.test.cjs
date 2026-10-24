@@ -1,6 +1,52 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { CursorCLI } = require('../src/providers/cursor.cjs');
+const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
+const { EventEmitter } = require('node:events');
+const { PassThrough } = require('node:stream');
+
+test('Cursor structured connections use private read/write/command denials without changing worker settings', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cursor-review-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const original = path.join(root, '.cursor'); fs.mkdirSync(original);
+  fs.writeFileSync(path.join(original, 'hooks.json'), '{"user":"preserved"}');
+  const launched = [];
+  const cursor = new CursorCLI((_args, cwd) => {
+    launched.push(cwd);
+    return Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+      kill() { this.exitCode = 0; this.emit('exit', 0); this.emit('close', 0); } });
+  });
+  const review = cursor.connect({ cwd: root, noTools: true });
+  assert.equal(review.cwd, path.join(root, 'cursor-review'));
+  assert.equal(launched[0], review.cwd);
+  const settings = JSON.parse(fs.readFileSync(path.join(review.cwd, '.cursor/cli.json'), 'utf8'));
+  assert.deepEqual(settings.permissions.allow, []);
+  assert.ok(settings.permissions.deny.includes('Read(**)'));
+  assert.ok(settings.permissions.deny.includes('Write(**)'));
+  assert.ok(settings.permissions.deny.includes('Shell(*)'));
+  assert.equal(fs.existsSync(path.join(review.cwd, '.cursor/hooks.json')), false, 'do not rely on unverified ACP hook enforcement');
+  review.close();
+  const worker = cursor.connect({ cwd: root });
+  assert.equal(worker.cwd, root);
+  assert.equal(fs.readFileSync(path.join(original, 'hooks.json'), 'utf8'), '{"user":"preserved"}');
+  assert.equal(fs.existsSync(path.join(original, 'cli.json')), false);
+  worker.close();
+});
+
+test('a Cursor structured review that attempts a tool is cancelled before its answer can be accepted', async () => {
+  const cursor = new CursorCLI();
+  let stopped = false, rejectPrompt;
+  cursor.connect = ({ onUpdate }) => ({ call: async method => {
+    if (method === 'session/new') return { sessionId: 's' };
+    if (method !== 'session/prompt') return {};
+    return new Promise((_resolve, reject) => {
+      rejectPrompt = reject;
+      queueMicrotask(() => onUpdate({ sessionId: 's', update: { sessionUpdate: 'tool_call', title: 'Grep' } }));
+    });
+  }, close() { stopped = true; rejectPrompt?.(new Error('Connection closed')); } });
+  await assert.rejects(cursor.run({ model: 'm', prompt: 'Review only the report.', schema: {} }), { code: 'INVALID_STRUCTURED_RESPONSE' });
+  assert.equal(stopped, true);
+});
 
 // Replace the ACP transport; capture the permission handler run() installs and answer one request with it.
 async function decide({ access, schema, approve }) {
@@ -37,6 +83,33 @@ test('Cursor asks the Harness in Ask and Workspace access, auto-allows only Full
   assert.equal((await decide({ access: 'danger-full-access', schema: { type: 'object' }, approve: async () => { askedClassifier = true; return true; } })).choice, 'no');
   assert.equal(askedClassifier, false);
   assert.equal((await decide({ access: 'read-only' })).choice, 'no', 'no approval callback means decline');
+});
+
+test('Cursor reports activity only for nonempty answer or reasoning chunks in its active prompt', async () => {
+  const cursor = new CursorCLI();
+  let activity = 0;
+  cursor.connect = ({ onUpdate, noTools }) => ({
+    cwd: 'private-review-workspace',
+    call: async (method, params) => {
+      const chunk = (sessionId, sessionUpdate, text) => onUpdate({ sessionId, update: { sessionUpdate, content: { type: 'text', text } } });
+      if (method === 'session/new') {
+        assert.equal(noTools, true);
+        assert.equal(params.cwd, 'private-review-workspace');
+        chunk('s', 'agent_thought_chunk', 'before prompt'); return { sessionId: 's' };
+      }
+      if (method !== 'session/prompt') return {};
+      chunk('different', 'agent_thought_chunk', 'another session');
+      chunk('s', 'agent_thought_chunk', '');
+      chunk('s', 'session_info_update', 'heartbeat');
+      assert.equal(activity, 0);
+      chunk('s', 'agent_thought_chunk', 'reasoning');
+      chunk('s', 'agent_message_chunk', '{}');
+      assert.equal(activity, 2);
+      return { stopReason: 'end_turn' };
+    }, close() {},
+  });
+  const result = await cursor.run({ model: 'm', prompt: 'Review the report.', schema: {}, onActivity: () => activity++ });
+  assert.equal(result.result, '{}', 'reasoning stays out of the JSON result');
 });
 
 // A fake ACP transport whose first prompt waits until session/cancel, like Cursor, and records what was sent.

@@ -29,6 +29,22 @@ test('Main Bot receives current shared project rules and the active AppData wiki
   assert.doesNotMatch(instructions(), /Main project rule first/);
 });
 
+test('Main Bot in a repositories parent starts without importing its child projects', async t => {
+  const { hub, session, calls, send, root } = await setup(t);
+  for (const name of ['project-a', 'project-b', 'plain-project']) {
+    const project = path.join(root, name);
+    fs.mkdirSync(project);
+    if (name !== 'plain-project') fs.mkdirSync(path.join(project, '.git'));
+    fs.writeFileSync(path.join(project, 'AGENTS.md'), name.repeat(5000));
+  }
+  await send('Ask the project bot to explain its workspace.');
+  const request = calls.findLast(call => call.request.schema.properties.action).request;
+  assert.doesNotMatch(request.instructions, /project-a|project-b|plain-project/);
+  assert.equal(session.status, 'completed');
+  assert.equal(fs.existsSync(path.join(root, 'PhasmaHarness.md')), false);
+  assert.match(hub.projectContextInstructions({ ...session, workspace: path.join(root, 'project-a') }), /project-a/);
+});
+
 test('completed worker survives a Main Bot follow-up timeout without replaying the assignment', async t => {
   const { hub, session, agents, replies, send } = await setup(t);
   replies.push(action('agent_work', { name: 'Worker', task: 'Say hello.' }));
@@ -50,6 +66,107 @@ test('completed worker survives a Main Bot follow-up timeout without replaying t
   assert.equal(saved.sessions.find(chat => chat.id === session.id).status, 'completed');
 });
 const action = (tool, args) => ({ reply: '', action: { tool, arguments: args } });
+test('simple delegated results return with no model, compaction or duplicate reply, even when Hub is offline', async t => {
+  const { hub, session, agents, replies, calls, send } = await setup(t);
+  replies.push(action('agent_work', { name: 'Reader', task: 'Read the wiki and report one fact.', resultHandling: 'direct' }));
+  await send('Ask Reader to read the wiki and report one fact. Do not edit files.');
+  const worker = agents.execution(session.hubWorker), work = agents.conversation(worker);
+  await until(() => worker.activeTurns.size > 0);
+  assert.equal(readSessionData(worker.filename).sessions.find(s => s.id === work.id).delegation.originalRequest.resultHandling, 'direct');
+  const before = calls.length;
+  hub.coordinatorChoice = async () => { throw new Error('Hub model is offline'); };
+  hub.summarizeCoordinator = async () => { throw new Error('Direct returns must not compact'); };
+  hub.smartRouter.complete = async () => { throw new Error('Direct returns must not infer'); };
+  const report = 'Read wiki/index.md. One fact: the app coordinates named workers. No files changed.';
+  worker.notification({ method: 'item/completed', params: { threadId: work.threadId, turnId: work.turnId,
+    item: { id: randomUUID(), type: 'agentMessage', phase: 'final_answer', text: report } } });
+  worker.notification({ method: 'turn/completed', params: { threadId: work.threadId, turn: { id: work.turnId, status: 'completed' } } });
+  await until(() => !hub.busy && !session.queue?.length && session.hubCompletion?.reviewed === false);
+  assert.equal(calls.length, before);
+  assert.equal(session.status, 'completed'); assert.equal(session.error, null);
+  assert.equal(session.items.filter(item => item.type === 'agentResult' && item.text === report).length, 1);
+  assert.equal(session.items.some(item => item.type === 'agentMessage' && item.text === report), false);
+  assert.equal(session.agentDelegations, 1, 'relay never restarts completed work');
+  assert.equal(work.delegation.delivered, true);
+});
+
+test('direct returns preserve failed build/test checks, failed workers, truncation and cancellation without inference', async t => {
+  for (const kind of ['build', 'test', 'failed', 'truncated', 'cancelled']) await t.test(kind, async t => {
+    const { hub, session, calls } = await setup(t);
+    hub.coordinatorChoice = async () => { throw new Error('No model should be needed'); };
+    const checked = ['build', 'test'].includes(kind);
+    await hub.sendCoordinator(session, { text: 'Worker claims success.', images: [], mode: 'terra-light', agentReply: true, agentReplyCancelled: kind === 'cancelled',
+      agentResult: { agentId: 'main', report: 'Worker claims success.', status: kind === 'failed' ? 'failed' : 'completed', truncated: kind === 'truncated',
+        verification: checked ? { [kind]: { status: 'failed', checks: [{ id: 'check', status: 'failed', exitCode: 1 }] } } : {},
+        request: { id: 'request', text: 'Return the result.', resultHandling: 'direct' } } });
+    assert.equal(calls.length, 0);
+    assert.equal(session.status, 'completed');
+    assert.equal(session.items.some(item => item.type === 'agentMessage' && item.text === 'Worker claims success.'), false);
+    if (kind === 'cancelled') {
+      assert.match(session.items.at(-1).text, /cancelled/);
+      assert.equal(session.hubCompletion.fulfilled, false);
+    }
+    else {
+      assert.equal(session.hubCompletion.fulfilled, false);
+      assert.match(session.items.at(-1).text, checked ? /host check failed/ : kind === 'failed' ? /did not finish successfully/ : /exceeds Hub/);
+    }
+  });
+});
+
+test('a completed direct worker without a final answer cannot confirm the request complete', async t => {
+  const { hub, session, agents, replies, calls, send } = await setup(t);
+  replies.push(action('agent_work', { name: 'Reader', task: 'Report one fact.', resultHandling: 'direct' }));
+  await send('Ask Reader to report one fact.');
+  const worker = agents.execution(session.hubWorker), work = agents.conversation(worker);
+  await until(() => worker.activeTurns.size > 0);
+  const before = calls.length;
+  worker.notification({ method: 'item/completed', params: { threadId: work.threadId, turnId: work.turnId,
+    item: { id: randomUUID(), type: 'agentMessage', phase: 'final_answer', text: '[task: done]' } } });
+  worker.notification({ method: 'turn/completed', params: { threadId: work.threadId, turn: { id: work.turnId, status: 'completed' } } });
+  await until(() => !hub.busy && !session.queue?.length && session.hubCompletion?.reviewed === false);
+  assert.equal(calls.length, before, 'no extra review or automatic rerun');
+  assert.equal(session.hubCompletion.fulfilled, false);
+  assert.match(session.items.at(-1).text, /returned no final answer/);
+  assert.equal(work.delegation.delivered, true);
+});
+
+test('complex results review and reply in exactly one call without compacting or rewriting the answer', async t => {
+  const { root, hub, session, agents, replies, assessments, calls, send } = await setup(t);
+  fs.writeFileSync(path.join(root, 'PhasmaHarness.md'), 'Keep review replies concise and retain source references.');
+  replies.push(action('agent_work', { name: 'Reviewer', task: 'Review the changed code.', resultHandling: 'review' }));
+  await send('Review the changed code and report concrete findings.');
+  const worker = agents.execution(session.hubWorker), work = agents.conversation(worker);
+  await until(() => worker.activeTurns.size > 0);
+  const before = calls.length;
+  hub.summarizeCoordinator = async () => { throw new Error('Result review must not compact chat'); };
+  assessments.push({ fulfilled: true, evidence: 'Source reviewed.', gaps: [], reply: 'Review complete: one issue at app.c:12.' });
+  worker.notification({ method: 'item/completed', params: { threadId: work.threadId, turnId: work.turnId,
+    item: { id: randomUUID(), type: 'agentMessage', phase: 'final_answer', text: 'Reviewed the changes: issue at app.c:12.' } } });
+  worker.notification({ method: 'turn/completed', params: { threadId: work.threadId, turn: { id: work.turnId, status: 'completed' } } });
+  await until(() => !hub.busy && session.items.at(-1)?.text === 'Review complete: one issue at app.c:12.');
+  assert.equal(calls.length - before, 1);
+  assert.ok(calls.at(-1).request.schema.required.includes('reply'));
+  assert.match(calls.at(-1).request.instructions, /Keep review replies concise and retain source references/);
+  assert.equal(session.hubCompletion.reviewed, true);
+  assert.equal(session.hubCompletion.fulfilled, true);
+});
+
+test('a simple batch returns every result without model calls and retains failed checks in the final status', async t => {
+  const { hub, session, calls } = await setup(t);
+  hub.coordinatorChoice = async () => { throw new Error('Direct batches do not need a model'); };
+  for (let index = 1; index <= 2; index++) {
+    await hub.sendCoordinator(session, { text: `Reply ${index}`, images: [], agentReply: true,
+      agentResult: { agentId: 'main', report: `Reply ${index}`, status: 'completed',
+        verification: index === 1 ? { test: { status: 'failed', checks: [{ id: 'test' }] } } : {},
+        request: { id: 'request', text: 'Ask both bots to reply.', resultHandling: 'direct', batch: { id: 'batch', count: 2, index } } } });
+    if (index === 1) assert.match(session.items.at(-1).text, /1\/2.*Waiting/);
+  }
+  assert.equal(calls.length, 0);
+  assert.equal(session.items.filter(item => item.hubBatchResult).length, 2);
+  assert.equal(session.hubCompletion.fulfilled, false);
+  assert.match(session.items.at(-1).text, /Worker 1: Tests: host check failed/);
+});
+
 test('failed worker reviews count batch receipts, but storage and budget failures stay visible', async t => {
   const { hub, session } = await setup(t);
   const input = { text: 'Done.', images: [], mode: 'terra-light', agentReply: true,
@@ -93,7 +210,7 @@ async function setup(t) {
         calls.push({ request, choice, abort });
         return { decision: request.schema.properties.summary ? { summary: 'User intent and pending work retained.' }
           : request.schema.properties.reflection ? { reflection: 'keep', rule: '', moment: '', reason: 'Fixture.' }
-          : request.schema.properties.fulfilled ? assessments.shift() || { fulfilled: true, evidence: 'The fixture worker completed the requested task.', gaps: [] }
+          : request.schema.properties.fulfilled ? { reply: replies[0]?.action === null ? replies.shift().reply : 'The worker completed the requested task.', ...(assessments.shift() || { fulfilled: true, evidence: 'The fixture worker completed the requested task.', gaps: [] }) }
           : replies.shift() || answer('Hello.') };
       },
     }, options);
@@ -1233,6 +1350,8 @@ test('Hub dispatches four configured reviewers in two background slots and waits
   assert.equal(agents.snapshot().batchReports[batchId].summary, '4 returned, not verified', 'no host checks, so no job counts as verified');
   assert.match(session.items.at(-1).text, /All four reviews are complete/);
   const synthesis = JSON.parse(calls.at(-1).request.prompt);
+  assert.equal(calls.filter(call => call.request.schema.properties.fulfilled).length, 4, 'each complex worker gets one combined review/reply');
+  assert.equal(calls.filter(call => call.request.schema.properties.action).length, 1, 'only initial dispatch uses the planning call; no second response pass');
   assert.equal(synthesis.batchResults.length, 4);
   assert.ok(synthesis.batchResults.every((result, i) => result.text.includes(`file${i + 1}.c:12`)));
   const saved = readSessionData(hub.filename).sessions.find(s => s.id === session.id);
@@ -1670,6 +1789,7 @@ test('Hub rejects malformed or mismatched action arguments before any side effec
     { reply: '', tool: 'agent_work', arguments: malformed },
     action('agent_work', malformed), action('agent_work', []), action('agent_work', null),
     action('agent_work', { task: null }), action('agent_work', { task: 'Review', arbitrary: true }),
+    action('agent_work', { task: 'Review', resultHandling: 'unknown' }),
     action('agent_create', { name: 'Reviewer', task: 'Wrong tool arguments' }),
     action('agent_set_access', { agentId: 'missing', access: 'root' }),
     action('agent_read_context', { agentId: 'main', line: 1.5 }),
@@ -1704,6 +1824,10 @@ test('Hub preserves the original request for routing, execution, disk and result
   worker.notification({ method: 'turn/completed', params: { threadId: work.threadId, turn: { id: work.turnId, status: 'completed' } } });
   await until(() => session.items.at(-1)?.text === 'Review returned.');
   const check = calls.find(call => call.request.schema.properties.fulfilled);
+  assert.equal(check.request.idleTimeout, true, 'a live completion review can exceed two minutes');
+  assert.equal(JSON.parse(check.request.prompt).workerResult, 'Reviewed all changes. Finding at shader.hlsl:42 with evidence.', 'the reviewer gets the answer, not executable handoff instructions or repeated metadata');
+  assert.equal(calls.at(-1).request.idleTimeout, true, 'the final summary uses the same progress-aware deadline');
+  assert.equal(calls.at(-1).choice.id, check.choice.id, 'the selected model is preserved');
   assert.equal(JSON.parse(check.request.prompt).originalRequest.text, original);
   assert.equal(JSON.parse(calls.at(-1).request.prompt).originalRequest.text, original);
   assert.equal(session.hubRequest.text, 'What is your name?', 'returning work does not overwrite the latest user request');

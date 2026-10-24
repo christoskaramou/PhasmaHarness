@@ -11,6 +11,7 @@ const ownsRunner = app.requestSingleInstanceLock({ quitForInstall: quitForInstal
 if (!ownsRunner || quitForInstall) { app.quit(); return; }
 const { createRunner, RunnerWindow } = require('./runner.cjs');
 const { configureWindowZoom } = require('./window-zoom.cjs');
+const { configureTextContextMenu } = require('./text-context-menu.cjs');
 const { confirmations } = require('./confirmations.cjs');
 const { validateSnapshot, pruneSources, MAX_BYTES } = require('./routing/benchmarks.cjs');
 const { Log } = require('./log.cjs');
@@ -101,6 +102,7 @@ async function start() {
   });
   configureWindowZoom(window.webContents, path.join(app.getPath('userData'), 'zoom.json'),
     error => log.warn('Could not save window zoom', { message: error.message }));
+  configureTextContextMenu(window);
   const updateWindowAppearance = () => {
     if (window.isDestroyed()) return;
     window.setBackgroundColor(windowBackground());
@@ -436,7 +438,7 @@ async function start() {
   handle('installUpdate', () => updater.install());
   handle('copyText', text => {
     if (typeof text !== 'string' || text.length > 2000000) throw new Error('Message is too large to copy.');
-    clipboard.writeText(text);
+    return clipboard.writeText(text);
   });
   handle('exportConversation', async id => {
     if (typeof id !== 'string' || !id) throw new Error('Choose a conversation to export.');

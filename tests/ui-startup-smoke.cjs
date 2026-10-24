@@ -141,6 +141,7 @@ app.whenReady().then(async () => {
   // A cold Windows runner can spend 10+ seconds starting Chromium before any checks run.
   deadline.refresh(); phase = 'settings checks';
   console.log(`Renderer ready after ${Date.now() - startedAt} ms; starting UI checks`);
+  await require('./text-context-menu-check.cjs')(window);
   await require('./connector-ui-check.cjs')(window, root);
   deadline.refresh();
   const result = await window.webContents.executeJavaScript(`(() => {
@@ -3446,6 +3447,24 @@ app.whenReady().then(async () => {
     assert.equal(zoomLayout.fontScale, '1', 'whole-page zoom does not also multiply text size');
   }
   console.log('Whole-interface zoom at 50%, 115%, 300% and consistent composer icons passed');
+  const resultPreview = await window.webContents.executeJavaScript(`(() => {
+    const saved = { state, fleetState };
+    try {
+      fleetState = null;
+      state = { ...state, agents: [{ id: 'main', name: 'Main Bot' }], conversationId: 'preview', busy: null, requests: [], waitingForAgents: [],
+        sessions: [{ id: 'preview', items: [
+          { type: 'agentMessage', text: 'Queued the task.' },
+          { type: 'agentResult', text: 'The wiki was read.', status: 'completed' },
+          { type: 'agentResult', text: 'Hidden comparison.', internal: true },
+          { type: 'agentResult', text: 'Outdated result.', superseded: true }
+        ] }] };
+      renderAgents();
+      return document.querySelector('#main-agent-list button').title;
+    } finally { state = saved.state; fleetState = saved.fleetState; renderAgents(); }
+  })()`);
+  assert.match(resultPreview, /The wiki was read\./);
+  assert.doesNotMatch(resultPreview, /Queued the task|Hidden comparison|Outdated result/);
+  console.log('Direct result sidebar preview replaces the queued acknowledgement passed');
   agents.closing = true;
   agents.budgets.close();
   for (const c of agents.allControllers()) c.close();

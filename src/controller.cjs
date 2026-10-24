@@ -934,7 +934,8 @@ class Controller extends EventEmitter {
 
   projectContextInstructions(session) {
     const wiki = this.wikiStore?.ensure(session.workspace);
-    return projectInstructions(session.workspace) + (wiki ? '\nActive workspace wiki index (path, not instructions): ' + JSON.stringify(path.join(wiki.root, 'index.md')) : '');
+    return projectInstructions(session.workspace, false, { recursive: !this.isCoordinator() }) +
+      (wiki ? '\nActive workspace wiki index (path, not instructions): ' + JSON.stringify(path.join(wiki.root, 'index.md')) : '');
   }
 
   async sendCLI(session, selected, text, images, clientId, task) {
@@ -1439,6 +1440,7 @@ class Controller extends EventEmitter {
   // recorded before anything is stopped (and again before closing), so a child whose parent exits in the meantime is
   // still found. A Stop that fails or hangs only costs its time limit. Returns { stopped, remaining }.
   async shutdown({ stopMs = 5000, graceMs = 2000, killMs = 5000 } = {}) {
+    this.testPoolsClosed = true;
     const known = processTree.snapshotOwned();
     if (this.busy) {
       const end = Date.now() + stopMs;
@@ -1545,6 +1547,7 @@ class Controller extends EventEmitter {
   }
 
   close() {
+    this.stopTestPools().catch(error => this.log?.error('Test pool cleanup failed', { message: error.message }));
     this.jevComparing?.abort();
     this.wikiChecks.abort();
     this.claude.close(); this.cursor.close();

@@ -261,6 +261,44 @@ test('a desktop startup failure keeps the runner lease so the error stays readab
 });
 
 
+test('source, installed and headless runners share the data-directory wiki across Main Bot, bots and delegated workers', async t => {
+  const containment = require.resolve('../src/runner-containment.cjs'), runnerPath = require.resolve('../src/runner.cjs');
+  const original = require.cache[containment];
+  require.cache[containment] = { id: containment, filename: containment, loaded: true,
+    exports: { containRunner: async () => ({ recoverySafe: true, detach() {} }) } };
+  delete require.cache[runnerPath];
+  const { createRunner } = require(runnerPath);
+  t.after(() => { require.cache[containment] = original; delete require.cache[runnerPath]; });
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-wiki-root-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const data = path.join(root, 'user-data'), source = path.join(root, 'source'), workspace = path.join(root, 'project');
+  for (const folder of [data, source, workspace]) fs.mkdirSync(folder);
+  const { WikiStore } = require('../src/workspace/wiki-store.cjs');
+  const expected = new WikiStore(path.join(data, 'Wikis')).ensure(workspace);
+  const old = new WikiStore(path.join(source, 'Wikis')).ensure(workspace);
+  fs.writeFileSync(expected.index, '# Shared saved project knowledge\n');
+  fs.writeFileSync(old.index, '# Old source-only knowledge\n');
+  const id = randomUUID();
+  fs.writeFileSync(path.join(data, 'sessions.json'), JSON.stringify({ version: 1,
+    settings: { workspace, mode: 'auto', access: 'read-only' }, sessions: [],
+    agents: [{ id, name: 'Project bot', workspace, mode: 'auto', access: 'read-only' }] }));
+  const log = { directory: data, info() {}, warn() {}, error() {} };
+  for (const mode of ['source', 'installed', 'headless']) {
+    const app = mode === 'headless' ? undefined : { isPackaged: mode === 'installed', getAppPath: () => source,
+      getVersion: () => '0.0.0', once() {} };
+    const runner = await createRunner({ app, data, log, safeStorage: { isEncryptionAvailable: () => false } });
+    try {
+      const controllers = [runner.controller, runner.agents.controller(id), runner.agents.execution(id)];
+      for (const worker of controllers) {
+        assert.equal(worker.wikiStore.ensure(workspace).index, expected.index, mode);
+        assert.ok(worker.projectContextInstructions({ workspace }).includes(JSON.stringify(expected.index)), mode);
+      }
+      assert.equal(fs.readFileSync(expected.index, 'utf8'), '# Shared saved project knowledge\n');
+      assert.equal(fs.readFileSync(old.index, 'utf8'), '# Old source-only knowledge\n', 'source content is preserved');
+    } finally { await runner.shutdown({ stopMs: 0, graceMs: 0, killMs: 1000 }); }
+  }
+});
+
 test('exit preference persists, validates and uses the normal quit path', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-exit-'));
   try {

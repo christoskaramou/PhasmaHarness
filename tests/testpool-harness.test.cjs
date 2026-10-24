@@ -118,7 +118,7 @@ test('pooled tests get neither Harness’s Electron-as-Node switch nor its Jev k
 });
 
 test('late pool failures never send into cleared, busy, changed or restricted chats', async () => {
-  for (const change of ['clear', 'busy', 'new turn', 'access']) {
+  for (const change of ['clear', 'busy', 'new turn', 'access', 'shutdown']) {
     const root = repo(), session = chat(root), bot = controller({ data: { sessions: [session] } });
     await bot.runTestPool(root, session);
     const file = path.join(root, '.testpool', 'catalog.json');
@@ -134,11 +134,74 @@ test('late pool failures never send into cleared, busy, changed or restricted ch
     if (change === 'busy') bot.busy = session.id;
     if (change === 'new turn') session.items.push({ type: 'agentMessage', text: 'A newer answer.' });
     if (change === 'access') session.access = 'read-only';
+    if (change === 'shutdown') bot.testPoolsClosed = true;
     fs.writeFileSync(path.join(root, 'release'), '');
     await running;
     assert.deepEqual(bot.sent, [], change);
     assert.match(bot.data.sessions[0].notice, /FAILED src-ok/, change);
   }
+});
+
+function holdingPool() {
+  const root = repo(), file = path.join(root, '.testpool', 'catalog.json');
+  const pool = JSON.parse(fs.readFileSync(file));
+  Object.assign(pool.tests[0], { always: true, command: 'node hold.cjs' });
+  fs.writeFileSync(file, JSON.stringify(pool));
+  fs.writeFileSync(path.join(root, 'hold.cjs'), "require('fs').appendFileSync('started', process.pid + '\\n'); setTimeout(() => {}, 60000);");
+  return root;
+}
+
+async function startedPool(root) {
+  const marker = path.join(root, 'started'), end = Date.now() + 10000;
+  while (!fs.existsSync(marker) && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.ok(fs.existsSync(marker), 'the real pooled command started');
+  return Number(fs.readFileSync(marker, 'utf8').trim());
+}
+
+test('controller shutdown cancels a real test pool quietly, stops its child and drops queued checks', { timeout: 30000 }, async t => {
+  const { Controller } = require('../src/controller.cjs');
+  const { EventEmitter } = require('node:events');
+  const root = holdingPool(), warnings = [], infos = [];
+  const client = Object.assign(new EventEmitter(), { close() {} });
+  const bot = new Controller(path.join(root, 'sessions.json'), root, client, { cancel() {}, close() {} }, { nativeCLIs: new Map() });
+  bot.log = { warn: (...args) => warnings.push(args), info: (...args) => infos.push(args), error: (...args) => warnings.push(args) };
+  t.after(async () => { await bot.shutdown({ stopMs: 0, graceMs: 0, killMs: 5000 }); });
+  const first = bot.create(root, 'danger-full-access'), queued = bot.create(root, 'danger-full-access');
+  first.items = chat(root).items; queued.items = chat(root).items;
+  const pending = bot.startTestPool(root, first);
+  const pid = await startedPool(root);
+  bot.startTestPool(root, queued);
+  const result = await bot.shutdown({ stopMs: 0, graceMs: 100, killMs: 5000 });
+  await pending;
+  assert.deepEqual(result.remaining, []);
+  if (process.platform === 'linux') {
+    let state;
+    try { state = fs.readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ')[1][0]; } catch { /* already reaped */ }
+    assert.ok(!state || state === 'Z', 'the pooled command stopped (an unreaped zombie is not running)');
+  } else {
+    assert.throws(() => process.kill(pid, 0), 'the pooled command did not survive shutdown');
+  }
+  assert.equal(fs.readFileSync(path.join(root, 'started'), 'utf8').trim().split('\n').length, 1);
+  assert.equal(bot.testPoolProcesses.size, 0);
+  assert.deepEqual(warnings, []);
+  assert.equal(infos.filter(([message]) => message === 'Test pool cancelled during shutdown').length, 1);
+  await bot.startTestPool(root, queued);
+  await bot.runTestPool(root, queued);
+  assert.equal(fs.readFileSync(path.join(root, 'started'), 'utf8').trim().split('\n').length, 1, 'closed controllers cannot start another pool');
+});
+
+test('an unexpected test-pool exit still warns when cancellation was not requested', { timeout: 30000 }, async t => {
+  const root = holdingPool(), warnings = [], infos = [];
+  const bot = controller({ log: { warn: (...args) => warnings.push(args), info: (...args) => infos.push(args) } });
+  t.after(() => bot.stopTestPools());
+  const pending = bot.runTestPool(root, chat(root));
+  await startedPool(root);
+  const run = [...bot.testPoolProcesses][0];
+  assert.deepEqual(await require('../src/process-tree.cjs').stopTree(run.child), []);
+  await pending;
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0][0], 'Test pool exited unexpectedly');
+  assert.deepEqual(infos, []);
 });
 
 test('pool serialization keeps every waiting chat and treats Windows case aliases as one repository', async () => {

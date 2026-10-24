@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { projectInstructions, projectEntry, currentProjectEntry, STARTER } = require('../src/workspace/project-instructions.cjs');
+const { projectInstructions, projectEntry, currentProjectEntry, legacyInstructionFiles, STARTER } = require('../src/workspace/project-instructions.cjs');
 const { WikiStore } = require('../src/workspace/wiki-store.cjs');
 
 function fixture(t) {
@@ -51,6 +51,118 @@ test('invalid legacy import preserves all originals and creates no partial entry
   fs.writeFileSync(original, 'Valid rule.');
   fs.linkSync(original, projectEntry(workspace));
   assert.throws(() => projectInstructions(workspace), /unlinked/);
+});
+
+test('instruction import stays inside its project and skips nested repositories, worktrees and managed workspaces', t => {
+  const { workspace } = fixture(t);
+  fs.mkdirSync(path.join(workspace, '.git'));
+  fs.writeFileSync(path.join(workspace, 'AGENTS.md'), 'Parent workspace rule.');
+  fs.mkdirSync(path.join(workspace, 'Engine'));
+  fs.writeFileSync(path.join(workspace, 'Engine', 'INSTRUCTIONS.md'), 'Local scoped rule.');
+  for (const name of ['repository', 'worktree', 'managed']) {
+    const child = path.join(workspace, name);
+    fs.mkdirSync(path.join(child, 'nested'), { recursive: true });
+    if (name === 'repository') fs.mkdirSync(path.join(child, '.git'));
+    else fs.writeFileSync(path.join(child, name === 'worktree' ? '.git' : 'PhasmaHarness.md'), name === 'worktree' ? 'gitdir: elsewhere' : 'Managed project rule.');
+    fs.writeFileSync(path.join(child, 'AGENTS.md'), 'Independent project rule.');
+    fs.writeFileSync(path.join(child, 'nested', 'INSTRUCTIONS.md'), 'x'.repeat(65537));
+  }
+  const readOnly = projectInstructions(workspace);
+  assert.match(readOnly, /Parent workspace rule/);
+  assert.match(readOnly, /Workspace scope: Engine[\s\S]*Local scoped rule/);
+  assert.doesNotMatch(readOnly, /Independent project rule|Managed project rule/);
+  assert.equal(fs.existsSync(projectEntry(workspace)), false);
+  const writable = projectInstructions(workspace, true);
+  assert.match(writable, /Parent workspace rule/);
+  assert.match(writable, /Local scoped rule/);
+  assert.doesNotMatch(writable, /Independent project rule|Managed project rule/);
+  assert.match(projectInstructions(path.join(workspace, 'managed')), /Managed project rule/);
+  assert.equal(fs.statSync(path.join(workspace, 'repository', 'nested', 'INSTRUCTIONS.md')).size, 65537);
+});
+
+test('legacy workspace-data instruction copies are not project rules', t => {
+  const { workspace } = fixture(t);
+  const copy = path.join(workspace, 'workspace-data', 'harness', 'runs', 'project');
+  fs.mkdirSync(copy, { recursive: true });
+  fs.writeFileSync(path.join(copy, 'AGENTS.md'), 'Stale generated project rule.');
+  assert.doesNotMatch(projectInstructions(workspace, true), /Stale generated project rule/);
+});
+
+test('root-only instruction loading retains root provider rules but leaves plain child projects to workers', t => {
+  const { workspace } = fixture(t);
+  for (const folder of ['.cursor/rules', '.github', 'plain-project']) fs.mkdirSync(path.join(workspace, folder), { recursive: true });
+  fs.writeFileSync(path.join(workspace, 'AGENTS.md'), 'Root agent rule.');
+  fs.writeFileSync(path.join(workspace, '.cursor/rules/root.mdc'), 'Root Cursor rule.');
+  fs.writeFileSync(path.join(workspace, '.github/copilot-instructions.md'), 'Root Copilot rule.');
+  fs.writeFileSync(path.join(workspace, 'plain-project/AGENTS.md'), 'Plain child rule.');
+  const body = projectInstructions(workspace, false, { recursive: false });
+  assert.match(body, /Root agent rule/);
+  assert.match(body, /Root Cursor rule/);
+  assert.match(body, /Root Copilot rule/);
+  assert.doesNotMatch(body, /Plain child rule/);
+  assert.equal(fs.existsSync(projectEntry(workspace)), false);
+  assert.match(projectInstructions(path.join(workspace, 'plain-project')), /Plain child rule/);
+  assert.match(projectInstructions(workspace, true), /Plain child rule/, 'worker initialization preserves scoped rules');
+});
+
+test('instruction discovery never enumerates excluded projects or unrelated Main Bot folders', t => {
+  const { workspace } = fixture(t);
+  for (const name of ['repository', 'worktree', 'managed', 'workspace-data', 'plain-project']) {
+    const child = path.join(workspace, name);
+    fs.mkdirSync(child);
+    if (name === 'repository') fs.mkdirSync(path.join(child, '.git'));
+    if (name === 'worktree') fs.writeFileSync(path.join(child, '.git'), 'gitdir: elsewhere');
+    if (name === 'managed') fs.writeFileSync(path.join(child, 'PhasmaHarness.md'), 'Child canonical rule.');
+    fs.writeFileSync(path.join(child, 'AGENTS.md'), 'Child rule.');
+  }
+  fs.writeFileSync(path.join(workspace, 'AGENTS.md'), 'Root rule.');
+  let rootOnly = true;
+  const readdir = fs.readdirSync;
+  t.mock.method(fs, 'readdirSync', (directory, options) => {
+    const relative = path.relative(workspace, directory);
+    if (relative && (rootOnly || relative !== 'plain-project')) throw new Error('Must not enter: ' + relative);
+    return readdir(directory, options);
+  });
+  assert.deepEqual(legacyInstructionFiles(workspace, { recursive: false }).map(e => e.relative), ['AGENTS.md']);
+  rootOnly = false;
+  assert.deepEqual(legacyInstructionFiles(workspace).map(e => e.relative), ['AGENTS.md', 'plain-project/AGENTS.md']);
+  t.mock.restoreAll();
+});
+
+test('canonical instructions are preserved without scanning legacy files or child projects', t => {
+  const { workspace } = fixture(t), entry = path.join(workspace, 'PhasmaHarness.md');
+  const body = '# Deliberate rules\nPreserve my exact text and spacing.\n';
+  fs.writeFileSync(entry, body);
+  fs.writeFileSync(path.join(workspace, 'AGENTS.md'), 'x'.repeat(65537));
+  t.mock.method(fs, 'readdirSync', () => { throw new Error('Canonical reads must not scan folders'); });
+  for (const create of [false, true]) {
+    assert.ok(projectInstructions(workspace, create).includes(body));
+    assert.ok(projectInstructions(workspace, create, { recursive: false }).includes(body));
+    assert.equal(fs.readFileSync(entry, 'utf8'), body);
+  }
+  t.mock.restoreAll();
+});
+
+test('a genuinely oversized consolidation fails without writing, truncating or removing rules', t => {
+  const { workspace } = fixture(t);
+  for (const name of ['AGENTS.md', 'CLAUDE.md']) fs.writeFileSync(path.join(workspace, name), name + '\n' + 'x'.repeat(35000));
+  const originals = fs.readdirSync(workspace).map(name => [name, fs.readFileSync(path.join(workspace, name))]);
+  for (const create of [false, true]) assert.throws(() => projectInstructions(workspace, create), /Consolidated project instructions exceed/);
+  assert.equal(fs.existsSync(projectEntry(workspace)), false);
+  assert.deepEqual(fs.readdirSync(workspace).sort(), originals.map(([name]) => name).sort());
+  for (const [name, bytes] of originals) assert.deepEqual(fs.readFileSync(path.join(workspace, name)), bytes);
+});
+
+test('instruction discovery rejects linked files and never follows directory links', t => {
+  const { root, workspace } = fixture(t);
+  const outside = path.join(root, 'outside');
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(outside, 'AGENTS.md'), 'Outside rule.');
+  fs.symlinkSync(outside, path.join(workspace, 'linked-project'), process.platform === 'win32' ? 'junction' : 'dir');
+  assert.doesNotMatch(projectInstructions(workspace), /Outside rule/);
+  fs.linkSync(path.join(outside, 'AGENTS.md'), path.join(workspace, 'AGENTS.md'));
+  for (const create of [false, true]) assert.throws(() => projectInstructions(workspace, create), /unlinked/);
+  assert.equal(fs.existsSync(projectEntry(workspace)), false);
 });
 
 test('a failed write cannot publish a partial migrated entry, and old Undo initializes the shared entry', t => {
