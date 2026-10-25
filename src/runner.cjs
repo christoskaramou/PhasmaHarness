@@ -67,7 +67,6 @@ async function createRunner({ app, data = app?.getPath('userData'), safeStorage,
     worker.smartRouter.providers = worker.providers;
     worker.smartRouter.jev = new JevClient(jevKey, fetch, () => controller.data.settings.jevEnabled !== false, jevReported);
     worker.contextSearch = new ContextSearch(os.homedir(), worker.smartRouter.jev);
-    worker.contextSearch.wikiStore = wikiStore;
   };
   let agents;
   try {

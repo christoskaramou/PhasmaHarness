@@ -54,7 +54,9 @@ class MuseCLI {
     try {
       host.info = await this.call(host, 'initialize', { clientInfo: { name: 'phasma_harness', version: require('../../package.json').version },
         capabilities: { experimentalApi: true, requestedCapabilities: ['sessionMcp'] } }, signal);
-      if (host.info.schema?.version !== 1 || host.info.schema?.fingerprint !== sdk.EXPECTED_SCHEMA_FINGERPRINT) {
+      // Muse updates itself; a newer build only adds optional fields within a schema version, and the SDK treats a
+      // fingerprint mismatch as a warning (checkServedFingerprint), so only another schema version is refused.
+      if (host.info.schema?.version !== 1) {
         throw new Error('Unsupported Muse Code protocol. Update Harness and Muse Code together before continuing.');
       }
       host.rpc.notify('initialized', {});
@@ -274,6 +276,8 @@ class MuseCLI {
 
   // `muse login` prints a code to approve in the browser; its window is hidden, so open the Meta link it prints.
   async login(open = () => {}) {
+    // Signing in again cannot fix an unsupported protocol, so the Meta page stays closed.
+    if (/Unsupported Muse/.test(this.status.error || '')) throw new Error(this.status.error);
     const executable = this.find();
     const child = spawnOwned(this.launch, executable.command, [...executable.args, 'login'],
       { cwd: os.tmpdir(), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: process.env });

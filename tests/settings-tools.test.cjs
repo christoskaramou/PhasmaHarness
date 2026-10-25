@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
+const path = require('node:path');
 const { SettingsTools } = require('../src/settings-tools.cjs');
 
 function setup() {
@@ -124,11 +125,11 @@ test('Routing model changes method and model together while retaining the Jev fa
   assert.equal(service.read(worker, { names: ['routingModel'] }).settings.routingModel.value, 'router');
 });
 
-test('reading the wiki folder creates nothing, and a moved workspace reads as null instead of failing', () => {
+test('the wiki folder is the workspace docs/wiki, and reading it creates nothing', () => {
   const { service, worker } = setup();
-  assert.equal(service.read(worker, { names: ['wikiFolder'] }).settings.wikiFolder.value, '/wiki');
+  assert.equal(service.read(worker, { names: ['wikiFolder'] }).settings.wikiFolder.value, path.join('/project', 'docs', 'wiki'));
   worker.data.settings.workspace = '/moved';
-  assert.equal(service.read(worker, {}).settings.wikiFolder.value, null);
+  assert.equal(service.read(worker, {}).settings.wikiFolder.value, path.join('/moved', 'docs', 'wiki'));
 });
 
 test('a confirmation answered after its turn ended, or never answered, applies nothing', async t => {

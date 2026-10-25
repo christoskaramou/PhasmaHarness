@@ -26,6 +26,20 @@ test('Smart skips workspace scanning and the second call for general messages', 
   assert.equal(result.assessment.needsChecks, false);
 });
 
+// 2026-10-25: a Claude CLI or LM Studio router left usage without totalTokens and every render of that chat threw.
+test('router usage in Claude CLI and API shapes is kept with a total', async () => {
+  const shapes = [
+    [{ input_tokens: 2, cache_creation_input_tokens: 8778, cache_read_input_tokens: 0, output_tokens: 572 }, 9352],
+    [{ inputTokens: 3702, outputTokens: 510, cachedInputTokens: null, cacheWriteInputTokens: null }, 4212],
+  ];
+  for (const [usage, total] of shapes) {
+    const router = new SmartRouter(__dirname);
+    router.classifyCodex = async () => ({ decision: decision(false), usage });
+    const result = await router.choose('hello', session, []);
+    assert.equal(result.router.usage.totalTokens, total);
+  }
+});
+
 test('Smart runs evidence classification only when requested and counts both calls', async () => {
   const router = new SmartRouter(__dirname);
   const order = [];

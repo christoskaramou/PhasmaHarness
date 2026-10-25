@@ -62,7 +62,15 @@ class DeepSeekCLI {
         clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } }), START_MS, LABEL, signal);
       if (host.info.protocolVersion !== 1 || !host.info.agentInfo?.name) throw new Error('Unsupported DeepSeek Harness protocol. Update DeepSeek Harness and reconnect.');
       return host;
-    } catch (error) { await this.closeHost(host); throw error; }
+    } catch (error) {
+      // A dsh that quits at start says why on stderr (its first line); "ACP connection closed" alone does not. Its
+      // output is complete once it has closed, which a crash does at once; a Stop does not wait for it.
+      if (!signal?.aborted) await Promise.race([host.exited, new Promise(resolve => setTimeout(resolve, 1000).unref())]);
+      const reason = host.stderr.split('\n').find(line => line.trim());
+      if (reason && error instanceof Error) error.message += `: ${reason.trim()}`;
+      await this.closeHost(host);
+      throw error;
+    }
   }
 
   async closeHost(host) {

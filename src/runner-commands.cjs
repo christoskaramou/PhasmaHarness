@@ -7,7 +7,7 @@ function assertRunnerOpen(agents, name) {
 const WATCH_ONLY = 'This bot works for the bot that made it; only that bot gives it work.';
 
 function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolder, stopDownloads }) {
-  const { controller, agents, wikiStore, documents, updater } = runner;
+  const { controller, agents, documents, updater } = runner;
   const register = handle;
   const chatMutations = new Set(['create', 'permissions', 'rename', 'archive', 'deleteSession', 'queuedMessage', 'compact', 'clearConversation']);
   handle = (name, handler) => register(name, (...args) => {
@@ -36,6 +36,8 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
       return controller.cursor.models.map(model => ({ id: model.id, label: model.label || model.id }));
     }
     if (id === 'codex') return controller.models.map(model => ({ id: model.model, label: model.model }));
+    // Settings asks every provider it connects for its models, Claude included.
+    if (id === 'claude-cli') return controller.claude.models.map(model => ({ id: model.model, label: model.label }));
     if (typeof id !== 'string' || !(controller.data.settings.providers || []).some(provider => provider.id === id))
       throw new Error('Unknown provider.');
     return (await controller.providers.models(id)).map(model => ({ id: model, label: model }));
@@ -55,7 +57,11 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
   handle('saveGroup', value => agents.saveGroup(value));
   handle('readDocument', value => documents.read(value));
   handle('deleteAgent', id => agents.deleteAgent(id));
-  handle('workspaceWiki', (id, agentId) => wikiStore.ensure(id ? agents.owner(id).session(id).workspace : agents.controller(agentId).data.settings.workspace));
+  // The workspace's own docs/wiki, shown in Settings; Harness does not create it.
+  handle('workspaceWiki', (id, agentId) => {
+    const root = require('node:path').join(id ? agents.owner(id).session(id).workspace : agents.controller(agentId).data.settings.workspace, 'docs', 'wiki');
+    return { root, exists: require('node:fs').existsSync(root) };
+  });
   handle('browseWorkspace', (id, action, relative, kind, agentId) => require('./workspace/workspace-browser.cjs').browse(
     id ? agents.owner(id).session(id).workspace : agents.controller(agentId).data.settings.workspace, action, relative, kind));
   handle('settings', (values, agentId) => { const snapshot = agents.settings(values, agentId); controller.warmRouter(); return snapshot; });

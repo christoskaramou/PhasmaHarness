@@ -3,7 +3,7 @@
 // its proposal lands on the lesson. These are Controller methods (see ../controller.cjs); `this` is the Controller.
 const fs = require('node:fs');
 const path = require('node:path');
-const { projectBody } = require('../workspace/project-instructions.cjs');
+const { projectRules } = require('../workspace/project-instructions.cjs');
 const { capabilities } = require('../providers/capabilities.cjs');
 const { SCHEMA, INSTRUCTIONS, reflectionInput, checkReflection } = require('../reflection.cjs');
 const { readLessons, saveReflection, lessonKey, sameLesson } = require('../lessons.cjs');
@@ -20,10 +20,7 @@ module.exports = {
     if (this.agents?.backgroundQuota(this, session, router))
       return null;
 
-    let rules = '';
-    try {
-      rules = projectBody(project);
-    } catch { /* no project entry yet */ }
+    const rules = projectRules(project) + this.keptRulesText(project);
     const { prompt, plain, hash } = reflectionInput(task, session.items.slice(task.startIndex || 0), rules);
     const key = lessonKey(lesson);
     if (readLessons(root).find(record => lessonKey(record) === key)?.reflection?.hash === hash)

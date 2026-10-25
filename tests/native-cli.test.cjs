@@ -69,8 +69,7 @@ test('a native-only account becomes ready, dispatches without Codex and keeps mi
   const run = calls.find(call => typeof call === 'object');
   assert.equal(run.model, 'model-a');
   assert.equal(run.access, 'read-only');
-  assert.match(run.instructions, /Native managed instruction marker/);
-  assert.ok(run.instructions.includes(JSON.stringify(path.join(controller.wikiStore.location(root).root, 'index.md'))));
+  assert.doesNotMatch(run.instructions, /Native managed instruction marker/, 'the DeepSeek CLI loads AGENTS.md itself');
   assert.equal(run.managedInstructions, true);
   assert.equal(session['native:deepseekSessionId'], 'native-session');
   assert.equal(session.usage.total, undefined);
@@ -91,7 +90,9 @@ test('disabled native accounts are inspected without starting authentication or 
 
 test('resumed native workers send instructions once, refresh edits/access, and recover after a failed turn', async t => {
   const { controller, backend, calls, root } = await controllerFixture(t, true);
-  const entry = path.join(root, 'PhasmaHarness.md'); fs.writeFileSync(entry, 'Stable project rules.');
+  controller.wikiStore = new (require('../src/workspace/wiki-store.cjs').WikiStore)(path.join(root, 'Workspaces'));
+  const entry = path.join(controller.wikiStore.ensure(root).root, 'kept-rules.md');
+  fs.writeFileSync(entry, 'Stable project rules.');
   const session = controller.create(root, 'read-only');
   const send = text => controller.send({ id: session.id, text, mode: 'native:deepseek:model-a', task: 'off' });
   for (let i = 0; i < 30; i++) await send(`Question ${i}`);

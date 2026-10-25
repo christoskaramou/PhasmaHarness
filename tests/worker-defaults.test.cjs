@@ -91,7 +91,7 @@ test('Claude and Cursor workers receive defaults; classifiers remain isolated', 
   assert.equal(args[args.indexOf('--system-prompt-snapshot') + 1], 'off');
   assert.equal(require('node:fs').existsSync(args[args.indexOf('--append-system-prompt-file') + 1]), false);
   const exclusions = JSON.parse(args[args.indexOf('--settings') + 1]).claudeMdExcludes;
-  assert.ok(exclusions.includes('**/CLAUDE.md') && exclusions.includes('**/AGENTS.md'));
+  assert.ok(!exclusions.some(pattern => pattern.startsWith('**/')), 'the workspace CLAUDE.md loads as it does outside Harness');
   await cursor.run({ model: 'test', prompt: 'continue', access: 'read-only', instructions: 'Managed instruction marker.' });
   assert.match(prompt, /Managed instruction marker/);
 });

@@ -74,10 +74,11 @@ function complete(c, s, text = 'Verified result.') {
 }
 const start = (c, s) => c.send({ id: s.id, text: 'Inspect this project', mode: 'terra-light', task: 'off' });
 
-test('direct bots and delegated execution use the same managed instructions and wiki', async t => {
+test('direct bots and delegated execution get the same Harness-kept rules, and Codex loads AGENTS.md itself', async t => {
   const { primary, agents, addWorker, workspace, directory } = await setup(t);
   primary.wikiStore = new (require('../src/workspace/wiki-store.cjs').WikiStore)(path.join(directory, 'Workspaces'));
   fs.writeFileSync(path.join(workspace, 'AGENTS.md'), 'Delegated managed instruction marker.');
+  fs.writeFileSync(path.join(primary.wikiStore.ensure(workspace).root, 'kept-rules.md'), '## Rules Harness learned\n\n- Kept rule marker.\n');
   const worker = await addWorker('Managed worker');
   const source = primary.create();
   await start(primary, source);
@@ -87,10 +88,11 @@ test('direct bots and delegated execution use the same managed instructions and 
   const direct = primary.client.calls.find(call => call.method === 'thread/start').params.developerInstructions;
   const delegated = worker.client.calls.find(call => call.method === 'thread/start').params.developerInstructions;
   for (const instructions of [direct, delegated]) {
-    assert.match(instructions, /Delegated managed instruction marker/);
-    assert.ok(instructions.includes(JSON.stringify(path.join(primary.wikiStore.location(workspace).root, 'index.md'))));
+    assert.match(instructions, /Kept rule marker/);
+    assert.doesNotMatch(instructions, /Delegated managed instruction marker/);
   }
-  assert.equal(fs.existsSync(path.join(workspace, 'INSTRUCTIONS.md')), false);
+  assert.equal(primary.client.calls.find(call => call.method === 'thread/start').params.config.project_doc_max_bytes, undefined);
+  assert.deepEqual(fs.readdirSync(workspace).filter(name => /\.md$/i.test(name)), ['AGENTS.md']);
 });
 
 test('direct tracked tasks reserve their budget before routing and do not charge later chat to it', async t => {

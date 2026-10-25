@@ -40,10 +40,10 @@ test('image and attachment validation precedes submission and keeps message meta
 test('shared model discovery exposes native metadata and rejects unknown provider IDs', async () => {
   const f = fixture(), c = f.runner.controller;
   c.nativeCLIs = new Map([['native:muse', { models: [{ model: 'muse-fixture', label: 'Fixture Muse' }] }]]);
-  c.models = [{ model: 'codex-fixture' }]; c.cursor = { models: [{ id: 'cursor-fixture' }] };
+  c.models = [{ model: 'codex-fixture' }]; c.cursor = { models: [{ id: 'cursor-fixture' }] }; c.claude = { models: [{ id: 'claude-cli:claude-fixture', model: 'claude-fixture', label: 'claude-fixture' }] };
   c.data = { settings: { providers: [{ id: 'configured-api' }] } };
   c.providers = { models: async id => { assert.equal(id, 'configured-api'); return ['api-fixture']; } };
-  for (const [id, model] of [['native:muse', 'muse-fixture'], ['codex', 'codex-fixture'], ['cursor-cli', 'cursor-fixture'], ['configured-api', 'api-fixture']])
+  for (const [id, model] of [['native:muse', 'muse-fixture'], ['codex', 'codex-fixture'], ['cursor-cli', 'cursor-fixture'], ['claude-cli', 'claude-fixture'], ['configured-api', 'api-fixture']])
     assert.equal((await f.call('providerModels', id))[0].id, model);
   for (const id of ['__proto__', 'unknown', {}, null]) await assert.rejects(f.call('providerModels', id), /Unknown provider/);
 });

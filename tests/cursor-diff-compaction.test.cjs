@@ -116,3 +116,30 @@ test('Cursor tool cards keep the output Cursor sends in rawOutput and the name a
   assert.deepEqual(toolOutput({ status: 'completed' }), []);
   assert.match(toolOutput({ rawOutput: { content: 'x'.repeat(70000) } }).content, /^x{64000}\n\[… 6000 more characters not kept\]$/);
 });
+
+test('Cursor text written after a tool call becomes a new message below the tool card', async () => {
+  const { CursorCLI } = require('../src/providers/cursor.cjs');
+  const cursor = new CursorCLI(), events = [];
+  cursor.connect = ({ onUpdate }) => ({
+    cwd: 'w', close() {},
+    call: async method => {
+      if (method === 'session/new') return { sessionId: 's' };
+      if (method !== 'session/prompt') return {};
+      const send = update => onUpdate({ sessionId: 's', update });
+      const say = text => send({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } });
+      say('Counting from README.md'); say(' with a search.');
+      send({ sessionUpdate: 'tool_call', toolCallId: 'g', title: 'grep', kind: 'search', rawInput: {} });
+      send({ sessionUpdate: 'tool_call_update', toolCallId: 'g', status: 'completed', rawOutput: { totalMatches: 5 } });
+      say('**5** matching lines.');
+      return { stopReason: 'end_turn' };
+    },
+  });
+  const result = await cursor.run({ model: 'm', prompt: 'Count.', onEvent: event => events.push(event) });
+  cursor.close();
+  const order = events.flatMap(e => e.type === 'assistant' ? e.message.content.map(c => c.type === 'text' ? `${e.message.id}:${c.text}` : `tool:${c.id}`) : []);
+  const [first, , , last] = order;
+  assert.equal(first.split(':')[1], 'Counting from README.md');
+  assert.ok(order.indexOf('tool:g') < order.findIndex(entry => entry.endsWith(':**5** matching lines.')), 'the later text comes after the card');
+  assert.notEqual(first.split(':')[0], last.split(':')[0], 'a separate message');
+  assert.equal(result.result, 'Counting from README.md with a search.\n\n**5** matching lines.');
+});

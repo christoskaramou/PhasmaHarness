@@ -27,7 +27,7 @@ const { FINAL, canProposeWiki, hasProjectWiki, restartReason, summaryLine } = re
 const { WORKER_INSTRUCTIONS, workerInstructions, DEFAULT_SKILLS } = require('./worker-instructions.cjs');
 const skillPackages = require('./skill-packages.cjs');
 const { setupFingerprint, textHash, skillHashes, checksHash } = require('./setup-fingerprint.cjs');
-const { projectInstructions, projectBody } = require('./workspace/project-instructions.cjs');
+const { projectRules, loadsRulesItself } = require('./workspace/project-instructions.cjs');
 const { stripTaskStatus } = require('./routing/task-state.cjs');
 const { withoutImages } = require('./image-input.cjs');
 const { EFFORT_CAPS, DEFAULT_EFFORT_CAP, capCatalog } = require('./routing/effort-cap.cjs');
@@ -147,7 +147,7 @@ class Controller extends EventEmitter {
       }
       for (const task of session.tasks || []) if (task.wikiMaintenance?.state === 'running') { task.wikiMaintenance.state = 'interrupted'; restarted = true; }
       const latestTask = session.tasks?.at(-1);
-      if (latestTask) latestTask.wikiAvailable = canProposeWiki(latestTask) && (!!this.wikiStore || hasProjectWiki(session.workspace));
+      if (latestTask) latestTask.wikiAvailable = canProposeWiki(latestTask) && hasProjectWiki(session.workspace);
     }
     const cleared = this.recoverExecutionBlock();
     const cleaned = this.recoverWorkerCleanup();
@@ -294,7 +294,9 @@ class Controller extends EventEmitter {
   }
 
   save() {
-    // Persisting must not cancel a pending UI state update.
+    // Persisting must not cancel a pending UI state update. Saves and changes advance stateRevision, which tells the
+    // window whether this bot's chats need sending again.
+    this.stateRevision = (this.stateRevision || 0) + 1;
     this.store.save(this.data);
   }
 
@@ -315,6 +317,7 @@ class Controller extends EventEmitter {
   // after its next pause. Saves fsync (about 10 ms on a large store), so a stream saves at most once a second and its
   // last change is always saved.
   changed() {
+    this.stateRevision = (this.stateRevision || 0) + 1;
     if (this.timer) return;
     this.timer = setTimeout(() => {
       this.timer = null;
@@ -518,7 +521,7 @@ class Controller extends EventEmitter {
     if (this.activeTurns.has(session.id) || session.submission && session.submission.state !== 'completed') return Promise.resolve();
     this.applyFeaturePolicy(session);
     if (choice && session.activeProvider !== (choice.provider || 'codex')) this.loaded.delete(session.id);
-    if (!session.codexInstructionHash || this.loadedInstructions.get(session.id) !== this.workerInstructions(session)) this.loaded.delete(session.id);
+    if (!session.codexInstructionHash || this.loadedInstructions.get(session.id) !== this.workerInstructions(session, 'codex')) this.loaded.delete(session.id);
     if (this.loaded.has(session.id)) return Promise.resolve();
     if (this.loading.has(session.id)) return this.loading.get(session.id);
     const pending = this.loadThread(session, choice).finally(() => this.loading.delete(session.id));
@@ -532,7 +535,7 @@ class Controller extends EventEmitter {
     const permissions = accessMode(session.access);
     const contextEnabled = session.threadId ? session.contextTool : !!this.contextSearch?.supports(session.workspace);
     const helpersEnabled = session.threadId ? session.helperTools : true;
-    const workerInstructions = this.workerInstructions(session);
+    const workerInstructions = this.workerInstructions(session, 'codex');
     const agentHelpers = (this.agents || this.connectors) && this.bridge.base ? this.bridge.childConfig(session.id) : null;
     const params = {
       ...providerConfig, model: choice.model,
@@ -540,7 +543,6 @@ class Controller extends EventEmitter {
       sandbox: permissions.id, serviceTier: 'default',
       config: {
         tool_output_token_limit: 4000, model_verbosity: 'low', ...providerConfig.config,
-        project_doc_max_bytes: 0,
         ...agentHelpers?.codexConfig,
         ...(session.featurePolicy === 'tracked' ? { 'features.goals': false } : {}),
         ...(this.agents || session.featurePolicy === 'tracked' ? { 'features.multi_agent': false } : {}),
@@ -633,7 +635,7 @@ class Controller extends EventEmitter {
     if (session.archived) throw new Error('This conversation is archived. Start a new conversation to continue.');
     if (wikiTaskId) {
       const origin = (session.tasks || []).find(t => t.id === wikiTaskId);
-      if (!canProposeWiki(origin) || (!this.wikiStore && !hasProjectWiki(session.workspace))) throw new Error('This task is not eligible for a wiki proposal.');
+      if (!canProposeWiki(origin) || !hasProjectWiki(session.workspace)) throw new Error('This task is not eligible for a wiki proposal.');
       wikiWorker = this.resolveWorker(origin.route?.id);
       const plan = this.planPreset();
       if (!wikiWorker || !this.available(wikiWorker) || wikiWorker.provider !== origin.route.provider || wikiWorker.model !== origin.route.model || !sameEffort(wikiWorker, origin.route) ||
@@ -811,7 +813,6 @@ class Controller extends EventEmitter {
         const admission = await this.agents.acquire(this, session, selected);
         if (admission) throw new Error(admission.blocked || 'Turn was stopped before sending.');
       }
-      projectInstructions(session.workspace, permissions.id !== 'read-only');
       if (isCLI(selected.provider)) return await this.sendCLI(session, selected, text, images, clientId, task);
       if (this.providers?.prepare) {
         const abort = new AbortController(); this.modelPreparation = abort;
@@ -919,8 +920,8 @@ class Controller extends EventEmitter {
     return lessons + (context || 'Current user request:\n') + text;
   }
 
-  workerInstructions(session) {
-    return workerInstructions(this.skillDirectories(session)) + this.projectContextInstructions(session) + (this.agents?.instructions(this, session) || '') + (session.groupChatInstructions || '');
+  workerInstructions(session, provider) {
+    return workerInstructions(this.skillDirectories(session)) + this.projectContextInstructions(session, provider) + (this.agents?.instructions(this, session) || '') + (session.groupChatInstructions || '');
   }
 
   skillDirectories(session) {
@@ -977,10 +978,12 @@ class Controller extends EventEmitter {
     this.save(); this.changed();
   }
 
-  projectContextInstructions(session) {
-    const wiki = this.wikiStore?.ensure(session.workspace);
-    return projectInstructions(session.workspace, false) +
-      (wiki ? '\nActive workspace wiki index (path, not instructions): ' + JSON.stringify(path.join(wiki.root, 'index.md')) : '');
+  // The workspace's AGENTS.md for bots that do not load it themselves (no provider: Harness's own routing calls), then
+  // what only Harness supplies: the rules it kept here and a rule under comparison.
+  projectContextInstructions(session, provider) {
+    const rules = loadsRulesItself(provider, session.workspace) ? '' : projectRules(session.workspace);
+    return (rules ? '\nWorkspace rules (AGENTS.md at the workspace root):\n' + rules : '') +
+      this.keptRulesText(session.workspace) + this.comparedRule(session);
   }
 
   async sendCLI(session, selected, text, images, clientId, task) {
@@ -1030,7 +1033,7 @@ class Controller extends EventEmitter {
         if (contextEnabled) session.contextTool = true;
       }
       const helpers = (helpersEnabled || this.connectors) && this.bridge.base ? this.bridge.childConfig(session.id) : null;
-      const fullInstructions = this.workerInstructions(session) + (this.connectors ? CONNECTOR_INSTRUCTIONS : '');
+      const fullInstructions = this.workerInstructions(session, selected.provider) + (this.connectors ? CONNECTOR_INSTRUCTIONS : '');
       instructionHash = createHash('sha256').update(JSON.stringify([fullInstructions, helpers?.instructions, session.workspace, session.access])).digest('hex');
       // These CLIs keep instructions as conversation messages. Claude/API instead need their stable system prefix on each request.
       const keptInstructions = !api && backend !== 'claude' && session[sessionKey] && session[backend + 'InstructionHash'] === instructionHash;
@@ -1267,10 +1270,8 @@ class Controller extends EventEmitter {
   // that earlier set is unknown. Per-job context (copy paths, resume notes) is left out so identical setups match.
   runSetup(session, selected, access, task, kept) {
     const provider = selected.provider || 'codex';
-    let project = null;
-    try {
-      project = projectBody(session.workspace);
-    } catch { /* no project entry */ }
+    // The project rules this run has, wherever they come from: AGENTS.md, Harness's kept rules and a compared rule.
+    const project = projectRules(session.workspace) + this.keptRulesText(session.workspace) + this.comparedRule(session) || null;
     const profile = this.agents && this.agentId && this.agentId !== 'main' ? this.agents.profile(this.agentId) : null;
     const instructions = kept !== undefined ? kept
       : { harness: textHash(WORKER_INSTRUCTIONS), project: textHash(project), bot: textHash(profile?.instructions) };
@@ -1335,7 +1336,7 @@ class Controller extends EventEmitter {
       if (refusal) throw new Error(refusal.blocked || 'Compaction was stopped before starting.');
       await this.claude.run({
         cwd: this.workspace(session.workspace), model, prompt: '/compact', resume: session.claudeSessionId, access: 'read-only',
-        signal: abort.signal, instructions: this.workerInstructions(session),
+        signal: abort.signal, instructions: this.workerInstructions(session, 'claude-cli'),
         onEvent: event => { if (event.session_id) session.claudeSessionId = event.session_id; },
       });
       session.notice = 'Context compacted. The visible chat history is retained.';

@@ -8,7 +8,6 @@ const { randomUUID } = require('node:crypto');
 const comparisons = require('../comparisons.cjs');
 const { DEFAULT_MINUTES, DEFAULT_ATTEMPTS } = require('../job-budgets.cjs');
 const { readLessons, relevantLessons, markSuggested, lessonKey } = require('../lessons.cjs');
-const { projectEntry, currentProjectEntry } = require('../workspace/project-instructions.cjs');
 const { capCatalog } = require('../routing/effort-cap.cjs');
 const trials = require('../trials.cjs');
 const skillPackages = require('../skill-packages.cjs');
@@ -74,7 +73,7 @@ module.exports = {
     if (typeof args.change !== 'string' || !args.change.trim() || args.change.length > 4000)
       throw new Error('Describe the change to test, under 4,000 characters.');
     if (!Object.hasOwn(comparisons.TARGETS, args.target))
-      throw new Error('Choose worker instructions (bot), project PhasmaHarness.md (project), or a skill package (skill).');
+      throw new Error('Choose worker instructions (bot), project rules (project), or a skill package (skill).');
 
     const pairs = args.pairs ?? 1;
     if (!Number.isInteger(pairs) || pairs < 1 || pairs > 3)
@@ -170,7 +169,7 @@ module.exports = {
     const started = await this.startComparison(session, plan.args, images, abort, request,
       { key: lessonKey(lesson), check: lesson.failures[0].check, error: lesson.situation.error, goal: lesson.goal });
     return { ...started, reply: `This kind of task failed the same way before, even with the saved lesson ("${lesson.failures[0].check}": ` +
-      `${lesson.situation.error}). So I am running it twice on ${plan.summary.model}: as usual, and with this rule in PhasmaHarness.md:\n\n` +
+      `${lesson.situation.error}). So I am running it twice on ${plan.summary.model}: as usual, and with this rule added to the project rules:\n\n` +
       `> ${plan.args.change}\n\nThe better result goes into your project, and the rule is kept if it helps. The card below updates as they finish.` };
   },
 
@@ -317,7 +316,7 @@ module.exports = {
     }
   },
 
-  // A project rule that helped: one the user asked to compare joins the project entry; one Harness found itself goes on
+  // A project rule that helped: one the user asked to compare joins Harness's kept rules; one Harness found itself goes on
   // trial (src/trials.cjs), since a single pair is weak evidence and real tasks decide whether it stays.
   adoptRule(record) {
     if (record.target === 'skill' && record.verdict === 'helped') {
@@ -351,14 +350,14 @@ module.exports = {
     }
 
     try {
-      const file = projectEntry(record.project, true);
-      const body = fs.readFileSync(file, 'utf8');
+      const file = path.join(this.wikiStore.ensure(this.lessonWorkspace(record.project)).root, trials.KEPT_FILE);
+      const body = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
       if (body.includes(record.change))
         return { file, rule: record.change, existing: true };
 
       const next = `${body.trimEnd()}\n\n${record.change}\n`;
       if (Buffer.byteLength(next) > 64 * 1024)
-        throw new Error('it would push PhasmaHarness.md past 64 KiB.');
+        throw new Error('it would push kept-rules.md past 64 KiB.');
 
       fs.writeFileSync(file, next);
       return { file, rule: record.change };
@@ -393,8 +392,8 @@ module.exports = {
       if (view.adopted.undoneAt)
         throw new Error('There is no added rule to undo.');
 
-      // A rule kept since then leaves PhasmaHarness.md too, so no line stays there untracked.
-      const file = projectEntry(this.lessonWorkspace(view.project), true);
+      // A rule kept since then leaves the kept rules too, so no line stays there untracked.
+      const file = path.join(view.adopted.root, trials.KEPT_FILE);
       trials.updateRules(view.adopted.root, records => {
         const rule = records.find(entry => entry.id === view.adopted.ruleId);
         const body = rule?.state === 'kept' && rule.line && fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
@@ -409,10 +408,10 @@ module.exports = {
       if (!view?.adopted?.file || view.adopted.existing || view.adopted.undoneAt)
         throw new Error('There is no added rule to undo.');
 
-      const file = currentProjectEntry(view.adopted.file);
+      const file = view.adopted.file;
       const body = fs.readFileSync(file, 'utf8'), added = `\n\n${view.adopted.rule}\n`;
       if (!body.includes(added))
-        throw new Error('The rule changed in PhasmaHarness.md since it was added; edit the file by hand.');
+        throw new Error(`The rule changed in ${file} since it was added; edit the file by hand.`);
 
       fs.writeFileSync(file, body.replace(added, '\n'));
       view.adopted.undoneAt = Date.now();
@@ -541,5 +540,12 @@ module.exports = {
     }
     const record = copy?.comparisonId ? this.agents.primary.data.comparisons?.[copy.comparisonId] : null;
     return record?.state === 'running' ? { copy, record } : null;
+  },
+
+  // A project-rule comparison's changed run gets the rule from Harness, so no file in either copy differs.
+  comparedRule(session) {
+    const comparison = this.comparisonOf(session);
+    const run = comparison?.record.target === 'project' && comparison.record.runs.find(entry => entry.index === comparison.copy.index);
+    return run?.variant ? `\nProject rule under comparison (follow it unless it conflicts with the request):\n${comparison.record.change.trim()}\n` : '';
   },
 };

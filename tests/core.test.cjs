@@ -6,7 +6,6 @@ const os = require('node:os');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
 const { Controller } = require('../src/controller.cjs');
-const { projectEntry } = require('../src/workspace/project-instructions.cjs');
 const { MEASURED_REAP } = require('../src/tasks.cjs');
 
 class Fake extends EventEmitter {
@@ -274,20 +273,21 @@ for (const stopped of [false, true]) test(`Claude ${stopped ? 'Stop' : 'completi
   assert.deepEqual(await idle, { busy: null, status });
 });
 
-test('changed project instructions refresh an existing worker; unchanged entry does not reload', async t => {
+test('changed Harness-kept rules refresh an existing worker; an AGENTS.md edit is left to Codex and nothing is created', async t => {
   const { controller, fake } = await setup(t);
+  controller.wikiStore = new (require('../src/workspace/wiki-store.cjs').WikiStore)(path.join(path.dirname(controller.filename), 'Workspaces'));
   const session = controller.create();
-  const entry = path.join(session.workspace, 'PhasmaHarness.md');
   await controller.send({ id: session.id, text: 'hello', mode: 'terra-light', task: 'off' });
-  assert.ok(fs.existsSync(entry));
+  assert.equal(fs.existsSync(path.join(session.workspace, 'PhasmaHarness.md')), false);
   complete(controller, session, session.turnId);
   await flush();
-  fs.writeFileSync(entry, '# Project rule\nUse the violet convention.');
+  fs.writeFileSync(path.join(controller.wikiStore.ensure(session.workspace).root, 'kept-rules.md'), '- Use the violet convention.\n');
   await controller.send({ id: session.id, text: 'continue', mode: 'terra-light', task: 'off' });
   assert.match(fake.calls.filter(c => c.method === 'thread/resume').at(-1).params.developerInstructions, /violet convention/);
   complete(controller, session, session.turnId);
   await flush();
   const count = fake.calls.filter(c => c.method === 'thread/resume').length;
+  fs.writeFileSync(path.join(session.workspace, 'AGENTS.md'), 'Codex reads this itself.');
   await controller.send({ id: session.id, text: 'again', mode: 'terra-light', task: 'off' });
   assert.equal(fake.calls.filter(c => c.method === 'thread/resume').length, count);
 });
@@ -385,7 +385,7 @@ test('damaged skill stores keep normal turns working with one persistent fallbac
   }
 });
 
-test('shared worker defaults reach Codex and CLI with the selected workspace wiki', async t => {
+test('shared worker defaults reach Codex and CLI; AGENTS.md goes only to a bot that does not load it itself', async t => {
   const { controller, fake } = await setup(t);
   const session = controller.create();
   controller.wikiStore = new (require('../src/workspace/wiki-store.cjs').WikiStore)(path.join(path.dirname(controller.filename), 'private-wiki'));
@@ -393,10 +393,10 @@ test('shared worker defaults reach Codex and CLI with the selected workspace wik
   await controller.send({ id: session.id, text: 'hello', mode: 'terra-light', task: 'off' });
   const instructions = fake.calls.find(c => c.method === 'thread/start').params.developerInstructions;
   assert.ok(instructions.includes('Harness skills') && instructions.includes('Ponytail full'));
-  assert.ok(instructions.includes('private-wiki'));
-  assert.match(instructions, /Managed amberquartz instructions/);
-  assert.equal(fake.calls.find(c => c.method === 'thread/start').params.config.project_doc_max_bytes, 0);
-  assert.equal(fs.existsSync(path.join(session.workspace, 'PhasmaHarness.md')), true);
+  assert.ok(!instructions.includes('private-wiki'), 'Harness data is not a wiki');
+  assert.doesNotMatch(instructions, /Managed amberquartz instructions/, 'Codex loads AGENTS.md itself');
+  assert.equal(fake.calls.find(c => c.method === 'thread/start').params.config.project_doc_max_bytes, undefined);
+  assert.equal(fs.existsSync(path.join(session.workspace, 'PhasmaHarness.md')), false);
   complete(controller, session, session.turnId);
   await flush();
   controller.data.settings.claudeEnabled = true;
@@ -406,22 +406,20 @@ test('shared worker defaults reach Codex and CLI with the selected workspace wik
   controller.claude.run = async request => { cli = request; return { result: 'ok' }; };
   await controller.send({ id: session.id, text: 'normal mode', mode: 'claude-cli:sonnet', task: 'off' });
   assert.ok(cli.instructions.includes('Ponytail full'));
-  assert.ok(cli.instructions.includes('private-wiki'));
-  assert.match(cli.instructions, /Managed amberquartz instructions/);
+  assert.match(cli.instructions, /Managed amberquartz instructions/, 'without a CLAUDE.md, Claude Code would not see AGENTS.md');
   assert.equal(cli.managedInstructions, true);
   assert.equal(cli.helpers, null);
   assert.ok(cli.prompt.includes('normal mode'));
 });
 
-test('managed instruction edits refresh and inject into resumed Codex work without recreating source entries', async t => {
+test('kept-rule edits refresh and inject into resumed Codex work without creating workspace entries', async t => {
   const { controller, fake } = await setup(t);
   const session = controller.create();
   controller.wikiStore = new (require('../src/workspace/wiki-store.cjs').WikiStore)(path.join(path.dirname(controller.filename), 'Workspaces'));
   await controller.send({ id: session.id, text: 'hello', mode: 'terra-light', task: 'off' });
   complete(controller, session, session.turnId);
   await flush();
-  const entry = require('../src/workspace/project-instructions.cjs').projectEntry(session.workspace);
-  fs.writeFileSync(entry, 'Refreshed managed convention.');
+  fs.writeFileSync(path.join(controller.wikiStore.ensure(session.workspace).root, 'kept-rules.md'), 'Refreshed managed convention.');
   await controller.send({ id: session.id, text: 'continue', mode: 'terra-light', task: 'off' });
   assert.match(fake.calls.findLast(c => c.method === 'thread/inject_items').params.items[0].content[0].text, /Refreshed managed convention/);
   assert.equal(fs.existsSync(path.join(session.workspace, 'INSTRUCTIONS.md')), false);
@@ -1001,7 +999,7 @@ test('router controls checks independently of task kind; manual and skip overrid
   assert.equal(fake.calls.filter(c => c.method === 'command/exec').length, 2);
 });
 
-test('successful checks schedule one internal wiki assessment; failures and unverified tasks never do', async t => {
+test('passed checks never start a wiki turn by themselves; a workspace docs/wiki only enables Propose', async t => {
   const { controller, fake } = await setup(t);
   const session = controller.create();
   controller.permissions(session.id, 'danger-full-access');
@@ -1014,26 +1012,11 @@ test('successful checks schedule one internal wiki assessment; failures and unve
   await controller.gateDone;
   const task = session.tasks[0];
   assert.equal(task.state, 'checks-passed');
-  assert.equal(task.wikiMaintenance.state, 'running');
-  assert.equal(fake.turnIds.length, 2);
-  assert.equal(session.tasks.length, 1);
-  assert.equal(controller.busy, session.id);
-  const maintenance = fake.calls.filter(c => c.method === 'turn/start').at(-1).params;
-  assert.match(maintenance.input[0].text, /EVERY requirement/);
-  assert.match(maintenance.input[0].text, /incomplete evidence means no wiki edits/);
-  assert.match(maintenance.input[0].text, /Do not change project instructions/);
-  assert.equal(await controller.maintainWiki(session, task), false, 'never dispatch twice');
-  complete(controller, session, fake.turnIds[1]);
-  assert.equal(task.wikiMaintenance.state, 'finished');
+  assert.ok(!task.wikiMaintenance);
+  assert.equal(task.wikiAvailable, true);
+  assert.equal(fake.turnIds.length, 1, 'no second, automatic turn');
   assert.equal(controller.busy, null);
-  for (const state of ['not-checked', 'blocked', 'needs-you', 'cancelled']) {
-    assert.equal(await controller.maintainWiki(session, { ...task, state, wikiMaintenance: null }), false);
-  }
-  task.wikiMaintenance.state = 'running';
-  controller.save();
-  const restored = reopen(controller);
-  t.after(() => restored.close());
-  assert.equal(restored.data.sessions[0].tasks[0].wikiMaintenance.state, 'interrupted');
+  assert.equal(controller.maintainWiki, undefined);
 });
 
 test('configured checks stay frozen and hold the slot', async t => {
@@ -1408,7 +1391,7 @@ test('a carried trial rule whose target failure comes back is dropped with a lin
   assert.ok(lesson.recurred, 'carrying the trial rule counts as carrying its lesson');
 });
 
-test('a trial rule carried by three matching tasks that pass its check first time is kept in PhasmaHarness.md, with an Undo', async t => {
+test('a trial rule carried by three matching tasks that pass its check first time is kept in the kept rules, with an Undo', async t => {
   const { controller, fake } = await setup(t);
   const { WikiStore } = require('../src/workspace/wiki-store.cjs');
   const trials = require('../src/trials.cjs');
@@ -1438,10 +1421,11 @@ test('a trial rule carried by three matching tasks that pass its check first tim
   const [kept] = trials.readRules(root);
   assert.equal(kept.state, 'kept');
   assert.deepEqual(kept.carried.map(entry => entry.outcome), ['clean', 'clean', 'clean']);
-  const file = projectEntry(session.workspace, true);
+  const file = path.join(root, 'kept-rules.md');
+  assert.equal(fs.existsSync(path.join(session.workspace, 'PhasmaHarness.md')), false);
   assert.match(fs.readFileSync(file, 'utf8'), /## Rules Harness learned\n\n- Make sure fetchUser is a function before wiring retries\. \(kept \d{4}-\d\d-\d\d\)\n/);
   const notice = session.items.findLast(item => item.type === 'notice');
-  assert.match(notice.text, /^Kept the rule "Make sure fetchUser is a function before wiring retries\." in PhasmaHarness\.md: 3 matching tasks passed its check/);
+  assert.match(notice.text, /^Kept the rule "Make sure fetchUser is a function before wiring retries\." in Harness's kept rules for this workspace: 3 matching tasks passed its check/);
 
   controller.undoRule(session.id, notice.id);
   assert.equal(fs.readFileSync(file, 'utf8').includes(rule), false, 'Undo takes the line out again');
@@ -1451,7 +1435,7 @@ test('a trial rule carried by three matching tasks that pass its check first tim
   assert.doesNotMatch(inputs().at(-1), /Project rules on trial/, 'a removed rule rides nothing');
 });
 
-test('a kept rule whose target failure comes back leaves PhasmaHarness.md with a line in the chat; Undo puts it back for good', async t => {
+test('a kept rule whose target failure comes back leaves the kept rules with a line in the chat; Undo puts it back for good', async t => {
   const { controller, fake } = await setup(t);
   const { WikiStore } = require('../src/workspace/wiki-store.cjs');
   const trials = require('../src/trials.cjs');
@@ -1466,7 +1450,7 @@ test('a kept rule whose target failure comes back leaves PhasmaHarness.md with a
   const error = 'TypeError: fetchUser is not a function';
   const rule = 'Make sure fetchUser is a function before wiring retries.';
   const line = `- ${rule} (kept 2026-10-21)`;
-  const file = projectEntry(session.workspace, true);
+  const file = path.join(root, 'kept-rules.md');
   fs.writeFileSync(file, `# Project instructions\n\nStay small.\n\n${trials.HEADING}\n\n${line}\n`);
   trials.updateRules(root, records => records.push({ id: 'kept', rule, lessonKey: `unit\n${error}`, check: 'unit', error, goal: 'Add retry handling to fetchUser',
     source: 'a reflection', state: 'kept', since: 1, keptAt: Date.parse('2026-10-21T10:00:00Z'), line, carried: [] }));
@@ -1477,7 +1461,7 @@ test('a kept rule whose target failure comes back leaves PhasmaHarness.md with a
   fake.onExec = () => failed ? { exitCode: 1, stdout: `${error}\n  at retry.js:12`, stderr: '' } : { exitCode: 0, stdout: 'ok', stderr: '' };
 
   await controller.send({ id: session.id, text: 'Make fetchUser retries configurable', mode: 'terra-light', task: 'on' });
-  assert.deepEqual(session.tasks[0].keptRuleIds, ['kept'], 'its PhasmaHarness.md gives the task the kept rule');
+  assert.deepEqual(session.tasks[0].keptRuleIds, ['kept'], 'Harness gives the task the kept rule');
   const turns = fake.turnIds.length;
   complete(controller, session, fake.turnIds.at(-1));
   await until(() => fake.turnIds.length === turns + 1);
@@ -1488,7 +1472,7 @@ test('a kept rule whose target failure comes back leaves PhasmaHarness.md with a
   assert.equal(trials.readRules(root)[0].state, 'rolled back');
   assert.equal(fs.readFileSync(file, 'utf8'), '# Project instructions\n\nStay small.\n', 'the line and its empty heading are gone');
   const notice = session.items.findLast(item => item.type === 'notice');
-  assert.equal(notice.text, `Took the rule "${rule}" out of PhasmaHarness.md: the failure it targets came back after it was kept.`);
+  assert.equal(notice.text, `Took the rule "${rule}" out of Harness's kept rules: the failure it targets came back after it was kept.`);
   const [lesson] = JSON.parse(fs.readFileSync(path.join(root, 'lessons.json'), 'utf8'));
   assert.ok(lesson.recurred, 'carrying the kept rule counts as carrying its lesson');
 
@@ -1506,10 +1490,10 @@ test('a kept rule whose target failure comes back leaves PhasmaHarness.md with a
   fs.writeFileSync(file, '# Project instructions\n\nStay small.\n');
   await controller.send({ id: session.id, text: 'Log fetchUser retries', mode: 'terra-light', task: 'on' });
   assert.deepEqual(session.tasks.at(-1).keptRuleIds, []);
-  assert.deepEqual([trials.readRules(root)[0].state, trials.readRules(root)[0].reason], ['removed', 'deleted from PhasmaHarness.md by hand']);
+  assert.deepEqual([trials.readRules(root)[0].state, trials.readRules(root)[0].reason], ['removed', 'deleted from the kept rules by hand']);
 });
 
-test('a rule kept with ten rules already in PhasmaHarness.md moves the one tasks matched least recently out, and Undo moves it back', async t => {
+test('a rule kept with ten rules already kept moves the one tasks matched least recently out, and Undo moves it back', async t => {
   const { controller, fake } = await setup(t);
   const { WikiStore } = require('../src/workspace/wiki-store.cjs');
   const trials = require('../src/trials.cjs');
@@ -1522,7 +1506,7 @@ test('a rule kept with ten rules already in PhasmaHarness.md moves the one tasks
   const root = controller.wikiStore.ensure(session.workspace).root;
   const keptAt = Date.parse('2026-10-01T10:00:00Z');
   const lines = Array.from({ length: trials.MAX_KEPT }, (_, index) => `- Kept rule ${index}. (kept 2026-10-01)`);
-  const file = projectEntry(session.workspace, true);
+  const file = path.join(root, 'kept-rules.md');
   fs.writeFileSync(file, `# Project instructions\n\nStay small.\n\n${trials.HEADING}\n\n${lines.join('\n')}\n`);
   trials.updateRules(root, records => records.push(...lines.map((line, index) => ({ id: `k${index}`, rule: `Kept rule ${index}.`, lessonKey: null, check: 'unit',
     error: 'x', goal: 'Unrelated docs work', source: 'a reflection', state: 'kept', since: 1, keptAt, lastMatchedAt: index === 6 ? 5 : 1000 + index, line, carried: [] }))));
@@ -1533,7 +1517,7 @@ test('a rule kept with ten rules already in PhasmaHarness.md moves the one tasks
     { taskId: 'x1', at: 1, outcome: 'clean' }, { taskId: 'x2', at: 2, outcome: 'clean' }));
 
   await controller.send({ id: session.id, text: 'Cache fetchUser results', mode: 'terra-light', task: 'on' });
-  assert.equal(session.tasks[0].keptRuleIds.length, trials.MAX_KEPT, 'the task carried all ten through PhasmaHarness.md');
+  assert.equal(session.tasks[0].keptRuleIds.length, trials.MAX_KEPT, 'the task carried all ten through the kept rules');
   complete(controller, session, fake.turnIds.at(-1));
   await controller.gateDone;
 
@@ -1543,8 +1527,8 @@ test('a rule kept with ten rules already in PhasmaHarness.md moves the one tasks
   const moved = trials.readRules(root).find(record => record.id === 'k6');
   assert.deepEqual([moved.state, moved.onDemand, moved.line, moved.movedLine], ['kept', true, null, lines[6]]);
   const notice = session.items.findLast(item => item.type === 'notice');
-  assert.equal(notice.text, `Kept the rule "${winner}" in PhasmaHarness.md: 3 matching tasks passed its check without this failure. ` +
-    '"Kept rule 6." moved out of PhasmaHarness.md to keep it at 10 rules; it is still used on the tasks it matches.');
+  assert.equal(notice.text, `Kept the rule "${winner}" in Harness's kept rules for this workspace: 3 matching tasks passed its check without this failure. ` +
+    '"Kept rule 6." moved out of the kept rules to keep them at 10; it is still used on the tasks it matches.');
   // Wiki upkeep may follow the passed task; let it finish before the next request.
   if (controller.busy) {
     complete(controller, session, fake.turnIds.at(-1));
@@ -1682,9 +1666,9 @@ test('a correction in the chat becomes a trial rule through the scanner and the 
   await chatExchange(controller, fake, session, 'Thanks, that is all for now', 'Glad to help.');
   await until(() => trials.readRules(root)[0].state === 'kept');
   assert.equal(scans(), 5, 'each exchange scanned once');
-  assert.match(fs.readFileSync(projectEntry(session.workspace), 'utf8'), /- Keep public export names unless the user asks to rename them\. \(kept /);
+  assert.match(fs.readFileSync(path.join(root, 'kept-rules.md'), 'utf8'), /- Keep public export names unless the user asks to rename them\. \(kept /);
   await until(() => session.items.some(item => item.ruleNotice?.kind === 'kept'));
-  assert.equal(session.items.findLast(item => item.ruleNotice?.kind === 'kept').text, `Kept the rule "${rule}" in PhasmaHarness.md: 3 matching tasks avoided this mistake.`);
+  assert.equal(session.items.findLast(item => item.ruleNotice?.kind === 'kept').text, `Kept the rule "${rule}" in Harness's kept rules for this workspace: 3 matching tasks avoided this mistake.`);
   assert.throws(() => controller.undoRule(session.id, notice.id), /left its trial/);
 });
 
@@ -2720,51 +2704,28 @@ test('CLI follow-ups include delegated history arriving during a turn exactly on
   assert.doesNotMatch(prompts[2], /Late delegated history/);
 });
 
-test('decision trace and the log-only wiki check: turns, final checks and each wiki addition, with no text', async t => {
-  const { controller, fake, smartRouter } = await setup(t);
+test('decision trace: turns and final checks, with no text, and no automatic wiki turn', async t => {
+  const { controller, fake } = await setup(t);
   const records = [];
   controller.trace = { record: entry => records.push(entry), summary: () => ({ turns: 0, wiki: {} }) };
-  const judged = [];
-  smartRouter.jev = { configured: true, async evaluate(state, questions) {
-    judged.push(JSON.parse(state));
-    return { model: 'jev-1.13.0', answers: Object.fromEntries(Object.keys(questions).map(key => [key, { choice: key.endsWith('_support') ? 'supported' : 'addition', confidence: 0.8 }])),
-      usage: { inputTokens: 300 }, durationMs: 200, estimatedCostUsd: 0.00001 };
-  } };
-  assert.throws(() => controller.settings({ wikiAssessment: 'yes' }), /Invalid wiki check/);
-  controller.settings({ wikiAssessment: true });
   const session = controller.create();
   controller.permissions(session.id, 'danger-full-access');
   arm(controller, fake);
   addCheck(controller, session, ['unit-tests']);
   fs.mkdirSync(path.join(session.workspace, 'docs', 'wiki'), { recursive: true });
-  fs.mkdirSync(path.join(session.workspace, 'src'), { recursive: true });
-  fs.writeFileSync(path.join(session.workspace, 'src', 'retry.js'), 'const attempts = 3;\nmodule.exports = { attempts };\n');
   fs.writeFileSync(path.join(session.workspace, 'docs', 'wiki', 'index.md'), '# Wiki\n');
-  // Only files Git tracks are ever sent as evidence.
-  require('node:child_process').spawnSync('git', ['-C', session.workspace, 'init', '-q']);
-  require('node:child_process').spawnSync('git', ['-C', session.workspace, 'add', 'src/retry.js']);
   await controller.send({ id: session.id, text: 'Implement retry handling', mode: 'terra-light' });
   controller.notification({ method: 'item/completed', params: { threadId: session.threadId, turnId: fake.turnIds[0], item: { id: 'a1', type: 'agentMessage', phase: 'final_answer', text: 'Added retries.\n[task: done]' } } });
   complete(controller, session, fake.turnIds[0]);
   await controller.gateDone;
-  // The maintenance turn writes the wiki as before; the check only reads it before and after.
-  fs.writeFileSync(path.join(session.workspace, 'docs', 'wiki', 'index.md'), '# Wiki\n\nRetries stop after 3 attempts (src/retry.js:1).\n');
-  complete(controller, session, fake.turnIds[1]);
-  await controller.wikiCheckDone; // the check runs after the turn, including Git discovery
   const turn = records.find(r => r.event === 'turn' && r.kind === 'message');
   assert.deepEqual(turn.route, { source: 'manual', provider: 'codex', model: 'gpt-5.6-terra', effort: 'low', sameTask: null, routerPick: null, escalatedFrom: null, failover: false, switched: false, effortCap: null });
   assert.deepEqual(turn.outcome, { status: 'completed', limit: false, reportedTask: 'done' });
   const checks = records.find(r => r.event === 'checks');
   assert.deepEqual({ state: checks.state, checks: checks.checks }, { state: 'checks-passed', checks: { configured: 1, ran: 1, passed: 1, failed: 0, blocked: 0 } }, 'checks are traced apart from the reported status');
-  assert.ok(records.some(r => r.event === 'turn' && r.kind === 'wiki-maintenance'));
-  const assessment = records.find(r => r.event === 'wiki-assessment');
-  assert.deepEqual({ file: assessment.file, lines: assessment.lines, verdict: assessment.verdict }, { file: 'index.md', lines: '3-3', verdict: { support: 'supported', supportConfidence: 0.8, novelty: 'addition', noveltyConfidence: 0.8 } });
-  assert.equal(judged[0].blocks.B1.sources[0].ref, 'src/retry.js:1');
-  const update = records.find(r => r.event === 'wiki-update');
-  assert.equal(update.assessed, 1);
-  assert.equal(update.jev.calls, 1);
-  assert.ok(!JSON.stringify(records).includes('Retries stop') && !JSON.stringify(records).includes('Implement retry'), 'no wiki, prompt or reply text in the trace');
-  assert.equal(fs.readFileSync(path.join(session.workspace, 'docs', 'wiki', 'index.md'), 'utf8'), '# Wiki\n\nRetries stop after 3 attempts (src/retry.js:1).\n', 'the check never writes the wiki');
+  assert.ok(!records.some(r => r.kind === 'wiki-maintenance'));
+  assert.equal(fake.turnIds.length, 1);
+  assert.ok(!JSON.stringify(records).includes('Implement retry'), 'no prompt or reply text in the trace');
 });
 
 test('traced worker tokens cover the whole turn, not only its last model call', async t => {

@@ -7,7 +7,6 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { createHash } = require('node:crypto');
 const { PRIVATE_PATH } = require('../tasks.cjs');
-const { STARTER } = require('./project-instructions.cjs');
 const run = promisify(execFile);
 const MAX_FILES = 50000, MAX_BYTES = 8 * 1024 ** 3;
 const INSTRUCTIONS = ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md', 'HERMES.md', 'INSTRUCTIONS.md', 'PhasmaHarness.md', '.github/copilot-instructions.md'];
@@ -25,7 +24,6 @@ function resolveInside(root, relative) {
 // Harness's own files in a copy, never applied back: the copied external wiki, and the starter entry Harness writes
 // into every writable workspace.
 const JOB_WIKI = '.phasma-job-wiki';
-const STARTER_HASH = createHash('sha256').update(STARTER).digest('hex');
 // BigInt inodes: a 64-bit NTFS file id loses its low bits as a Number, so unrelated files could compare equal.
 async function sameFile(a, b) {
   const [left, right] = await Promise.all([a, b].map(file => fs.stat(file, { bigint: true })));
@@ -253,9 +251,8 @@ class JobWorkspaces {
   }
 
   async wiki(source, signal) {
-    const configured = this.agents.primary.wikiStore?.location(source).root;
-    const root = [configured, path.join(source, 'docs', 'wiki')].find(folder => folder && sync.existsSync(path.join(folder, 'index.md')));
-    if (!root) return null;
+    const root = path.join(source, 'docs', 'wiki');
+    if (!sync.existsSync(path.join(root, 'index.md'))) return null;
     const actual = await fs.realpath(root), relative = path.relative(source, actual);
     const target = inside(source, actual) && relative ? relative : '.phasma-job-wiki';
     if (target === '.phasma-job-wiki' && sync.existsSync(path.join(source, target))) throw new Error('The reserved job wiki folder already exists in the source project.');
@@ -269,7 +266,7 @@ class JobWorkspaces {
         if (stat.isDirectory()) { await visit(filename, relative + '/'); continue; }
         if (!stat.isFile() || stat.nlink !== 1) throw new Error('Wiki inputs must be ordinary, unlinked files: ' + relative);
         result.bytes += stat.size;
-        if (result.files.length >= MAX_FILES || result.bytes > MAX_BYTES) throw new Error('The active wiki exceeds the batch input limit.');
+        if (result.files.length >= MAX_FILES || result.bytes > MAX_BYTES) throw new Error('The workspace wiki exceeds the batch input limit.');
         result.files.push({ path: relative, size: stat.size, mode: stat.mode & 0o777, hash: await this.hash(filename, signal) });
       }
     };
@@ -286,7 +283,7 @@ class JobWorkspaces {
         await fs.copyFile(input, output, sync.constants.COPYFILE_EXCL | sync.constants.COPYFILE_FICLONE);
         await fs.chmod(output, file.mode);
       }
-      if (await this.hash(output, signal) !== file.hash) throw new Error('The active wiki changed during workspace setup: ' + file.path);
+      if (await this.hash(output, signal) !== file.hash) throw new Error('The workspace wiki changed during workspace setup: ' + file.path);
     }
   }
 
@@ -355,7 +352,7 @@ class JobWorkspaces {
         if (wiki) await this.copyWiki(wiki.source, path.join(destination, wiki.target), wiki, signal);
         const after = await this.inventory(source, signal);
         if (JSON.stringify(after) !== JSON.stringify(manifest)) throw new Error('Project inputs changed during workspace setup. Start a new batch.');
-        if (JSON.stringify(await this.wiki(source, signal)) !== JSON.stringify(wiki)) throw new Error('The active wiki changed during workspace setup. Start a new batch.');
+        if (JSON.stringify(await this.wiki(source, signal)) !== JSON.stringify(wiki)) throw new Error('The workspace wiki changed during workspace setup. Start a new batch.');
       } catch (error) {
         // An unrecorded half-written input would make every sibling job fail with EEXIST.
         await fs.rm(destination, { recursive: true, force: true });
@@ -374,7 +371,6 @@ class JobWorkspaces {
     if (input.wiki) {
       const wiki = path.join(workspace, input.wiki.target);
       await this.copyWiki(path.join(input.workspace, input.wiki.target), wiki, input.wiki, signal);
-      this.agents.primary.wikiStore?.setLocation(workspace, wiki);
       if (input.wiki.target === '.phasma-job-wiki' && input.manifest.repositories.length) {
         await fs.mkdir(path.join(workspace, '.git', 'info'), { recursive: true });
         await fs.appendFile(path.join(workspace, '.git', 'info', 'exclude'), '\n/.phasma-job-wiki/\n');
@@ -417,14 +413,14 @@ class JobWorkspaces {
     try { current = await this.inventory(record.workspace); }
     catch (error) { throw new Error(`Apply needs ordinary files in the project copy. ${error.message}`); }
 
-    const skipped = file => file.split('/')[0] === JOB_WIKI || (['PhasmaHarness.md', 'INSTRUCTIONS.md'].includes(file) && !!record.comparisonId);
+    // PhasmaHarness.md is retired; a copy made by an older Harness may still hold one it created.
+    const skipped = file => file.split('/')[0] === JOB_WIKI || file === 'PhasmaHarness.md' || (file === 'INSTRUCTIONS.md' && !!record.comparisonId);
     const before = new Map(input.files.map(file => [file.path, file]));
     const after = new Map(current.files.map(file => [file.path, file]));
     const changes = [];
     for (const [file, entry] of after) {
       const base = before.get(file);
-      const starter = !base && file === 'PhasmaHarness.md' && entry.hash === STARTER_HASH;
-      if (!skipped(file) && !starter && base?.hash !== entry.hash)
+      if (!skipped(file) && base?.hash !== entry.hash)
         changes.push({ path: file, kind: base ? 'modified' : 'added', base: base?.hash || null, copy: entry.hash, mode: entry.mode });
     }
     for (const [file, base] of before) {

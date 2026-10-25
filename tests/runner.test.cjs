@@ -261,7 +261,7 @@ test('a desktop startup failure keeps the runner lease so the error stays readab
 });
 
 
-test('source, installed and headless runners share the data-directory wiki across Main Bot, bots and delegated workers', async t => {
+test('source, installed and headless runners share the data-directory Harness store across Main Bot, bots and delegated workers', async t => {
   const containment = require.resolve('../src/runner-containment.cjs'), runnerPath = require.resolve('../src/runner.cjs');
   const original = require.cache[containment];
   require.cache[containment] = { id: containment, filename: containment, loaded: true,
@@ -278,6 +278,8 @@ test('source, installed and headless runners share the data-directory wiki acros
   const old = new WikiStore(path.join(source, 'Wikis')).ensure(workspace);
   fs.writeFileSync(expected.index, '# Shared saved project knowledge\n');
   fs.writeFileSync(old.index, '# Old source-only knowledge\n');
+  fs.writeFileSync(path.join(expected.root, 'kept-rules.md'), '- Shared kept rule.\n');
+  fs.writeFileSync(path.join(old.root, 'kept-rules.md'), '- Old source-only rule.\n');
   const id = randomUUID();
   fs.writeFileSync(path.join(data, 'sessions.json'), JSON.stringify({ version: 1,
     settings: { workspace, mode: 'auto', access: 'read-only' }, sessions: [],
@@ -291,7 +293,8 @@ test('source, installed and headless runners share the data-directory wiki acros
       const controllers = [runner.controller, runner.agents.controller(id), runner.agents.execution(id)];
       for (const worker of controllers) {
         assert.equal(worker.wikiStore.ensure(workspace).index, expected.index, mode);
-        assert.ok(worker.projectContextInstructions({ workspace }).includes(JSON.stringify(expected.index)), mode);
+        const context = worker.projectContextInstructions({ workspace });
+        assert.ok(context.includes('Shared kept rule') && !context.includes('Old source-only rule'), mode);
       }
       assert.equal(fs.readFileSync(expected.index, 'utf8'), '# Shared saved project knowledge\n');
       assert.equal(fs.readFileSync(old.index, 'utf8'), '# Old source-only knowledge\n', 'source content is preserved');

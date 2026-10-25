@@ -429,14 +429,16 @@ function renderProviderConnections() {
 // API providers: add (name, base URL, optional key), enable/disable, replace or clear the key, remove.
 function renderApiProviders() {
   const list = $('#api-provider-list');
-  const previous = new Map([...list.children].map(row => [row.dataset.providerId, { open: row.open, key: row.querySelector('input[type=password]').value }]));
+  const previous = new Map([...list.children].map(wrap => [wrap.dataset.providerId, { open: wrap.querySelector('details').open, key: wrap.querySelector('input[type=password]').value }]));
   list.replaceChildren(...(state.providers || []).map(p => {
     const saved = previous.get(p.id), busy = !!(state.anyAgentBusy || state.busy);
+    // The plug sits beside the summary, not in it: a button inside <summary> is not reliably reachable by keyboard.
+    const wrap = element('div', 'provider-plug-row');
+    wrap.dataset.providerId = p.id;
+    wrap.dataset.connectionProvider = p.id;
     const row = element('details', 'api-provider-row provider-settings');
-    row.dataset.providerId = p.id;
     row.open = saved?.open || false;
     const summary = element('summary', 'provider-account-row');
-    summary.dataset.connectionProvider = p.id;
     summary.title = `Manage ${p.name}`;
     const plug = element('button', `provider-plug ${p.enabled ? 'connected' : 'disconnected'}`);
     plug.type = 'button'; plug.disabled = busy;
@@ -451,7 +453,7 @@ function renderApiProviders() {
     };
     const text = element('span', 'provider-account-text');
     text.append(element('strong', '', p.name), element('span', 'provider-detail', ` · ${p.enabled ? 'Enabled' : 'Disabled'}`));
-    summary.append(plug, text);
+    summary.append(text);
     const options = element('div', 'provider-options');
     const endpoint = element('p', 'provider-endpoint', p.baseUrl);
     const keyLabel = element('label', '', p.configured ? 'API key saved' : 'API key (optional)');
@@ -473,7 +475,8 @@ function renderApiProviders() {
     actions.append(key, remove);
     options.append(endpoint, keyLabel, actions);
     row.append(summary, options);
-    return row;
+    wrap.append(plug, row);
+    return wrap;
   }));
   renderProviderConnections();
 }
@@ -683,6 +686,10 @@ function subBotsOf(id) {
 
 function notify(error) {
   $('#toast').textContent = String(error.message || error).replace(/^Error invoking remote method '[^']+': Error: /, '');
+  // At the top of the visible chat history, never over the message box; the stylesheet's place when no chat is shown.
+  const history = $('#conversation').getBoundingClientRect();
+  $('#toast').style.top = history.height ? `${history.top + 12}px` : '';
+  $('#toast').style.left = history.width ? `${history.left + history.width / 2}px` : '';
   $('#toast').hidden = false;
   clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('#toast').hidden = true; }, 9000);
 }
@@ -728,6 +735,10 @@ function showImage(image, url, sessionId, itemId, index) {
 
 var reportedSettingsChanges = new Set();
 function applyState(next) {
+  // Updates leave out the chats of bots that did not change; this window keeps its copies, or reloads when it has none.
+  const complete = HarnessAgentState.keepSessions(next, fleetState);
+  if (!complete) { api.bootstrap().then(applyState).catch(notify); return; }
+  next = complete;
   reportedSettingsChanges ||= new Set();
   for (const change of next.settingsChanges || []) {
     if (!['applied', 'failed', 'declined'].includes(change.status) || reportedSettingsChanges.has(change.id)) continue;
@@ -1938,7 +1949,7 @@ function renderComparison(view, sessionId, opened = true) {
     confounded: 'Could not compare fairly', 'no observed effect': 'No clear difference' };
   const status = view.state === 'running' ? `Running · ${returned} of ${view.runs.length} back`
     : view.revealed ? verdicts[view.verdict] || view.verdict : view.state;
-  const targets = { bot: 'worker instructions', project: 'project PhasmaHarness.md', skill: `${view.skill} skill` };
+  const targets = { bot: 'worker instructions', project: 'project rules', skill: `${view.skill} skill` };
   details.append(element('summary', '', `Comparison${view.number ? ' ' + view.number : ''} · ${view.pairs * 2} runs on ${view.model} · ${status}`),
     element('p', '', `Task: ${view.task}`), element('p', '', `Change to the ${targets[view.target]}: ${view.change}`));
   if (view.error)
@@ -2015,8 +2026,8 @@ function renderComparison(view, sessionId, opened = true) {
       : 'Put the rule on trial: matching tasks carry it, and it is kept after 3 of them pass that check without this failure.',
     !view.adopted.undoneAt, sessionId, view.id, 'rule'));
   else if (view.adopted?.file)
-    details.append(comparisonOutcome(view.adopted.undoneAt ? 'The rule was taken out of PhasmaHarness.md again.'
-      : view.adopted.existing ? 'The rule was already in PhasmaHarness.md.' : 'Added the rule to PhasmaHarness.md.',
+    details.append(comparisonOutcome(view.adopted.undoneAt ? 'The rule was taken out of Harness\'s kept rules again.'
+      : view.adopted.existing ? 'The rule was already in Harness\'s kept rules.' : 'Added the rule to Harness\'s kept rules for this workspace.',
     !view.adopted.undoneAt && !view.adopted.existing, sessionId, view.id, 'rule'));
   else if (view.adopted?.error)
     details.append(element('p', '', `The change was not kept: ${view.adopted.error}`));
@@ -2290,7 +2301,7 @@ function renderMessages(session) {
       if (selected && selected.source !== 'manual' && selected.source !== 'hub-auto') {
         const details = element('details', 'activity');
         const meter = selected.router;
-        const cost = meter ? ` · ${meter.skipped ? 'local preflight · no model call' : routerName(meter.model, meter.effort)} · ${(meter.durationMs / 1000).toFixed(1)}s${meter.usage ? ` · ${meter.usage.totalTokens.toLocaleString()} router tokens` : ''}` : ' · no model call';
+        const cost = meter ? ` · ${meter.skipped ? 'local preflight · no model call' : routerName(meter.model, meter.effort)} · ${(meter.durationMs / 1000).toFixed(1)}s${Number.isFinite(meter.usage?.totalTokens) ? ` · ${meter.usage.totalTokens.toLocaleString()} router tokens` : ''}` : ' · no model call';
         const chooser = selected.source === 'jev' ? routerName(meter?.model)
           : selected.source === 'model' ? routerName(meter?.model, meter?.effort)
           : selected.source === 'fallback' ? 'Fallback routing'
@@ -2313,7 +2324,13 @@ function renderMessages(session) {
       let title = item.type, detail = '';
       if (item.type === 'commandExecution') { title = `${item.status === 'inProgress' ? 'Running' : item.exitCode ? 'Failed' : 'Ran'} · ${item.command}`; detail = item.aggregatedOutput || 'Waiting for output…'; }
       if (item.type === 'fileChange') { title = `${item.status === 'inProgress' ? 'Editing' : 'Changed'} ${item.changes.length} file${item.changes.length === 1 ? '' : 's'}`; detail = item.changes.map(c => c.path + '\n' + (c.diff || '')).join('\n\n'); }
-      if (item.type === 'mcpToolCall') { title = `${item.server} · ${item.tool} · ${item.status}`; detail = JSON.stringify(item.error || item.result || item.arguments, null, 2); }
+      if (item.type === 'mcpToolCall') {
+        title = `${item.server} · ${item.tool} · ${item.status}`;
+        // Cursor sends no output for some steps (a read of a larger file): show what the step worked on instead of [].
+        const noOutput = !item.error && (item.result == null || (Array.isArray(item.result) && !item.result.length));
+        detail = noOutput ? JSON.stringify(item.arguments || {}, null, 2) + (item.status === 'completed' ? `\n\n${item.server} reported no output for this step.` : '')
+          : JSON.stringify(item.error || item.result, null, 2);
+      }
       if (item.type === 'dynamicToolCall') { title = `${item.tool} · ${item.status}`; detail = JSON.stringify(item.contentItems || item.arguments, null, 2); }
       if (item.type === 'webSearch') { title = `Web search · ${item.query || item.action?.query || ''}`; detail = JSON.stringify(item.action || {}, null, 2); }
       if (item.type === 'contextCompaction') title = 'Conversation context compacted';
@@ -3836,7 +3853,7 @@ document.querySelectorAll('.settings-tab').forEach(tab => {
 });
 
 function showWiki(wiki) {
-  $('#wiki-location').textContent = wiki.root;
+  $('#wiki-location').textContent = wiki.exists ? wiki.root : `${wiki.root} (not created; Harness never creates it)`;
 }
 $('#wiki-open').onclick = () => api.openWorkspaceWiki(selectedId).catch(notify);
 

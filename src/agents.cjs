@@ -14,7 +14,6 @@ const { FINAL, validateChecks } = require('./tasks.cjs');
 const { JobBudgets, usageText } = require('./job-budgets.cjs');
 const { JobWorkspaces, summary: workspaceSummary } = require('./workspace/job-workspaces.cjs');
 const reports = require('./job-reports.cjs');
-const { prepareCopy: prepareComparisonCopy } = require('./comparisons.cjs');
 const groupChats = require('./group-chats.cjs');
 const { Routines } = require('./routines.cjs');
 const { UNKNOWN_RESET_MS } = require('./providers/limits.cjs');
@@ -735,7 +734,8 @@ class Agents extends EventEmitter {
 
   snapshot() {
     const snapshot = controller => ({ ...controller.snapshot(), conversationId: this.conversation(controller)?.id || null,
-      waitingForAgents: controller.data.sessions.filter(session => this.pendingDelegations(session.id)).map(session => session.id) });
+      waitingForAgents: controller.data.sessions.filter(session => this.pendingDelegations(session.id)).map(session => session.id),
+      stateRevision: controller.stateRevision || 0 });
     const jobBudgets = this.budgets.snapshot();
     const sessions = this.allControllers().flatMap(controller => controller.data.sessions.map(session => ({ ...session, agentId: controller.agentId })));
     const assignments = this.allControllers().flatMap(controller => controller.data.sessions.flatMap(session =>
@@ -1126,8 +1126,6 @@ class Agents extends EventEmitter {
           if (!copy || copy.state !== 'ready') continue;
           if (!job.taskChecks) {
             try {
-              if (copy.comparisonId)
-                prepareComparisonCopy(this.primary.data.comparisons?.[copy.comparisonId], copy, path.join(this.workspaces.batchDirectory(copy.batchId), 'input'));
               job.taskChecks = this.copyChecks({ ...copy, source: job.sourceChecksRoot || copy.source }, job.sourceTaskChecks || []); controller.save();
             } catch (error) { job.error = error.message; session.error = error.message; continue; }
           }

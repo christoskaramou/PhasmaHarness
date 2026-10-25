@@ -15,7 +15,8 @@ async function main() {
   const report = { root, results: [], logs: [], cleanup: [] };
   for (const provider of requested) {
     const project = path.join(root, provider); fs.mkdirSync(project);
-    const entry = path.join(project, 'PhasmaHarness.md');
+    const entry = path.join(project, 'AGENTS.md');
+    fs.writeFileSync(path.join(project, 'CLAUDE.md'), '@AGENTS.md\n');
     fs.writeFileSync(entry, '# Verification workspace\nFor chat verification, reply with the requested code only. Do not use tools, delegate or change files.\n');
     const hub = new Controller(path.join(project, 'sessions.json'), project);
     hub.log = Object.fromEntries(['info', 'warn', 'error'].map(level => [level, (message, data) => report.logs.push({ provider, level, message, data })]));

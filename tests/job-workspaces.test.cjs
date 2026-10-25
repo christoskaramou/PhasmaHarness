@@ -7,7 +7,6 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 const { JobWorkspaces } = require('../src/workspace/job-workspaces.cjs');
-const { STARTER } = require('../src/workspace/project-instructions.cjs');
 
 function git(cwd, ...args) {
   return execFileSync('git', ['-c', 'core.fsmonitor=false', '-c', 'user.name=Harness fixture',
@@ -31,24 +30,20 @@ function fixture(t, { repository = true } = {}) {
 }
 
 test('workspace instructions are frozen per batch and isolated per copy', async t => {
-  const { directory, source, primary, workspaces } = fixture(t);
-  const { WikiStore } = require('../src/workspace/wiki-store.cjs');
-  const { projectEntry } = require('../src/workspace/project-instructions.cjs');
-  primary.wikiStore = new WikiStore(path.join(directory, 'Workspaces'));
-  primary.wikiStore.ensure(source);
-  const entry = projectEntry(source, true);
+  const { source, workspaces } = fixture(t);
+  const entry = path.join(source, 'AGENTS.md');
   fs.writeFileSync(entry, 'Frozen managed rule.');
   const id = randomUUID();
   const first = await workspaces.prepare(source, { id, index: 1 });
   fs.writeFileSync(entry, 'Later source rule.');
-  const firstEntry = projectEntry(first.workspace);
+  const firstEntry = path.join(first.workspace, 'AGENTS.md');
   fs.writeFileSync(firstEntry, 'First bot rule.');
   const second = await workspaces.prepare(source, { id, index: 2 });
-  assert.equal(fs.readFileSync(projectEntry(second.workspace), 'utf8'), 'Frozen managed rule.');
+  assert.equal(fs.readFileSync(path.join(second.workspace, 'AGENTS.md'), 'utf8'), 'Frozen managed rule.');
   assert.equal(fs.readFileSync(firstEntry, 'utf8'), 'First bot rule.');
   assert.equal(fs.readFileSync(entry, 'utf8'), 'Later source rule.');
-  assert.equal(fs.existsSync(path.join(source, 'INSTRUCTIONS.md')), false);
-  assert.equal(fs.existsSync(path.join(first.workspace, 'INSTRUCTIONS.md')), false);
+  for (const folder of [source, first.workspace, second.workspace])
+    assert.equal(fs.existsSync(path.join(folder, 'PhasmaHarness.md')), false);
 });
 
 test('skill candidate isolation is rechecked at snapshot time, after comparison planning', async t => {
@@ -67,16 +62,14 @@ test('skill candidate isolation is rechecked at snapshot time, after comparison 
   assert.equal(fs.existsSync(path.join(workspaces.batchDirectory(batch.id), 'input')), false);
 });
 
-test('plain project folders retain one independent frozen batch input, ignore rules, instructions and the active wiki without creating Git metadata', async t => {
+test('plain project folders retain one independent frozen batch input, ignore rules, instructions and the workspace wiki without creating Git metadata', async t => {
   const { directory, source, primary, workspaces } = fixture(t, { repository: false });
   fs.writeFileSync(path.join(source, 'AGENTS.md'), 'Keep these ignored project instructions.');
   fs.writeFileSync(path.join(source, 'new.txt'), 'Fresh project input');
   fs.writeFileSync(path.join(source, 'credentials.json'), 'FIXTURE_ONLY_PRIVATE');
   fs.mkdirSync(path.join(source, 'build')); fs.writeFileSync(path.join(source, 'build/old.exe'), 'Ignored output');
-  const wiki = path.join(directory, 'wiki'); fs.mkdirSync(wiki);
-  fs.writeFileSync(path.join(wiki, 'index.md'), 'Project decisions.');
-  const locations = [];
-  primary.wikiStore = { location: () => ({ root: wiki }), setLocation: (...args) => locations.push(args) };
+  fs.mkdirSync(path.join(source, 'docs', 'wiki'), { recursive: true });
+  fs.writeFileSync(path.join(source, 'docs', 'wiki', 'index.md'), 'Project decisions.');
   const id = randomUUID();
   const first = await workspaces.prepare(source, { id, index: 1 });
   assert.equal(first.head, null);
@@ -85,7 +78,7 @@ test('plain project folders retain one independent frozen batch input, ignore ru
   assert.equal(fs.existsSync(path.join(first.workspace, 'credentials.json')), false);
   assert.equal(fs.existsSync(path.join(first.workspace, 'build')), false);
   assert.equal(fs.readFileSync(path.join(first.workspace, 'AGENTS.md'), 'utf8'), 'Keep these ignored project instructions.');
-  assert.equal(fs.readFileSync(path.join(first.workspace, '.phasma-job-wiki/index.md'), 'utf8'), 'Project decisions.');
+  assert.equal(fs.readFileSync(path.join(first.workspace, 'docs/wiki/index.md'), 'utf8'), 'Project decisions.');
   fs.writeFileSync(path.join(source, 'new.txt'), 'Changed after the batch snapshot');
   fs.writeFileSync(path.join(first.workspace, 'source.txt'), 'First bot edits');
   const second = await workspaces.prepare(source, { id, index: 2 });
@@ -93,7 +86,6 @@ test('plain project folders retain one independent frozen batch input, ignore ru
   assert.equal(fs.readFileSync(path.join(second.workspace, 'source.txt'), 'utf8'), 'committed source');
   assert.equal(fs.readFileSync(path.join(source, 'source.txt'), 'utf8'), 'committed source');
   assert.equal(workspaces.same(source, second.workspace), true);
-  assert.equal(locations.length, 2);
 });
 
 test('empty plain folders produce usable isolated workspaces; home and drive roots are refused', async t => {
@@ -231,24 +223,21 @@ test('dirty submodule files have independent Git stores and stay inside their jo
   assert.equal(fs.readFileSync(original, 'utf8'), 'dirty local library');
 });
 
-test('the active external wiki is copied once and every worker uses its own index', async t => {
-  const { directory, source, primary, workspaces } = fixture(t);
-  const { WikiStore } = require('../src/workspace/wiki-store.cjs');
-  primary.wikiStore = new WikiStore(path.join(directory, 'wiki-store'));
-  const wiki = path.join(directory, 'active-wiki'); fs.mkdirSync(wiki);
+test('a git-ignored workspace wiki is copied once per batch and every copy keeps its own', async t => {
+  const { source, workspaces } = fixture(t);
+  fs.appendFileSync(path.join(source, '.gitignore'), '/docs/wiki/' + os.EOL);
+  git(source, 'commit', '-qam', 'Ignore the wiki');
+  const wiki = path.join(source, 'docs', 'wiki');
+  fs.mkdirSync(wiki, { recursive: true });
   fs.writeFileSync(path.join(wiki, 'index.md'), 'Approved project knowledge');
   fs.writeFileSync(path.join(wiki, 'topic.md'), 'Verified source references');
-  primary.wikiStore.setLocation(source, wiki);
   const id = randomUUID(), first = await workspaces.prepare(source, { id, index: 1 });
   fs.writeFileSync(path.join(wiki, 'topic.md'), 'Later wiki edit');
   const second = await workspaces.prepare(source, { id, index: 2 });
   for (const copy of [first, second]) {
-    const local = primary.wikiStore.location(copy.workspace).root;
-    assert.ok(local.startsWith(copy.workspace + path.sep));
-    assert.equal(fs.readFileSync(path.join(local, 'topic.md'), 'utf8'), 'Verified source references');
+    assert.equal(fs.readFileSync(path.join(copy.workspace, 'docs', 'wiki', 'topic.md'), 'utf8'), 'Verified source references');
     assert.equal(git(copy.workspace, 'status', '--porcelain=v1'), '');
   }
-  assert.equal(primary.wikiStore.location(source).root, wiki);
   assert.equal(fs.readFileSync(path.join(wiki, 'topic.md'), 'utf8'), 'Later wiki edit');
 });
 
@@ -427,23 +416,17 @@ test('Apply refuses project files changed since the copy, and skips an addition 
   });
 });
 
-test('Apply leaves out Harness\'s own files: the job wiki, the starter entry and a comparison\'s instructions', async t => {
-  const { directory, source, primary, workspaces } = fixture(t, { repository: false });
-  const wiki = path.join(directory, 'wiki');
-  fs.mkdirSync(wiki);
-  fs.writeFileSync(path.join(wiki, 'index.md'), 'Project decisions.');
-  primary.wikiStore = { location: () => ({ root: wiki }), setLocation() {} };
+test('Apply leaves out the retired PhasmaHarness.md and an old comparison\'s INSTRUCTIONS.md; a bot\'s AGENTS.md edit lands', async t => {
+  const { source, workspaces } = fixture(t, { repository: false });
   const id = randomUUID();
   const first = await workspaces.prepare(source, { id, index: 1 });
-  fs.writeFileSync(path.join(first.workspace, '.phasma-job-wiki', 'index.md'), 'Edited by wiki upkeep.');
-  fs.writeFileSync(path.join(first.workspace, 'PhasmaHarness.md'), STARTER);
+  fs.writeFileSync(path.join(first.workspace, 'PhasmaHarness.md'), '# Created by an older Harness');
   assert.deepEqual((await workspaces.changes(first.workspace)).changes, []);
 
-  fs.writeFileSync(path.join(first.workspace, 'PhasmaHarness.md'), '# Rules written by the bot');
-  assert.deepEqual((await workspaces.changes(first.workspace)).changes.map(change => change.path), ['PhasmaHarness.md']);
+  fs.writeFileSync(path.join(first.workspace, 'AGENTS.md'), '# Rules written by the bot');
+  assert.deepEqual((await workspaces.changes(first.workspace)).changes.map(change => change.path), ['AGENTS.md']);
   const second = await workspaces.prepare(source, { id, index: 2 });
   workspaces.records[second.workspace].comparisonId = randomUUID();
-  fs.writeFileSync(path.join(second.workspace, 'PhasmaHarness.md'), 'A comparison change.');
   fs.writeFileSync(path.join(second.workspace, 'INSTRUCTIONS.md'), 'A comparison started before the entry migration.');
   assert.deepEqual((await workspaces.changes(second.workspace)).changes, []);
 });

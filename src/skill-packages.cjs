@@ -1,5 +1,5 @@
 'use strict';
-// Workspace overrides and comparison snapshots live beside the AppData wiki, never in the installation.
+// Workspace overrides and comparison snapshots live in Harness's AppData data folder, never in the installation.
 const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID, createHash } = require('node:crypto');

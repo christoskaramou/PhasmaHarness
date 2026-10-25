@@ -39,6 +39,48 @@ var HarnessAgentState = (() => {
     return isSubBot(fleet?.agents?.find(agent => agent.id === id)) || (!!job && !job.delivered && !own) ? background || null : null;
   }
 
-  return { INHERITED, isSubBot, inheritedSource, backgroundView };
+  // The desktop window gets a bot's chats only when they changed since it last got them, and everything when full is set;
+  // the Main Bot's chats are not repeated at the top level. A change is the bot's stateRevision moving, or a chat's
+  // message count or status changing, which also catches edits other bots' code makes. sent: context key -> mark.
+  /** @param {any} state @param {Map<string, string>} sent @param {boolean} full */
+  function trimFleet(state, sent, full) {
+    if (!state?.agentStates) return state;
+    const { sessions, ...trimmed } = state;
+    for (const group of ['agentStates', 'executionStates']) {
+      if (!state[group]) continue;
+      trimmed[group] = {};
+      for (const [id, context] of Object.entries(state[group])) {
+        const key = group + ':' + id;
+        const mark = context.stateRevision + '|' + (context.sessions || []).map((/** @type {any} */ chat) => `${chat.id}:${chat.items?.length ?? 0}:${chat.status}`).join(',');
+        if (!full && sent.get(key) === mark) {
+          const { sessions: unchanged, ...light } = context;
+          trimmed[group][id] = { ...light, sessionsKept: true };
+        } else {
+          sent.set(key, mark);
+          trimmed[group][id] = context;
+        }
+      }
+    }
+    return trimmed;
+  }
+
+  // The window side: a context marked sessionsKept reuses the chats it already holds. Null means one is missing (after a
+  // reload, say), so the caller asks for a full state.
+  /** @param {any} next @param {any} previous */
+  function keepSessions(next, previous) {
+    if (!next?.agentStates) return next;
+    for (const group of ['agentStates', 'executionStates']) {
+      for (const [id, context] of Object.entries(next[group] || {})) {
+        if (!context.sessionsKept) continue;
+        const kept = previous?.[group]?.[id]?.sessions;
+        if (!kept) return null;
+        context.sessions = kept;
+        delete context.sessionsKept;
+      }
+    }
+    return next;
+  }
+
+  return { INHERITED, isSubBot, inheritedSource, backgroundView, trimFleet, keepSessions };
 })();
 if (typeof module !== 'undefined') module.exports = HarnessAgentState;

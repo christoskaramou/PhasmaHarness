@@ -4,7 +4,6 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const comparisons = require('../src/comparisons.cjs');
-const { STARTER } = require('../src/workspace/project-instructions.cjs');
 
 const setup = (bot, extra = {}) => ({ hash: `h-${bot}-${JSON.stringify(extra)}`, v: 1, provider: 'codex', model: 'gpt-5.6-terra', effort: 'low',
   access: 'workspace-write', instructions: { harness: { hash: 'w' }, project: { hash: 'p' }, bot: { hash: bot } }, lessons: { hash: 'L' },
@@ -84,32 +83,16 @@ test('check files named by the check commands are restored from the snapshot bef
   assert.deepEqual(comparisons.protectedFiles(checks, workspace).sort(), ['check.cjs', 'tests/data.json']);
 });
 
-test('a project-instructions comparison gives every copy the same base and only the changed run the change', t => {
+test('a project-rule comparison gives only the changed run the rule, from Harness, and writes no file', t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-compare-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const input = path.join(root, 'input');
-  fs.mkdirSync(input);
-  const copies = [1, 2].map(index => ({ index, workspace: path.join(root, String(index)) }));
-  copies.forEach(copy => fs.mkdirSync(copy.workspace));
-  const record = { target: 'project', change: 'Always handle empty names.', runs: [{ index: 1, variant: false }, { index: 2, variant: true }] };
-  const read = copy => fs.readFileSync(path.join(copy.workspace, 'PhasmaHarness.md'), 'utf8');
-  for (const copy of copies)
-    comparisons.prepareCopy(record, copy, input);
-  assert.equal(read(copies[0]), STARTER);
-  assert.equal(read(copies[1]), `${STARTER.trimEnd()}\n\nAlways handle empty names.\n`);
-  fs.writeFileSync(path.join(input, 'AGENTS.md'), 'Keep legacy source rules.');
-  comparisons.prepareCopy(record, copies[0], input);
-  assert.match(read(copies[0]), /Keep legacy source rules/);
-  fs.writeFileSync(path.join(input, 'PhasmaHarness.md'), '# Rules\n');
-  comparisons.prepareCopy(record, copies[1], input);
-  comparisons.prepareCopy(record, copies[1], input);
-  assert.equal(read(copies[1]), '# Rules\n\nAlways handle empty names.\n', 'running it again writes the same file');
-  fs.writeFileSync(path.join(input, 'PhasmaHarness.md'), 'x'.repeat(65530));
-  assert.throws(() => comparisons.prepareCopy(record, copies[1], input), /exceed 64 KiB/);
-  assert.equal(read(copies[1]), '# Rules\n\nAlways handle empty names.\n', 'oversized variants preserve the existing copy');
-  fs.rmSync(path.join(copies[0].workspace, 'PhasmaHarness.md'));
-  comparisons.prepareCopy({ ...record, target: 'bot' }, copies[0], input);
-  assert.equal(fs.existsSync(path.join(copies[0].workspace, 'PhasmaHarness.md')), false);
+  const record = { state: 'running', target: 'project', change: 'Always handle empty names.', runs: [{ index: 1, variant: false }, { index: 2, variant: true }] };
+  const { comparedRule } = require('../src/controller/comparison.cjs');
+  const rule = index => comparedRule.call({ comparisonOf: () => ({ record, copy: { index, workspace: root } }) }, {});
+  assert.equal(rule(1), '');
+  assert.match(rule(2), /Project rule under comparison.*\nAlways handle empty names\./);
+  assert.equal(comparedRule.call({ comparisonOf: () => ({ record: { ...record, target: 'bot' }, copy: { index: 2 } }) }, {}), '');
+  assert.deepEqual(fs.readdirSync(root), []);
 });
 
 test('a finished comparison shows its verdict at once, picks the run to apply, and the wiki keeps the records and a page', t => {

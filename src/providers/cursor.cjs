@@ -57,8 +57,31 @@ function parseStatus(output) {
   return { installed: true, loggedIn: true, email: /@/.test(identity) ? identity : null, identity };
 }
 
+// A finished turn leaves its Cursor process running for the conversation's next turn, which then skips spawn,
+// initialize, session/load and model setup (about 6 s, measured 2026-10-25). An idle process tree is about 270 MB, so at
+// most three stay warm across all bots (every bot has its own CursorCLI), each for 10 minutes. Oldest first.
+const WARM = new Map();
+function drop(sessionId) {
+  const entry = WARM.get(sessionId);
+  if (!entry) return null;
+  clearTimeout(entry.timer);
+  WARM.delete(sessionId);
+  return entry;
+}
+
 class CursorCLI {
   constructor(launch = launchCursor) { this.launch = launch; this.children = new Set(); this.status = { installed: null, loggedIn: false }; this.models = []; }
+  park(sessionId, entry) {
+    drop(sessionId)?.rpc.close();
+    entry.owner = this;
+    entry.timer = setTimeout(() => drop(sessionId)?.rpc.close(), 10 * 60 * 1000);
+    entry.timer.unref?.();
+    WARM.set(sessionId, entry);
+    while (WARM.size > 3) drop(WARM.keys().next().value)?.rpc.close();
+  }
+  unpark(sessionId) { return WARM.get(sessionId)?.owner === this ? drop(sessionId) : null; }
+  warmCount() { return [...WARM.values()].filter(entry => entry.owner === this).length; }
+  closeWarm() { for (const [id, entry] of [...WARM]) if (entry.owner === this) drop(id)?.rpc.close(); }
   start(args, cwd) {
     const child = this.launch(args, cwd); this.children.add(child);
     child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8'); child.stdin.on('error', () => {});
@@ -83,11 +106,14 @@ class CursorCLI {
   async login() {
     if (this.loginPending) throw new Error('Cursor login is already running.');
     this.loginPending = true;
+    // Warm processes belong to the account that started them.
+    this.closeWarm();
     try { await this.command(['login'], 300000); return await this.refresh(); }
     finally { this.loginPending = false; }
   }
   async logout() {
     if (this.loginPending) throw new Error('Cursor login is already running.');
+    this.closeWarm();
     try { await this.command(['logout'], 60000); }
     catch (error) {
       if (error.code === 'ENOENT') throw new Error('Cursor CLI is not installed. Install it from Settings → Providers.');
@@ -166,7 +192,7 @@ class CursorCLI {
     child.stderr.on('data', () => {});
     child.once('error', e => { fail(e); close(); }); child.once('close', () => { closed = true; fail(new Error('Cursor connection closed.')); signal?.removeEventListener('abort', close); });
     signal?.addEventListener('abort', close, { once: true }); if (signal?.aborted) close();
-    return { call, close, child, cwd, notify: (method, params) => write({ method, params }) };
+    return { call, close, child, cwd, open: () => !closed, notify: (method, params) => write({ method, params }) };
   }
   async run({ cwd, model, effort, effortOption, parameterized, parameters = [], prompt, images = [], resume, access, signal, onEvent = () => {}, onActivity, approve = async () => false, schema, schemaInHistory = false, helpers, onInput, instructions = WORKER_INSTRUCTIONS }) {
     // Models from cursor/list_available_models are base names with separate parameters: Cursor accepts them, and their
@@ -174,9 +200,34 @@ class CursorCLI {
     const setEffort = typeof effort === 'string' && effort && typeof effortOption === 'string' && effortOption;
     const picker = parameterized === true || setEffort;
     // Each prompt has its own reply id, approval signal and start time (Send now replaces the prompt in this session).
-    let sessionId, output = '', prompting = false, toolError = null, messageId = randomUUID(), promptAbort = new AbortController(), promptStartedAt = Date.now();
+    let sessionId, output = '', segment = '', prompting = false, toolError = null, messageId = randomUUID(), promptAbort = new AbortController(), promptStartedAt = Date.now();
     const tools = new Map();
-    const rpc = this.connect({ cwd, model, signal, noTools: !!schema,
+    // The conversation's parked connection is reused when it serves the same folder, tools and model picker.
+    const mcpServers = (!schema && helpers?.cursorServers) ? helpers.cursorServers : [];
+    const key = JSON.stringify([cwd, !!schema, !!picker, mcpServers]);
+    const mode = schema || access === 'read-only' ? 'ask' : 'agent';
+    const parked = resume ? this.unpark(resume) : null;
+    let reused = parked?.key === key && parked.rpc.open?.() !== false ? parked : null;
+    if (parked && !reused) parked.rpc.close();
+    if (reused) {
+      // The prompt call has no time limit, so a parked process must first answer a bounded call; a silent one is replaced.
+      try {
+        await reused.rpc.call('session/set_mode', { sessionId: resume, modeId: mode }, 20000);
+        reused.applied.mode = mode;
+      } catch {
+        reused.rpc.close();
+        reused = null;
+      }
+    }
+    const rpc = reused?.rpc || this.connect({ cwd, model, noTools: !!schema,
+      onUpdate: p => rpc.route.onUpdate(p), onRequest: (method, p) => rpc.route.onRequest(method, p) });
+    const applied = reused?.applied || {};
+    let init = reused?.init, keep = false;
+    // Stop closes this turn's connection, new or reused; a parked connection answers no one.
+    const abort = () => rpc.close();
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) rpc.close();
+    rpc.route = {
       onUpdate: p => {
         if (!prompting || p.sessionId !== sessionId) return;
         const u = p.update;
@@ -188,9 +239,12 @@ class CursorCLI {
         }
         if (['agent_message_chunk', 'agent_thought_chunk'].includes(u?.sessionUpdate) && u.content?.type === 'text' && u.content.text) onActivity?.();
         if (u?.sessionUpdate === 'agent_message_chunk' && u.content?.type === 'text') {
-          output += u.content.text;
-          onEvent({ type: 'assistant', session_id: sessionId, message: { id: messageId, content: [{ type: 'text', text: output }] } });
+          if (!segment && output) output += '\n\n';
+          output += u.content.text; segment += u.content.text;
+          onEvent({ type: 'assistant', session_id: sessionId, message: { id: messageId, content: [{ type: 'text', text: segment }] } });
         }
+        // Text written after a tool call is a new message below its card, not an addition to the text above it.
+        if (u?.sessionUpdate === 'tool_call' && segment) { messageId = randomUUID(); segment = ''; }
         // Cursor often names a tool and fills its input in a later update (a grep starts as "grep" with {}).
         if (u?.sessionUpdate === 'tool_call' || (u?.sessionUpdate === 'tool_call_update' && (u.title || u.rawInput))) {
           const known = tools.get(u.toolCallId) || {};
@@ -212,31 +266,44 @@ class CursorCLI {
         if (method === 'cursor/create_plan') return { outcome: { outcome: !schema && await approve({ title: p.name || 'Approve Cursor plan', rawInput: p.plan, kind: 'plan' }) ? 'accepted' : 'rejected' } };
         if (method === 'cursor/ask_question') return { outcome: { outcome: 'skipped', reason: 'Ask the user in the chat response.' } };
         return { outcome: 'cancelled' };
-      } });
+      } };
     try {
-      const init = await rpc.call('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false,
+      init ??= await rpc.call('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false,
         ...(picker ? { _meta: { parameterizedModelPicker: true } } : {}) }, clientInfo: { name: 'phasma-harness', version: '0.1.0' } });
       if (images.length && !init.agentCapabilities?.promptCapabilities?.image) throw new Error('Cursor CLI did not advertise image support.');
       // Authentication is completed by the official login command, never token extraction.
       // Classifiers keep an empty MCP list. Workers get the bundled helper MCP via session mcpServers.
-      const mcpServers = (!schema && helpers?.cursorServers) ? helpers.cursorServers : [];
-      const s = await rpc.call(resume ? 'session/load' : 'session/new', { ...(resume ? { sessionId: resume } : {}), cwd: rpc.cwd || cwd, mcpServers });
-      if (resume && s.sessionId && s.sessionId !== resume) throw new Error('Cursor loaded a different conversation. No message was sent.');
-      sessionId = resume || s.sessionId;
+      if (reused) sessionId = resume;
+      else {
+        const s = await rpc.call(resume ? 'session/load' : 'session/new', { ...(resume ? { sessionId: resume } : {}), cwd: rpc.cwd || cwd, mcpServers });
+        if (resume && s.sessionId && s.sessionId !== resume) throw new Error('Cursor loaded a different conversation. No message was sent.');
+        sessionId = resume || s.sessionId;
+      }
       if (!sessionId) throw new Error('Cursor did not return a session ID.');
       onEvent({ type: 'system', session_id: sessionId });
-      await rpc.call('session/set_model', { sessionId, modelId: model });
-      // Other saved parameters of the model (e.g. context, fast), then the reasoning level.
-      if (picker) for (const p of parameters) {
-        if (typeof p?.id === 'string' && typeof p.value === 'string' && p.id !== effortOption)
-          await rpc.call('session/set_config_option', { sessionId, configId: p.id, value: p.value });
+      // A reused connection keeps its model, parameters and mode; only what differs is set again.
+      if (applied.model !== model) {
+        await rpc.call('session/set_model', { sessionId, modelId: model });
+        applied.model = model; applied.config = null;
       }
-      if (setEffort) {
-        const updated = await rpc.call('session/set_config_option', { sessionId, configId: effortOption, value: effort });
-        const applied = (updated?.configOptions || []).find(o => o?.id === effortOption);
-        if (applied?.currentValue !== effort) throw new Error(`Cursor did not apply ${effortOption}=${effort} for ${model}.`);
+      const config = JSON.stringify([picker ? parameters : null, setEffort ? effort : null]);
+      if (applied.config !== config) {
+        // Other saved parameters of the model (e.g. context, fast), then the reasoning level.
+        if (picker) for (const p of parameters) {
+          if (typeof p?.id === 'string' && typeof p.value === 'string' && p.id !== effortOption)
+            await rpc.call('session/set_config_option', { sessionId, configId: p.id, value: p.value });
+        }
+        if (setEffort) {
+          const updated = await rpc.call('session/set_config_option', { sessionId, configId: effortOption, value: effort });
+          const current = (updated?.configOptions || []).find(o => o?.id === effortOption);
+          if (current?.currentValue !== effort) throw new Error(`Cursor did not apply ${effortOption}=${effort} for ${model}.`);
+        }
+        applied.config = config;
       }
-      await rpc.call('session/set_mode', { sessionId, modeId: schema || access === 'read-only' ? 'ask' : 'agent' });
+      if (applied.mode !== mode) {
+        await rpc.call('session/set_mode', { sessionId, modeId: mode });
+        applied.mode = mode;
+      }
       prompting = true;
       const helperNote = (!schema && helpers?.instructions) ? '\n\nApp helper note (not Cursor system policy):' + helpers.instructions : '';
       const pictures = urls => {
@@ -244,7 +311,7 @@ class CursorCLI {
         return urls.map(url => imageData(url)).map(({ mime, data }) => ({ type: 'image', mimeType: mime, data }));
       };
       const send = parts => {
-        promptAbort = new AbortController(); promptStartedAt = Date.now(); messageId = randomUUID(); output = '';
+        promptAbort = new AbortController(); promptStartedAt = Date.now(); messageId = randomUUID(); output = ''; segment = '';
         return rpc.call('session/prompt', { sessionId, prompt: parts }, 0);
       };
       let current = send([{ type: 'text', text: (schema || !instructions ? '' : 'Harness worker defaults (subject to user overrides):\n' + instructions + '\n\nCurrent request:\n') + prompt + helperNote + (schema && !(resume && schemaInHistory) ? '\nReturn only JSON matching this schema: ' + JSON.stringify(schema) : '') }, ...pictures(images)]);
@@ -298,13 +365,18 @@ class CursorCLI {
       // Cursor reports usage and rate limits as a closing line of the reply, not as an error.
       const limit = cursorLimitText(output);
       if (limit) throw Object.assign(new Error(`Cursor: ${limit}.`), { limit: { until: null, reason: `Cursor: ${limit}.` } });
+      keep = true;
       return { result: output, session_id: sessionId };
     } catch (error) { throw toolError || error; }
     finally {
-      rpc.close();
+      signal?.removeEventListener('abort', abort);
+      // After its turn a connection approves nothing; only a structured one-off (never resumed) is not kept.
+      rpc.route = { onUpdate: () => {}, onRequest: async () => ({ outcome: 'cancelled' }) };
+      if (keep && (resume || !schema) && !signal?.aborted && rpc.open?.() !== false) this.park(sessionId, { rpc, key, init, applied });
+      else rpc.close();
       if (toolError && rpc.child && (await stopTree(rpc.child)).length) throw new Error('Cursor review process cleanup is not confirmed.');
     }
   }
-  close() { for (const c of this.children) stop(c); }
+  close() { this.closeWarm(); for (const c of this.children) stop(c); }
 }
 module.exports = { CursorCLI, launchCursor, parseStatus, compactDiff, toolOutput };

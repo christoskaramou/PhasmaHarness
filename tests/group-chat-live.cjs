@@ -17,9 +17,8 @@ async function main() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-group-live-'));
   const workspace = path.join(root, 'project'); fs.mkdirSync(workspace);
   const rule = randomUUID();
-  fs.writeFileSync(path.join(workspace, 'PhasmaHarness.md'), `# Test project\n\nFor verification questions, the project rule code is ${rule}.\n`);
+  fs.writeFileSync(path.join(workspace, 'AGENTS.md'), `# Test project\n\nFor verification questions, the project rule code is ${rule}.\n`);
   const wikiStore = new WikiStore(path.join(root, 'AppData', 'Wikis'));
-  const wiki = wikiStore.ensure(workspace);
   const report = { root, results: [], log: [] };
   const log = Object.fromEntries(['info', 'warn', 'error'].map(level => [level, (message, data) => report.log.push({ level, message, data })]));
   const hub = new Controller(path.join(root, 'sessions.json'), workspace, undefined, undefined, { wikiStore });
@@ -61,7 +60,7 @@ async function main() {
       const started = Date.now(), before = group.items.length;
       timer = setTimeout(() => commands.get('stop')(group.id).catch(error => log.error('Live test stop failed', { error: error.message })), 120000);
       console.log('START', bot.choice.provider, bot.choice.model);
-      await commands.get('send')({ id: group.id, text:`@${bot.name} Return only JSON with group (current shared group code), rule (project rule code), and wiki (the absolute active wiki index path from your instructions). Use the provided context, with no tools or file changes.` });
+      await commands.get('send')({ id: group.id, text:`@${bot.name} Return only JSON with group (current shared group code), and rule (project rule code). Use the provided context, with no tools or file changes.` });
       const run = agents.groupRuns.get(group.id);
       assert.ok(run);
       await run.operation;
@@ -69,7 +68,6 @@ async function main() {
       const reply = group.items.slice(before).filter(item => item.type === 'agentMessage' && item.phase !== 'commentary').map(item => item.text).join('\n');
       assert.equal(group.status, 'completed', group.error);
       assert.ok(reply.includes(code) && reply.includes(rule), 'Worker did not receive the current shared context and project entry.');
-      assert.ok(reply.replace(/\\\\/g, '\\').toLowerCase().includes(wiki.index.toLowerCase()) || reply.toLowerCase().includes(wiki.index.replace(/\\/g, '/').toLowerCase()), 'Worker did not receive the active wiki path.');
       assert.ok(!reply.includes(privateCode), 'Private Main context leaked.');
       assert.equal(agents.pendingJobs().length, 0);
       assert.equal(group.items.some(item => item.type === 'agentResult'), false);

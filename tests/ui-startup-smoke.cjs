@@ -915,12 +915,12 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); renderProviders(); true');
   await providerAction("document.querySelector('.api-provider-row summary').click(); document.querySelector('.api-provider-row input[type=password]').value = 'test-provider-key'; renderProviders()");
   assert.deepEqual(await window.webContents.executeJavaScript("[document.querySelector('.api-provider-row').open, document.querySelector('.api-provider-row input[type=password]').value]"), [true, 'test-provider-key'], 'expanded provider and key draft survive model refresh');
-  await providerAction("document.querySelector('.api-provider-row').open = false; document.querySelector('.api-provider-row .provider-plug').click()");
+  await providerAction("document.querySelector('.api-provider-row').open = false; document.querySelector('[data-connection-provider=lm-studio] .provider-plug').click()");
   assert.equal(controller.data.settings.providers[0].enabled, false);
   assert.deepEqual(controller.data.settings.providers.map(p => p.id), ['lm-studio', 'other'], 'toggling does not move another provider under the pointer');
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('.api-provider-row .provider-account-text').textContent"), 'LM Studio · Disabled');
-  assert.deepEqual(await window.webContents.executeJavaScript("[document.querySelector('.api-provider-row').open, document.querySelector('.api-provider-row .provider-plug').getAttribute('aria-pressed')]"), [false, 'false'], 'plug toggles without expanding settings');
-  await providerAction("document.querySelector('.api-provider-row .provider-plug').click()");
+  assert.deepEqual(await window.webContents.executeJavaScript("[document.querySelector('.api-provider-row').open, document.querySelector('[data-connection-provider=lm-studio] .provider-plug').getAttribute('aria-pressed')]"), [false, 'false'], 'plug toggles without expanding settings');
+  await providerAction("document.querySelector('[data-connection-provider=lm-studio] .provider-plug').click()");
   assert.equal(controller.data.settings.providers[0].enabled, true);
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('.api-provider-row').open"), false);
   await providerAction("document.querySelector('.api-provider-row summary').click()");
@@ -2938,7 +2938,7 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('document.querySelector("#toast").hidden = true; true');
 
   card = await cardText(1);
-  assert.match(card, /Comparison 2 · .*Applied run B's changes to your project: greet\.js\. ?Undo.*Added the rule to PhasmaHarness\.md\. ?Undo/s);
+  assert.match(card, /Comparison 2 · .*Applied run B's changes to your project: greet\.js\. ?Undo.*Added the rule to Harness's kept rules for this workspace\. ?Undo/s);
   const ruleButtons = await cardButtons(1);
   assert.equal(ruleButtons.some(label => label.startsWith('Apply')), false, 'what already landed is not offered again');
   assert.ok(ruleButtons.includes('Undo the applied changes') && ruleButtons.includes('Undo the added rule'));

@@ -110,7 +110,7 @@ async function museFixture(t, options = {}) {
         if (request.id === undefined) continue;
         const p = request.params;
         let result = {};
-        if (request.method === 'initialize') result = { schema: { version: 1, fingerprint: options.fingerprint || EXPECTED_SCHEMA_FINGERPRINT },
+        if (request.method === 'initialize') result = { schema: { version: options.schemaVersion || 1, fingerprint: options.fingerprint || EXPECTED_SCHEMA_FINGERPRINT },
           serverInfo: { name: 'muse', version: '1.4.10' }, experimentalApi: true, grantedCapabilities: ['sessionMcp'],
           sessionDurability: 'durable', sandboxAvailability: options.sandbox || 'available' };
         if (request.method === 'model/list') result = { profileId: options.catalogProfile || null, models: options.authError ? [] : [{ modelId: 'model-a', providerId: 'meta', profileId: options.catalogProfile || null,

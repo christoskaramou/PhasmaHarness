@@ -47,7 +47,7 @@ const DEFAULT_INSTRUCTIONS = `Harness defaults (user/project rules override; "no
 - Workflow: one agent unless delegation requested. Preserve unrelated work. No commit/push unless asked; no Co-Authored-By lines. Report actual checks and each log warning or error with its cause. Reuse evidence; targeted searches/ranges before full reads; batch independent lookups; stop testing once relevant checks pass. Complete authorized work.
 - Output: ~2,000 tokens per routine tool result; above ~8,000 capture/search a file (large-responses). Truncated output is incomplete evidence.
 - Shell: bundled rtk/rg lead PATH. Prefix programs with rtk (rtk proxy <cmd> for raw output); shell built-ins and PowerShell cmdlets (Get-Content, Select-String, cd) run without it. If missing, report/use native tools; never install system copies.
-- Knowledge: use Harness's workspace wiki; verify live source; propose durable updates with source references and verification dates; no diaries or competing stores.
+- Knowledge: the workspace's AGENTS.md and docs/wiki; verify live source; edit them only when asked or the project's rules say so, citing sources and dates; no diaries or competing stores. Never recreate the retired PhasmaHarness.md.
 - Model selection/project_context are built in; no duplicate skills. Respect filesystem/tool permissions.
 - Task status: last line of every final reply must be [task: done] if complete, [task: pending] if work remains, or [task: needs-input] if awaiting the user's answer/decision. Harness hides this line.
 Harness skills: read when applicable via router_read_output {"skill":"<name>"} or file; reread changed paths. If native file access is blocked, use router_read_output.

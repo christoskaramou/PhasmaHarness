@@ -37,6 +37,14 @@ async function fixture(t, options = {}) {
       child.emit('exit', 0); child.emit('close', 0);
     };
     children.push({ child, args, options: spawnOptions });
+    if (options.crash) {
+      setImmediate(() => {
+        child.stderr.write(options.crash);
+        child.exitCode = 1; child.stdout.end(); child.stderr.end();
+        child.emit('exit', 1); child.emit('close', 1);
+      });
+      return child;
+    }
     const stream = ndJsonStream(Writable.toWeb(child.stdout), Readable.toWeb(child.stdin));
     let helpers, cancelPending, cancelled = false, seeCancel;
     const cancelSeen = new Promise(resolve => { seeCancel = resolve; });
@@ -121,10 +129,24 @@ test('DeepSeek is found as the npm package script, and a missing executable read
   fs.mkdirSync(lib, { recursive: true });
   fs.writeFileSync(path.join(lib, 'bin.js'), 'fixture');
   fs.writeFileSync(path.join(lib, '..', 'package.json'), JSON.stringify({ version: '9.9.9' }));
+  // With no Node anywhere, Harness's own runtime is the last resort.
   const found = findNativeCLI('deepseek-cli', env, 'win32');
   assert.deepEqual(found, { command: process.execPath, args: [path.join(lib, 'bin.js')] });
   const { backend } = await fixture(t, { find: () => found });
   assert.equal((await backend.refresh()).version, '9.9.9');
+
+  // Node on PATH runs it, as npm's own shim would: dsh's native loader refuses Electron builds it does not list.
+  fs.writeFileSync(path.join(root, 'node.exe'), 'fixture');
+  assert.deepEqual(findNativeCLI('deepseek-cli', env, 'win32'), { command: path.join(root, 'node.exe'), args: [path.join(lib, 'bin.js')] });
+
+  // An npm prefix on PATH (nvm, a custom prefix) is found too, and its own node.exe wins.
+  const prefix = path.join(root, 'nvm');
+  const prefixLib = path.join(prefix, 'node_modules', '@deepseek-ai', 'dsh', 'lib');
+  fs.mkdirSync(prefixLib, { recursive: true });
+  fs.writeFileSync(path.join(prefixLib, 'bin.js'), 'fixture');
+  fs.writeFileSync(path.join(prefix, 'node.exe'), 'fixture');
+  assert.deepEqual(findNativeCLI('deepseek-cli', { ...env, PATH: [prefix, root].join(path.delimiter) }, 'win32'),
+    { command: path.join(prefix, 'node.exe'), args: [path.join(prefixLib, 'bin.js')] });
 
   const missing = await fixture(t, { find: () => findNativeCLI('deepseek-cli', { PATH: root, LOCALAPPDATA: root, USERPROFILE: path.join(root, 'none'), APPDATA: path.join(root, 'none') }, 'win32') });
   assert.equal(missing.backend.inspect().installed, false);
@@ -133,6 +155,13 @@ test('DeepSeek is found as the npm package script, and a missing executable read
   assert.equal(status.loggedIn, false);
   assert.match(status.error, /dsh is not installed/);
   assert.equal(missing.children.length, 0);
+});
+
+test('a dsh that quits at start says why instead of only "connection closed"', async t => {
+  const { backend } = await fixture(t, { crash: 'dsh: fatal uncaught exception: unsupported Electron runtime fingerprint\n    at boot (index.js:1)\n}\n' });
+  const status = await backend.refresh();
+  assert.equal(status.loggedIn, false);
+  assert.match(status.error, /could not start: ACP connection closed: dsh: fatal uncaught exception: unsupported Electron runtime fingerprint$/);
 });
 
 test('DeepSeek discovers models without inference and closes the probe process', async t => {

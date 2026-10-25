@@ -3,8 +3,9 @@ const path = require('node:path');
 const { createHash } = require('node:crypto');
 
 
-// Every wiki lives in this one folder, one subfolder per workspace, and cannot be moved (the user's choice, 2026-10-22).
-// Project copies keep their copied wiki; old custom folders are imported without overwriting either location.
+// Harness's own per-workspace data, one subfolder per workspace: lessons, trial and kept rules, setups, comparisons,
+// notes and skill versions. The workspace's wiki pages live in its own docs/wiki and are never written here (the user's
+// choice, 2026-10-25). The folder keeps its old "wiki" name; old custom wiki folders were imported once.
 class WikiStore {
   constructor(directory) {
     this.directory = path.resolve(directory);
@@ -18,24 +19,8 @@ class WikiStore {
     return process.platform === 'win32' ? root.toLowerCase() : root;
   }
 
-  // A project copy's own wiki, copied in with it.
-  setLocation(workspace, folder) {
-    const key = this.identity(workspace);
-    const locations = { ...this.locations };
-    if (typeof folder !== 'string' || !path.isAbsolute(folder) || !fs.statSync(folder).isDirectory())
-      throw new Error('Choose an existing absolute wiki folder.');
-    locations[key] = { root: fs.realpathSync(folder), copy: true };
-    fs.mkdirSync(this.directory, { recursive: true });
-    fs.writeFileSync(this.settingsFile + '.tmp', JSON.stringify(locations, null, 2));
-    fs.renameSync(this.settingsFile + '.tmp', this.settingsFile);
-    this.locations = locations;
-    return this.ensure(workspace);
-  }
-
   location(workspace) {
     const root = fs.realpathSync(workspace);
-    const copy = this.locations[this.identity(root)];
-    if (copy?.copy === true && typeof copy.root === 'string') return { workspace: root, root: copy.root, managed: false };
     const identity = process.platform === 'win32' ? root.toLowerCase() : root;
     const id = createHash('sha256').update(identity).digest('hex').slice(0, 20);
     const name = path.basename(root).replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 48) || 'workspace';

@@ -187,8 +187,17 @@ test('a queued Muse follow-up counts as delivered only when its turn runs; a fai
 });
 
 test('Muse incompatible schemas and missing authentication stay unavailable', async t => {
-  const mismatch = await fixture(t, { fingerprint: 'unknown-schema' });
+  // Muse updates itself ahead of the pinned SDK (1.4.13 against 1.4.12 on 2026-10-25): a newer fingerprint still connects.
+  const newer = await fixture(t, { fingerprint: 'sha256:newer-build' });
+  const connected = await newer.backend.refresh();
+  assert.equal(connected.loggedIn, true);
+  assert.equal(newer.backend.models.length, 1);
+  const mismatch = await fixture(t, { schemaVersion: 2 });
   assert.match((await mismatch.backend.refresh()).error, /Unsupported Muse/);
+  const opened = [];
+  await assert.rejects(mismatch.backend.login(url => opened.push(url)), /Unsupported Muse/);
+  assert.equal(opened.length, 0, 'an unsupported protocol does not open the Meta sign-in page');
+  assert.ok(!mismatch.children.some(({ args }) => args.includes('login')), 'muse login is not started');
   const signedOut = await fixture(t, { authError: true });
   assert.equal((await signedOut.backend.refresh()).loggedIn, false);
   await assert.rejects(signedOut.backend.run({ ...runOptions(), schema: {} }), /structured routing is not enabled/);

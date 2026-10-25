@@ -67,3 +67,43 @@ test('the window gets at most one fleet state per 100 ms, the last built after t
   assert.ok(emitted.length <= Math.ceil((Date.now() - start) / 100) + 1);
   assert.equal(emitted.at(-1).value, 30);
 });
+
+test('window updates carry only the bots whose chats changed, and the window keeps the rest', () => {
+  const { trimFleet, keepSessions } = require('../ui/agent-state.js');
+  const chats = id => [{ id: id + '-chat', items: [{ id: id + '-item', type: 'agentMessage', text: id }] }];
+  const fleet = revisions => ({ sessions: chats('main'), settings: {},
+    agentStates: { main: { stateRevision: revisions[0], sessions: chats('main') }, bot: { stateRevision: revisions[1], sessions: chats('bot') } },
+    executionStates: { bot: { stateRevision: revisions[2], sessions: chats('job') } } });
+  const sent = new Map();
+  const first = trimFleet(fleet([1, 1, 1]), sent, false);
+  assert.equal(first.sessions, undefined, 'the Main Bot chats are not repeated at the top level');
+  assert.ok(first.agentStates.bot.sessions && first.executionStates.bot.sessions);
+  const window = keepSessions(structuredClone(first), null);
+  const second = trimFleet(fleet([1, 2, 1]), sent, false);
+  assert.deepEqual([second.agentStates.main.sessionsKept, second.agentStates.bot.sessionsKept, second.executionStates.bot.sessionsKept], [true, undefined, true]);
+  assert.equal(second.agentStates.main.sessions, undefined);
+  const merged = keepSessions(structuredClone(second), window);
+  assert.deepEqual(merged.agentStates.main.sessions, chats('main'));
+  assert.deepEqual(merged.executionStates.bot.sessions, chats('job'));
+  assert.equal(merged.agentStates.main.sessionsKept, undefined);
+  assert.equal(keepSessions(structuredClone(second), null), null, 'a window without copies asks for a full state');
+  // Another bot's code adds a message without this bot's own change notice: the message count still marks it changed.
+  const added = fleet([1, 2, 1]); added.agentStates.main.sessions[0].items.push({ id: 'receipt', type: 'agentResult' });
+  assert.equal(trimFleet(added, sent, false).agentStates.main.sessionsKept, undefined);
+  assert.equal(trimFleet(added, sent, false).agentStates.main.sessionsKept, true);
+  const full = trimFleet(fleet([1, 2, 1]), sent, true);
+  assert.ok(Object.values(full.agentStates).every(context => context.sessions));
+  const plain = { sessions: [], settings: {} };
+  assert.equal(trimFleet(plain, sent, false), plain);
+  assert.equal(keepSessions(plain, null), plain);
+});
+
+test('a change notice and a save both advance the bot revision that decides whether its chats are resent', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-revision-'));
+  const controller = new Controller(path.join(directory, 'sessions.json'), directory, new EventEmitter(), { cancel() {}, close() {}, jev: null });
+  t.after(() => { clearTimeout(controller.timer); clearTimeout(controller.saveTimer); controller.store.closeJournal(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const start = controller.stateRevision || 0;
+  controller.changed();
+  controller.save();
+  assert.equal(controller.stateRevision, start + 2);
+});

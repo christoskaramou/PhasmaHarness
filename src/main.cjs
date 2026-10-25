@@ -21,6 +21,7 @@ const { RemoteRunner } = require('./remote.cjs');
 const { registerRunnerCommands, assertRunnerOpen } = require('./runner-commands.cjs');
 const { RemoteSettings } = require('./remote-settings.cjs');
 const { microphoneAllowed } = require('./dictation.cjs');
+const { trimFleet } = require('../ui/agent-state.js');
 
 // Workers and helpers inherit this, so bundled rtk/rg win over any system copies.
 process.env.PATH = path.join(__dirname, '..', 'tools', 'bin') + path.delimiter + process.env.PATH;
@@ -82,7 +83,7 @@ async function start() {
     quit: () => { quitting = true; app.quit(); } });
   ({ controller, agents } = runner);
   if (installQuitRequested) { app.quit(); return; }
-  const { wikiStore, updater, voice } = runner;
+  const { updater, voice } = runner;
   log.info('Started', { version: app.getVersion(), electron: process.versions.electron, platform: `${process.platform} ${process.arch} ${os.release()}`, packaged: app.isPackaged });
   updater.on('state', state => { if (window && !window.isDestroyed()) window.webContents.send('update', state); });
   updater.on('state', state => browserAccess?.broadcast('update', state));
@@ -136,9 +137,18 @@ async function start() {
       : agents.busy ? 'Work in progress' : 'Runner ready',
     onError: error => log.error('Runner settings failed', { message: error.message }),
   });
+  // Each update used to carry every bot's chats (6 MB on the user's data). The window now gets only the bots that changed,
+  // and everything every 5 s or after a reload, so an edit that skipped changed()/save() still shows within 5 s.
+  const sentChats = new Map();
+  let fullAt = 0;
+  window.webContents.on('did-finish-load', () => sentChats.clear());
   agents.on('state', state => {
     desktop.refresh();
-    if (!window.isDestroyed()) window.webContents.send('state', state);
+    if (!window.isDestroyed()) {
+      const full = Date.now() - fullAt >= 5000;
+      if (full) fullAt = Date.now();
+      window.webContents.send('state', trimFleet(state, sentChats, full));
+    }
     browserAccess?.broadcast('state', state);
   });
   const sharedChanges = new Set(['benchmarkApply', 'benchmarkReset', 'cursorLogin', 'cursorRefresh', 'cursorLogout', 'claudeLogin', 'claudeRefresh', 'claudeLogout', 'connectChatGPT', 'logoutChatGPT', 'installProvider', 'providerSettings', 'providerKey', 'nativeProviderAction', 'jevSaveKey', 'jevRemoveKey', 'jevTest', 'checks']);
@@ -240,8 +250,11 @@ async function start() {
   // The recorded audio; Dictation checks it is the open recording's and valid PCM before it reaches the engine.
   handle('voiceTranscribe', (id, audio) => voice.transcribe(id, audio));
   handle('openWorkspaceWiki', async (id, agentId) => {
-    const wiki = wikiStore.ensure(id ? agents.owner(id).session(id).workspace : agents.controller(agentId).data.settings.workspace);
-    const error = await shell.openPath(wiki.root);
+    const root = path.join(id ? agents.owner(id).session(id).workspace : agents.controller(agentId).data.settings.workspace, 'docs', 'wiki');
+    if (!fs.existsSync(root))
+      throw new Error('This workspace has no docs/wiki folder.');
+
+    const error = await shell.openPath(root);
     if (error) throw new Error(error);
   });
   const benchmarkWorkers = () => controller.catalog().filter(p => p.worker && p.enabled && controller.available(p));

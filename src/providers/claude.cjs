@@ -20,8 +20,8 @@ const ASK_NOTE = '\nHarness access: tool calls outside the pre-approved set wait
 
 // Bots get Harness's rules and skills, not the user's personal Claude Code setup: user settings (their hooks,
 // permissions, skills and subagents), the home CLAUDE.md and auto-memory stay out, and every plugin is off.
-// Managed workers also exclude native project entries; project settings/hooks and MCP servers remain available.
-function withoutPersonalSetup(managedInstructions = false) {
+// The workspace's own CLAUDE.md files load as they do outside Harness; project settings/hooks and MCP servers remain available.
+function withoutPersonalSetup() {
   const home = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
   let plugins = {};
   try {
@@ -29,8 +29,7 @@ function withoutPersonalSetup(managedInstructions = false) {
   } catch { /* none installed */ }
 
   const settings = {
-    claudeMdExcludes: [...new Set([path.join(home, 'CLAUDE.md'), path.join(os.homedir(), 'CLAUDE.md')].map(file => file.replace(/\\/g, '/'))),
-      ...(managedInstructions ? ['**/CLAUDE.md', '**/CLAUDE.local.md', '**/AGENTS.md'] : [])],
+    claudeMdExcludes: [...new Set([path.join(home, 'CLAUDE.md'), path.join(os.homedir(), 'CLAUDE.md')].map(file => file.replace(/\\/g, '/')))],
     enabledPlugins: Object.fromEntries(Object.keys(plugins).map(id => [id, false])),
     autoMemoryEnabled: false,
   };
@@ -234,7 +233,7 @@ class ClaudeCLI {
     return new Promise((resolve, reject) => {
       if (signal?.aborted) return reject(new Error('Claude stopped.'));
       const args = ['-p', '--verbose', '--input-format', 'stream-json', '--output-format', 'stream-json', '--include-partial-messages', '--model', model,
-        ...withoutPersonalSetup(managedInstructions)];
+        ...withoutPersonalSetup()];
       if (onInput && !schema) args.push('--replay-user-messages');
       if (EFFORTS.includes(effort)) args.push('--effort', effort);
       // With an approval callback, the Harness access setting applies: pre-approved tools run, anything else asks the user in the Harness.

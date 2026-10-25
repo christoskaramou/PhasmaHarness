@@ -5,7 +5,7 @@
 // ../controller.cjs); `this` is the Controller.
 const fs = require('node:fs');
 const path = require('node:path');
-const { projectBody } = require('../workspace/project-instructions.cjs');
+const { projectRules } = require('../workspace/project-instructions.cjs');
 const { redact } = require('../log.cjs');
 const { capabilities } = require('../providers/capabilities.cjs');
 const { capCatalog } = require('../routing/effort-cap.cjs');
@@ -188,12 +188,9 @@ module.exports = {
     return same.find(p => p.effort === 'medium') || best;
   },
 
-  // What the project already says: its PhasmaHarness.md and the rules riding matching tasks.
+  // What the project already says: its AGENTS.md, the rules Harness kept and the rules riding matching tasks.
   learnedRules(project, records) {
-    let body = '';
-    try {
-      body = projectBody(project);
-    } catch { /* no project entry yet */ }
+    const body = projectRules(project) + this.keptRulesText(project);
     const riding = records.filter(record => record.state === 'trial' || (record.state === 'kept' && record.onDemand)).map(record => `- ${record.rule}`);
     return [body, ...riding].join('\n');
   },

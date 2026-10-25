@@ -65,18 +65,14 @@ class ContextSearch {
       else throw error;
     }
     const names = stdout.split(/\r?\n/).map(n => n.replace(/\\/g, '/').replace(/^\.\//, '')).filter(allowed).sort();
-    // WikiStore names workspaces and wikis by fs.realpathSync paths (links resolved, Windows short names such as
-    // RUNNER~1 kept), so it gets the workspace as selected. Files are read through native real paths, which also
-    // expand short names; wikiScope is the wiki folder in that form and hits report the store's form.
-    const wiki = this.wikiStore?.location(this.root);
-    if (wiki) {
-      for (let i = names.length - 1; i >= 0; i--)
-        if (names[i].startsWith('docs/wiki/')) names.splice(i, 1);
-    }
+    // The workspace's docs/wiki is walked directly, so a git-ignored wiki is searched too; rg's listing of it is dropped.
+    // A wiki redirected through a link is not walked.
+    const wiki = { root: path.join(root, 'docs', 'wiki') };
+    for (let i = names.length - 1; i >= 0; i--)
+      if (names[i].startsWith('docs/wiki/')) names.splice(i, 1);
     const localWiki = new Map();
     let wikiScope = null;
-    // The same no-redirect rule as WikiStore.ensure().
-    if (wiki && fsSync.existsSync(wiki.root) && fsSync.realpathSync(wiki.root) === path.resolve(wiki.root)) {
+    if (fsSync.existsSync(wiki.root) && fsSync.realpathSync(wiki.root) === path.resolve(wiki.root)) {
       wikiScope = await fs.realpath(wiki.root);
       const pending = [''];
       let visited = 0;
@@ -87,7 +83,7 @@ class ContextSearch {
           const relative = path.posix.join(dir, entry.name);
           if (!allowed('docs/wiki/' + relative + (entry.isDirectory() ? '/index.md' : ''))) continue;
           if (entry.isDirectory() && pending.length < 100) pending.push(relative);
-          else if (entry.isFile() && relative.endsWith('.md') && localWiki.size < 200) localWiki.set('@wiki/' + relative, relative);
+          else if (entry.isFile() && relative.endsWith('.md') && localWiki.size < 200) localWiki.set('docs/wiki/' + relative, relative);
         }
       }
       names.unshift(...localWiki.keys());
@@ -110,7 +106,6 @@ class ContextSearch {
           const data = await fs.readFile(filename);
           if (data.includes(0)) { this.cache.delete(name); continue; }
           entry = { signature, hash: createHash('sha256').update(data).digest('hex'), chunks: chunks(name, data.toString('utf8')) };
-          if (wikiRelative) entry.chunks = entry.chunks.map(chunk => ({ ...chunk, source: 'wiki', path: path.join(wiki.root, path.relative(wikiScope, filename)) }));
           this.cache.set(name, entry);
         }
         manifest.push(`${name}:${entry.hash}`); corpus.push(...entry.chunks);

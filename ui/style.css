@@ -1083,10 +1083,10 @@ dialog label select {
 
 #toast {
   position:fixed;
-  bottom:28px;
+  top:88px;
   left:50%;
   transform:translateX(-50%);
-  max-width:620px;
+  max-width:min(620px, calc(100vw - 32px));
   background:var(--warning-bg);
   border:1px solid var(--warning-border);
   color:var(--text);
@@ -3306,6 +3306,27 @@ button,button *,[role=button],[role=button] *,input[type=button],input[type=subm
 
 .provider-account-row>.provider-plug {
   flex:none
+}
+
+/* A plug beside an expandable provider row keeps the look of a plug inside it (22px plug, 10px gap). */
+.provider-plug-row {
+  position:relative
+}
+
+.provider-plug-row>.provider-plug {
+  position:absolute;
+  top:0;
+  left:0;
+  z-index:1
+}
+
+.provider-plug-row>.provider-settings>summary {
+  min-height:22px;
+  padding-left:32px
+}
+
+.provider-plug-row:has(> .provider-plug.disconnected) .provider-account-row {
+  color:var(--muted)
 }
 
 .provider-account-text {

@@ -36,14 +36,22 @@ function findNativeCLI(id, env = process.env, platform = process.platform) {
     } catch {}
   }
   for (const command of candidates) if (fs.existsSync(command)) return { command, args: [] };
-  // npm's Windows shims are .cmd files, so the package script is run through this executable instead.
+  // npm's Windows shims are .cmd files, so the package script runs under the Node the shim would use: the prefix's own
+  // node.exe, else Node on PATH. Harness's own Electron is the last resort: dsh's native loader accepts only the Electron
+  // builds it lists, and Harness's 44.9.3 is not one (2026-10-25).
   const script = { 'deepseek-cli': ['@deepseek-ai', 'dsh', 'lib', 'bin.js'] }[id];
   if (script) {
-    const roots = [path.join(env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'npm', 'node_modules'),
+    // Any npm prefix on PATH (a custom prefix, nvm) first, then the default ones.
+    const roots = [...(env.PATH || '').split(path.delimiter).filter(Boolean).map(directory => path.join(directory, 'node_modules')),
+      path.join(env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'npm', 'node_modules'),
       path.join(home, '.npm-global', 'lib', 'node_modules'), '/usr/local/lib/node_modules'];
     for (const root of roots) {
       const file = path.join(root, ...script);
-      if (fs.existsSync(file)) return { command: process.execPath, args: [file] };
+      if (!fs.existsSync(file))
+        continue;
+      const prefixNode = path.join(root, '..', 'node.exe');
+      const node = (platform === 'win32' && fs.existsSync(prefixNode) ? prefixNode : null) || executableOnPath('node', env, platform);
+      return { command: node || process.execPath, args: [file] };
     }
   }
   const error = new Error(`${name} is not installed. Install it from Settings → Providers.`);

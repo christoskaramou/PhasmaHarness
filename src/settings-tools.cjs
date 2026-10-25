@@ -1,3 +1,4 @@
+const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 
 const GENERAL = {
@@ -15,7 +16,7 @@ const SPECIAL = {
   models: 'Model action: { action: toggle, id, enabled }, { action: toggleCodexModel, model, enabled }, or { action: enableDiscovered, provider, model, label }',
   providerKey: '{ id: provider ID, key: new secret or null to remove }; reads show configured flags only',
   jevKey: 'New secret or null to remove; reads show configured status only',
-  checks: 'Array of workspace checks using the existing Checks format', wikiFolder: 'This workspace’s wiki folder (fixed, read only)',
+  checks: 'Array of workspace checks using the existing Checks format', wikiFolder: 'This workspace’s docs/wiki folder (read only)',
   benchmarks: 'Validated benchmark snapshot or null to reset to bundled evidence',
 };
 const MANUAL = new Set(['access', 'workspace', 'browserAccess', 'providers', 'providerConnection', 'providerKey', 'jevKey', 'checks', 'wikiFolder', 'startAtSignIn']);
@@ -70,13 +71,9 @@ class SettingsTools {
       note: 'Security settings are manual-only. Secrets are never returned. Write one setting per call; queued changes apply after active work finishes. Queued requests are cancelled on app restart.' };
   }
 
-  // Reading where the wiki lives creates nothing and never fails the whole read (a moved workspace reports null).
+  // The workspace's own wiki folder; reading it creates nothing.
   wikiFolder(workspace) {
-    try {
-      return this.wikiStore.location(workspace).root;
-    } catch {
-      return null;
-    }
+    return typeof workspace === 'string' ? path.join(workspace, 'docs', 'wiki') : null;
   }
 
   async write(caller, args) {

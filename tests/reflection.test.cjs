@@ -65,7 +65,7 @@ test('a lesson\'s reflection is asked once per input, saved by re-reading the le
   } } };
   let paused = null;
   const controller = { agents: { primary: owner, backgroundQuota: () => paused }, log: { warn: (...args) => warnings.push(args) },
-    trialFromReflection: reflection.trialFromReflection };
+    trialFromReflection: reflection.trialFromReflection, keptRulesText: () => '' };
   const reflect = () => reflection.reflectOnLesson.call(controller, { items }, task(), lesson, root, root);
 
   await reflect();

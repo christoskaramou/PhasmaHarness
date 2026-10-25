@@ -74,20 +74,23 @@ test('a Cursor structured review that attempts a tool is cancelled before its an
 // Replace the ACP transport; capture the permission handler run() installs and answer one request with it.
 async function decide({ access, schema, approve }) {
   const cursor = new CursorCLI();
-  let onRequest;
+  let onRequest, result;
+  const ask = () => onRequest('session/request_permission', {
+    toolCall: { title: 'Run ninja' },
+    options: [{ optionId: 'yes', kind: 'allow_once' }, { optionId: 'no', kind: 'reject_once' }],
+  });
   cursor.connect = options => {
     onRequest = options.onRequest;
     return { call: async (method) => {
       if (method === 'session/new') return { sessionId: 's' };
-      if (method === 'session/prompt') return { stopReason: 'end_turn' };
+      // Cursor asks while the prompt runs.
+      if (method === 'session/prompt') { result = await ask(); return { stopReason: 'end_turn' }; }
       return {};
     }, close() {} };
   };
   await cursor.run({ model: 'm', prompt: 'x', access, schema, approve });
-  const result = await onRequest('session/request_permission', {
-    toolCall: { title: 'Run ninja' },
-    options: [{ optionId: 'yes', kind: 'allow_once' }, { optionId: 'no', kind: 'reject_once' }],
-  });
+  // After the turn the connection may be parked for the next one; it approves nothing.
+  assert.deepEqual(await ask(), { outcome: 'cancelled' });
   return { choice: result.outcome.optionId };
 }
 
@@ -175,21 +178,18 @@ test('a Stop while Cursor Send now is still cancelling the step never sends the 
   const cursor = new CursorCLI(), prompts = [];
   let failFirst;
   // Like the real connection: Stop closes it and fails the pending prompt; session/cancel alone does not end the step.
-  cursor.connect = ({ signal }) => {
-    signal?.addEventListener('abort', () => failFirst?.(new Error('Cursor connection closed.')), { once: true });
-    return {
-      child: null,
-      notify: () => {},
-      call: async (method, params) => {
-        if (method === 'session/new') return { sessionId: 's' };
-        if (method !== 'session/prompt') return {};
-        prompts.push(params);
-        if (prompts.length === 1) return new Promise((_, reject) => { failFirst = reject; });
-        return { stopReason: 'end_turn' };
-      },
-      close() {},
-    };
-  };
+  cursor.connect = () => ({
+    child: null,
+    notify: () => {},
+    call: async (method, params) => {
+      if (method === 'session/new') return { sessionId: 's' };
+      if (method !== 'session/prompt') return {};
+      prompts.push(params);
+      if (prompts.length === 1) return new Promise((_, reject) => { failFirst = reject; });
+      return { stopReason: 'end_turn' };
+    },
+    close() { failFirst?.(new Error('Cursor connection closed.')); },
+  });
   const abort = new AbortController();
   let input = null;
   const running = cursor.run({ model: 'm', prompt: 'Build it.', access: 'workspace-write', signal: abort.signal,
