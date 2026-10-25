@@ -13,7 +13,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-ui-'));
 app.setPath('userData', root);
 // Xvfb runners may lack a working GPU readback path for offscreen screenshots.
 app.disableHardwareAcceleration();
-fs.mkdirSync(path.resolve(__dirname, '../.scratch'), { recursive: true });
+fs.mkdirSync(path.resolve(__dirname, '../.scratch/mosaic'), { recursive: true });
 const startedAt = Date.now();
 let phase = 'Electron startup';
 const deadline = setTimeout(() => { console.error(`UI smoke timed out during ${phase} after ${Date.now() - startedAt} ms`); app.exit(1); }, 30000);
@@ -112,6 +112,15 @@ app.whenReady().then(async () => {
   const window = new BrowserWindow({ show: false,
     ...(process.platform === 'win32' ? { titleBarStyle: 'hidden', titleBarOverlay: { height: 40 } } : {}),
     webPreferences: { preload: path.resolve(__dirname, '../src/preload.cjs'), contextIsolation: true, sandbox: true, backgroundThrottling: false, offscreen: true } });
+  // Screenshots are only for local review. A GPU-less CI runner can fail a capture (UnknownVizError); there it saves an
+  // empty image and says so instead of failing the run.
+  if (process.env.CI) {
+    const capture = window.webContents.capturePage.bind(window.webContents);
+    window.webContents.capturePage = (...args) => capture(...args).catch(error => {
+      console.log(`Screenshot skipped on CI: ${error.message}`);
+      return require('electron').nativeImage.createEmpty();
+    });
+  }
   require('../src/window-zoom.cjs').configureWindowZoom(window.webContents, path.join(root, 'zoom.json'), error => { throw error; });
   const confirmation = confirmations(window);
   ipcMain.handle('answerConfirmation', (_event, id, accepted) => confirmation.answer(id, accepted));
