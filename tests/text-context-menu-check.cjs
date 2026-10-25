@@ -8,7 +8,8 @@ module.exports = async window => {
   let opened;
   Menu.prototype.popup = function (options) { opened = { menu: this, options }; };
   configureTextContextMenu(window);
-  const saved = await Promise.all((await clipboard.read()).map(async item =>
+  // An empty clipboard (CI runners) reads as an item with no types, which ClipboardItem refuses.
+  const saved = await Promise.all((await clipboard.read()).filter(item => item.types.length).map(async item =>
     new ClipboardItem(Object.fromEntries(await Promise.all(item.types.map(async type => [type, await item.getType(type)]))))));
   try {
     await run(`(() => {
