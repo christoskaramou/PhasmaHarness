@@ -1,7 +1,7 @@
 const { randomUUID } = require('node:crypto');
+const groupChats = require('../group-chats.cjs');
 const path = require('node:path');
 const { verificationGaps } = require('../job-reports.cjs');
-const groupChats = require('../group-chats.cjs');
 const { TOOLS } = require('../tools/agent-tools.cjs');
 const { hubEffortAllowed } = require('../routing/effort-cap.cjs');
 const { capabilities } = require('../providers/capabilities.cjs');
@@ -77,16 +77,17 @@ function actionArguments(action) {
 function messages(session) {
   return session.items.filter(i => i.type === 'userMessage' || (i.type === 'agentMessage' && i.phase !== 'commentary')).map(i => ({
     id: i.id, role: i.type === 'userMessage' ? 'user' : 'assistant',
+    ...(i.groupSpeaker ? { speaker: i.groupSpeaker.name } : {}),
     text: i.text || (i.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n'),
   }));
 }
 
 function recordUsage(session, usage) {
   if (!usage || (!Number.isFinite(usage.inputTokens) && !Number.isFinite(usage.input_tokens))) return;
-  const last = { inputTokens: usage.inputTokens ?? ((usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0)),
-    cachedInputTokens: usage.cachedInputTokens ?? usage.cache_read_input_tokens ?? 0, outputTokens: usage.outputTokens ?? usage.output_tokens ?? 0 };
+  const last = { inputTokens: usage.inputTokens ?? usage.total_input_tokens ?? ((usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0)),
+    cachedInputTokens: usage.cachedInputTokens ?? usage.cache_read_input_tokens ?? null, outputTokens: usage.outputTokens ?? usage.output_tokens ?? 0 };
   const total = session.usage?.total || {};
-  session.usage = { last: { ...last, totalTokens: last.inputTokens + last.outputTokens }, total: Object.fromEntries(Object.entries(last).map(([key, value]) => [key, (total[key] || 0) + value])) };
+  session.usage = { last: { ...last, totalTokens: last.inputTokens + last.outputTokens }, total: Object.fromEntries(Object.entries(last).map(([key, value]) => [key, value === null || total[key] === null ? null : (total[key] || 0) + value])) };
 }
 
 async function summarize(controller, session, summary, chunk, choice, abort) {
@@ -279,13 +280,6 @@ module.exports = {
         if (refusal) throw new Error(refusal.blocked || 'Hub stopped before routing.');
       }
       this.markAdmitted(session);
-      if (session.group && !agentReply) {
-        const target = groupChats.recipient(this.agents, session, fileMessage?.displayText || text);
-        if (target && target.id !== 'main') {
-          groupChats.dispatch(this, session, target, { text, images, fileMessage, turnId });
-          return;
-        }
-      }
       // Worker results resume Hub's model, including queues saved with an obsolete composer preset.
       const directResult = agentReply && agentResult && !agentResult.request?.comparison && (agentReplyCancelled || agentResult.request?.resultHandling === 'direct');
       const choice = directResult ? null : await this.coordinatorChoice(agentReply && this.data.hubMode ? (this.data.hubModeSource === 'auto' ? 'auto' : this.data.hubMode) : mode, abort);
@@ -400,7 +394,8 @@ module.exports = {
         reviewingResult = true;
         // The chat id keys its kept Codex thread, so later calls send only what changed.
         const { decision, usage } = await this.smartRouter.complete({ instructions: this.projectContextInstructions(session) + '\n\n' + INSTRUCTIONS(this.agents.hubName()), prompt: JSON.stringify(context), schema: SCHEMA, images,
-          timeoutMs: 120000, idleTimeout: true, conversation: { key: session.id, context } }, choice, abort);
+          timeoutMs: 120000, idleTimeout: true, conversation: { key: session.id, context, state: session.coordinatorConversation,
+            save: value => { session.coordinatorConversation = value; this.save(); } } }, choice, abort);
         abort.signal.throwIfAborted();
         recordUsage(session, usage);
         if (!decision || typeof decision.reply !== 'string' || !Object.hasOwn(decision, 'action')) throw new Error('Hub returned an invalid response. No action was taken from that response.');
@@ -471,6 +466,8 @@ module.exports = {
       }
       session.status = 'completed';
     } catch (error) {
+      // The kept Hub session may hold a decision that never ran; the next turn rebuilds from the chat.
+      session.coordinatorConversation = null; this.smartRouter.conversations?.delete(session.id);
       if (reviewingResult && !error.budgetPersistenceFailed && error.code !== 'JOB_BUDGET_HOLD' && !abort.signal.aborted && agentReply && agentResult?.status === 'completed') {
         const worker = this.agents.agentName(agentResult.agentId);
         session.hubCompletion = { requestId: agentResult.request?.id, agentId: agentResult.agentId,

@@ -14,25 +14,25 @@ function fixture(t) {
   return { root, workspace, store: new WikiStore(path.join(root, 'AppData', 'Wikis')) };
 }
 
-test('one workspace entry preserves scoped legacy rules once, deduplicates mirrors and ignores later legacy edits', t => {
+test('one workspace entry imports the root legacy rules once, deduplicates mirrors and ignores later legacy edits', t => {
   const { workspace } = fixture(t);
   fs.mkdirSync(path.join(workspace, 'Engine'));
   for (const name of ['AGENTS.md', 'CLAUDE.md', 'HERMES.md']) fs.writeFileSync(path.join(workspace, name), 'Shared amberquartz rule.');
-  fs.writeFileSync(path.join(workspace, 'Engine', 'INSTRUCTIONS.md'), 'Scoped copperfalcon rule.');
+  fs.writeFileSync(path.join(workspace, 'Engine', 'INSTRUCTIONS.md'), 'Subfolder copperfalcon rule.');
   fs.mkdirSync(path.join(workspace, '.cursor', 'rules'), { recursive: true });
   fs.writeFileSync(path.join(workspace, '.cursor', 'rules', 'quality.mdc'), '---\nalwaysApply: true\n---\nCursor quality rule.');
   fs.writeFileSync(path.join(workspace, 'manual.md'), 'Ordinary documentation.');
   const initial = projectInstructions(workspace, true);
   assert.equal(initial.match(/Shared amberquartz rule/g).length, 1);
-  assert.match(initial, /Workspace scope: Engine[\s\S]*Scoped copperfalcon/);
+  assert.doesNotMatch(initial, /copperfalcon|Workspace scope/, 'subfolder rule files are never imported');
   assert.doesNotMatch(initial, /Ordinary documentation/);
-  assert.match(initial, /Workspace scope: \.\n\nImported from: \.cursor\/rules\/quality.mdc[\s\S]*Cursor quality rule/);
+  assert.match(initial, /Imported from: \.cursor\/rules\/quality.mdc[\s\S]*Cursor quality rule/);
   assert.equal(projectEntry(workspace), path.join(workspace, 'PhasmaHarness.md'));
   assert.equal(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8'), 'Shared amberquartz rule.', 'automatic initialization never deletes originals');
   fs.writeFileSync(path.join(workspace, 'AGENTS.md'), 'Stale legacy rule.');
   assert.doesNotMatch(projectInstructions(workspace), /Stale legacy rule/);
   for (const name of ['AGENTS.md', 'CLAUDE.md', 'HERMES.md', 'Engine/INSTRUCTIONS.md']) fs.unlinkSync(path.join(workspace, name));
-  assert.match(projectInstructions(workspace, true), /Scoped copperfalcon/);
+  assert.match(projectInstructions(workspace, true), /Shared amberquartz rule/);
   assert.equal(fs.existsSync(path.join(workspace, 'INSTRUCTIONS.md')), false);
   assert.equal(fs.existsSync(path.join(workspace, 'AGENTS.md')), false);
   assert.equal(currentProjectEntry(path.join(workspace, 'INSTRUCTIONS.md')), projectEntry(workspace));
@@ -53,7 +53,7 @@ test('invalid legacy import preserves all originals and creates no partial entry
   assert.throws(() => projectInstructions(workspace), /unlinked/);
 });
 
-test('instruction import stays inside its project and skips nested repositories, worktrees and managed workspaces', t => {
+test('instruction import reads only the workspace root, never subfolders, nested repositories or managed workspaces', t => {
   const { workspace } = fixture(t);
   fs.mkdirSync(path.join(workspace, '.git'));
   fs.writeFileSync(path.join(workspace, 'AGENTS.md'), 'Parent workspace rule.');
@@ -69,13 +69,11 @@ test('instruction import stays inside its project and skips nested repositories,
   }
   const readOnly = projectInstructions(workspace);
   assert.match(readOnly, /Parent workspace rule/);
-  assert.match(readOnly, /Workspace scope: Engine[\s\S]*Local scoped rule/);
-  assert.doesNotMatch(readOnly, /Independent project rule|Managed project rule/);
+  assert.doesNotMatch(readOnly, /Local scoped rule|Independent project rule|Managed project rule/);
   assert.equal(fs.existsSync(projectEntry(workspace)), false);
   const writable = projectInstructions(workspace, true);
   assert.match(writable, /Parent workspace rule/);
-  assert.match(writable, /Local scoped rule/);
-  assert.doesNotMatch(writable, /Independent project rule|Managed project rule/);
+  assert.doesNotMatch(writable, /Local scoped rule|Independent project rule|Managed project rule/);
   assert.match(projectInstructions(path.join(workspace, 'managed')), /Managed project rule/);
   assert.equal(fs.statSync(path.join(workspace, 'repository', 'nested', 'INSTRUCTIONS.md')).size, 65537);
 });
@@ -88,21 +86,21 @@ test('legacy workspace-data instruction copies are not project rules', t => {
   assert.doesNotMatch(projectInstructions(workspace, true), /Stale generated project rule/);
 });
 
-test('root-only instruction loading retains root provider rules but leaves plain child projects to workers', t => {
+test('instruction loading keeps root provider rules and never imports a child folder\'s rules', t => {
   const { workspace } = fixture(t);
   for (const folder of ['.cursor/rules', '.github', 'plain-project']) fs.mkdirSync(path.join(workspace, folder), { recursive: true });
   fs.writeFileSync(path.join(workspace, 'AGENTS.md'), 'Root agent rule.');
   fs.writeFileSync(path.join(workspace, '.cursor/rules/root.mdc'), 'Root Cursor rule.');
   fs.writeFileSync(path.join(workspace, '.github/copilot-instructions.md'), 'Root Copilot rule.');
   fs.writeFileSync(path.join(workspace, 'plain-project/AGENTS.md'), 'Plain child rule.');
-  const body = projectInstructions(workspace, false, { recursive: false });
+  const body = projectInstructions(workspace);
   assert.match(body, /Root agent rule/);
   assert.match(body, /Root Cursor rule/);
   assert.match(body, /Root Copilot rule/);
   assert.doesNotMatch(body, /Plain child rule/);
   assert.equal(fs.existsSync(projectEntry(workspace)), false);
   assert.match(projectInstructions(path.join(workspace, 'plain-project')), /Plain child rule/);
-  assert.match(projectInstructions(workspace, true), /Plain child rule/, 'worker initialization preserves scoped rules');
+  assert.doesNotMatch(projectInstructions(workspace, true), /Plain child rule/, 'creating the entry imports root rules only');
 });
 
 test('instruction discovery never enumerates excluded projects or unrelated Main Bot folders', t => {
@@ -116,16 +114,61 @@ test('instruction discovery never enumerates excluded projects or unrelated Main
     fs.writeFileSync(path.join(child, 'AGENTS.md'), 'Child rule.');
   }
   fs.writeFileSync(path.join(workspace, 'AGENTS.md'), 'Root rule.');
-  let rootOnly = true;
   const readdir = fs.readdirSync;
   t.mock.method(fs, 'readdirSync', (directory, options) => {
     const relative = path.relative(workspace, directory);
-    if (relative && (rootOnly || relative !== 'plain-project')) throw new Error('Must not enter: ' + relative);
+    if (relative) throw new Error('Must not enter: ' + relative);
     return readdir(directory, options);
   });
-  assert.deepEqual(legacyInstructionFiles(workspace, { recursive: false }).map(e => e.relative), ['AGENTS.md']);
-  rootOnly = false;
-  assert.deepEqual(legacyInstructionFiles(workspace).map(e => e.relative), ['AGENTS.md', 'plain-project/AGENTS.md']);
+  assert.deepEqual(legacyInstructionFiles(workspace).map(e => e.relative), ['AGENTS.md']);
+  t.mock.restoreAll();
+});
+
+test('instruction discovery at home keeps root rules without visiting protected personal folders', t => {
+  const { workspace } = fixture(t);
+  for (const directory of ['AppData/Local/Temp/msdtadmin', 'Downloads', '.cursor/rules'])
+    fs.mkdirSync(path.join(workspace, directory), { recursive: true });
+  fs.writeFileSync(path.join(workspace, 'AGENTS.md'), 'Home workspace rule.');
+  fs.writeFileSync(path.join(workspace, '.cursor/rules/root.mdc'), 'Root Cursor rule.');
+  fs.writeFileSync(path.join(workspace, 'Downloads/AGENTS.md'), 'Unrelated downloaded rule.');
+  t.mock.method(os, 'homedir', () => workspace);
+  const readdir = fs.readdirSync;
+  t.mock.method(fs, 'readdirSync', (directory, options) => {
+    const relative = path.relative(workspace, directory).replace(/\\/g, '/');
+    if (/^(AppData|Downloads)(\/|$)/.test(relative))
+      throw Object.assign(new Error('Access is denied: ' + directory), { code:'EACCES' });
+    return readdir(directory, options);
+  });
+  for (const create of [false, true]) {
+    const body = projectInstructions(workspace, create);
+    assert.match(body, /Home workspace rule/);
+    assert.match(body, /Root Cursor rule/);
+    assert.doesNotMatch(body, /Unrelated downloaded rule/);
+  }
+  assert.equal(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8'), 'Home workspace rule.');
+  t.mock.restoreAll();
+});
+
+test('instruction discovery at a drive root never enters system or user folders', t => {
+  const volume = path.parse(process.cwd()).root;
+  t.mock.method(fs, 'readdirSync', directory => {
+    assert.equal(directory, volume, 'only the volume root may be listed');
+    return ['Users', 'Windows', 'System Volume Information'].map(name => ({ name, isDirectory:() => true }));
+  });
+  assert.deepEqual(legacyInstructionFiles(volume), []);
+  t.mock.restoreAll();
+});
+
+test('an unreadable applicable instruction still fails without publishing incomplete rules', t => {
+  const { workspace } = fixture(t), file = path.join(workspace, 'AGENTS.md');
+  fs.writeFileSync(file, 'Required root rule.');
+  const read = fs.readFileSync;
+  t.mock.method(fs, 'readFileSync', (name, options) => {
+    if (name === file) throw Object.assign(new Error('Access is denied: ' + file), { code:'EACCES' });
+    return read(name, options);
+  });
+  for (const create of [false, true]) assert.throws(() => projectInstructions(workspace, create), { code:'EACCES' });
+  assert.equal(fs.existsSync(projectEntry(workspace)), false);
   t.mock.restoreAll();
 });
 
@@ -137,7 +180,6 @@ test('canonical instructions are preserved without scanning legacy files or chil
   t.mock.method(fs, 'readdirSync', () => { throw new Error('Canonical reads must not scan folders'); });
   for (const create of [false, true]) {
     assert.ok(projectInstructions(workspace, create).includes(body));
-    assert.ok(projectInstructions(workspace, create, { recursive: false }).includes(body));
     assert.equal(fs.readFileSync(entry, 'utf8'), body);
   }
   t.mock.restoreAll();
@@ -232,4 +274,13 @@ test('entry creation is opt-in, existing rules survive, and invalid entries are 
   fs.unlinkSync(file);
   fs.mkdirSync(file);
   assert.throws(() => projectInstructions(workspace), /regular file/);
+});
+
+test('project rules allow CLAUDE.md and AGENTS.md pointers to the shared entry', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'harness pointers '));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, 'PhasmaHarness.md'), STARTER);
+  const text = projectInstructions(root);
+  assert.doesNotMatch(text, /recreate legacy|create parallel/i, 'bots are not told to remove or avoid pointer files');
+  assert.match(text, /CLAUDE\.md or AGENTS\.md may (exist only as pointers|point) to it/);
 });

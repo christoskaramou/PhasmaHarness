@@ -229,7 +229,7 @@ class ClaudeCLI {
     }
     return await this.refresh();
   }
-  run({ cwd, model, effort, prompt, images = [], resume, access, signal, onEvent = () => {}, approve, schema, helpers, onInput, instructions = WORKER_INSTRUCTIONS, managedInstructions = false }) {
+  run({ cwd, model, effort, prompt, images = [], resume, access, signal, onEvent = () => {}, approve, schema, helpers, onInput, instructions = WORKER_INSTRUCTIONS, managedInstructions = false, persistSession = false }) {
     let promptDirectory;
     return new Promise((resolve, reject) => {
       if (signal?.aborted) return reject(new Error('Claude stopped.'));
@@ -249,7 +249,7 @@ class ClaudeCLI {
         args.push('--append-system-prompt-file', file, '--append-subagent-system-prompt-file', file, '--system-prompt-snapshot', 'off');
       } else args.push('--append-system-prompt', systemPrompt);
       if (resume) args.push('--resume', resume);
-      if (schema) args.push('--tools', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--no-session-persistence', '--json-schema', JSON.stringify(schema));
+      if (schema) args.push('--tools', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', ...(!persistSession ? ['--no-session-persistence'] : []), '--json-schema', JSON.stringify(schema));
       else {
         // Not --strict-mcp-config: the user's own MCP servers stay, with ours added.
         const mcp = [...personalMcp(), ...(helpers?.claudeConfig ? [JSON.stringify(helpers.claudeConfig)] : [])];
@@ -423,9 +423,10 @@ class ClaudeCLI {
 }
 
 function handoff(items, maxLength = 1000000) {
-  const messages = items.filter(i => i.type === 'userMessage' || i.type === 'agentMessage').map(i => ({
+  // Progress notes (commentary) are not history the next model needs; final answers carry the outcome.
+  const messages = items.filter(i => i.type === 'userMessage' || (i.type === 'agentMessage' && i.phase !== 'commentary')).map(i => ({
     role: i.type === 'userMessage' ? 'user' : 'assistant',
-    text: i.type === 'userMessage' ? (i.content || []).map(c => c.type === 'text' ? c.text : '[Earlier image attachment]').join('\n') : stripTaskStatus(i.text),
+    text: i.type === 'userMessage' ? (i.contextText || '') + (i.content || []).map(c => c.type === 'text' ? c.text : '[Earlier image attachment]').join('\n') : stripTaskStatus(i.text),
   }));
   const text = JSON.stringify(messages);
   if (text.length > maxLength) throw new Error('Conversation is too large to transfer. Start a new chat or compact it before switching backends.');

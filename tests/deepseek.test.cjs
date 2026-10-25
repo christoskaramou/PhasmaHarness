@@ -55,7 +55,7 @@ async function fixture(t, options = {}) {
       async resumeSession(params) {
         calls.push(['resumeSession', params]);
         helpers = params.mcpServers?.find(server => server.name === 'phasma_harness');
-        return { configOptions: configOptions(FLASH) };
+        return { ...(options.resumedSessionId ? { sessionId: options.resumedSessionId } : {}), configOptions: configOptions(FLASH) };
       },
       async setSessionConfigOption(params) { calls.push(['config', params]); return { configOptions: configOptions(params.value) }; },
       async prompt(params) {
@@ -186,6 +186,10 @@ test('DeepSeek resumes an explicit session with helpers and selects only an adve
   await assert.rejects(backend.run({ ...runOptions(), model: 'not-a-model', resume: 'saved-session' }), /requested DeepSeek model is unavailable/);
   assert.equal(backend.hosts.size, 0, 'a failed turn closes its host');
 
+  const moved = await fixture(t, { resumedSessionId: 'other-session' });
+  await assert.rejects(moved.backend.run({ ...runOptions(), resume: 'saved-session' }), /different conversation/);
+  assert.equal(methodCalls(moved.calls, 'prompt').length, 0, 'a worker that skips unchanged instructions never prompts another session');
+
   const unavailable = await fixture(t, { resume: false });
   await assert.rejects(unavailable.backend.run({ ...runOptions(), resume: 'saved' }), /cannot resume/);
   assert.equal(methodCalls(unavailable.calls, 'newSession').length, 0);
@@ -239,6 +243,35 @@ test('DeepSeek structured calls use a private read-only host, enforce the local 
 
   const malformed = await fixture(t, { text: ['{"label":"nope"}'] });
   await assert.rejects(malformed.backend.run({ ...runOptions(), schema }), /invalid structured response/);
+});
+
+test('DeepSeek Main reuses its private host and session without durable-resume support or repeated schemas', async t => {
+  const { backend, calls, children } = await fixture(t, { resume: false, text: ['{"label":"ready"}'] });
+  const schema = { type: 'object', properties: { label: { type: 'string' } }, required: ['label'] };
+  const first = await backend.run({ ...runOptions(), schema, persistSession: true });
+  await backend.run({ ...runOptions(), schema, persistSession: true, schemaInHistory: true, resume: first.session_id });
+  assert.equal(children.length, 1);
+  assert.equal(methodCalls(calls, 'newSession').length, 1);
+  assert.equal(methodCalls(calls, 'resumeSession').length, 0);
+  assert.match(methodCalls(calls, 'prompt')[0][1].prompt[0].text, /Return only a JSON/);
+  assert.doesNotMatch(methodCalls(calls, 'prompt')[1][1].prompt[0].text, /Return only a JSON/);
+  await backend.run(runOptions());
+  assert.equal(children.length, 2, 'ordinary work cannot reuse the private Main host');
+  await backend.close(); assert.ok(children.every(row => row.child.exitCode === 0));
+});
+
+test('DeepSeek Main keeps its private session after invalid JSON, so the repair continues it without durable resume', async t => {
+  let prompts = 0;
+  const { backend, calls, children } = await fixture(t, { resume: false, onPrompt: () => ++prompts === 1 ? '{"label":"nope"}' : '{"label":"ready"}' });
+  const schema = { type: 'object', properties: { label: { type: 'string', pattern: '^ready$' } }, required: ['label'], additionalProperties: false };
+  let sessionId;
+  await assert.rejects(backend.run({ ...runOptions(), schema, persistSession: true, onEvent: event => { sessionId ||= event.session_id; } }), /invalid structured response/);
+  const repaired = await backend.run({ ...runOptions(), schema, persistSession: true, schemaInHistory: true, resume: sessionId });
+  assert.deepEqual(repaired.structured_output, { label: 'ready' });
+  assert.equal(children.length, 1);
+  assert.equal(methodCalls(calls, 'newSession').length, 1);
+  assert.equal(methodCalls(calls, 'resumeSession').length, 0);
+  await backend.close();
 });
 
 test('DeepSeek ignores foreign or malformed updates and fails turns that do not complete', async t => {

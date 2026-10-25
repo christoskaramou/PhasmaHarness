@@ -39,11 +39,11 @@ function windowBackground() {
   let mode = 'system';
   try { mode = JSON.parse(fs.readFileSync(appearanceFile, 'utf8')); } catch { /* System until the renderer reports a choice. */ }
   const dark = mode === 'dark' || (mode !== 'light' && nativeTheme.shouldUseDarkColors);
-  return dark ? '#191919' : '#ffffff';
+  return dark ? '#121212' : '#ffffff';
 }
 function windowControls() {
   const color = windowBackground();
-  return { color, symbolColor: color === '#ffffff' ? '#202020' : '#ededed', height: 40 };
+  return { color, symbolColor: color === '#ffffff' ? '#202b3c' : '#ececec', height: 40 };
 }
 process.on('uncaughtExceptionMonitor', error => log.error('Uncaught exception', { message: error?.message, stack: String(error?.stack || '').slice(0, 1500) }));
 process.on('unhandledRejection', reason => log.error('Unhandled rejection', { message: reason?.message || String(reason) }));

@@ -122,6 +122,7 @@ class MuseCLI {
       : { workspaceRoot: options.cwd, providerId: 'meta', modelId: options.model }) };
     const opened = await this.call(host, verb, params, options.signal, true);
     if (!opened.session?.sessionId) throw new Error('Muse returned no session identity.');
+    if (options.resume && opened.session.sessionId !== options.resume) throw new Error('Muse loaded a different conversation. No message was sent.');
     if (opened.session.activeTurnId) throw new Error('This Muse session still has active work. Resolve it before retrying.');
     const snapshot = opened.session.permissionState || (await this.call(host, 'session/read',
       { sessionId: opened.session.sessionId }, options.signal)).session?.permissionState;

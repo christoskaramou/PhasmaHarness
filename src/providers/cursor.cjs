@@ -26,6 +26,29 @@ function launchCursor(args, cwd) {
   return spawnOwned(spawn, fs.existsSync(local) ? local : 'cursor-agent', args, { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
 }
 
+// An ACP edit result carries the whole file before and after (190 KB per edit seen); keep the changed lines with three
+// lines of context and the first kept line's number. Already-compact blocks come back unchanged.
+function compactDiff(block) {
+  if (block?.type !== 'diff' || typeof block.newText !== 'string' || (block.oldText != null && typeof block.oldText !== 'string')) return block;
+  const before = block.oldText == null ? [] : block.oldText.split('\n'), after = block.newText.split('\n');
+  let prefix = 0, suffix = 0;
+  while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix++;
+  while (suffix < before.length - prefix && suffix < after.length - prefix && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]) suffix++;
+  const start = Math.max(0, prefix - 3), trimmed = Math.max(0, suffix - 3);
+  if (!start && !trimmed) return block;
+  return { ...block, ...(block.oldText == null ? {} : { oldText: before.slice(start, before.length - trimmed).join('\n') }),
+    newText: after.slice(start, after.length - trimmed).join('\n'), startLine: (block.startLine || 1) + start };
+}
+
+// Cursor reports most tool output in rawOutput (a read's text, a grep's match count); content carries only edit diffs.
+// shortcut: text values keep 64,000 characters (the largest skill file seen is 36 KB); raise it if a check needs more.
+function toolOutput(update) {
+  if (Array.isArray(update.content) && update.content.length) return update.content.map(compactDiff);
+  const clip = value => typeof value === 'string' ? (value.length > 64000 ? value.slice(0, 64000) + `\n[… ${value.length - 64000} more characters not kept]` : value)
+    : Array.isArray(value) ? value.map(clip) : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, clip(item)])) : value;
+  return update.rawOutput === undefined ? update.content || [] : clip(update.rawOutput);
+}
+
 function parseStatus(output) {
   const text = String(output || '').replace(/\x1b\[[0-9;]*m/g, '');
   const match = text.match(/logged in as\s+(\S+)/i);
@@ -145,13 +168,14 @@ class CursorCLI {
     signal?.addEventListener('abort', close, { once: true }); if (signal?.aborted) close();
     return { call, close, child, cwd, notify: (method, params) => write({ method, params }) };
   }
-  async run({ cwd, model, effort, effortOption, parameterized, parameters = [], prompt, images = [], resume, access, signal, onEvent = () => {}, onActivity, approve = async () => false, schema, helpers, onInput, instructions = WORKER_INSTRUCTIONS }) {
+  async run({ cwd, model, effort, effortOption, parameterized, parameters = [], prompt, images = [], resume, access, signal, onEvent = () => {}, onActivity, approve = async () => false, schema, schemaInHistory = false, helpers, onInput, instructions = WORKER_INSTRUCTIONS }) {
     // Models from cursor/list_available_models are base names with separate parameters: Cursor accepts them, and their
     // reasoning option, only from a client that declares the parameterized model picker.
     const setEffort = typeof effort === 'string' && effort && typeof effortOption === 'string' && effortOption;
     const picker = parameterized === true || setEffort;
     // Each prompt has its own reply id, approval signal and start time (Send now replaces the prompt in this session).
     let sessionId, output = '', prompting = false, toolError = null, messageId = randomUUID(), promptAbort = new AbortController(), promptStartedAt = Date.now();
+    const tools = new Map();
     const rpc = this.connect({ cwd, model, signal, noTools: !!schema,
       onUpdate: p => {
         if (!prompting || p.sessionId !== sessionId) return;
@@ -167,8 +191,14 @@ class CursorCLI {
           output += u.content.text;
           onEvent({ type: 'assistant', session_id: sessionId, message: { id: messageId, content: [{ type: 'text', text: output }] } });
         }
-        if (u?.sessionUpdate === 'tool_call') onEvent({ type: 'assistant', session_id: sessionId, message: { content: [{ type: 'tool_use', id: u.toolCallId, name: u.title || u.kind || 'Cursor tool', input: u.rawInput || {} }] } });
-        if (u?.sessionUpdate === 'tool_call_update' && ['completed', 'failed'].includes(u.status)) onEvent({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: u.toolCallId, is_error: u.status === 'failed', content: u.content || [] }] } });
+        // Cursor often names a tool and fills its input in a later update (a grep starts as "grep" with {}).
+        if (u?.sessionUpdate === 'tool_call' || (u?.sessionUpdate === 'tool_call_update' && (u.title || u.rawInput))) {
+          const known = tools.get(u.toolCallId) || {};
+          const tool = { name: u.title || known.name || u.kind || 'Cursor tool', input: u.rawInput || known.input || {} };
+          tools.set(u.toolCallId, tool);
+          onEvent({ type: 'assistant', session_id: sessionId, message: { content: [{ type: 'tool_use', id: u.toolCallId, ...tool }] } });
+        }
+        if (u?.sessionUpdate === 'tool_call_update' && ['completed', 'failed'].includes(u.status)) onEvent({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: u.toolCallId, is_error: u.status === 'failed', content: toolOutput(u) }] } });
       },
       onRequest: async (method, p) => {
         if (method === 'session/request_permission') {
@@ -191,6 +221,7 @@ class CursorCLI {
       // Classifiers keep an empty MCP list. Workers get the bundled helper MCP via session mcpServers.
       const mcpServers = (!schema && helpers?.cursorServers) ? helpers.cursorServers : [];
       const s = await rpc.call(resume ? 'session/load' : 'session/new', { ...(resume ? { sessionId: resume } : {}), cwd: rpc.cwd || cwd, mcpServers });
+      if (resume && s.sessionId && s.sessionId !== resume) throw new Error('Cursor loaded a different conversation. No message was sent.');
       sessionId = resume || s.sessionId;
       if (!sessionId) throw new Error('Cursor did not return a session ID.');
       onEvent({ type: 'system', session_id: sessionId });
@@ -216,7 +247,7 @@ class CursorCLI {
         promptAbort = new AbortController(); promptStartedAt = Date.now(); messageId = randomUUID(); output = '';
         return rpc.call('session/prompt', { sessionId, prompt: parts }, 0);
       };
-      let current = send([{ type: 'text', text: (schema ? '' : 'Harness worker defaults (subject to user overrides):\n' + instructions + '\n\nCurrent request:\n') + prompt + helperNote + (schema ? '\nReturn only JSON matching this schema: ' + JSON.stringify(schema) : '') }, ...pictures(images)]);
+      let current = send([{ type: 'text', text: (schema || !instructions ? '' : 'Harness worker defaults (subject to user overrides):\n' + instructions + '\n\nCurrent request:\n') + prompt + helperNote + (schema && !(resume && schemaInHistory) ? '\nReturn only JSON matching this schema: ' + JSON.stringify(schema) : '') }, ...pictures(images)]);
       let steering = null, finished = false;
       // ACP runs one prompt at a time: Send now cancels the step, closes its approvals, stops what it started, then
       // prompts again in the same session and process. Unconfirmed cleanup keeps the message queued.
@@ -276,4 +307,4 @@ class CursorCLI {
   }
   close() { for (const c of this.children) stop(c); }
 }
-module.exports = { CursorCLI, launchCursor, parseStatus };
+module.exports = { CursorCLI, launchCursor, parseStatus, compactDiff, toolOutput };

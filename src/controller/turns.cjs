@@ -150,6 +150,8 @@ module.exports = {
       try { this.traceTurn(session, submission, outcome, !!maintenanceRoute); } catch { /* tracing never affects a turn */ }
     }
     if (submission.kind === 'compaction' && outcome.status === 'completed') {
+      delete session.codexInstructionHash;
+      this.loaded.delete(session.id);
       session.notice = 'Context compacted. The visible chat history is retained.';
       session.lastCompactedAt = Date.now();
       session.noticeExpiresAt = Date.now() + 5000;
@@ -281,7 +283,10 @@ module.exports = {
       if (submission?.kind !== 'compaction') this.providerOutcome(session, provider, route?.model, messageId, outcome);
     }
     if ((method === 'item/started' || method === 'item/completed') && this.visible(p.item)) {
-      if (method === 'item/completed' && p.item.type === 'contextCompaction') session.lastCompactedAt = Date.now();
+      if (method === 'item/completed' && p.item.type === 'contextCompaction') {
+        session.lastCompactedAt = Date.now();
+        delete session.codexInstructionHash;
+      }
       p.item.turnId = p.turnId;
       p.item.routeLabel = session.routes.at(-1)?.label;
       const index = session.items.findIndex(i => i.id === p.item.id || (p.item.clientId && i.clientId === p.item.clientId));

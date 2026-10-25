@@ -1,6 +1,7 @@
 // Harness's own agent loop for API providers (LM Studio, DeepSeek API, any OpenAI-compatible endpoint), so they never
 // need Codex. It streams chat completions, runs the model's tool calls and reports Claude-style events to sendCLI.
 const fs = require('node:fs');
+const { cacheUsage } = require('./prompt-cache.cjs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
@@ -124,19 +125,28 @@ class ApiAgent {
   }
 
   load(id) {
-    try { return JSON.parse(fs.readFileSync(path.join(this.directory, `${id}.json`), 'utf8')).messages; } catch { return null; }
+    try {
+      if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error('Invalid conversation ID.');
+      const saved = JSON.parse(fs.readFileSync(path.join(this.directory, `${id}.json`), 'utf8'));
+      if (!Array.isArray(saved.messages) || !saved.messages.length) throw new Error('Missing conversation messages.');
+      return saved.messages;
+    } catch (error) {
+      if (error.code && error.code !== 'ENOENT') throw error;
+      throw Object.assign(new Error('The saved API conversation is unavailable. No request was sent. Retry to restore it from Harness chat history.'), { code: 'API_HISTORY_UNAVAILABLE' });
+    }
   }
 
   save(id, messages) {
     fs.mkdirSync(this.directory, { recursive: true });
-    // DeepSeek's reasoning is passed back only within the turn that produced it.
-    const kept = messages.map(({ reasoning_content, ...message }) => message);
-    fs.writeFileSync(path.join(this.directory, `${id}.json`), JSON.stringify({ version: 1, messages: kept }));
+    // Preserve provider reasoning/tool messages too: they are part of the reusable prefix.
+    const file = path.join(this.directory, `${id}.json`);
+    fs.writeFileSync(file + '.tmp', JSON.stringify({ version: 1, messages }), { mode: 0o600 });
+    fs.renameSync(file + '.tmp', file);
   }
 
-  async complete(choice, body, signal, onText) {
+  async complete(choice, body, signal, onText, cacheKey) {
     const local = await this.providers.local.inspect(choice, signal);
-    const response = await this.providers.modelRequest(choice, body, local, signal, 'chat/completions');
+    const response = await this.providers.modelRequest(choice, body, local, signal, 'chat/completions', cacheKey);
     if (!response.ok) throw new Error((await response.json().catch(() => null))?.error?.message || `Provider request failed (HTTP ${response.status}).`);
     const message = { role: 'assistant', content: '' }, calls = [];
     let usage = null, reasoning = '';
@@ -146,6 +156,8 @@ class ApiAgent {
       if (!delta) continue;
       if (delta.content) { message.content += delta.content; onText(delta.content); }
       if (delta.reasoning_content) reasoning += delta.reasoning_content;
+      if (delta.reasoning) message.reasoning = (message.reasoning || '') + delta.reasoning;
+      if (Array.isArray(delta.reasoning_details)) (message.reasoning_details ||= []).push(...delta.reasoning_details);
       for (const call of delta.tool_calls || []) {
         const slot = calls[call.index ?? calls.length] ||= { id: '', type: 'function', function: { name: '', arguments: '' } };
         if (call.id) slot.id = call.id;
@@ -156,6 +168,7 @@ class ApiAgent {
     const toolCalls = calls.filter(Boolean).map(call => ({ ...call, id: call.id || `call_${randomUUID()}` }));
     if (toolCalls.length) message.tool_calls = toolCalls;
     if (reasoning) message.reasoning_content = reasoning;
+    if (message.reasoning_details?.length) delete message.reasoning;
     return { message, usage };
   }
 
@@ -182,8 +195,18 @@ class ApiAgent {
   }
 
   async run(options) {
-    const { provider, model, effort, cwd, prompt, images = [], instructions, resume, access, signal, approve, onEvent, bridge, onInput } = options;
-    const previous = resume ? this.load(resume) : null;
+    const { provider, model, effort, cwd, images = [], instructions, resume, access, signal, approve, onEvent, bridge, onInput } = options;
+    let previous = null, prompt = options.prompt;
+    if (resume) {
+      try { previous = this.load(resume); }
+      catch (error) {
+        if (error.code !== 'API_HISTORY_UNAVAILABLE' || typeof options.recoveryPrompt !== 'function') throw error;
+        // No request has been sent: recover only from the owning Harness chat, never retry an accepted call.
+        signal.throwIfAborted();
+        prompt = options.recoveryPrompt();
+        if (typeof prompt !== 'string' || !prompt) throw error;
+      }
+    }
     const id = previous ? resume : randomUUID();
     const messages = previous || [];
     const system = { role: 'system', content: `${instructions || ''}\n\nYou work in ${cwd} on ${process.platform}. ` +
@@ -194,8 +217,8 @@ class ApiAgent {
     messages.push({ role: 'user', content: userContent(prompt, images) });
     const tools = [...TOOLS, ...(bridge?.tools || []).map(tool => ({ name: tool.name, description: tool.description, parameters: tool.inputSchema }))]
       .map(tool => ({ type: 'function', function: tool }));
-    const total = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0 };
-    let reported = false, answer = '';
+    const total = { input_tokens: 0, total_input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+    let reported = false, usageIncomplete = false, answer = '';
     // Harness owns this loop, so a follow-up joins the conversation before the next model call. It counts as
     // delivered only once that call succeeds; one still waiting when the turn ends goes back to the Harness queue.
     const pending = [], sent = [];
@@ -218,11 +241,12 @@ class ApiAgent {
         if (step === MAX_STEPS) throw new Error(`The model was still calling tools after ${MAX_STEPS} steps, so the turn was stopped.`);
         signal.throwIfAborted();
         deliver();
-        const answered = await this.step({ provider, model, effort, cwd, access, approve, bridge, signal, onEvent, messages, tools, total });
+        const answered = await this.step({ provider, model, effort, cwd, access, approve, bridge, signal, onEvent, messages, tools, total, cacheKey: id });
         for (const item of sent.splice(0))
           item.resolve();
         if (answered.reported)
           reported = true;
+        else usageIncomplete = true;
 
         if (answered.final && !pending.length) {
           answer = answered.final.content;
@@ -239,20 +263,21 @@ class ApiAgent {
     }
 
     this.save(id, messages);
-    return { result: answer, session_id: id, ...(reported ? { usage: total } : {}) };
+    return { result: answer, session_id: id, ...(reported ? { usage: total } : {}), ...(usageIncomplete ? { usageIncomplete: true } : {}) };
   }
 
   // One model call and the tools it asked for. Returns the final message when the model asked for no tools.
-  async step({ provider, model, effort, cwd, access, approve, bridge, signal, onEvent, messages, tools, total }) {
+  async step({ provider, model, effort, cwd, access, approve, bridge, signal, onEvent, messages, tools, total, cacheKey }) {
     const messageId = randomUUID();
     onEvent({ type: 'stream_event', event: { type: 'message_start', message: { id: messageId } } });
     const body = { model, messages, tools, stream: true, stream_options: { include_usage: true }, ...(effort ? { reasoning_effort: effort } : {}) };
     const { message, usage } = await this.complete({ provider, model }, body, signal,
-      text => onEvent({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text } } }));
-    const cached = usage?.prompt_tokens_details?.cached_tokens ?? usage?.prompt_cache_hit_tokens ?? 0;
-    const stepUsage = usage ? { input_tokens: (usage.prompt_tokens || 0) - cached, output_tokens: usage.completion_tokens || 0, cache_read_input_tokens: cached } : null;
+      text => onEvent({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text } } }), cacheKey);
+    const counts = cacheUsage(usage);
+    const stepUsage = counts ? { total_input_tokens: counts.inputTokens, input_tokens: counts.inputTokens - (counts.cachedInputTokens || 0) - (counts.cacheWriteInputTokens || 0),
+      output_tokens: counts.outputTokens, cache_read_input_tokens: counts.cachedInputTokens, cache_creation_input_tokens: counts.cacheWriteInputTokens } : null;
     if (stepUsage) {
-      for (const key of Object.keys(total)) total[key] += stepUsage[key];
+      for (const key of Object.keys(total)) total[key] = total[key] === null || stepUsage[key] === null ? null : total[key] + stepUsage[key];
     }
 
     const calls = message.tool_calls || [];

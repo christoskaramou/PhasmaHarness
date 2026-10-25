@@ -37,11 +37,69 @@ test('resumed API work refreshes instructions while retaining its conversation',
   const { agent, workspace, requests } = fixture(t, [reply, reply]);
   const options = { provider: 'local', model: 'test', cwd: workspace, access: 'read-only', signal: new AbortController().signal, onEvent() {} };
   const first = await agent.run({ ...options, prompt: 'Remember this request.', instructions: 'Old project rule.' });
-  await agent.run({ ...options, resume: first.session_id, prompt: 'Continue.', instructions: 'Current managed project rule.' });
+  await agent.run({ ...options, resume: first.session_id, prompt: 'Continue.', instructions: 'Current managed project rule.',
+    recoveryPrompt: () => assert.fail('valid provider history must never build recovery text') });
   assert.match(requests[1].messages[0].content, /Current managed project rule/);
   assert.doesNotMatch(requests[1].messages[0].content, /Old project rule/);
   assert.ok(requests[1].messages.some(message => message.content === 'Remember this request.'));
   assert.equal(requests[1].messages.filter(message => message.role === 'system').length, 1);
+});
+
+test('API history preserves reasoning and exact message prefixes across restart, with stable cache affinity', async t => {
+  const details = [{ type: 'reasoning.encrypted', data: 'opaque-provider-content', index: 0 }];
+  const { agent, workspace, requests } = fixture(t, [
+    [{ choices: [{ delta: { content: 'Remembered.', reasoning_content: 'provider reasoning', reasoning_details: details } }],
+      usage: { prompt_tokens: 100, completion_tokens: 3, prompt_tokens_details: { cached_tokens: 50, cache_write_tokens: 20 } } }],
+    [{ choices: [{ delta: { content: 'Continued.' } }], usage: { prompt_tokens: 160, completion_tokens: 4 } }],
+  ]);
+  const keys = [], modelRequest = agent.providers.modelRequest;
+  agent.providers.modelRequest = async (...args) => { keys.push(args[5]); return modelRequest(...args); };
+  const options = { provider: 'local', model: 'test', cwd: workspace, instructions: 'Stable system rules.', access: 'read-only', signal: new AbortController().signal, onEvent() {} };
+  const first = await agent.run({ ...options, prompt: 'Remember me.' });
+  assert.equal(first.usage.total_input_tokens, 100);
+  assert.equal(first.usage.cache_read_input_tokens, 50);
+  const restarted = new ApiAgent(agent.providers, agent.directory);
+  const second = await restarted.run({ ...options, resume: first.session_id, prompt: 'Continue.' });
+  assert.equal(second.session_id, first.session_id); assert.equal(keys[0], keys[1]);
+  assert.deepEqual(requests[1].messages.slice(0, 2), requests[0].messages);
+  assert.equal(requests[1].messages[2].reasoning_content, 'provider reasoning');
+  assert.deepEqual(requests[1].messages[2].reasoning_details, details);
+  assert.equal(second.usage.cache_read_input_tokens, null, 'missing cache reporting is unknown, not zero');
+  fs.writeFileSync(path.join(agent.directory, first.session_id + '.json'), '{broken');
+  await assert.rejects(restarted.run({ ...options, resume: first.session_id, prompt: 'Do not lose history.' }), /saved API conversation is unavailable/);
+  assert.equal(requests.length, 2, 'no incomplete conversation reaches the provider');
+});
+
+test('a missing usage report in a tool loop marks the total as incomplete', async t => {
+  const { agent, workspace } = fixture(t, [
+    [call(0, 'read', 'read_file', { path: 'notes.txt' })],
+    [{ choices: [{ delta: { content: 'Done.' } }], usage: { prompt_tokens: 100, completion_tokens: 4 } }],
+  ]);
+  const result = await run(agent, workspace, 'read-only', []);
+  assert.equal(result.usageIncomplete, true);
+  assert.equal(result.usage.total_input_tokens, 100, 'reported tokens remain a lower bound, not a complete or zero-cost turn');
+});
+
+for (const damaged of ['missing', 'corrupt']) test(`API ${damaged} history recovers before inference when Harness supplies its own transcript`, async t => {
+  const { agent, workspace, requests } = fixture(t, [[{ choices: [{ delta: { content: 'Recovered.' } }], usage: { prompt_tokens: 10, completion_tokens: 2 } }]]);
+  fs.mkdirSync(agent.directory, { recursive: true });
+  if (damaged === 'corrupt') fs.writeFileSync(path.join(agent.directory, 'lost.json'), '{broken');
+  let recovered = 0;
+  const result = await agent.run({ provider: 'api', model: 'test', cwd: workspace, prompt: 'Continue', resume: 'lost',
+    recoveryPrompt: () => { recovered++; return 'Earlier user request: remember alpha. Earlier answer: alpha. Current user request: Continue'; },
+    instructions: 'Current rules', access: 'read-only', signal: new AbortController().signal, onEvent() {} });
+  assert.equal(requests.length, 1); assert.notEqual(result.session_id, 'lost');
+  assert.equal(recovered, 1);
+  assert.match(JSON.stringify(requests[0].messages), /remember alpha/);
+  assert.match(requests[0].messages[0].content, /Current rules/);
+});
+
+test('an oversized required API recovery fails before inference instead of silently dropping history', async t => {
+  const { agent, workspace, requests } = fixture(t, []);
+  await assert.rejects(agent.run({ provider: 'api', model: 'test', cwd: workspace, prompt: 'Continue', resume: 'missing',
+    recoveryPrompt: () => require('../src/providers/claude.cjs').handoff([{ type: 'agentMessage', text: 'x'.repeat(1000001) }]),
+    access: 'read-only', signal: new AbortController().signal, onEvent() {} }), /too large to transfer/);
+  assert.equal(requests.length, 0);
 });
 
 test('the API loop reads and edits inside the workspace, asks for commands and outside reads, and returns tool results', async t => {

@@ -1,0 +1,69 @@
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs'), path = require('node:path'), os = require('node:os');
+const { EventEmitter } = require('node:events');
+const { Controller } = require('../src/controller.cjs');
+const { Agents } = require('../src/agents.cjs');
+const { readSessionData } = require('../src/session-store.cjs');
+
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+test('a steady stream of changes reaches the UI every 100 ms and saves at most once a second, ending saved', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-throttle-'));
+  const controller = new Controller(path.join(directory, 'sessions.json'), directory, new EventEmitter(), { cancel() {}, close() {}, jev: null });
+  t.after(() => { clearTimeout(controller.timer); clearTimeout(controller.saveTimer); fs.rmSync(directory, { recursive: true, force: true }); });
+  const session = { id: 's1', items: [{ id: 'a1', type: 'agentMessage', text: '' }], routes: [] };
+  controller.data.sessions.push(session); controller.save();
+  const texts = [];
+  controller.on('state', state => texts.push(state.sessions[0].items[0].text));
+  let saves = 0; const save = controller.store.save.bind(controller.store);
+  controller.store.save = data => { saves++; return save(data); };
+  // Deltas every 20 ms used to keep resetting the timer, so nothing reached the UI until the stream paused.
+  for (let i = 0; i < 25; i++) { session.items[0].text += 'x'; controller.changed(); await wait(20); }
+  assert.ok(texts.length >= 4, `only ${texts.length} updates during the stream`);
+  assert.ok(saves <= 2, `${saves} saves during half a second of streaming`);
+  await wait(1200);
+  assert.equal(texts.at(-1), 'x'.repeat(25));
+  assert.equal(readSessionData(controller.filename).sessions[0].items[0].text, 'x'.repeat(25));
+});
+
+test('saves reuse one journal handle, a checkpoint releases it, and a failed write starts clean on the next save', t => {
+  const { SessionStore } = require('../src/session-store.cjs');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-journal-'));
+  const file = path.join(directory, 'sessions.json'), store = new SessionStore(file);
+  t.after(() => { store.closeJournal(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const data = { version: 1, sessions: [{ id: 's1', items: [] }] };
+  store.save(data);
+  let opens = 0; const open = fs.openSync;
+  t.mock.method(fs, 'openSync', (target, ...rest) => { if (String(target).endsWith('.journal')) opens++; return open(target, ...rest); });
+  for (let i = 0; i < 5; i++) { data.sessions[0].items.push({ id: 'i' + i, type: 'agentMessage', text: 'x' + i }); store.save(data); }
+  assert.equal(opens, 1, 'one journal open for five saves');
+  assert.deepEqual(readSessionData(file).sessions[0].items.map(item => item.id), ['i0', 'i1', 'i2', 'i3', 'i4']);
+  store.checkpoint(data);
+  assert.equal(store.fd, null);
+  const write = fs.writeSync;
+  t.mock.method(fs, 'writeSync', () => { throw Object.assign(new Error('disk full'), { code: 'ENOSPC' }); });
+  data.sessions[0].items.push({ id: 'lost', type: 'agentMessage', text: 'not saved' });
+  assert.throws(() => store.save(data), /disk full/);
+  assert.equal(store.fd, null, 'a failed write drops its handle');
+  fs.writeSync = write;
+  data.sessions[0].items.at(-1).id = 'kept';
+  store.save(data);
+  assert.deepEqual(readSessionData(file).sessions[0].items.map(item => item.id), ['i0', 'i1', 'i2', 'i3', 'i4', 'kept']);
+});
+
+test('the window gets at most one fleet state per 100 ms, the last built after the final change', async () => {
+  const fleet = Object.assign(new EventEmitter(), { value: 0, snapshot() { return { value: this.value }; } });
+  const emitted = [];
+  fleet.on('state', state => emitted.push({ at: Date.now(), value: state.value }));
+  const emitFleet = Agents.prototype.emitFleet.bind(fleet);
+  const start = Date.now();
+  emitFleet();
+  assert.equal(emitted.length, 1, 'a change after a quiet spell is sent at once');
+  for (let i = 1; i <= 30; i++) { fleet.value = i; emitFleet(); await wait(10); }
+  await wait(150);
+  const gaps = emitted.slice(1).map((entry, i) => entry.at - emitted[i].at);
+  assert.ok(gaps.every(gap => gap >= 95), `pushes ${JSON.stringify(gaps)} ms apart`);
+  assert.ok(emitted.length <= Math.ceil((Date.now() - start) / 100) + 1);
+  assert.equal(emitted.at(-1).value, 30);
+});

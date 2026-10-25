@@ -45,6 +45,50 @@ test('Main Bot in a repositories parent starts without importing its child proje
   assert.match(hub.projectContextInstructions({ ...session, workspace: path.join(root, 'project-a') }), /project-a/);
 });
 
+test('Main Bot can greet from any accessible folder without scanning protected descendants', async t => {
+  const { session, calls, send, root } = await setup(t);
+  fs.mkdirSync(path.join(root, 'AppData/Local/Temp/msdtadmin'), { recursive:true });
+  fs.mkdirSync(path.join(root, 'unreadable-child'));
+  fs.writeFileSync(path.join(root, 'AGENTS.md'), 'Root greeting rule.');
+  const readdir = fs.readdirSync;
+  t.mock.method(fs, 'readdirSync', (directory, options) => {
+    const relative = path.relative(root, directory);
+    if (relative && !relative.startsWith('..') && !path.isAbsolute(relative))
+      throw Object.assign(new Error('Access is denied: ' + directory), {code:'EACCES'});
+    return readdir(directory, options);
+  });
+  await send('hi');
+  assert.equal(session.status, 'completed', session.error);
+  assert.match(calls.findLast(call => call.request.schema.properties.action).request.instructions, /Root greeting rule/);
+  assert.equal(fs.existsSync(path.join(root, 'PhasmaHarness.md')), false);
+  t.mock.restoreAll();
+});
+
+test('an ordinary bot can start in its home workspace without scanning AppData', async t => {
+  const { root, agents } = await setup(t);
+  fs.mkdirSync(path.join(root, 'AppData/Local/Temp/msdtadmin'), { recursive:true });
+  fs.writeFileSync(path.join(root, 'AGENTS.md'), 'Home greeting rule.');
+  const profile = await agents.saveAgent({ name:'Home bot', instructions:'Answer the user.', workspace:root, access:'workspace-write', mode:'terra-light' });
+  const worker = agents.controller(profile.id);
+  await agents.initializeController(worker);
+  const work = agents.conversation(worker, true, root, 'workspace-write');
+  t.mock.method(os, 'homedir', () => root);
+  const readdir = fs.readdirSync;
+  t.mock.method(fs, 'readdirSync', (directory, options) => {
+    if (path.relative(root, directory).startsWith('AppData'))
+      throw Object.assign(new Error('Access is denied: ' + directory), {code:'EACCES'});
+    return readdir(directory, options);
+  });
+  await worker.send({ id:work.id, text:'hi', mode:'terra-light' });
+  await until(() => worker.activeTurns.size);
+  assert.match(worker.client.calls.find(call => call.method === 'thread/start').params.developerInstructions, /Home greeting rule/);
+  finishGroupReply(worker, 'Hello.');
+  await until(() => !worker.busy);
+  assert.equal(work.status, 'completed', work.error);
+  assert.match(fs.readFileSync(path.join(root, 'PhasmaHarness.md'), 'utf8'), /Home greeting rule/);
+  t.mock.restoreAll();
+});
+
 test('completed worker survives a Main Bot follow-up timeout without replaying the assignment', async t => {
   const { hub, session, agents, replies, send } = await setup(t);
   replies.push(action('agent_work', { name: 'Worker', task: 'Say hello.' }));
@@ -562,42 +606,67 @@ test('a restricted worker can retrieve its long assigned input without reading a
   assert.throws(() => agents.readContext(work, { agentId: 'main' }), /requires Full access/);
 });
 
-test('group mentions dispatch only the named bot without Hub inference and return into the owning group', async t => {
+test('group mentions stream one direct member reply with shared context, no delegation or Hub review', async t => {
   const { root, hub, session, agents, calls } = await setup(t);
-  const coder = await agents.saveAgent({ name: 'Coder', instructions: 'Handle coding questions.', workspace: root, access: 'read-only', mode: 'terra-light' });
+  const coder = await agents.saveAgent({ name: 'Coder', instructions: 'Handle coding questions.', workspace: root, access: 'read-only', mode: 'auto' });
   const reviewer = await agents.saveAgent({ name: 'Review bot', instructions: 'Review work.', workspace: root, access: 'workspace-write', mode: 'terra-light' });
   session.items.push({ type: 'agentMessage', text: 'PRIVATE_MAIN_CHAT_CONTEXT' }); hub.save();
   const group = agents.saveGroup({ name: 'Game team', members: [coder.id, reviewer.id] });
+  group.items.push({ id: randomUUID(), type: 'agentMessage', groupSpeaker: { id: reviewer.id, name: reviewer.name }, text: 'GROUP_CONTEXT: the build is green.' });
+  assert.equal(agents.executions.size, 0, 'joining a group starts no worker');
+  const choose = agents.createController;
+  agents.createController = (...args) => {
+    const controller = choose(...args), route = controller.smartRouter.choose;
+    controller.smartRouter.choose = async (text, context, ...rest) => {
+      assert.equal(context.jevQuickAnswers, false, 'group replies use the member worker with its full shared context');
+      const routingContext = require('../src/routing/smart-router.cjs').contextFor(text, context, {});
+      assert.match(routingContext.sharedGroupContext, /GROUP_CONTEXT: the build is green/);
+      assert.doesNotMatch(routingContext.sharedGroupContext, /PRIVATE_MAIN_CHAT_CONTEXT|Reply here as yourself/, 'the router hint carries messages, not the reply rules');
+      assert.match(context.groupChatInstructions, /Reply here as yourself/);
+      assert.doesNotMatch(context.groupChatInstructions, /GROUP_CONTEXT|\[\]/, 'stable rules carry no message list');
+      return route(text, context, ...rest);
+    };
+    return controller;
+  };
   assert.equal(agents.conversation(hub).id, session.id, 'a group never replaces the pinned Hub chat');
   await hub.send({ id: group.id, text: '@Coder inspect the project and explain the result.' });
   assert.equal(calls.length, 0, 'an explicit mention needs no Hub routing call');
   assert.equal(hub.busy, null);
   const worker = agents.execution(coder.id);
   await until(() => worker.activeTurns.size);
-  const work = agents.conversation(worker), job = work.delegation;
-  assert.equal(job.owner, group.id);
-  assert.equal(job.originalRequest.groupId, group.id);
-  assert.equal(job.access, 'read-only', 'membership never raises the worker ceiling');
-  assert.equal(job.originalRequest.mentionAgentId, coder.id);
-  assert.equal(group.items[0].groupMention.jobId, job.id);
+  const work = worker.data.sessions.find(chat => chat.groupChatId === group.id);
+  assert.equal(work.delegation, undefined);
+  assert.equal(work.access, 'read-only', 'membership never raises the worker ceiling');
+  assert.equal(agents.pendingJobs().length, 0);
+  assert.equal(agents.conversation(worker), undefined, 'group work cannot replace a bot’s ordinary conversation');
+  assert.equal(group.groupTurn.sessionId, work.id);
+  assert.doesNotMatch(worker.workerInstructions(work), /GROUP_CONTEXT: the build is green/, 'shared messages are data, not changing developer instructions');
+  assert.match(worker.client.calls.findLast(call => call.method === 'turn/start').params.input[0].text, /GROUP_CONTEXT: the build is green/);
+  assert.doesNotMatch(worker.workerInstructions(work), /PRIVATE_MAIN_CHAT_CONTEXT/);
   assert.equal(agents.executions.has(reviewer.id), false, 'the other member receives no inference');
   assert.throws(() => agents.saveGroup({ id: group.id, name: group.title, members: [reviewer.id] }), /before removing/);
   const groupContext = JSON.stringify(agents.readContext(work, { agentId: 'main' }));
   assert.match(groupContext, /inspect the project and explain the result/);
   assert.doesNotMatch(groupContext, /PRIVATE_MAIN_CHAT_CONTEXT/);
-  assert.throws(() => hub.archive(group.id), /outstanding work/);
-  assert.throws(() => hub.deleteSession(group.id), /outstanding work/);
+  assert.throws(() => hub.archive(group.id), /Stop this group reply/);
+  assert.throws(() => hub.deleteSession(group.id), /Stop this group reply/);
   await hub.send({ id: session.id, text: 'Are you available while Coder works?' });
   assert.equal(session.items.at(-1).text, 'Hello.');
   worker.notification({ method: 'item/completed', params: { threadId: work.threadId, turnId: work.turnId,
     item: { id: randomUUID(), type: 'agentMessage', phase: 'final_answer', text: 'Project inspected; no changes were made.' } } });
+  await until(() => group.items.some(item => item.groupSpeaker?.id === coder.id && item.text.includes('Project inspected')));
+  assert.equal(worker.busy, work.id, 'reply is visible before the worker finishes');
   worker.notification({ method: 'turn/completed', params: { threadId: work.threadId, turn: { id: work.turnId, status: 'completed' } } });
-  await until(() => group.items.some(item => item.type === 'agentResult') && !hub.busy);
-  const receipt = group.items.find(item => item.type === 'agentResult');
-  assert.equal(receipt.agentId, coder.id);
-  assert.equal(receipt.ownerName, 'Hub');
+  await until(() => !agents.groupRuns.has(group.id));
+  assert.equal(group.status, 'completed');
+  assert.equal(group.items.some(item => item.type === 'agentResult'), false);
+  assert.equal(calls.length, 1, 'only the separate Main chat used Hub; no group review call');
+  assert.equal(worker.client.calls.filter(call => call.method === 'turn/start').length, 1);
   assert.equal(session.items.some(item => item.type === 'agentResult'), false);
   assert.match(require('../src/conversation-export.cjs').conversationMarkdown(group), /Group chat · coordinated by Hub/);
+  assert.match(require('../src/conversation-export.cjs').conversationMarkdown(group), /## Coder/);
+  agents.saveGroup({ id: group.id, name: group.title, members: [reviewer.id] });
+  assert.throws(() => agents.readContext(work, { agentId: 'main' }), /group is no longer available/, 'removing membership never falls back to the private Main chat');
 });
 
 test('group queues remain separate while Hub is busy and attachments cannot summon another bot', async t => {
@@ -658,28 +727,240 @@ test('groups survive the legacy conversation migration and a runner restart with
   assert.equal(restored.snapshot().agentStates.main.sessions.find(chat => chat.id === group.id).title, 'Persistent group');
 });
 
-test('stopping one group cancels only its assignments and preserves another group sharing Hub', async t => {
+test('stopping a queued direct group reply leaves other groups and the bot’s existing work alone', async t => {
   const { root, hub, agents } = await setup(t);
   const profiles = [];
   for (const name of ['Coder', 'Reviewer']) {
     const profile = await agents.saveAgent({ name, instructions: 'Answer questions.', workspace: root, access: 'read-only', mode: 'terra-light' });
-    const worker = agents.execution(profile.id); await agents.initializeController(worker); worker.connection = 'disconnected';
+    const worker = agents.execution(profile.id); await agents.initializeController(worker);
+    worker.busy = worker.create(root, 'read-only').id;
     profiles.push(profile);
   }
   const first = agents.saveGroup({ name: 'First group', members: [profiles[0].id] });
   const second = agents.saveGroup({ name: 'Second group', members: [profiles[1].id] });
   await hub.send({ id: first.id, text: '@Coder inspect one task.' });
   await hub.send({ id: second.id, text: '@Reviewer inspect another task.' });
-  const firstJob = agents.conversation(agents.execution(profiles[0].id)).delegation;
-  const secondJob = agents.conversation(agents.execution(profiles[1].id)).delegation;
+  await until(() => agents.groupRuns.size === 2);
   await agents.stop(first.id);
-  assert.equal(firstJob.cancelled, true);
-  assert.equal(firstJob.delivered, true);
+  assert.equal(first.status, 'interrupted');
   assert.equal(first.queuePaused, true);
-  assert.equal(secondJob.cancelled, undefined);
-  assert.equal(secondJob.delivered, false);
-  assert.equal(secondJob.state, 'queued');
+  assert.ok(agents.execution(profiles[0].id).busy, 'stopping a waiting reply must not stop unrelated work');
+  assert.equal(agents.groupRuns.has(second.id), true);
+  assert.equal(second.groupTurn.state, 'waiting');
   assert.equal(second.items.some(item => item.type === 'agentResult'), false);
+  await agents.stop(second.id);
+});
+
+function finishGroupReply(worker, text, status = 'completed') {
+  const chat = worker.session(worker.busy), threadId = chat.threadId, turnId = chat.turnId;
+  if (text) worker.notification({ method: 'item/completed', params: { threadId, turnId,
+    item: { id: randomUUID(), type: 'agentMessage', phase: 'final_answer', text } } });
+  worker.notification({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status } } });
+}
+
+test('a group reply remains connected when the addressed bot asks a helper to work', async t => {
+  const { root, hub, agents } = await setup(t);
+  const bot = await agents.saveAgent({ name: 'Coder', instructions: 'Answer the group.', workspace: root, access: 'read-only', mode: 'terra-light' });
+  const helper = await agents.saveAgent({ name: 'Helper', instructions: 'Answer assigned questions.', workspace: root, access: 'read-only', mode: 'terra-light' });
+  const group = agents.saveGroup({ name: 'Team', members: [bot.id] });
+  await hub.send({ id: group.id, text: '@Coder Ask Helper to check this, then give me the answer.' });
+  const worker = agents.execution(bot.id);
+  await until(() => worker.activeTurns.size);
+  const work = worker.session(worker.busy);
+  await worker.bridgeTool(work.id, 'agent_delegate', { agentId: helper.id, task: 'Reply exactly HELPER_RESULT.' });
+  const child = agents.execution(helper.id);
+  await until(() => child.activeTurns.size);
+  finishGroupReply(worker, 'Waiting for Helper.\n[task: pending]');
+  await until(() => !agents.groupRuns.has(group.id) || group.groupTurn?.state === 'waiting');
+  assert.equal(agents.groupRuns.has(group.id), true, 'the group must stay connected until the helper result has been used');
+  finishGroupReply(child, 'HELPER_RESULT');
+  await until(() => worker.activeTurns.size);
+  finishGroupReply(worker, 'The helper checked it: HELPER_RESULT.');
+  await until(() => !agents.groupRuns.has(group.id));
+  assert.match(group.items.at(-1).text, /The helper checked it: HELPER_RESULT/);
+  assert.equal(group.status, 'completed');
+  assert.equal(group.items.some(item => item.type === 'agentResult'), false, 'the group still has ordinary replies, not delegated report cards');
+});
+
+test('direct group replies queue per member and load fresh, isolated group history when starting', async t => {
+  const { root, hub, session, agents, calls } = await setup(t);
+  const bot = await agents.saveAgent({ name: 'Coder', instructions: 'Answer the group.', workspace: root, access: 'read-only', mode: 'terra-light' });
+  const first = agents.saveGroup({ name: 'First group', members: [bot.id] });
+  const second = agents.saveGroup({ name: 'Second group', members: [bot.id] });
+  let releaseMain;
+  const complete = hub.smartRouter.complete;
+  hub.smartRouter.complete = async (...args) => {
+    await new Promise(resolve => { releaseMain = resolve; });
+    return complete(...args);
+  };
+  const mainReply = hub.send({ id: session.id, text: 'An unrelated Main Bot question.' });
+  await until(() => !!releaseMain);
+  await hub.send({ id: first.id, text: '@Coder FIRST_GROUP_SECRET' });
+  const worker = agents.execution(bot.id);
+  await until(() => worker.activeTurns.size);
+  const firstWork = worker.session(worker.busy);
+  await hub.send({ id: second.id, text: '@Coder SECOND_GROUP_SECRET' });
+  assert.deepEqual(await hub.send({ id: first.id, text: '@Coder Now use the preceding answer.' }), { queued:true });
+  assert.equal(worker.client.calls.filter(call => call.method === 'turn/start').length, 1);
+  assert.equal(second.groupTurn.state, 'waiting');
+  finishGroupReply(worker, 'FIRST_GROUP_ANSWER');
+  await until(() => worker.activeTurns.size && worker.busy !== firstWork.id);
+  const secondWork = worker.session(worker.busy);
+  assert.equal(secondWork.groupChatId, second.id);
+  assert.notEqual(firstWork.threadId, secondWork.threadId);
+  assert.doesNotMatch(worker.workerInstructions(secondWork), /FIRST_GROUP/);
+  finishGroupReply(worker, 'SECOND_GROUP_ANSWER');
+  await until(() => worker.activeTurns.size && worker.busy === firstWork.id);
+  assert.equal(first.queue.length, 0);
+  const continued = worker.client.calls.findLast(call => call.method === 'turn/start');
+  assert.equal(continued.params.threadId, firstWork.threadId);
+  assert.doesNotMatch(continued.params.input[0].text, /FIRST_GROUP_ANSWER|SECOND_GROUP/, 'the native thread already saw its first reply; other groups stay private');
+  assert.equal(worker.client.calls.filter(call => call.method === 'thread/inject_items').length, 0, 'unchanged group instructions are not injected again');
+  finishGroupReply(worker, 'Used the first answer.');
+  await until(() => !agents.groupRuns.size);
+  assert.equal(calls.length, 0);
+  assert.equal(hub.busy, session.id, 'all group turns finished independently while Main is still replying');
+  assert.deepEqual(first.items.filter(item => item.type === 'agentMessage').map(item => item.text), ['FIRST_GROUP_ANSWER', 'Used the first answer.']);
+  assert.deepEqual(second.items.filter(item => item.type === 'agentMessage').map(item => item.text), ['SECOND_GROUP_ANSWER']);
+  releaseMain(); await mainReply;
+});
+
+test('stopping a group waiting for a helper stops that helper and suppresses the follow-up', async t => {
+  const { root, hub, agents } = await setup(t);
+  const bot = await agents.saveAgent({ name: 'Coder', instructions: 'Answer the group.', workspace: root, access: 'read-only', mode: 'terra-light' });
+  const helper = await agents.saveAgent({ name: 'Helper', instructions: 'Help with assigned work.', workspace: root, access: 'read-only', mode: 'terra-light' });
+  const group = agents.saveGroup({ name: 'Team', members: [bot.id] });
+  await hub.send({ id: group.id, text: '@Coder Ask Helper to check this, then report.' });
+  const worker = agents.execution(bot.id);
+  await until(() => worker.activeTurns.size);
+  await worker.bridgeTool(worker.busy, 'agent_delegate', { agentId: helper.id, task: 'Check the task.' });
+  const child = agents.execution(helper.id);
+  await until(() => child.activeTurns.size);
+  finishGroupReply(worker, 'Waiting for the check.\n[task: pending]');
+  await until(() => group.groupTurn?.state === 'waiting');
+  const call = child.client.call.bind(child.client);
+  child.client.call = async (method, params) => {
+    if (method === 'turn/interrupt') finishGroupReply(child, '', 'interrupted');
+    return call(method, params);
+  };
+  await agents.stop(group.id);
+  assert.equal(child.busy, null);
+  assert.equal(agents.pendingJobs().length, 0);
+  assert.equal(group.status, 'interrupted');
+  assert.equal(worker.client.calls.filter(call => call.method === 'turn/start').length, 1, 'Stop never restarts the group worker for a cancelled helper');
+  assert.equal(group.queuePaused, true);
+  const work = worker.data.sessions.find(chat => chat.groupChatId === group.id);
+  assert.equal(work.queue?.some(message => message.agentReply) || false, false, 'cancelled helper notices stay in history, not a queue that a new request resumes');
+  await hub.send({ id: group.id, text: '@Coder A new, unrelated question.' });
+  await until(() => worker.activeTurns.size);
+  finishGroupReply(worker, 'Answered the new question.');
+  await until(() => !agents.groupRuns.has(group.id));
+  assert.equal(worker.client.calls.filter(call => call.method === 'turn/start').length, 2);
+});
+
+test('direct group Stop retries a failed interrupt and never starts its queued message', async t => {
+  const { root, hub, agents } = await setup(t);
+  const bot = await agents.saveAgent({ name: 'Coder', instructions: 'Answer the group.', workspace: root, access: 'read-only', mode: 'terra-light' });
+  const group = agents.saveGroup({ name: 'Team', members: [bot.id] });
+  await hub.send({ id: group.id, text: '@Coder Explain this.' });
+  const worker = agents.execution(bot.id);
+  await until(() => worker.activeTurns.size);
+  await hub.send({ id: group.id, text: '@Coder queued request' });
+  const call = worker.client.call.bind(worker.client);
+  let interrupts = 0;
+  worker.client.call = async (method, params) => {
+    if (method === 'turn/interrupt') {
+      if (!interrupts++) throw new Error('Fixture interrupt failed');
+      finishGroupReply(worker, 'Partial reply', 'interrupted');
+    }
+    return call(method, params);
+  };
+  await assert.rejects(agents.stop(group.id), /Fixture interrupt failed/);
+  assert.equal(agents.groupRuns.has(group.id), true);
+  await agents.stop(group.id);
+  assert.equal(group.status, 'interrupted');
+  assert.equal(group.queuePaused, true);
+  assert.equal(group.queue.length, 1);
+  assert.equal(worker.client.calls.filter(call => call.method === 'turn/start').length, 1);
+  assert.equal(group.items.find(item => item.groupMention)?.groupMention.state, 'interrupted');
+});
+
+test('direct group replies retain configured checks and report an empty answer as failure', async t => {
+  const { root, hub, agents, calls } = await setup(t);
+  const bot = await agents.saveAgent({ name: 'Coder', instructions: 'Answer the group.', workspace: root, access: 'danger-full-access', mode: 'terra-light' });
+  const group = agents.saveGroup({ name: 'Team', members: [bot.id] });
+  group.access = 'danger-full-access';
+  const worker = agents.execution(bot.id); await agents.initializeController(worker);
+  const marker = path.join(root, 'checked');
+  worker.data.settings.checks[root] = [{ id: 'real-check', name: 'Real check', argv: [process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'yes')`], cwd: root, timeoutMs: 10000 }];
+  await hub.send({ id: group.id, text: '@Coder Finish with the configured check.' });
+  await until(() => worker.activeTurns.size);
+  const work = worker.session(worker.busy);
+  finishGroupReply(worker, 'Finished.');
+  await until(() => !agents.groupRuns.size, 15000);
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'yes');
+  assert.equal(work.tasks.at(-1).state, 'checks-passed');
+  assert.equal(group.status, 'completed');
+  worker.data.settings.checks[root] = [];
+  await hub.send({ id: group.id, text: '@Coder Answer again.' });
+  await until(() => worker.activeTurns.size);
+  finishGroupReply(worker, '[task: done]');
+  await until(() => !agents.groupRuns.size);
+  assert.equal(group.status, 'failed');
+  assert.match(group.error, /without a reply/);
+  assert.equal(group.queuePaused, true);
+  assert.equal(calls.length, 0, 'checks do not add a Hub review');
+});
+
+test('group Send now stops the current member and consumes the queued message once', async t => {
+  const { root, hub, agents } = await setup(t);
+  const bot = await agents.saveAgent({ name: 'Coder', instructions: 'Answer the group.', workspace: root, access: 'read-only', mode: 'terra-light' });
+  const group = agents.saveGroup({ name: 'Team', members: [bot.id] });
+  // A previously scheduled queue callback must recheck an intervening direct reply.
+  group.queue = [{ id:randomUUID(), text:'@Coder queued change', images:[], mode:'terra-light', task:'on' }];
+  hub.settle(group);
+  await hub.send({ id: group.id, text: '@Coder original request' });
+  const worker = agents.execution(bot.id);
+  await until(() => worker.activeTurns.size);
+  assert.equal(group.queue.length, 1);
+  assert.match(worker.session(worker.busy).items.find(item => item.type === 'userMessage').content[0].text, /original request/);
+  const call = worker.client.call.bind(worker.client);
+  worker.client.call = async (method, params) => {
+    if (method === 'turn/interrupt') finishGroupReply(worker, 'Stopped the original reply.', 'interrupted');
+    return call(method, params);
+  };
+  await hub.queuedMessage(group.id, group.queue[0].id, 'steer');
+  await until(() => worker.activeTurns.size);
+  assert.equal(group.queue.length, 0);
+  assert.equal(group.items.filter(item => item.type === 'userMessage').length, 2);
+  finishGroupReply(worker, 'Answered the change.');
+  await until(() => !agents.groupRuns.size);
+  assert.equal(group.status, 'completed');
+  assert.equal(worker.client.calls.filter(call => call.method === 'turn/start').length, 2);
+});
+
+test('a restart interrupts a saved direct group turn without replaying it or exposing the worker thread', async t => {
+  const { root, hub, agents } = await setup(t);
+  const bot = await agents.saveAgent({ name: 'Coder', instructions: 'Answer the group.', workspace: root, access: 'read-only', mode: 'terra-light' });
+  const group = agents.saveGroup({ name: 'Team', members: [bot.id] });
+  await hub.send({ id: group.id, text: '@Coder Explain this.' });
+  const worker = agents.execution(bot.id);
+  await until(() => worker.activeTurns.size);
+  const restoredHub = agents.createController(hub.filename, root);
+  await restoredHub.initialize();
+  const restored = new Agents(restoredHub, async () => {}, agents.createController);
+  t.after(async () => { restored.closing = true; restored.budgets.close(); await restored.routines.close(); await restored.workspaces.close(); for (const c of restored.allControllers()) c.close(); });
+  const saved = restoredHub.session(group.id);
+  assert.equal(saved.status, 'interrupted');
+  assert.equal(saved.groupTurn, undefined);
+  assert.equal(saved.queuePaused, true);
+  assert.match(saved.error, /restart/);
+  assert.equal(restored.groupRuns.size, 0);
+  restored.migrateConversations();
+  assert.equal(restoredHub.data.agents.length, 1);
+  assert.equal(restored.conversation(restored.execution(bot.id)), undefined);
+  finishGroupReply(worker, 'Original process completed.');
+  await until(() => !agents.groupRuns.size);
 });
 
 test('Hub retains complete file snapshots in its request and conversation while using compact display metadata', async t => {
@@ -1626,6 +1907,21 @@ test('Hub never restarts a cancelled result and failed compaction preserves orig
   await assert.rejects(hub.compact(session.id), /Provider offline/);
   assert.equal(JSON.stringify(session.items), original);
   assert.equal(session.hubSummaryThrough, undefined); assert.equal(hub.busy, null);
+});
+
+test('a Hub turn that fails after the model decided forgets its kept session, so the next turn rebuilds from the chat', async t => {
+  const { hub, session, replies } = await setup(t);
+  const complete = hub.smartRouter.complete;
+  hub.smartRouter.complete = async (request, ...rest) => {
+    request.conversation?.save({ threadId: 'kept', fingerprint: 'policy', sent: request.conversation.context });
+    return complete.call(hub.smartRouter, request, ...rest);
+  };
+  replies.push(answer('Hello.'));
+  await hub.send({ id: session.id, text: 'Remember this.' });
+  assert.equal(session.coordinatorConversation?.threadId, 'kept', 'a completed turn keeps its session');
+  replies.push(action('agent_work', { name: 'Restart', task: 'Continue stopped work.' }));
+  await assert.rejects(hub.send({ id: session.id, text: 'Worker stopped.', agentReply: true, agentReplyCancelled: true }), /will not restart automatically/);
+  assert.equal(session.coordinatorConversation, null, 'the never-run decision is not continued');
 });
 
 test('conversation deltas carry new messages, extended tool results, changed and removed fields', () => {

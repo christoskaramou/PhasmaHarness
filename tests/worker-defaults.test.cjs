@@ -168,3 +168,13 @@ test('Codex bots leave out the personal setup: hooks, plugins, memories, notify,
     assert.ok(skills.includes(JSON.stringify(path.join(home, skill, 'SKILL.md').replace(/\\/g, '/')) + ', enabled=false'), skill);
   assert.ok(!skills.includes('builtin'), 'Codex keeps its own .system skills');
 });
+
+test('a handoff to another backend carries requests and final answers, not progress notes', () => {
+  const text = handoff([
+    { type: 'userMessage', content: [{ type: 'text', text: 'Fix the parser.' }] },
+    { type: 'agentMessage', phase: 'commentary', text: 'Looking at parser.js now.' },
+    { type: 'agentMessage', phase: 'final_answer', text: 'Fixed the parser.' },
+  ]);
+  assert.match(text, /Fix the parser[.][\s\S]*Fixed the parser[.]/);
+  assert.doesNotMatch(text, /Looking at parser/);
+});

@@ -50,6 +50,7 @@ class Agents extends EventEmitter {
     this.primary = primary; this.configure = configure; this.createController = createController;
     this.controllers = new Map(); this.executions = new Map(); this.initializing = new Map(); this.closing = false;
     this.backgroundSlots = new Map(); this.capacityWaits = new Map();
+    this.groupRuns = new Map();
     this.accountRetries = new Map(); this.accountRetryMs = 10000;
     this.revisionOperations = new Map();
     this.artifactRuns = new artifacts.ArtifactRuns();
@@ -63,6 +64,13 @@ class Agents extends EventEmitter {
     this.attach('main', primary);
     for (const profile of primary.data.agents) this.open(profile);
     for (const id of primary.data.workerContexts || []) this.openExecution(id);
+    for (const session of primary.data.sessions) if (session.groupTurn) {
+      const message = session.items.find(item => item.id === session.groupTurn.messageId);
+      if (message?.groupMention) message.groupMention.state = 'interrupted';
+      session.status = 'interrupted'; session.queuePaused = true;
+      session.error = 'Group reply was interrupted by a restart. Review the conversation before sending again.';
+      delete session.groupTurn; primary.save();
+    }
     const cancellations = new Set([...this.allControllers()].flatMap(controller => controller.data.cancelledAgentJobs || []));
     for (const { job } of this.pendingJobs()) {
       if (cancellations.has(job.id) || job.ancestorJobIds?.some(id => cancellations.has(id))) job.cancelled = true;
@@ -203,8 +211,18 @@ class Agents extends EventEmitter {
         if (limits !== this.savedLimits) { this.primary.save(); this.savedLimits = limits; }
         this.pump();
       } catch (error) { controller.error = `Agent coordination failed: ${error.message}`; controller.log.warn(controller.error); }
-      this.emit('state', this.snapshot());
+      this.emitFleet();
     });
+  }
+
+  // Each controller reports up to ten times a second while it streams, and every report carries the whole fleet. The
+  // window gets at most one per 100 ms: at once after a quiet spell, otherwise one trailing report built when it is sent.
+  emitFleet() {
+    if (this.fleetTimer) return;
+    const emit = () => { this.fleetTimer = null; this.fleetAt = Date.now(); this.emit('state', this.snapshot()); };
+    const wait = 100 - (Date.now() - (this.fleetAt || 0));
+    if (wait <= 0) emit();
+    else { this.fleetTimer = setTimeout(emit, wait); this.fleetTimer.unref?.(); }
   }
 
   open(profile) {
@@ -372,7 +390,7 @@ class Agents extends EventEmitter {
     if (!controller) throw new Error('Unknown session.');
     return controller;
   }
-  get busy() { return [...this.allControllers()].some(c => c.busy); }
+  get busy() { return this.groupRuns.size > 0 || [...this.allControllers()].some(c => c.busy); }
   pendingJobs() {
     return [...this.allControllers()].flatMap(controller => controller.data.sessions.flatMap(session =>
       [session.delegation, ...(session.delegationQueue || [])].filter(job => job && !job.delivered)
@@ -473,9 +491,9 @@ class Agents extends EventEmitter {
   }
 
   conversation(controller, create = false, workspace, access) {
-    let session = controller.data.sessions.find(s => s.id === controller.data.agentSessionId && !s.group) ||
-      controller.data.sessions.find(s => s.id === controller.busy && !s.group) ||
-      controller.data.sessions.find(s => !s.archived && !s.group);
+    let session = controller.data.sessions.find(s => s.id === controller.data.agentSessionId && !s.group && !s.groupChatId) ||
+      controller.data.sessions.find(s => s.id === controller.busy && !s.group && !s.groupChatId) ||
+      controller.data.sessions.find(s => !s.archived && !s.group && !s.groupChatId);
     if (!session && create) session = controller.create(workspace, access);
     if (session && controller.data.agentSessionId !== session.id) {
       controller.data.agentSessionId = session.id; controller.save();
@@ -529,7 +547,7 @@ class Agents extends EventEmitter {
   migrateConversations() {
     for (const controller of [...this.controllers.values()]) {
       const keep = this.conversation(controller);
-      for (const session of controller.data.sessions.filter(s => !s.archived && !s.group && s !== keep)) {
+      for (const session of controller.data.sessions.filter(s => !s.archived && !s.group && !s.groupChatId && s !== keep)) {
         // A crash between the two stores' saves can leave the same chat in both; finish that move on restart.
         if (![...this.allControllers()].some(c => c !== controller && c.data.sessions.some(s => s.id === session.id))) {
           const base = (session.title || 'Imported chat').slice(0, 48);
@@ -548,6 +566,8 @@ class Agents extends EventEmitter {
   }
 
   requireIdle(controller, clearing = null) {
+    if ([...this.groupRuns].some(([id, run]) => run.agentId === controller.agentId || (controller === this.primary && (!clearing || clearing.id === id))))
+      throw new Error('Stop the group reply before continuing.');
     const execution = !controller.executionContext && this.executions.get(controller.agentId);
     if (execution) this.requireIdle(execution);
     if (controller.busy || controller.loading.size || controller.activeTurns.size || controller.requests.size || controller.cleanupPending.size || controller.blockedReason())
@@ -1927,7 +1947,11 @@ class Agents extends EventEmitter {
     if (this.closing) throw new Error('The app is closing.');
     if (typeof args.agentId !== 'string' || !args.agentId) throw new Error('Invalid agent ID.');
     let target = this.controller(args.agentId), session = this.conversation(target), ownAssignment = null;
-    if (source.delegation?.source && !source.delegation.delivered && this.owner(source.delegation.source).agentId === args.agentId) {
+    const sharedGroup = args.agentId === 'main' && source.groupChatId && this.primary.data.sessions.find(chat =>
+      chat.id === source.groupChatId && !chat.archived && chat.group?.members.includes(this.owner(source.id).agentId));
+    if (args.agentId === 'main' && source.groupChatId && !sharedGroup) throw new Error('This group is no longer available to this bot.');
+    if (sharedGroup) { target = this.primary; session = sharedGroup; }
+    else if (source.delegation?.source && !source.delegation.delivered && this.owner(source.delegation.source).agentId === args.agentId) {
       ownAssignment = source.delegation;
       target = this.owner(source.delegation.source); session = target.session(source.delegation.source);
     } else {
@@ -1942,7 +1966,7 @@ class Agents extends EventEmitter {
     const restricted = source.access !== 'danger-full-access' &&
       (!this.workspaces.same(workspace, source.delegation?.projectScope || source.workspace) || access === 'danger-full-access');
     const assignedOnly = !!ownAssignment && restricted;
-    if (restricted && !assignedOnly) {
+    if (restricted && !assignedOnly && !sharedGroup) {
       throw new Error('Reading context from a different workspace or a Full-access conversation requires Full access.');
     }
     const scopedHistory = session?.delegation?.projectScope && canonical(session.workspace) !== canonical(session.delegation.projectScope);
@@ -1953,10 +1977,10 @@ class Agents extends EventEmitter {
         : this.executionText(ownAssignment) }] }]
       : scopedHistory ? session.items.slice(session.delegation.historyStartIndex ?? session.delegation.startIndex ?? 0) : session?.items || [];
     const text = visibleItems.flatMap((item, index) => {
-      if (item.pending) return [];
+      if (item.pending || (sharedGroup && (item.internal || item.agentReply))) return [];
       let body;
       if (item.type === 'userMessage') body = (item.content || []).map(part => part.type === 'text' ? part.text : '[Attachment omitted]').join('\n');
-      else if (item.type === 'agentMessage') body = stripTaskStatus(item.text || '');
+      else if (item.type === 'agentMessage') body = (item.groupSpeaker ? `${item.groupSpeaker.name}: ` : '') + stripTaskStatus(item.text || '');
       else if (item.type === 'agentResult') body = `Result from ${item.agentName}. Status: ${item.status}. Owner: ${item.ownerName}.${item.superseded ? ' Earlier assignment revision; do not restart it.' : ''}\n${item.error || ''}\n${item.text || ''}` +
         (item.amendments || []).map(change => `\nChange ${change.state}, revision ${change.revision}: ${change.text}`).join('') + artifacts.summary(item.artifacts) + usageText(item.budgetSummary) + workspaceSummary(item.workspaceCopy) + reports.verificationText(item.verification, true);
       else if (item.type === 'agentArtifact' && item.localOnly) body = artifacts.summary([item.artifact]);
@@ -2190,6 +2214,20 @@ class Agents extends EventEmitter {
   }
 
   async stop(id, recorded = false) {
+    const group = this.groupRuns.get(id);
+    if (group) {
+      this.primary.session(id).queuePaused = true; this.primary.save();
+      group.abort.abort();
+      if (group.worker) await this.stop(group.sessionId);
+      await group.operation;
+      if (group.worker) {
+        const work = group.worker.session(group.sessionId);
+        work.queue = (work.queue || []).filter(message => !message.agentReply);
+        for (const item of work.items) if (item.pendingReply?.agentReply) { delete item.pendingReply; item.notified = true; }
+        group.worker.save(); group.worker.changed();
+      }
+      return;
+    }
     const direct = this.findForegroundTask(id);
     if (direct) return this.stopForegroundTask(direct);
     if (!recorded) {
@@ -2233,9 +2271,10 @@ class Agents extends EventEmitter {
   }
 
   async shutdown(options = {}) {
-    clearTimeout(this.quotaTimer);
+    clearTimeout(this.quotaTimer); clearTimeout(this.fleetTimer); this.fleetTimer = null;
     for (const timer of this.accountRetries.values()) clearTimeout(timer);
     this.closing = true; this.pump();
+    for (const run of this.groupRuns.values()) run.abort.abort();
     for (const controller of this.allControllers()) for (const session of controller.data.sessions) session.queuePaused = true;
     const end = Date.now() + (options.stopMs ?? 5000);
     let timer;

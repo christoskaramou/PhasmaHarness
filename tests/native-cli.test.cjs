@@ -89,6 +89,31 @@ test('disabled native accounts are inspected without starting authentication or 
   assert.equal(controller.catalog().find(model => model.provider === 'native:deepseek').enabled, false);
 });
 
+test('resumed native workers send instructions once, refresh edits/access, and recover after a failed turn', async t => {
+  const { controller, backend, calls, root } = await controllerFixture(t, true);
+  const entry = path.join(root, 'PhasmaHarness.md'); fs.writeFileSync(entry, 'Stable project rules.');
+  const session = controller.create(root, 'read-only');
+  const send = text => controller.send({ id: session.id, text, mode: 'native:deepseek:model-a', task: 'off' });
+  for (let i = 0; i < 30; i++) await send(`Question ${i}`);
+  const runs = () => calls.filter(call => typeof call === 'object');
+  assert.equal(runs().length, 30, 'one model turn per message');
+  assert.match(runs()[0].instructions, /Stable project rules/);
+  assert.ok(runs().slice(1).every(call => call.instructions === '' && call.resume === 'native-session'));
+  assert.ok(runs().slice(1).every(call => !call.prompt.includes('Earlier conversation')), 'native history is not replayed');
+  assert.equal(require('../src/session-store.cjs').readSessionData(controller.filename).sessions.find(s => s.id === session.id)['native:deepseekInstructionHash'], session['native:deepseekInstructionHash']);
+  fs.writeFileSync(entry, 'Changed project rules.'); await send('Read the updated rule.');
+  assert.match(runs().at(-1).instructions, /Changed project rules/);
+  await send('Continue'); assert.equal(runs().at(-1).instructions, '');
+  session.access = 'workspace-write'; await send('Continue with new access');
+  assert.match(runs().at(-1).instructions, /Changed project rules/);
+  const run = backend.run; backend.run = async () => { throw new Error('Fixture disconnect'); };
+  await send('Fail safely'); assert.equal(session.status, 'failed');
+  backend.run = run; await send('Recover');
+  assert.equal(runs().at(-1).resume, null);
+  assert.match(runs().at(-1).instructions, /Changed project rules/);
+  assert.match(runs().at(-1).prompt, /Question 0/, 'a fresh provider session receives history instead of losing it');
+});
+
 test('native structured routing selects its runtime and cannot fall back to Claude', async t => {
   const root = directory(t);
   const router = new SmartRouter(root);

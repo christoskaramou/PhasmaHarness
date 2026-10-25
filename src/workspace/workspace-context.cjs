@@ -47,8 +47,8 @@ async function collectWorkspace(workspace, request, signal) {
   };
   let gitRoot, status = '';
   try {
-    gitRoot = (await git(['rev-parse', '--show-toplevel'])).trim();
-    status = await git(['status', '--porcelain=v1', '-z', '--untracked-files=all', '--', '.']);
+    [gitRoot, status] = await Promise.all([git(['rev-parse', '--show-toplevel']).then(out => out.trim()),
+      git(['status', '--porcelain=v1', '-z', '--untracked-files=all', '--', '.'])]);
     result.available = true;
   } catch (error) {
     if (error.name === 'AbortError') throw error;
@@ -82,33 +82,40 @@ async function collectWorkspace(workspace, request, signal) {
   const signals = new Set(names.flatMap(name => signalsFor(name, '')));
   const selected = [...candidates.values()].sort((a, b) => Number(b.explicit) - Number(a.explicit) || signalsFor(b.path, '').length - signalsFor(a.path, '').length).slice(0, 8);
   if (candidates.size > selected.length) result.limitations.push(`Only ${selected.length} of ${candidates.size} text files sampled.`);
-  for (const file of selected) {
-    signal?.throwIfAborted();
+  const read = async file => {
+    let text = '', truncated = false;
+    if (file.status && file.status !== '??') {
+      // Disable repository-controlled external diff/textconv programs; cover staged AND unstaged changes.
+      const [staged, unstaged] = await Promise.all([true, false].map(cached =>
+        git(['diff', '--no-ext-diff', '--no-textconv', '--no-color', '--unified=3', ...(cached ? ['--cached'] : []), '--', file.path])));
+      text += 'STAGED\n' + staged + 'UNSTAGED\n' + unstaged;
+    }
+    if (!file.status || file.status === '??' || file.explicit) {
+      const actual = await fs.realpath(file.filename);
+      if (!inside(root, actual)) throw new Error('File points outside workspace.');
+      const actualName = path.relative(root, actual).replace(/\\/g, '/');
+      if (EXCLUDED.test(actualName) || PRIVATE.test(actualName)) throw new Error('File points to an excluded path.');
+      const handle = await fs.open(actual, 'r');
+      try {
+        const stat = await handle.stat();
+        if (!stat.isFile()) throw new Error('Not a regular file.');
+        const buffer = Buffer.alloc(5000);
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+        if (buffer.subarray(0, bytesRead).includes(0)) throw new Error('Binary file.');
+        text += '\nFILE\n' + buffer.subarray(0, bytesRead).toString('utf8');
+        truncated = stat.size > bytesRead;
+      } finally { await handle.close(); }
+    }
+    return { text, truncated };
+  };
+  signal?.throwIfAborted();
+  // Each file's reads are independent: they run together (one git call long instead of sixteen), applied in order.
+  const reads = selected.map(file => read(file).then(value => ({ value }), error => ({ error })));
+  for (const [index, file] of selected.entries()) {
     try {
-      let text = '', truncated = false;
-      if (file.status && file.status !== '??') {
-        // Disable repository-controlled external diff/textconv programs; cover staged AND unstaged changes.
-        for (const cached of [true, false]) {
-          const patch = await git(['diff', '--no-ext-diff', '--no-textconv', '--no-color', '--unified=3', ...(cached ? ['--cached'] : []), '--', file.path]);
-          text += (cached ? 'STAGED\n' : 'UNSTAGED\n') + patch;
-        }
-      }
-      if (!file.status || file.status === '??' || file.explicit) {
-        const actual = await fs.realpath(file.filename);
-        if (!inside(root, actual)) throw new Error('File points outside workspace.');
-        const actualName = path.relative(root, actual).replace(/\\/g, '/');
-        if (EXCLUDED.test(actualName) || PRIVATE.test(actualName)) throw new Error('File points to an excluded path.');
-        const handle = await fs.open(actual, 'r');
-        try {
-          const stat = await handle.stat();
-          if (!stat.isFile()) throw new Error('Not a regular file.');
-          const buffer = Buffer.alloc(5000);
-          const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-          if (buffer.subarray(0, bytesRead).includes(0)) throw new Error('Binary file.');
-          text += '\nFILE\n' + buffer.subarray(0, bytesRead).toString('utf8');
-          truncated = stat.size > bytesRead;
-        } finally { await handle.close(); }
-      }
+      const outcome = await reads[index];
+      if (outcome.error) throw outcome.error;
+      let { text, truncated } = outcome.value;
       signalsFor(file.path, text).forEach(s => signals.add(s));
       const changes = text.split('\n').filter(line => /^[+-]/.test(line) && !/^(---|\+\+\+)/.test(line));
       const commentsOnly = !!file.status && file.status !== '??' && !file.explicit && changes.length > 0 && changes.every(line => /^[-+]\s*(\/\/.*)?$/.test(line));

@@ -120,7 +120,7 @@ async function museFixture(t, options = {}) {
         if (request.method === 'session/start' || request.method === 'session/resume') {
           helpers = p.config?.mcpServers?.phasma_harness;
           result = { session: {
-            sessionId: 'session-1', activeTurnId: null, permissionState: { profileId: options.profile || p.permissionProfile, reviewerAuthority: 'human' } },
+            sessionId: request.method === 'session/resume' && options.resumedSessionId || 'session-1', activeTurnId: null, permissionState: { profileId: options.profile || p.permissionProfile, reviewerAuthority: 'human' } },
             viewCursor: 'cursor' };
         }
         // Like Muse, a turn/start re-sent under its original commandId gets the original answer and starts nothing.

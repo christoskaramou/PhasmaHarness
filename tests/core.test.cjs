@@ -584,6 +584,10 @@ test('compaction finishes through thread/compacted or turn/completed for the own
   assert.equal(session.submission.kind, 'compaction');
   assert.equal(session.submission.state, 'acknowledged');
   assert.equal(session.submission.turnId, null);
+  controller.loaded.delete(session.id);
+  const duringCompaction = fake.calls.length;
+  await controller.load(session.id);
+  assert.equal(fake.calls.length, duringCompaction, 'a manual compaction awaiting its turn ID must not be reloaded either');
   controller.notification({ method: 'turn/started', params: { threadId: session.threadId, turn: { id: previous } } });
   controller.notification({ method: 'thread/compacted', params: { threadId: session.threadId } });
   controller.notification({ method: 'thread/compacted', params: { threadId: session.threadId, turnId: 'other-turn' } });
@@ -596,6 +600,8 @@ test('compaction finishes through thread/compacted or turn/completed for the own
   assert.equal(session.submission.state, 'completed');
   assert.match(session.notice, /Context compacted/);
   assert.ok(Number.isFinite(session.lastCompactedAt), 'successful Codex compaction records its time');
+  assert.equal(session.codexInstructionHash, undefined);
+  assert.equal(controller.loaded.has(session.id), false);
   const items = JSON.stringify(session.items);
   await controller.compact(session.id);
   controller.notification({ method: 'turn/started', params: { threadId: session.threadId, turn: { id: 'compact-2' } } });
@@ -605,7 +611,7 @@ test('compaction finishes through thread/compacted or turn/completed for the own
   assert.equal(JSON.stringify(session.items), items);
 });
 
-test('automatic compaction records its time only after the owned item completes', async t => {
+test('automatic compaction defers instruction refresh until the live turn settles, even when the chat is reopened', async t => {
   const { controller, fake } = await setup(t);
   const session = controller.create();
   await controller.send({ id: session.id, text: 'hello', mode: 'terra-light', task: 'off' });
@@ -614,7 +620,44 @@ test('automatic compaction records its time only after the owned item completes'
   assert.equal(session.lastCompactedAt, undefined);
   controller.notification({ method: 'item/completed', params });
   assert.ok(Number.isFinite(session.lastCompactedAt));
+  assert.equal(session.codexInstructionHash, undefined);
+  assert.equal(controller.loaded.has(session.id), true, 'compaction does not unload the live thread');
+  const beforeLoad = fake.calls.length;
+  await controller.load(session.id);
+  assert.equal(fake.calls.length, beforeLoad, 'opening an automatically compacted chat must not reload a live turn');
+  controller.loaded.delete(session.id); // Settings changes can also invalidate the loaded marker during a turn.
+  await controller.load(session.id);
+  await controller.resume(session);
+  assert.equal(fake.calls.length, beforeLoad, 'the shared resume guard also protects a separately invalidated live thread');
+  assert.equal(controller.activeTurns.get(session.id), fake.turnIds[0]);
+  assert.equal(session.codexInstructionHash, undefined, 'defer the instruction refresh until this turn settles');
+  controller.notification({ method: 'item/completed', params: { threadId: session.threadId, turnId: fake.turnIds[0],
+    item: { id: 'after-compaction', type: 'agentMessage', phase: 'final_answer', text: 'Continued after compaction.' } } });
   complete(controller, session, fake.turnIds[0]);
+  assert.ok(session.items.some(item => item.text === 'Continued after compaction.'));
+  await controller.send({ id: session.id, text: 'Continue after compaction', mode: 'terra-light', task: 'off' });
+  assert.equal(fake.calls.filter(call => call.method === 'thread/inject_items').length, 1, 'refresh rules once after compaction');
+  complete(controller, session, fake.turnIds.at(-1));
+  await controller.send({ id: session.id, text: 'Continue normally', mode: 'terra-light', task: 'off' });
+  assert.equal(fake.calls.filter(call => call.method === 'thread/inject_items').length, 1, 'unchanged later turns still reuse the rules');
+  complete(controller, session, fake.turnIds.at(-1));
+});
+
+test('a queued group message keeps its context, after earlier exchanges and before the current request', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  await controller.send({ id: session.id, text: 'First turn', mode: 'terra-light', task: 'off' });
+  session.directContext = [{ question: 'Older question', answer: 'Older answer' }];
+  const contextText = 'New group messages:\n[{"speaker":"User","text":"The build is green"}]\n\nCurrent user request:\n';
+  assert.deepEqual(await controller.send({ id: session.id, text: 'Reply to the group', contextText, mode: 'terra-light', task: 'off' }), { queued: true });
+  assert.equal(session.queue[0].contextText, contextText);
+  complete(controller, session, fake.turnIds[0]);
+  await until(() => fake.turnIds.length === 2);
+  const text = fake.calls.filter(call => call.method === 'turn/start').at(-1).params.input[0].text;
+  const order = ['Older question', 'The build is green', 'Reply to the group'].map(part => text.indexOf(part));
+  assert.ok(order.every((index, i) => index >= 0 && (i === 0 || index > order[i - 1])), text);
+  assert.equal(text.split('Current user request:').length - 1, 1);
+  complete(controller, session, fake.turnIds.at(-1));
 });
 
 test('Jev direct answers drain through settle', async t => {
@@ -2754,6 +2797,17 @@ test('traced worker tokens cover the whole turn, not only its last model call', 
   const cursorTurn = records.filter(r => r.event === 'turn').at(-1);
   assert.equal(cursorTurn.route.provider, 'cursor-cli');
   assert.equal(cursorTurn.worker.tokens, null);
+  // A Cursor tool card takes the name and input Cursor fills in later, and keeps a rawOutput result.
+  controller.cursor.run = async ({ onEvent }) => {
+    onEvent({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'g1', name: 'grep', input: {} }] } });
+    onEvent({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'g1', name: 'grep "harbor"', input: { pattern: 'harbor' } }] } });
+    onEvent({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'g1', content: { totalMatches: 1 } }] } });
+    return { result: 'Done.' };
+  };
+  await controller.send({ id: cursorSession.id, text: 'search it', mode: 'cursor-cli:composer-2.5:default', task: 'off' });
+  await flush();
+  const card = cursorSession.items.find(item => item.id === 'g1');
+  assert.deepEqual([card.tool, card.arguments, card.status, card.result], ['grep "harbor"', { pattern: 'harbor' }, 'completed', { totalMatches: 1 }]);
   // Codex: reports after each model call carry the thread total and that call; the turn is their difference.
   const codex = controller.create();
   await controller.send({ id: codex.id, text: 'go', mode: 'terra-light', task: 'off' });
@@ -2876,12 +2930,53 @@ test('API providers run in Harness\'s own loop without Codex, continue the chat,
   await until(() => !controller.busy);
   assert.deepEqual(bodies.at(-1).messages.filter(message => message.role !== 'system').map(message => message.role), ['user', 'assistant', 'user'], 'the saved chat continues');
 
+  const oversized = { id: 'oversized-history', type: 'agentMessage', text: 'x'.repeat(1000001) };
+  session.items.unshift(oversized);
+  const continued = session.localSessionId;
+  await controller.send({ id: session.id, text: 'Continue the long conversation', mode, task: 'off' });
+  await until(() => !controller.busy);
+  assert.equal(session.status, 'completed');
+  assert.equal(session.localSessionId, continued, 'valid API history needs no transfer regardless of Harness history size');
+  assert.ok(JSON.stringify(bodies.at(-1)).length < 1000000, 'ordinary continuation does not serialize the recovery history');
+  session.items = session.items.filter(item => item !== oversized);
+
+  const lost = session.localSessionId;
+  fs.unlinkSync(path.join(controller.apiAgent.directory, lost + '.json'));
+  await controller.send({ id: session.id, text: 'recover this conversation', mode, task: 'off' });
+  await until(() => !controller.busy);
+  assert.equal(session.status, 'completed');
+  assert.notEqual(session.localSessionId, lost);
+  assert.equal(bodies.length, 4, 'missing local history recovers with one provider call');
+  const recovered = bodies.at(-1).messages.at(-1).content;
+  assert.match(recovered, /hello/); assert.match(recovered, /and again/);
+  assert.match(recovered, /recover this conversation/);
+  assert.equal(recovered.split('recover this conversation').length - 1, 1, 'recovery includes the current request once');
+
   const waiting = new Promise(resolve => { started = resolve; });
   const pending = controller.send({ id: session.id, text: 'stop this', mode, task: 'off' });
   await waiting; await controller.stop();
   await pending.catch(() => {});
   await until(() => !controller.busy);
   assert.equal(session.status, 'interrupted');
+});
+
+test('archived Main chats keep their native continuation protected from Claude cleanup and retain it when reopened', async t => {
+  const { controller } = await setup(t);
+  const session = controller.create(), root = session.workspace, id = require('node:crypto').randomUUID();
+  session.coordinatorConversation = { sessionId: id };
+  controller.archive(session.id);
+  const home = path.join(root, 'claude-store'), bucket = path.join(home, 'projects', fs.realpathSync(root).replace(/[^a-zA-Z0-9]/g, '-'));
+  fs.mkdirSync(bucket, { recursive: true });
+  const file = path.join(bucket, id + '.jsonl');
+  fs.writeFileSync(file, JSON.stringify({ sessionId: id, cwd: root }) + '\n');
+  const old = new Date(Date.now() - 40 * 86400000); fs.utimesSync(file, old, old);
+  const saved = controller.smartRouter.savedConversations();
+  assert.ok(saved.some(chat => chat.sessionId === id));
+  require('../src/providers/conversation-retention.cjs').pruneClaude(root, new Set(saved.map(chat => chat.sessionId)), home);
+  assert.ok(fs.existsSync(file), 'archiving retains the native transcript even past the retention period');
+  session.archived = false;
+  assert.equal(controller.smartRouter.savedConversations()[0].sessionId, id);
+  assert.equal(readSessionData(controller.filename).sessions.find(chat => chat.id === session.id).coordinatorConversation.sessionId, id);
 });
 
 test('diagnostics list versions, provider state and limits without emails, keys or chat content', async t => {

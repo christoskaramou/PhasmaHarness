@@ -5,6 +5,29 @@ const fs = require('node:fs'), path = require('node:path'), os = require('node:o
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 
+test('Cursor Main resumes with no repeated schema while validation and tool denial stay enabled', async () => {
+  const cursor = new CursorCLI(), sent = [], schema = { type: 'object', properties: { reply: { type: 'string' } }, required: ['reply'] };
+  cursor.connect = options => {
+    assert.equal(options.noTools, true);
+    return { close() {}, call: async (method, params) => {
+      if (method === 'initialize') return { agentCapabilities: {} };
+      if (method === 'session/load') { assert.equal(params.sessionId, 'kept'); return { sessionId: 'kept' }; }
+      if (method === 'session/new') return { sessionId: 'kept' };
+      if (method === 'session/prompt') {
+        sent.push(params.prompt[0].text);
+        options.onUpdate({ sessionId: 'kept', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '{"reply":"ok"}' } } });
+        return { stopReason: 'end_turn' };
+      }
+      return {};
+    } };
+  };
+  await cursor.run({ model: 'test', prompt: 'First', schema });
+  const result = await cursor.run({ model: 'test', prompt: 'Next', schema, resume: 'kept', schemaInHistory: true });
+  assert.deepEqual(JSON.parse(result.result), { reply: 'ok' });
+  assert.match(sent[0], /Return only JSON/);
+  assert.equal(sent[1], 'Next');
+});
+
 test('Cursor structured connections use private read/write/command denials without changing worker settings', t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cursor-review-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

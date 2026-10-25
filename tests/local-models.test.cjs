@@ -58,7 +58,7 @@ test('local structured inference uses the schema-enabled chat endpoint and prepa
   const { providers, calls } = lm({ chat: () => completion() });
   const result = await providers.structured(choice, { ...hubRequest, images: ['data:image/png;base64,aGVsbG8='] }, new AbortController().signal);
   assert.deepEqual(result.decision, hubReply);
-  assert.deepEqual(result.usage, { inputTokens: 32, cachedInputTokens: 8, outputTokens: 16 });
+  assert.deepEqual(result.usage, { inputTokens: 32, cachedInputTokens: 8, outputTokens: 16, cacheWriteInputTokens: null });
   const request = calls.find(c => c.endpoint === '/v1/chat/completions').body;
   assert.equal(request.model, 'gemma-runtime');
   assert.deepEqual(request.response_format, { type: 'json_schema', json_schema: { name: 'harness_response', strict: true, schema: hubSchema } });
@@ -78,7 +78,7 @@ test('local structured usage preserves missing counters as unknown and accepts a
   const { providers } = lm({ chat: () => json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(hubReply) } }],
     usage: { prompt_tokens: 0, completion_tokens: 0 } }) });
   const result = await providers.structured(choice, hubRequest, new AbortController().signal);
-  assert.deepEqual(result.usage, { inputTokens: 0, outputTokens: 0, cachedInputTokens: null });
+  assert.deepEqual(result.usage, { inputTokens: 0, outputTokens: 0, cachedInputTokens: null, cacheWriteInputTokens: null });
 });
 
 test('local structured responses reject plain text and incomplete output without leaking model text', async () => {

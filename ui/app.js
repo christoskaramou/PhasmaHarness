@@ -31,6 +31,7 @@ function renderSidebarWidth() {
   if (sidebarWidth === null) sidebar.style.removeProperty('width');
   else sidebar.style.width = `${Math.max(200, Math.min(sidebarMaxWidth(), sidebarWidth))}px`;
   const width = Math.round(sidebar.getBoundingClientRect().width);
+  document.documentElement.style.setProperty('--sidebar-width', `${width}px`);
   sidebarResizer.setAttribute('aria-valuemin', '200');
   sidebarResizer.setAttribute('aria-valuemax', String(sidebarMaxWidth()));
   sidebarResizer.setAttribute('aria-valuenow', String(width));
@@ -819,12 +820,16 @@ $('#group-archive').onclick = async () => {
   finally { $('#group-archive').disabled = false; }
 };
 let groupRenderKey = '';
+function mentionMembers() {
+  const group = current()?.group;
+  return group ? (fleetState?.agents || state.agents || []).filter(bot => bot.id === 'main' || group.members.includes(bot.id)) : [];
+}
 function renderGroups() {
   const sessions = fleetState?.agentStates?.main?.sessions || state.sessions;
   const groups = sessions.filter(session => session.group && !session.archived);
   $('#group-section').hidden = !groups.length;
-  const members = (current()?.group?.members || []).map(id => fleetState?.agents.find(bot => bot.id === id)).filter(Boolean);
-  const key = JSON.stringify([groups.map(group => [group.id, group.title, group.group.members]), selectedAgent, selectedId,
+  const members = mentionMembers();
+  const key = JSON.stringify([groups.map(group => [group.id, group.title, group.group.members, group.groupTurn]), selectedAgent, selectedId,
     members.map(bot => [bot.id, bot.name]), submitting, readingImages, changingPermissions]);
   if (key === groupRenderKey) return;
   groupRenderKey = key;
@@ -833,12 +838,15 @@ function renderGroups() {
     button.setAttribute('aria-pressed', String(selectedAgent === 'main' && selectedId === group.id));
     button.disabled = submitting || readingImages || changingPermissions;
     const label = element('span', 'agent-nav-label');
-    label.append(element('strong', '', group.title), element('small', 'agent-nav-preview', `${group.group.members.length + 1} members · Hub coordinates`));
+    const activity = group.groupTurn;
+    label.append(element('strong', '', group.title), element('small', 'agent-nav-preview', activity
+      ? `${activity.name} · ${activity.state === 'needs-input' ? 'Needs input' : activity.state === 'waiting' ? 'Waiting' : 'Replying'}`
+      : `${group.group.members.length + 1} members`));
     button.append(element('span', 'agent-avatar', '#'), label);
     button.onclick = () => selectAgent('main', group.id).catch(notify);
     return button;
   }));
-  $('#group-mention').replaceChildren(new Option('@mention…', ''), new Option('@Hub', 'main'),
+  $('#group-mention').replaceChildren(new Option('@mention…', ''),
     ...members.map(bot => new Option('@' + bot.name, bot.id)));
 }
 $('#group-mention').onchange = () => {
@@ -1107,6 +1115,10 @@ for (const container of [$('#agent-list'), $('#main-agent-list'), $('#agent-card
   });
 }
 let agentRenderKey = '';
+$('#agent-search').addEventListener('input', () => renderAgents());
+$('#agent-search').addEventListener('keydown', event => {
+  if (event.key === 'Escape') { event.preventDefault(); event.target.value = ''; renderAgents(); }
+});
 function renderAgents() {
   const agents = state.agents || [{ id: 'main', name: 'Hub' }];
   const switching = submitting || readingImages || changingPermissions;
@@ -1134,12 +1146,23 @@ function renderAgents() {
       error: !['ready', 'connecting'].includes(worker.connection) ? worker.error : null };
   });
   const active = agents.filter(a => a.busy).length;
-  const visible = rows.filter(row => !row.batchIdle || row.id === selectedAgent);
+  const query = $('#agent-search').value.trim().toLocaleLowerCase();
+  const matches = new Set(rows.filter(row => row.id === 'main' || `${row.name} ${row.workspace}`.toLocaleLowerCase().includes(query)).map(row => row.id));
+  // Keep matching children under their creators even when the creator's name doesn't match.
+  if (query) for (const row of rows.filter(row => matches.has(row.id))) {
+    const seen = new Set();
+    for (let parent = row; isSubBot(parent) && !seen.has(parent.id);) {
+      seen.add(parent.id); parent = rows.find(other => other.id === parent.createdBy);
+      if (!parent) break;
+      matches.add(parent.id);
+    }
+  }
+  const visible = rows.filter(row => query ? matches.has(row.id) : !row.batchIdle || row.id === selectedAgent);
   // Sub-bots show under their creator only while it or one of its sub-bots is selected; a creator shows how many bots
   // are under it.
   const byId = new Map(visible.map(row => [row.id, row]));
   const creatorOf = row => (isSubBot(row) ? byId.get(row.createdBy) : null);
-  const open = new Set();
+  const open = new Set(query ? visible.map(row => row.id) : []);
   for (let row = byId.get(selectedAgent); row && !open.has(row.id); row = creatorOf(row))
     open.add(row.id);
   const sidebar = [];
@@ -1168,7 +1191,7 @@ function renderAgents() {
     place(row, 0);
   $('#agent-roster-label').textContent = `Other bots · ${visible.length - 1}`;
   $('#agents-summary').textContent = `${agents.length} agents · ${active} working`;
-  const key = JSON.stringify([rows, selectedAgent, selectedId, switching, deletingAgent]);
+  const key = JSON.stringify([rows, selectedAgent, selectedId, switching, deletingAgent, query]);
   if (key === agentRenderKey) return;
   closeAgentMenu();
   agentRenderKey = key;
@@ -1178,7 +1201,7 @@ function renderAgents() {
     const node = element('button', '', label); node.type = 'button'; node.dataset.agent = agent.id; node.dataset.action = action; node.disabled = disabled; return node;
   };
   const badge = row => element('span', `agent-badge ${row.status.toLowerCase().replaceAll(' ', '-')}`, row.status);
-  const avatar = row => element('span', 'agent-avatar', row.name.slice(0, row.id === 'main' ? 1 : 2).toUpperCase());
+  const avatar = row => { const icon = HarnessMosaic.icon(row.id, row.id === 'main'); icon.classList.add('agent-avatar'); return icon; };
   const nav = row => {
     const isHub = row.id === 'main';
     const node = button('', row, 'open', switching);
@@ -1192,7 +1215,8 @@ function renderAgents() {
     node.setAttribute('aria-haspopup', 'menu');
     const label = element('span', 'agent-nav-label');
     label.append(element('strong', '', row.name));
-    label.append(element('small', 'agent-nav-preview', isHub ? 'Your main chat' : row.preview || row.status));
+    label.append(element('small', 'agent-nav-preview', row.preview || row.status));
+    if (row.status === 'Ready') node.classList.add('agent-idle');
     node.append(avatar(row), label);
     if (row.subBots) {
       const count = element('span', 'agent-subbots', String(row.subBots));
@@ -1205,7 +1229,7 @@ function renderAgents() {
   };
   $('#main-agent-list').replaceChildren(...sidebar.filter(row => row.id === 'main').map(nav));
   $('#agent-list').replaceChildren(...sidebar.filter(row => row.id !== 'main').map(nav));
-  if (sidebar.length === 1) $('#agent-list').append(element('p', 'muted', rows.length > 1
+  if (sidebar.length === 1) $('#agent-list').append(element('p', 'muted', query ? 'No matching bots.' : rows.length > 1
     ? 'Finished batch workers are in Overview.' : 'Create an agent for a new conversation.'));
   $('#agent-cards').replaceChildren(...rows.map(row => {
     const card = element('article', `agent-card${row.id === selectedAgent ? ' selected' : ''}`);
@@ -1416,6 +1440,7 @@ function render() {
   $('#route-preview').hidden = !!state.coordinator;
   const ready = state.connection === 'ready';
   $('#session-title').textContent = session?.group ? session.title : state.agents?.find(a => a.id === selectedAgent)?.name || 'Hub';
+  $('#session-icon').replaceChildren(HarnessMosaic.icon(session?.group ? session.id : selectedAgent, !session?.group && selectedAgent === 'main'));
   const readOnly = readOnlyNote();
   $('#prompt').placeholder = readOnly || `Message ${$('#session-title').textContent}…`;
   $('#prompt').readOnly = !!readOnly;
@@ -1433,7 +1458,7 @@ function render() {
   $('#permissions').value = permission.id;
   $('#permissions').title = `${permission.label}: ${permission.description}`;
   $('#permissions').setAttribute('aria-label', `Session permissions: ${permission.label}`);
-  $('#permissions').disabled = changingPermissions || submitting || !!(session && state.busy === session.id) || !!readOnlyNote();
+  $('#permissions').disabled = changingPermissions || submitting || !!session?.groupTurn || !!(session && state.busy === session.id) || !!readOnlyNote();
   $('#permissions').classList.toggle('full-access', permission.id === 'danger-full-access');
   $('#browse-session').disabled = !selectedId;
   const jevIssue = jevHealth();
@@ -1451,7 +1476,7 @@ function render() {
   $('#jev-remove').disabled = !jevKeySaved || jevBusy;
   $('#jev-save').disabled = jevBusy;
   clearTimeout(noticeTimer);
-  const sticky = state.error || (state.busy && state.busy !== selectedId
+  const sticky = state.error || (state.busy && state.busy !== selectedId && !session?.group
     ? state.coordinator ? 'Hub is replying in another chat. Your message can queue here.' : 'Another session is working. You can browse here while it finishes.' : '');
   const noticeExpiresAt = session?.noticeExpiresAt ?? (session?.notice?.startsWith('Context compacted.') ? 0 : Infinity);
   let flash = session?.error || (Date.now() < noticeExpiresAt ? session?.notice : '') || '';
@@ -1478,7 +1503,7 @@ function render() {
     const text = element('span', '', `${message.error ? 'Paused' : 'Queued'}: ${message.text}${message.images.length ? ` (${message.images.length} images)` : ''}`);
     text.title = message.error || message.text;
     row.append(text);
-    for (const [action, label] of [[state.busy || revise ? 'steer' : 'send', 'Send now'], ['edit', '✎'], ['remove', '×']]) {
+    for (const [action, label] of [[(state.busy && !session.groupTurn) || revise ? 'steer' : 'send', 'Send now'], ['edit', '✎'], ['remove', '×']]) {
       const button = element('button', 'compact-action', label);
       button.type = 'button';
       button.classList.add(`queue-${action}`);
@@ -1488,6 +1513,7 @@ function render() {
       button.setAttribute('aria-label', action === 'remove' ? 'Remove queued message' : action === 'edit' ? 'Edit queued message' : label);
       button.disabled = (action === 'steer' && (revise && !['queued', 'running'].includes(session.delegation.state))) || !!session.queueSending || (action !== 'remove' && (message.uncertain || (action !== 'edit' && (!ready || (state.busy && (state.busy !== selectedId || (!revise && ((!session.turnId && providerCaps(session.activeProvider).steer && !state.coordinator) || session.compacting))))))));
       button.title = action === 'edit' ? 'Move back to the composer to edit and resend'
+        : action === 'send' && session.groupTurn ? 'Stop the current group reply, then send this message'
         : action === 'steer' && !revise ? sendNowTitle(session.activeProvider)
           : button.getAttribute('aria-label');
       button.onclick = async () => {
@@ -1511,12 +1537,12 @@ function render() {
   }
   $('#send').disabled = ((!ready || (state.coordinator && !currentMode())) && !slashCommand($('#prompt').value)) || !!session?.queueSending || !!session?.compacting || (state.busy && state.busy !== selectedId && !state.coordinator) || changingPermissions || submitting || readingImages || (!$('#prompt').value.trim() && !attachedImages().length && !attachedFiles().length);
   renderImages();
-  $('#working').hidden = !state.busy || state.busy !== selectedId || !!session?.pendingMessage;
+  $('#working').hidden = !session?.groupTurn && (!state.busy || state.busy !== selectedId || !!session?.pendingMessage);
   const turnError = state.busy === selectedId ? '' : session?.error || '';
   $('#turn-error').textContent = turnError ? `${session.status === 'interrupted' ? 'Stopped' : 'Turn failed'}: ${turnError}` : '';
   $('#turn-error').hidden = !turnError;
   renderModelFetching();
-  $('#working-text').textContent = session?.waitingForAgent || (session?.compacting ? 'Compacting conversation context…' : state.routing === selectedId && state.routing
+  $('#working-text').textContent = (session?.groupTurn ? `${session.groupTurn.name} ${session.groupTurn.state === 'needs-input' ? 'needs your input' : session.groupTurn.state === 'waiting' ? 'is waiting to reply' : 'is replying'}…` : '') || session?.waitingForAgent || (session?.compacting ? 'Compacting conversation context…' : state.routing === selectedId && state.routing
     ? `Choosing a model with ${routerName(state.routerModel)}…` : `${session?.routes.at(-1)?.label || 'Codex CLI'} is working…`);
   const usage = session?.usage;
   const total = usage?.total;
@@ -1863,7 +1889,8 @@ function renderAgentResult(item, node, session) {
   const checksFailed = Object.values(item.verification || {}).some(group => group.status === 'failed');
   node.dataset.status = checksFailed ? 'failed' : item.status;
   const status = checksFailed ? 'Checks failed' : { completed: 'Result received', failed: 'Failed', cancelled: 'Cancelled', interrupted: 'Interrupted' }[item.status] || 'Needs review';
-  const label = element('div', 'message-label', `${item.agentName} · ${item.superseded ? 'Earlier revision' : status}`);
+  const label = element('div', 'message-label');
+  label.append(HarnessMosaic.icon(item.agentId), element('strong', '', item.agentName), document.createTextNode(' · '), element('span', 'result-status', item.superseded ? 'Earlier revision' : status));
   const answer = reportAnswer(item);
   const report = [item.error, answer].filter(Boolean).filter((text, i, all) => all.indexOf(text) === i).join('\n\n');
   const preview = element('div', 'job-result-preview message-body');
@@ -2115,6 +2142,7 @@ function providerConnectionSummary() {
 // Codex runtime; a reply without a turn (older data) was Codex's.
 const WRITERS = { codex: 'Codex CLI', 'claude-cli': 'Claude CLI', 'cursor-cli': 'Cursor CLI', 'native:muse': 'Muse Code CLI', 'native:antigravity': 'Antigravity CLI', 'native:deepseek': 'DeepSeek Harness CLI' };
 function writer(item, session) {
+  if (item.groupSpeaker) return item.groupSpeaker.name;
   if (item.type === 'plan') return 'Plan';
   if (item.routeLabel === 'Jev · quick answer') return 'Jev';
   const route = item.turnId ? (session.routes || []).find(r => r.turnId === item.turnId) : null;
@@ -2225,7 +2253,7 @@ function renderMessages(session) {
         };
         actions.append(copy);
       }
-      if (!user || item.routineRun) actions.append(label);
+      if ((!user || item.routineRun) && !item.groupSpeaker) actions.append(label);
       renderMarkdown(body, text);
       if (user) {
         for (const file of attachment?.files || []) {
@@ -2241,6 +2269,7 @@ function renderMessages(session) {
         if (!event.target.closest('a, button, summary, input, select, textarea')) node.focus({ preventScroll: true });
       };
       node.replaceChildren(bubble, actions);
+      if (item.groupSpeaker) { label.classList.add('group-speaker'); node.prepend(label); }
       if (user && batch) node.append(renderBatchReport(batch, batchOpened));
       if (item.hubComparison) node.append(renderComparison(item.hubComparison, session.id, comparisonOpened));
       if (user) {
@@ -2319,7 +2348,7 @@ async function selectSession(id) {
 function renderSendButton() {
   window.HarnessDictation?.render();
   const hasDraft = !!$('#prompt').value.trim() || attachedImages().length > 0 || attachedFiles().length > 0;
-  const busyHere = !!selectedId && state?.busy === selectedId;
+  const busyHere = !!selectedId && (state?.busy === selectedId || !!current()?.groupTurn);
   $('#attach-files').disabled = readingImages || submitting || changingPermissions || !!readOnlyNote();
   if (readOnlyNote())
     $('#dictate').disabled = true;
@@ -2363,20 +2392,24 @@ async function updatePreview() {
 
 let reviewingExecution = null;
 function renderRequest() {
-  const execution = reviewingExecution && fleetState?.executionStates?.[reviewingExecution];
+  const groupTurn = current()?.groupTurn;
+  const groupExecution = groupTurn?.sessionId && fleetState?.executionStates?.[groupTurn.agentId];
+  const activeGroup = groupExecution?.busy === groupTurn?.sessionId && groupExecution?.requests.length ? groupTurn : null;
+  const executionId = activeGroup?.agentId || reviewingExecution;
+  const execution = executionId && fleetState?.executionStates?.[executionId];
   if (reviewingExecution && !execution?.requests.length) reviewingExecution = null;
-  const request = reviewingExecution ? execution.requests[0] : state.requests[0];
+  const request = executionId ? execution?.requests[0] : state.requests[0];
   const dialog = $('#request-dialog');
   if (!request) { if (dialog.open) dialog.close(); shownRequest = null; return; }
-  const requestKey = `${reviewingExecution || selectedAgent}:${reviewingExecution ? execution.conversationId : selectedId}:${request.id}`;
+  const requestKey = `${executionId || selectedAgent}:${activeGroup?.sessionId || (executionId ? execution.conversationId : selectedId)}:${request.id}`;
   if (shownRequest === requestKey) return;
   shownRequest = requestKey;
   const content = $('#request-content'); content.replaceChildren();
-  const session = (reviewingExecution ? execution : state).sessions.find(s => s.threadId === request.params.threadId);
+  const session = activeGroup ? execution.sessions.find(s => s.id === activeGroup.sessionId) : (executionId ? execution : state).sessions.find(s => s.threadId === request.params.threadId);
   content.append(element('div', 'request-context', session?.title || 'Current task'));
-  const agentId = reviewingExecution || selectedAgent;
+  const agentId = executionId || selectedAgent;
   // A watched background chat answers in that background context.
-  const contextId = reviewingExecution ? session?.id || execution.conversationId : state.watching ? session?.id || state.conversationId : undefined;
+  const contextId = executionId ? session?.id || execution.conversationId : state.watching ? session?.id || state.conversationId : undefined;
   const finish = async answer => { try { await window.router.answer(request.id, answer, agentId, contextId); } catch (error) { notify(error); } };
   if (/requestUserInput/.test(request.method)) {
     content.append(element('h2', '', 'Codex has a question'));
@@ -2585,6 +2618,25 @@ $('#command-dialog').addEventListener('keydown', event => {
   }
 });
 let slashIndex = 0, slashDismissed = false;
+function groupMentionQuery() {
+  if (!current()?.group) return;
+  const prompt = $('#prompt'), query = prompt.value.slice(0, prompt.selectionStart).match(/^\s*@([^\r\n]*)$/)?.[1].toLowerCase();
+  if (query === undefined) return;
+  const names = mentionMembers().map(bot => bot.name.toLowerCase());
+  // Only a leading mention routes a group message; stop suggesting once its body begins.
+  if (!names.some(name => name.startsWith(query)) && names.some(name => query.startsWith(name + ' '))) return;
+  return query;
+}
+function chooseGroupMention(id) {
+  if (groupMentionQuery() === undefined || submitting || readingImages || changingPermissions || readOnlyNote()) return;
+  const bot = mentionMembers().find(bot => bot.id === id);
+  if (!bot) return;
+  const prompt = $('#prompt'), mention = '@' + bot.name + ' ';
+  prompt.value = mention + prompt.value.slice(prompt.selectionEnd).replace(/^[ \t]*/, '');
+  prompt.setSelectionRange(mention.length, mention.length);
+  prompt.focus(); prompt.dispatchEvent(new Event('input', { bubbles:true }));
+  slashDismissed = true; hideSlashMenu();
+}
 function hideSlashMenu() {
   $('#slash-menu').hidden = true;
   $('#prompt').setAttribute('aria-expanded', 'false');
@@ -2592,26 +2644,40 @@ function hideSlashMenu() {
 }
 function renderSlashMenu() {
   const prompt = $('#prompt'), menu = $('#slash-menu');
-  const query = prompt.value.trim().match(/^\/([a-z-]*)$/i)?.[1].toLowerCase();
-  if (query === undefined || slashDismissed || document.activeElement !== prompt || submitting || readingImages || changingPermissions) { hideSlashMenu(); return; }
-  const names = Object.keys(COMMANDS).filter(name => name.startsWith(query));
-  slashIndex = Math.min(slashIndex, Math.max(0, names.length - 1));
+  const mention = groupMentionQuery();
+  const query = mention ?? prompt.value.trim().match(/^\/([a-z-]*)$/i)?.[1].toLowerCase();
+  if (query === undefined || slashDismissed || document.activeElement !== prompt || submitting || readingImages || changingPermissions || readOnlyNote()) { hideSlashMenu(); return; }
+  const entries = mention !== undefined ? mentionMembers().filter(bot => bot.name.toLowerCase().startsWith(query)).map(({ id, name }) => ({ id, name }))
+    : Object.keys(COMMANDS).filter(name => name.startsWith(query)).map(name => ({ id:name, name }));
+  slashIndex = Math.min(slashIndex, Math.max(0, entries.length - 1));
   const options = $('#slash-options');
-  if (options.dataset.query !== query) options.replaceChildren(...names.map(name => {
+  const key = JSON.stringify([mention !== undefined, query, entries]);
+  if (options.dataset.query !== key) options.replaceChildren(...entries.map(({ id, name }) => {
     const button = element('button', 'slash-option');
-    button.type = 'button'; button.tabIndex = -1; button.id = 'slash-' + name; button.dataset.command = name;
+    button.type = 'button'; button.tabIndex = -1; button.id = 'slash-' + id;
     button.setAttribute('role', 'option');
-    button.append(element('code', '', '/' + name), element('span', '', COMMANDS[name].description));
+    if (mention !== undefined) {
+      button.dataset.member = id;
+      button.append(element('strong', '', '@' + name), element('span', '', id === 'main' ? 'Coordinator' : 'Group member'));
+      button.onclick = () => chooseGroupMention(id);
+    } else {
+      button.dataset.command = name;
+      button.append(element('code', '', '/' + name), element('span', '', COMMANDS[name].description));
+      button.onclick = () => chooseSlashCommand(name, true);
+    }
     button.onmousedown = event => event.preventDefault();
-    button.onclick = () => chooseSlashCommand(name, true);
     return button;
   }));
-  options.dataset.query = query;
+  options.dataset.query = key;
+  options.setAttribute('aria-label', mention !== undefined ? 'Group members' : 'Slash commands');
+  $('.slash-menu-heading span').textContent = mention !== undefined ? 'Mention a bot' : 'Commands';
+  $('.slash-menu-heading span:last-child').textContent = mention !== undefined ? '↑ ↓ select · Enter or Tab mention' : '↑ ↓ select · Enter run · Tab complete';
   [...options.children].forEach((button, index) => button.setAttribute('aria-selected', String(index === slashIndex)));
-  $('#slash-empty').hidden = !!names.length;
+  $('#slash-empty').textContent = mention !== undefined ? 'No matching group members' : 'No matching commands';
+  $('#slash-empty').hidden = !!entries.length;
   menu.hidden = false;
   prompt.setAttribute('aria-expanded', 'true');
-  if (names.length) prompt.setAttribute('aria-activedescendant', 'slash-' + names[slashIndex]);
+  if (entries.length) prompt.setAttribute('aria-activedescendant', options.children[slashIndex].id);
   else prompt.removeAttribute('aria-activedescendant');
 }
 function chooseSlashCommand(name, execute) {
@@ -2762,8 +2828,13 @@ $('#prompt').addEventListener('keydown', event => {
       renderSlashMenu(); $('#slash-options').children[slashIndex].scrollIntoView({ block: 'nearest' }); return;
     }
     if (options.length && ['Enter', 'Tab'].includes(event.key)) {
-      event.preventDefault(); chooseSlashCommand(options[slashIndex].dataset.command, event.key === 'Enter'); return;
+      event.preventDefault();
+      const option = options[slashIndex];
+      if (option.dataset.member) chooseGroupMention(option.dataset.member);
+      else chooseSlashCommand(option.dataset.command, event.key === 'Enter');
+      return;
     }
+    if (!options.length && event.key === 'Enter' && groupMentionQuery() !== undefined) { event.preventDefault(); return; }
   }
   if (!event.isComposing && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && ['ArrowUp', 'ArrowDown'].includes(event.key)) {
     const prompt = $('#prompt');
@@ -3425,7 +3496,7 @@ document.addEventListener('click', event => {
 document.addEventListener('keydown', event => {
   if (event.defaultPrevented) return;
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'n' && !document.querySelector('dialog[open]')) { event.preventDefault(); editAgent(); }
-  if (event.key === 'Escape' && state?.busy && state.busy === selectedId && !document.querySelector('dialog[open]')) api.stop(state.busy).catch(notify);
+  if (event.key === 'Escape' && (state?.busy === selectedId || current()?.groupTurn) && !document.querySelector('dialog[open]')) api.stop(selectedId).catch(notify);
 });
 api.onState(applyState);
 api.bootstrap().then(applyState).catch(notify);
@@ -3724,6 +3795,15 @@ function appendModelToggle(parent, { checked, label, onChange }) {
 // The tabs share one scrolling body; each keeps its own place in it.
 const settingsScroll = {};
 document.querySelectorAll('.settings-tab').forEach(tab => {
+  tab.addEventListener('keydown', event => {
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    const tabs = [...document.querySelectorAll('.settings-tab')];
+    const step = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 }[event.key];
+    if (!step) return;
+    event.preventDefault();
+    const next = tabs[(tabs.indexOf(tab) + step + tabs.length) % tabs.length];
+    next.focus(); next.click();
+  });
   tab.onclick = () => {
     const name = tab.dataset.tab;
     const body = $('.settings-body');

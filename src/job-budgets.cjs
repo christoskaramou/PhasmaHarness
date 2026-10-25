@@ -22,7 +22,7 @@ function normalizedUsage(value) {
     if (!count(value.input_tokens) || !count(value.output_tokens)) return null;
     const read = value.cache_read_input_tokens ?? 0, write = value.cache_creation_input_tokens ?? 0;
     if (!count(read) || !count(write)) return null;
-    input = value.input_tokens + read + write; output = value.output_tokens; cached = read;
+    input = value.total_input_tokens ?? (value.input_tokens + read + write); output = value.output_tokens; cached = value.cache_read_input_tokens ?? null;
   }
   if (!count(input + output) || (cached != null && (!count(cached) || cached > input))) return null;
   return { inputTokens: input, outputTokens: output, cachedInputTokens: cached ?? null, totalTokens: input + output };

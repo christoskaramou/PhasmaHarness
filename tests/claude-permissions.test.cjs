@@ -29,6 +29,18 @@ function fake() {
 }
 const flag = (args, name) => args.includes(name) ? args[args.indexOf(name) + 1] : undefined;
 
+test('Claude Main continuations persist and resume while retaining the tool-free contract', async () => {
+  const { cli, state, send } = fake();
+  const run = cli.run({ model: 'test', prompt: 'Continue.', schema: { type: 'object' }, resume: 'kept-main', persistSession: true });
+  await new Promise(setImmediate);
+  assert.equal(flag(state.args, '--resume'), 'kept-main');
+  assert.equal(state.args.includes('--no-session-persistence'), false);
+  assert.equal(flag(state.args, '--tools'), '');
+  assert.equal(flag(state.args, '--permission-mode'), 'dontAsk');
+  assert.equal(flag(state.args, '--mcp-config'), '{"mcpServers":{}}');
+  send({ type: 'result', result: '{}' }); await run;
+});
+
 for (const [access, mode] of [['workspace-write', 'acceptEdits'], ['read-only', 'default']]) {
   test(`Claude ${access} asks the Harness for tools outside the pre-approved set`, async () => {
     const { cli, state, send, nextInput } = fake();

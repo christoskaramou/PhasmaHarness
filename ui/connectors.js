@@ -1,26 +1,31 @@
 var HarnessConnectors = (() => {
   const api = window.router, $ = selector => document.querySelector(selector);
-  let records = [], editing = null, busy = false, timer, refreshError;
+  let records = [], editing = null, busy = false, timer, refreshError, renderKey;
   const states = { connected: 'Connected', connecting: 'Connecting…', disconnected: 'Disconnected', disabled: 'Disabled', 'needs-sign-in': 'Authorization required', error: 'Could not connect' };
   function message(value) { $('#connector-status').textContent = value || ''; }
   function button(label, action) { const node = document.createElement('button'); node.type = 'button'; node.textContent = label; node.disabled = busy; node.onclick = action; return node; }
   function render() {
+    const key = JSON.stringify([records, busy]);
+    if (key === renderKey) return;
+    renderKey = key;
     const list = $('#connector-list'); list.replaceChildren();
     if (!records.length) { const empty = document.createElement('p'); empty.className = 'hint'; empty.textContent = 'Add an MCP server to share its tools with your bots.'; list.append(empty); }
     for (const record of records) {
       const card = document.createElement('section'); card.className = 'connector-card';
       const heading = document.createElement('div'); heading.className = 'connector-heading';
       const name = document.createElement('strong'); name.textContent = record.name;
-      const status = document.createElement('span'); status.className = 'hint'; status.textContent = states[record.state] || record.state;
-      heading.append(name, status); card.append(heading);
+      const status = document.createElement('span'); status.className = 'connector-state'; status.dataset.state = record.state; status.textContent = states[record.state] || record.state;
+      heading.append(HarnessMosaic.icon(record.id), name, status); card.append(heading);
       const detail = document.createElement('p'); detail.className = 'hint';
       detail.textContent = record.error || `${record.transport === 'http' ? 'Remote MCP' : 'Local MCP'}${record.toolCount !== undefined ? ` · ${record.toolCount} ${record.toolCount === 1 ? 'tool' : 'tools'}` : ''} · ${record.confirmCalls ? 'Confirm each call' : 'Allowed for Full access'}`;
       card.append(detail);
-      const actions = document.createElement('div'); actions.className = 'compact-actions';
+      const actions = document.createElement('details'); actions.className = 'connector-actions';
+      const toggle = document.createElement('summary'); toggle.textContent = '⋯'; toggle.setAttribute('aria-label', `Actions for ${record.name}`); actions.append(toggle);
       actions.append(button('Edit', () => edit(record)), button(record.state === 'connected' || record.state === 'connecting' ? 'Disconnect' : 'Connect', () => act(record, record.state === 'connected' || record.state === 'connecting' ? 'disconnect' : 'connect')));
       if (record.auth === 'oauth' && record.enabled) actions.append(button(record.signingIn ? 'Cancel sign-in' : 'Sign in', () => act(record, record.signingIn ? 'cancel-sign-in' : 'sign-in')));
       if (record.credentialsSaved) actions.append(button('Forget credentials', () => act(record, 'forget-auth')));
       actions.append(button('Remove', () => act(record, 'remove'))); card.append(actions); list.append(card);
+      actions.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); actions.open = false; toggle.focus(); } });
     }
     $('#connector-add').disabled = busy; $('#connector-save').disabled = busy;
   }

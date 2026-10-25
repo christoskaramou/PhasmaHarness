@@ -162,11 +162,11 @@ app.whenReady().then(async () => {
       ratio: width / previousWidth,
       shieldShift: getComputedStyle(document.querySelector('.composer-access svg')).transform };
   })()`);
-  assert.equal(sidebarSettings.text, '');
+  assert.equal(sidebarSettings.text, 'Settings');
   assert.equal(sidebarSettings.name, 'Settings');
   assert.equal(sidebarSettings.title, 'Settings');
-  assert.ok(Math.abs(sidebarSettings.ratio - .8) < .01, 'sidebar gear is 20% smaller: ' + JSON.stringify(sidebarSettings));
-  assert.equal(sidebarSettings.shieldShift, 'matrix(1, 0, 0, 1, -4, 0)', 'shield moves closer to plus');
+  assert.equal(sidebarSettings.ratio, 1, 'Mosaic gear keeps its CSS size');
+  assert.equal(sidebarSettings.shieldShift, 'none', 'shield is centred in its hit area');
   const shieldFocus = await window.webContents.executeJavaScript(`(() => {
     const access = document.querySelector('#permissions');
     const disabled = access.disabled;
@@ -265,7 +265,7 @@ app.whenReady().then(async () => {
     return results;
   })()`);
   for (const result of composerLayout) {
-    assert.ok(Math.abs(result.empty - result.line) < 1, 'empty composer is one line');
+    assert.ok(Math.abs(result.empty - result.line) < 1, 'empty composer is one line: ' + JSON.stringify(result));
     assert.ok(Math.abs(result.three - 3 * result.line) < 1, 'newlines grow the composer');
     assert.ok(Math.abs(result.capped - 6 * result.line) < 1, 'wrapped text caps at six lines');
     assert.equal(result.scrolls, true);
@@ -358,7 +358,7 @@ app.whenReady().then(async () => {
     assert.equal((await appearanceState()).background, 'rgb(255, 255, 255)');
     nativeTheme.themeSource = 'dark';
     await themeFrame();
-    assert.equal((await appearanceState()).background, 'rgb(25, 25, 25)', 'System follows live OS appearance changes');
+    assert.equal((await appearanceState()).background, 'rgb(18, 18, 18)', 'System follows live OS appearance changes');
     await chooseAppearance('light');
     assert.deepEqual(await appearanceState(), {
       mode: 'light', background: 'rgb(255, 255, 255)', draft: 'Keep this draft', sidebar: true, optionsClosed: true,
@@ -366,7 +366,7 @@ app.whenReady().then(async () => {
     nativeTheme.themeSource = 'light';
     await chooseAppearance('dark');
     await themeFrame();
-    assert.equal((await appearanceState()).background, 'rgb(25, 25, 25)', 'explicit Dark overrides a light OS');
+    assert.equal((await appearanceState()).background, 'rgb(18, 18, 18)', 'explicit Dark overrides a light OS');
     assert.deepEqual({ sent: sent.length, previews }, callsBeforeAppearance, 'appearance does not call providers or routing');
     await new Promise(resolve => {
       window.webContents.once('did-finish-load', resolve);
@@ -392,12 +392,14 @@ app.whenReady().then(async () => {
     await new Promise(r => setTimeout(r, 30));
     if (cancel) await resizeKey('Escape');
     window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', x: x + delta, y: 200, clickCount: 1 });
-    await new Promise(r => setTimeout(r, 30));
+    for (let tries = 0; tries < 50 && (await sidebarSize()).dragging; tries++) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal((await sidebarSize()).dragging, false, 'sidebar drag released');
   };
   const initialSidebar = await sidebarSize();
-  await dragSidebar(70);
+  const dragDistance = Math.min(70, initialSidebar.max - initialSidebar.width);
+  await dragSidebar(dragDistance);
   const resizedSidebar = await sidebarSize();
-  assert.equal(resizedSidebar.width, initialSidebar.width + 70);
+  assert.equal(resizedSidebar.width, initialSidebar.width + dragDistance);
   assert.equal(resizedSidebar.saved, String(resizedSidebar.width));
   assert.equal(resizedSidebar.now, resizedSidebar.saved);
   assert.equal(resizedSidebar.dragging, false);
@@ -679,8 +681,8 @@ app.whenReady().then(async () => {
     const textBox = range.getBoundingClientRect();
     const lineHeight = parseFloat(getComputedStyle(short.querySelector('.message-body')).lineHeight);
     const messages = document.querySelector('#messages').getBoundingClientRect();
-    return { hugsText: shortBox.width - textBox.width <= 30,
-      compact: Math.abs(shortBox.height / (lineHeight + 32) - 2 / 3) < .03,
+    return { hugsText: shortBox.width - textBox.width <= 36,
+      compact: shortBox.height <= lineHeight + 24,
       aligned: Math.abs(shortBox.right - messages.right) < 1,
       wraps: longBox.height > shortBox.height && longBox.width <= messages.width * .88 + 1,
       noOverflow: long.scrollWidth <= long.clientWidth + 1 };
@@ -720,12 +722,11 @@ app.whenReady().then(async () => {
       document.documentElement.dataset.appearance = savedAppearance;
       return result;
     })()`);
-    assert.ok(colors.user.every(channel => channel === colors.user[0]) && colors.agent.every(channel => channel === colors.agent[0]));
-    assert.deepEqual(colors.user, appearance === 'light' ? [28, 28, 28] : [25, 25, 25]);
-    assert.deepEqual(colors.agent, appearance === 'light' ? [239, 239, 239] : [41, 41, 41]);
-    assert.equal(colors.userText, 'rgb(255, 255, 255)');
-    assert.equal(colors.linkText, colors.userText);
-    assert.deepEqual(colors.codeBackground, [41, 41, 41]);
+    assert.deepEqual(colors.user, appearance === 'light' ? [234, 242, 254] : [38, 38, 38]);
+    assert.deepEqual(colors.agent, appearance === 'light' ? [244, 245, 247] : [28, 28, 28]);
+    assert.equal(colors.userText, appearance === 'light' ? 'rgb(32, 43, 60)' : 'rgb(236, 236, 236)');
+    assert.equal(colors.linkText, appearance === 'light' ? 'rgb(40, 95, 187)' : 'rgb(133, 178, 255)');
+    assert.deepEqual(colors.codeBackground, appearance === 'light' ? [245, 246, 248] : [28, 28, 28]);
     assert.deepEqual(colors.commentary, colors.agent);
     assert.equal(colors.leftAligned, true);
     assert.equal(colors.fits, true);
@@ -1021,7 +1022,7 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript(`document.querySelector('[data-connection-provider="native:deepseek"]').classList.contains('connecting')`), false);
   ipcMain.removeHandler('installProvider');
   console.log('Provider action spinner passed');
-  // Rows that are not connected are greyed like their plugs, and each Settings tab keeps its own scroll place.
+  // Disconnected labels stay muted but more readable than the faint plugs; tabs keep their scroll place.
   const providerWindowSize = window.getSize();
   window.setSize(providerWindowSize[0], 480); await new Promise(resolve => setTimeout(resolve, 50));
   await window.webContents.executeJavaScript(`document.querySelector('#settings-dialog').showModal(); document.querySelector('#tab-providers').click();
@@ -1032,7 +1033,8 @@ app.whenReady().then(async () => {
   const settingsLook = await window.webContents.executeJavaScript(`(() => {
     const row = [...document.querySelectorAll('.provider-account-row')].find(r => r.querySelector(':scope > .provider-plug.disconnected'));
     const color = node => getComputedStyle(node).color;
-    const greyed = color(row.querySelector('strong')) === color(row.querySelector('.provider-plug'))
+    const greyed = color(row.querySelector('strong')) === color(row)
+      && color(row.querySelector('strong')) !== color(row.querySelector('.provider-plug'))
       && color(row.querySelector('strong')) !== color(document.querySelector('#settings-dialog'));
     const body = document.querySelector('.settings-body');
     // A connect or install error shows right under the provider rows, in view while they are.
@@ -1052,7 +1054,7 @@ app.whenReady().then(async () => {
     document.querySelector('#settings-dialog').close();
     return { greyed, errorInView, providers, general, back, generalSet, generalBack, errorBox: [box.top, box.bottom], view: [view.top, view.bottom] };
   })()`);
-  assert.equal(settingsLook.greyed, true, 'a provider that is not connected is greyed like its plug');
+  assert.equal(settingsLook.greyed, true, 'disconnected labels are muted independently of their fainter plugs');
   assert.equal(settingsLook.errorInView, true, 'a connect error shows under the provider rows, in view: ' + JSON.stringify(settingsLook));
   assert.ok(settingsLook.providers > 0, 'the Providers tab scrolls in this fixture');
   assert.deepEqual([settingsLook.general, settingsLook.back, settingsLook.generalBack], [0, settingsLook.providers, settingsLook.generalSet],
@@ -1101,11 +1103,11 @@ app.whenReady().then(async () => {
   const corner = { x: Math.floor(originalDialog.right - 4), y: Math.floor(originalDialog.bottom - 4) };
   window.webContents.sendInputEvent({ type: 'mouseMove', ...corner });
   window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...corner });
-  window.webContents.sendInputEvent({ type: 'mouseMove', x: corner.x + 70, y: corner.y - 60 });
-  window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: corner.x + 70, y: corner.y - 60 });
+  window.webContents.sendInputEvent({ type: 'mouseMove', x: corner.x - 70, y: corner.y - 60 });
+  window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: corner.x - 70, y: corner.y - 60 });
   await new Promise(r => setTimeout(r, 50));
   const resizedDialog = await dialogSize();
-  assert.ok(resizedDialog.width > originalDialog.width, 'the Settings corner resizes horizontally');
+  assert.ok(resizedDialog.width < originalDialog.width, 'the Settings corner resizes horizontally');
   assert.ok(resizedDialog.height < originalDialog.height, 'the Settings corner resizes vertically');
   assert.ok(resizedDialog.fits && resizedDialog.footerFits);
   await window.webContents.executeJavaScript("document.querySelector('#settings-close').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true, cancelable: true })); true");
@@ -1156,9 +1158,9 @@ app.whenReady().then(async () => {
   assert.ok(Math.abs(settingsLayout.ratio - .75) < .02, 'form fields are one-quarter shorter');
   const compactGear = await window.webContents.executeJavaScript(`(() => {
     const button = document.querySelector('#settings');
-    return button.getBoundingClientRect().width < 50;
+    return button.textContent.includes('Settings') && button.getBoundingClientRect().height >= 36;
   })()`);
-  assert.ok(compactGear, 'sidebar gear hit area fits the icon');
+  assert.ok(compactGear, 'Settings has a labelled, reachable sidebar row');
   for (const choice of ['close', 'tray']) {
     await window.webContents.executeJavaScript(`(async () => {
       const select = document.querySelector('#settings-runner-exit');
@@ -1535,8 +1537,8 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript("document.querySelector('#hub-form').dispatchEvent(new Event('submit', { cancelable: true })); true");
   await until(async () => await window.webContents.executeJavaScript(`(() => {
     const list = document.querySelector('#main-agent-list');
-    return list.textContent.includes('Atlas') && list.querySelector('.agent-avatar')?.textContent === 'A';
-  })()`), 'the renamed Hub shows its name and initial in the sidebar');
+    return list.textContent.includes('Atlas') && list.querySelectorAll('.agent-avatar i').length === 4;
+  })()`), 'the renamed Hub retains its Mosaic identity in the sidebar');
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#hub-dialog').open"), false);
   assert.equal(agents.hubName(), 'Atlas');
   assert.equal(controller.data.settings.mode, chosenHubMode, 'the Hub saves the model and effort its two pickers show');
@@ -2496,7 +2498,7 @@ app.whenReady().then(async () => {
     renderAgentResult({ agentName: 'PhasmaHarness', status: 'completed', text:
       'Both accepted; replies are pending.\\n[task: pending]\\nSub 1 replied Yellow.\\n[task: pending]\\nBoth bots replied **Yellow**:\\n\\n| Bot | Reply |\\n| --- | --- |\\n| Sub 1 | Yellow |\\n| Sub 2 | Yellow |\\n[task: done]\\n<img src=x onerror=alert(1)>' }, node, current());
     document.querySelector('#messages').append(node);
-    return { text: node.textContent, table: !!node.querySelector('table'), bold: node.querySelector('strong')?.textContent, image: !!node.querySelector('img') };
+    return { text: node.textContent, table: !!node.querySelector('table'), bold: node.querySelector('.job-result-preview strong')?.textContent, image: !!node.querySelector('img') };
   })()`);
   assert.doesNotMatch(historicalReport.text, /pending|\[task:|Both accepted|Sub 1 replied/);
   assert.equal(historicalReport.table, true);
@@ -3100,11 +3102,23 @@ app.whenReady().then(async () => {
   window.webContents.debugger.detach();
   console.log(`Sending from a scrolled-up chat rolls to the newest message (${rolls.map(roll => `${roll.distance} px away: ${roll.ms} ms`).join(', ')})`);
   phase = 'group chat controls';
-  const groupMember = agents.primary.data.agents[0];
+  const groupMember = agents.primary.data.agents.find(bot => bot.name.includes(' '));
+  assert.ok(groupMember, 'mention fixture includes a bot with spaces in its name');
   await window.webContents.executeJavaScript(`document.querySelector('#agents-overview').click();
-    document.querySelector('#groups-add').click();
+    document.querySelector('#groups-add').click(); true`);
+  const groupAppearance = await window.webContents.executeJavaScript('document.documentElement.dataset.appearance');
+  for (const theme of ['light', 'dark']) {
+    await window.webContents.executeJavaScript(`document.documentElement.dataset.appearance = '${theme}'; new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))`);
+    assert.equal(await window.webContents.executeJavaScript(`(() => {
+      const input = document.querySelector('#group-name'), label = input.parentElement, box = input.getBoundingClientRect();
+      return getComputedStyle(label).flexDirection === 'column' && box.width >= label.clientWidth - 1
+        && getComputedStyle(input).outlineStyle === 'none' && getComputedStyle(document.querySelector('#group-error')).display === 'none';
+    })()`), true, `${theme} group name fills a separate row with no blue outline or empty error marker`);
+    fs.writeFileSync(path.resolve(__dirname, '../.scratch/mosaic/group-form-' + theme + '.png'), (await window.webContents.capturePage()).toPNG());
+  }
+  await window.webContents.executeJavaScript(`document.documentElement.dataset.appearance = ${JSON.stringify(groupAppearance)};
     document.querySelector('#group-name').value = 'Game team';
-    document.querySelector('#group-members input').checked = true;
+    [...document.querySelectorAll('#group-members input')].find(input => input.value === ${JSON.stringify(groupMember.id)}).checked = true;
     document.querySelector('#group-form').requestSubmit(); true`);
   await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 80))');
   const group = controller.data.sessions.find(chat => chat.group && chat.title === 'Game team');
@@ -3114,6 +3128,43 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#group-owner").hidden'), false);
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-activity").hidden'), true, 'unrelated Hub work stays out of the group activity');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#main-agent-list button").getAttribute("aria-pressed")'), 'false');
+  const mentionDraft = (value, caret = value.length) => window.webContents.executeJavaScript(`(() => {
+    const prompt = document.querySelector('#prompt'); prompt.value = ${JSON.stringify(value)}; prompt.focus();
+    prompt.setSelectionRange(${caret}, ${caret}); prompt.dispatchEvent(new Event('input', { bubbles:true }));
+    return [...document.querySelectorAll('#slash-options [data-member]')].map(button => button.dataset.member);
+  })()`);
+  const mentionKey = key => window.webContents.executeJavaScript(`document.querySelector('#prompt').dispatchEvent(new KeyboardEvent('keydown', {key:${JSON.stringify(key)}, bubbles:true, cancelable:true})); true`);
+  const beforeMentions = sent.length;
+  assert.deepEqual(await mentionDraft('@'), ['main', groupMember.id], 'typing @ lists only this group’s coordinator and members');
+  for (const theme of ['light', 'dark']) {
+    await window.webContents.executeJavaScript(`document.documentElement.dataset.appearance = '${theme}'; new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))`);
+    assert.equal(await window.webContents.executeJavaScript(`(() => {
+      const composer = document.querySelector('#composer'), style = getComputedStyle(composer), menu = document.querySelector('#slash-menu').getBoundingClientRect();
+      const neutral = document.createElement('span'); neutral.style.color = 'var(--border-strong)'; composer.append(neutral);
+      const same = style.borderColor === getComputedStyle(neutral).color; neutral.remove();
+      return same && menu.top >= 0 && menu.left >= 0 && menu.right <= innerWidth && menu.bottom <= innerHeight;
+    })()`), true, `${theme} composer retains its neutral border and member picker fits`);
+    fs.writeFileSync(path.resolve(__dirname, '../.scratch/mosaic/group-mentions-' + theme + '.png'), (await window.webContents.capturePage()).toPNG());
+  }
+  await window.webContents.executeJavaScript(`document.documentElement.dataset.appearance = ${JSON.stringify(groupAppearance)}; true`);
+  await mentionKey('ArrowDown'); await mentionKey('Enter');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), '@' + groupMember.name + ' ');
+  assert.equal(sent.length, beforeMentions, 'Enter selects the bot without sending');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#slash-menu").hidden'), true);
+  assert.deepEqual(await mentionDraft('@' + groupMember.name.toUpperCase()), [groupMember.id], 'mention filtering is case-insensitive and supports spaces');
+  await mentionKey('Tab');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), '@' + groupMember.name + ' ');
+  await mentionDraft('@' + groupMember.name + ' review this', 1 + groupMember.name.length);
+  await window.webContents.executeJavaScript('document.querySelector("#slash-options [data-member]").click(); true');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), '@' + groupMember.name + ' review this', 'clicking a member preserves the following draft');
+  await mentionDraft('@'); await mentionKey('Escape');
+  assert.deepEqual(await window.webContents.executeJavaScript('[document.querySelector("#slash-menu").hidden, document.querySelector("#prompt").value]'), [true, '@']);
+  assert.deepEqual(await mentionDraft('@unknown-bot'), []);
+  await mentionKey('Enter'); assert.equal(sent.length, beforeMentions);
+  await mentionDraft('@' + groupMember.name + ' review this');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#slash-menu").hidden'), true, 'typing the message body closes suggestions');
+  await mentionDraft('Email test@example.com');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#slash-menu").hidden'), true, 'an email is not a routed mention');
   await window.webContents.executeJavaScript(`document.querySelector('#prompt').value = 'Review this design';
     document.querySelector('#group-mention').value = ${JSON.stringify(groupMember.id)};
     document.querySelector('#group-mention').dispatchEvent(new Event('change')); true`);
@@ -3122,6 +3173,8 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript('selectedId'), group.id, 'state updates keep the group selected');
   await window.webContents.executeJavaScript('selectAgent("main")');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#group-mention").hidden'), true);
+  await mentionDraft('@');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#slash-menu").hidden'), true, 'direct chats do not offer group mentions');
   await window.webContents.executeJavaScript('document.querySelector("#group-list button").click(); true');
   await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 40))');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), '@' + groupMember.name + ' Review this design', 'group draft survives switching');
@@ -3130,6 +3183,51 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 50))');
   assert.equal(group.title, 'Game team updated');
   assert.equal(await sendIsReachable(), true);
+  // A direct group reply belongs to its worker context, including Stop and questions.
+  const groupWorker = agents.execution(groupMember.id), beforeGroupBusy = groupWorker.busy;
+  const groupWork = groupWorker.create(root, 'read-only');
+  groupWork.groupChatId = group.id; groupWork.threadId = 'group-ui-thread'; groupWork.title = group.title;
+  groupWorker.busy = groupWork.id;
+  group.groupTurn = { agentId: groupMember.id, name: groupMember.name, sessionId: groupWork.id, state: 'running' };
+  group.items.push({ id: 'group-ui-user', type: 'userMessage', localOnly: true, content: [{ type:'text', text: '@' + groupMember.name + ' What should we test next?' }] },
+    { id: 'group-ui-reply', type: 'agentMessage', phase:'final_answer', localOnly:true, groupSpeaker: { id: groupMember.id, name: groupMember.name }, text: 'Test the current build and check the failing cases from this conversation.' });
+  await window.webContents.executeJavaScript('document.querySelector("#prompt").value = ""; true');
+  await publish();
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#stop").hidden'), false, 'Stop is available without a busy Hub');
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#working-text").textContent'), /is replying/);
+  assert.equal(await window.webContents.executeJavaScript('writer(current().items.at(-1), current())'), groupMember.name);
+  assert.equal(await window.webContents.executeJavaScript(`(() => {
+    const label = document.querySelector('#messages .group-speaker');
+    return label?.textContent === ${JSON.stringify(groupMember.name)} && !label.closest('.message-actions') && label.getBoundingClientRect().height > 0;
+  })()`), true, 'a group reply names its bot without hover');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#job-activity").hidden'), true, 'a direct reply adds no task handoff');
+  let stoppedGroup;
+  ipcMain.removeHandler('stop'); ipcMain.handle('stop', (_event, id) => { stoppedGroup = id; });
+  await window.webContents.executeJavaScript('document.querySelector("#stop").click(); true');
+  await until(() => stoppedGroup === group.id, 'Stop targets the group rather than the pinned Main chat');
+  groupWorker.requests.set('group-input', { id: 'group-input', method: 'item/tool/requestUserInput', params: { threadId: groupWork.threadId,
+    questions: [{ id:'target', question:'Which build should I check?', options:[] }] } });
+  group.groupTurn.state = 'needs-input';
+  let groupAnswer;
+  ipcMain.removeHandler('answer'); ipcMain.handle('answer', async (_event, id, answer, agentId, contextId) => {
+    groupAnswer = { id, answer, agentId, contextId }; groupWorker.requests.delete(id); await publish();
+  });
+  await publish();
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#request-dialog").open'), true);
+  await window.webContents.executeJavaScript(`document.querySelector('#request-content input').value = 'Debug';
+    [...document.querySelectorAll('#request-content button')].find(button => button.textContent === 'Send answers').click(); true`);
+  await until(() => !!groupAnswer, 'the direct worker received its answer');
+  assert.deepEqual(groupAnswer, { id: 'group-input', answer: { answers: { target: 'Debug' } }, agentId: groupMember.id, contextId: groupWork.id });
+  groupWorker.busy = beforeGroupBusy; delete group.groupTurn;
+  await publish();
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#stop").hidden'), true);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#request-dialog").open'), false);
+  for (const theme of ['light', 'dark']) {
+    await window.webContents.executeJavaScript(`document.documentElement.dataset.appearance = '${theme}'; new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))`);
+    fs.writeFileSync(path.resolve(__dirname, '../.scratch/mosaic/group-direct-' + theme + '.png'), (await window.webContents.capturePage()).toPNG());
+  }
+  await window.webContents.executeJavaScript(`document.documentElement.dataset.appearance = ${JSON.stringify(groupAppearance)}; true`);
+  ipcMain.removeHandler('stop'); ipcMain.handle('stop', (_event, id) => { stoppedAgent = agents.owner(id).agentId; });
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/group-chat.png'), (await window.webContents.capturePage()).toPNG());
   await window.webContents.executeJavaScript(`document.querySelector('#group-edit').click();
     document.querySelector('#group-archive').click(); true`);
@@ -3443,7 +3541,7 @@ app.whenReady().then(async () => {
     assert.equal(zoomLayout.fits, true, 'composer controls remain inside the zoomed window');
     assert.ok(zoomLayout.rightGapDifference < 1, 'visible gaps between context ring, microphone and Send are equal');
     assert.ok(Math.abs(zoomLayout.leftGap) < 1, 'shield sits next to plus without extra gap');
-    assert.ok(Math.abs(zoomLayout.sizeRatio - 5 / 6) < .01, 'other buttons shrink by one-sixth while plus stays unchanged');
+    assert.ok(Math.abs(zoomLayout.sizeRatio - 1) < .01, 'composer buttons have consistent hit areas');
     assert.equal(zoomLayout.fontScale, '1', 'whole-page zoom does not also multiply text size');
   }
   console.log('Whole-interface zoom at 50%, 115%, 300% and consistent composer icons passed');
@@ -3465,9 +3563,13 @@ app.whenReady().then(async () => {
   assert.match(resultPreview, /The wiki was read\./);
   assert.doesNotMatch(resultPreview, /Queued the task|Hidden comparison|Outdated result/);
   console.log('Direct result sidebar preview replaces the queued acknowledgement passed');
+  phase = 'Mosaic light and dark layouts';
+  await require('./mosaic-ui-check.cjs')(window);
   agents.closing = true;
   agents.budgets.close();
   for (const c of agents.allControllers()) c.close();
+  phase = 'group IPC round trip';
+  await require('./group-chat-ui-check.cjs')(window, root, ipcMain);
   window.destroy();
   clearTimeout(deadline);
   app.exit(0);

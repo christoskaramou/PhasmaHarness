@@ -5,7 +5,7 @@ This is the shared entry point for every agent launched by Harness in this works
 ## Working rules
 
 - Inspect relevant live source before editing. Preserve unrelated changes. Run focused checks and report what was actually verified.
-- Keep project rules in PhasmaHarness.md. Do not create parallel AGENTS.md, CLAUDE.md or other provider instruction files.
+- Keep project rules in PhasmaHarness.md. Provider entry files such as CLAUDE.md or AGENTS.md may exist only as pointers to it; put no separate rules in them.
 
 ## Project knowledge
 

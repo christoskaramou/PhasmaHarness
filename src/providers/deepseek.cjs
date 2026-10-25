@@ -68,6 +68,7 @@ class DeepSeekCLI {
   async closeHost(host) {
     if (!host) return;
     if (this.host === host) this.host = null;
+    if (this.reviewHost === host) this.reviewHost = null;
     const remaining = await stopTree(host.child);
     if (remaining.length) throw new Error('DeepSeek Harness cleanup is not confirmed. Resolve the running process before retrying.');
     this.hosts.delete(host);
@@ -87,6 +88,7 @@ class DeepSeekCLI {
     const session = host.sessions.get(options.resume) || (options.resume
       ? await deadline(host.rpc.resumeSession({ ...args, sessionId: options.resume }), 30000, LABEL, options.signal)
       : await deadline(host.rpc.newSession(args), 30000, LABEL, options.signal));
+    if (options.resume && session.sessionId && session.sessionId !== options.resume) throw new Error('DeepSeek Harness loaded a different conversation. No message was sent.');
     const sessionId = session.sessionId || options.resume;
     if (typeof sessionId !== 'string' || !sessionId) throw new Error('DeepSeek Harness returned no session identity.');
     const opened = { ...session, sessionId };
@@ -165,14 +167,17 @@ class DeepSeekCLI {
     try {
       const access = options.schema ? 'read-only' : options.access;
       if (this.host && (this.host.cwd !== options.cwd || this.host.access !== access || this.host.rpc.signal.aborted)) await this.closeHost(this.host);
-      host = options.schema ? await this.createHost(options.cwd, access, options.signal)
+      if (this.reviewHost && (this.reviewHost.cwd !== options.cwd || this.reviewHost.rpc.signal.aborted)) await this.closeHost(this.reviewHost);
+      host = options.schema ? (options.persistSession
+        ? this.reviewHost || (this.reviewHost = await this.createHost(options.cwd, access, options.signal))
+        : await this.createHost(options.cwd, access, options.signal))
         : this.host || (this.host = await this.createHost(options.cwd, access, options.signal));
       const session = await this.openSession(host, options);
       context = { ...options, sessionId: session.sessionId, text: '', calls: new Map(), onEvent: options.onEvent || (() => {}) };
       host.context = context;
       context.onEvent({ type: 'system', session_id: session.sessionId });
       const prompt = [{ type: 'text', text: [options.instructions || '', options.helpers?.instructions || '',
-        options.schema ? `Return only a JSON object matching this schema. No tools are available.\n${JSON.stringify(options.schema)}` : '', options.prompt].filter(Boolean).join('\n\n') }];
+        options.schema && !(options.resume && options.schemaInHistory) ? `Return only a JSON object matching this schema. No tools are available.\n${JSON.stringify(options.schema)}` : '', options.prompt].filter(Boolean).join('\n\n') }];
       prompt.push(...this.images(host, options.images));
       let current = this.prompt(host, context, options, prompt), steering = null, finished = false;
       // ACP allows one prompt in flight, so Send now replaces the current step inside the same session and process.
@@ -205,10 +210,14 @@ class DeepSeekCLI {
       if (result.stopReason !== 'end_turn') throw new Error(result.stopReason === 'cancelled' ? 'DeepSeek Harness stopped.' : `DeepSeek Harness turn ended without completion: ${result.stopReason}`);
       return { result: context.text, session_id: session.sessionId,
         ...(options.schema ? { structured_output: structuredResponse(context.text, options.schema) } : {}) };
-    } catch (error) { if (host) await this.closeHost(host); throw error; }
+    } catch (error) {
+      // Invalid JSON ends a completed turn; Main's repair continues that in-memory session.
+      if (host && !(options.persistSession && error.code === 'INVALID_STRUCTURED_RESPONSE')) await this.closeHost(host);
+      throw error;
+    }
     finally {
       if (host) host.context = null;
-      try { if (options.schema && host && this.hosts.has(host)) await this.closeHost(host); }
+      try { if (options.schema && !options.persistSession && host && this.hosts.has(host)) await this.closeHost(host); }
       finally { this.active = false; }
     }
   }

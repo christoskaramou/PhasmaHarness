@@ -1,7 +1,9 @@
 const path = require('node:path');
+const { createHash } = require('node:crypto');
 const { JevKey } = require('./jev-key.cjs');
 const { LocalModels } = require('./local-models.cjs');
 const { capabilities } = require('./capabilities.cjs');
+const { cacheRequest, cacheUsage } = require('./prompt-cache.cjs');
 
 function validateProvider(value) {
   if (!value || !/^[a-z][a-z0-9-]{0,39}$/.test(value.id) || ['codex', 'claude-cli', 'cursor-cli'].includes(value.id)) throw new Error('Use a provider ID containing lowercase letters, numbers and hyphens.');
@@ -55,7 +57,7 @@ class Providers {
   prepare(choice, signal) { return this.local.prepare(choice, signal); }
   // Only Codex turns load Codex threads; API providers run in src/providers/api-agent.cjs.
   config() { return { modelProvider: 'openai', config: {} }; }
-  async structured(choice, { instructions, prompt, schema, images = [] }, signal) {
+  async structured(choice, { instructions, prompt, schema, images = [], messages, cacheKey }, signal) {
     signal.throwIfAborted();
     // Codex and the CLI providers answer through their own runtimes; only API providers have an endpoint here.
     if (!capabilities(choice.provider).api)
@@ -68,29 +70,26 @@ class Providers {
     const format = !local.supported ? { type: 'json_object' } : local.kind === 'llama.cpp' ? { type: 'json_schema', schema }
       : { type: 'json_schema', json_schema: { name: 'harness_response', strict: true, schema } };
     const body = { model: choice.model, stream: false,
-      messages: [{ role: 'system', content: instructions + '\nReturn only JSON matching this schema: ' + JSON.stringify(schema) },
+      messages: messages || [{ role: 'system', content: instructions + '\nReturn only JSON matching this schema: ' + JSON.stringify(schema) },
         { role: 'user', content: [{ type: 'text', text: prompt }, ...images.map(url => ({ type: 'image_url', image_url: { url } }))] }],
       response_format: format,
       ...(choice.effort ? { reasoning_effort: choice.effort } : {}) };
     return this.local.exclusive(choice, async () => {
-      const response = await this.modelRequest(choice, body, local, signal, 'chat/completions');
+      const requestKey = cacheKey || createHash('sha256').update(JSON.stringify([choice.provider, choice.model, instructions, schema])).digest('hex');
+      const response = await this.modelRequest(choice, body, local, signal, 'chat/completions', requestKey);
       if (!response.ok) throw new Error((await response.json()).error.message);
       let result;
       try { result = await response.json(); }
       catch { signal.throwIfAborted(); throw new Error(`${p.name} returned an invalid structured response. No action was taken. Try another model.`); }
       signal.throwIfAborted();
       if (result.choices?.[0]?.finish_reason !== 'stop') throw new Error(`${p.name} returned an incomplete response. No action was taken. Shorten the request or try another model.`);
-      const counts = [result.usage?.prompt_tokens, result.usage?.completion_tokens];
-      const cached = result.usage?.prompt_tokens_details?.cached_tokens;
-      const usage = counts.every(value => Number.isSafeInteger(value) && value >= 0) ? {
-        inputTokens: counts[0], outputTokens: counts[1],
-        cachedInputTokens: Number.isSafeInteger(cached) && cached >= 0 && cached <= counts[0] ? cached : null,
-      } : null;
-      try { return { decision: require('./structured.cjs').structuredResponse(result.choices[0].message?.content, schema), usage }; }
+      const usage = cacheUsage(result.usage);
+      try { return { decision: require('./structured.cjs').structuredResponse(result.choices[0].message?.content, schema), usage,
+        ...(cacheKey ? { messages: [...body.messages, result.choices[0].message] } : {}) }; }
       catch (error) { throw Object.assign(error, { usage }); }
     }, signal);
   }
-  async modelRequest(choice, body, local, signal, endpoint) {
+  async modelRequest(choice, body, local, signal, endpoint, cacheKey) {
     const p = this.provider(choice.provider);
     let loaded;
     if (local.supported) {
@@ -102,7 +101,10 @@ class Providers {
       body.model = loaded.runtimeModel;
       body.max_tokens = Math.min(body.max_tokens || 4096, 4096, Math.floor(loaded.contextLength / 4));
     }
-    const send = () => this.fetch(`${p.baseUrl}/${endpoint}`, { method: 'POST', headers: this.headers(p.id), body: JSON.stringify(body), redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(600000)]) });
+    const send = () => {
+      const cached = cacheRequest(p.baseUrl, body, cacheKey);
+      return this.fetch(`${p.baseUrl}/${endpoint}`, { method: 'POST', headers: { ...this.headers(p.id), ...cached.headers }, body: JSON.stringify(cached.body), redirect: 'error', signal: AbortSignal.any([signal, AbortSignal.timeout(600000)]) });
+    };
     let response = await send();
     let message = `Provider request failed (HTTP ${response.status}). Check model compatibility, key and API balance.`;
     if (!response.ok && local.supported) {

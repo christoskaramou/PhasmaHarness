@@ -16,6 +16,7 @@
   <script defer src="documents.js"></script>
   <script defer src="agent-state.js"></script>
   <script defer src="report-format.js"></script>
+  <script defer src="mosaic.js"></script>
   <script defer src="connectors.js"></script>
   <script defer src="app.js"></script>
   <script defer src="dictation.js"></script>
@@ -24,11 +25,15 @@
 <body>
   <aside id="agents-sidebar" class="sidebar">
     <div class="sidebar-toolbar">
-      <div class="brand">PhasmaHarness</div>
+      <div class="brand" data-mosaic="main">Phasma Harness</div>
+    </div>
+    <div class="roster-tools">
+      <label class="roster-search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/></svg><input id="agent-search" type="search" placeholder="Search bots…" aria-label="Search bots or projects" autocomplete="off"></label>
       <button id="agent-new" type="button" aria-label="New agent" title="New agent">
         <svg width=".7em" height=".7em" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
           <path d="M7 2v10M2 7h10"/>
         </svg>
+        <span>New bot</span>
       </button>
     </div>
     <section class="main-agent" aria-label="Hub agent">
@@ -50,7 +55,7 @@
         <span aria-hidden="true"><svg width=".8em" height=".8em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <path d="m9 3 1-1h4l1 1 .5 2 2 1 2-.5 1.5 2.5-.5 2-1.5 1v2l1.5 1 .5 2-1.5 2.5-2-.5-2 1-.5 2-1 1h-4l-1-1-.5-2-2-1-2 .5L3 16l.5-2L5 13v-2l-1.5-1L3 8l1.5-2.5 2 .5 2-1Z"/>
           <circle cx="12" cy="12" r="3"/>
-        </svg></span>
+        </svg></span><span class="settings-label">Settings</span>
       </button>
       <button id="tips-button" class="settings-button tips-button" type="button" title="Tips" aria-label="Tips">
         <span aria-hidden="true"><svg width=".8em" height=".8em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -67,14 +72,15 @@
   <div id="sidebar-resizer" role="separator" tabindex="0" aria-label="Resize agents area" aria-controls="agents-sidebar" aria-orientation="vertical" title="Drag to resize agents. Arrow keys adjust; double-click or Enter resets."></div>
   <main>
 <header>
- <div>
+ <div class="session-heading">
+  <span id="session-icon" aria-hidden="true"></span>
   <h1 id="session-title">
    New session
   </h1>
   <span class="session-workspace" id="session-path">
    Your workspace, your models.
   </span>
-  <span id="group-owner" class="muted" hidden>Coordinated by Hub</span>
+  <span id="group-owner" class="muted" hidden>Group chat</span>
   <select id="group-mention" class="permissions-control" aria-label="Mention a group member" hidden></select>
  </div>
  <div class="header-actions">
@@ -88,13 +94,13 @@
    <svg aria-hidden="true" fill="none" height="18" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" viewbox="0 0 24 24" width="18">
     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z M14 2v6h6 M8 13h8 M8 17h5">
     </path>
-   </svg>
+   </svg><span class="header-action-label">Session</span>
   </button>
   <button aria-label="Browse workspace files" class="compact-action" id="browse-files" title="Browse workspace files" type="button">
    <svg aria-hidden="true" fill="none" height="18" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" viewbox="0 0 24 24" width="18">
     <path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z">
     </path>
-   </svg>
+   </svg><span class="header-action-label">Files</span>
   </button>
   <button aria-label="View Git changes" class="compact-action" disabled="" id="browse-changes" title="View Git changes" type="button">
    <svg aria-hidden="true" fill="none" height="18" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" viewbox="0 0 24 24" width="18">
@@ -106,7 +112,7 @@
     </circle>
     <path d="M6 8v8m12-7a10 10 0 0 1-9 10">
     </path>
-   </svg>
+   </svg><span class="header-action-label">Changes</span>
   </button>
  </div>
 </header>
@@ -173,7 +179,7 @@
     <div class="dialog-heading"><h2 id="group-heading">New group</h2><button type="button" class="close-dialog icon-button" aria-label="Close group editor">×</button></div>
     <label>Name<input id="group-name" required maxlength="80" placeholder="Game team"></label>
     <fieldset id="group-members"><legend>Members</legend></fieldset>
-    <p class="hint">Hub coordinates. Start a message with @Name to bring in that member. Membership keeps each bot’s existing access.</p>
+    <p class="hint">Start with @Name for a direct reply using this group’s history. Other bots stay idle. Each bot keeps its existing access.</p>
     <p id="group-error" class="turn-error" role="alert"></p>
     <div class="dialog-footer"><button id="group-archive" type="button" hidden>Archive group</button><button id="group-save" class="primary" type="submit">Create group</button></div>
   </form></dialog>
@@ -195,7 +201,7 @@
   </form></dialog>
   <dialog id="settings-dialog"><form id="settings-form">
     <div class="dialog-heading"><h2>Settings</h2><button type="button" class="close-dialog icon-button" aria-label="Close settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
-    <div class="settings-tabs" role="tablist" aria-label="Settings sections">
+    <div class="settings-tabs" role="tablist" aria-label="Settings sections" aria-orientation="vertical">
       <button type="button" class="settings-tab active" role="tab" id="tab-general" aria-selected="true" aria-controls="panel-general" data-tab="general">General</button>
       <button type="button" class="settings-tab" role="tab" id="tab-providers" aria-selected="false" aria-controls="panel-providers" data-tab="providers">Providers</button>
       <button type="button" class="settings-tab" role="tab" id="tab-connectors" aria-selected="false" aria-controls="panel-connectors" data-tab="connectors">Connectors</button>
@@ -206,7 +212,7 @@
     </div>
     <div class="settings-body">
     <div id="panel-connectors" class="settings-panel" role="tabpanel" aria-labelledby="tab-connectors" hidden>
-      <div class="connector-heading"><div><h3 class="settings-section">Shared connectors</h3><p class="hint">Available to every bot, with any model or CLI.</p></div><button type="button" id="connector-add">Add connector</button></div>
+      <div class="connector-heading"><div><h3 class="settings-section">Connectors</h3><p class="hint">Shared by every bot and model.</p></div><button type="button" id="connector-add" class="primary">+ Add connector</button></div>
       <p id="connector-status" class="hint" role="status"></p>
       <div id="connector-list"></div>
       <div id="connector-editor" hidden>

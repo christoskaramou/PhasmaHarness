@@ -54,7 +54,8 @@ test('CLI and local responses get one format retry, preserve the request and cou
     assert.equal(result.timing.attempts, 2);
     assert.equal(result.usage.inputTokens, 20);
     assert.equal(calls.length, 2);
-    assert.match(calls[1].instructions || calls[1].prompt, /previous response did not match/);
+    assert.match(calls[1].prompt, /previous response did not match/);
+    if (calls[1].instructions) assert.equal(calls[1].instructions, request.instructions);
     assert.match(calls[1].prompt, /Untrusted request data/);
     assert.deepEqual(calls[1].schema, schema);
     assert.equal(calls[1].signal, calls[0].signal, 'one deadline covers both attempts');

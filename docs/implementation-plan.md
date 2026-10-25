@@ -2,7 +2,7 @@
 
 Draft plan · 18 October 2026
 
-Implement the [design](design.md) in small working slices. Keep the app usable at every step. Use one [minimal Grok Bot-inspired chat layout](ui-templates.html) with Dark, Light, and System appearance settings. System is the initial default. Both palettes use the same components, behavior, and data.
+Implement the [design](design.md) in small working slices. Keep the app usable at every step. Use the user-selected Mosaic layout with Dark, Light, and System appearance settings. System is the initial default. Both palettes use the same components, behavior, and data. Chat and Settings are separate views; the concept board presents examples of both.
 
 ## Completion gates
 
@@ -43,9 +43,9 @@ Source checked 18 October 2026. Preserve and extend these pieces:
 
 ## Step 1 Build the minimal chat UI and appearance settings
 
-Implement the shared minimal chat layout in `ui/index.html`, `ui/style.css`, and `ui/app.js`; reuse the existing preload commands and renderer. Keep a small bot sidebar, a quiet header, a centered conversation, and a persistent composer. Remove the large preview heading, top theme tabs, colorful avatars, dashboard-style boxes, and unnecessary metadata. Activity is a compact expandable row; completed work appears inline.
+Implement the shared Mosaic layout in `ui/index.html`, `ui/style.css`, `ui/mosaic.js`, and `ui/app.js`; reuse the existing preload commands and renderer. Keep a compact bot sidebar, a quiet header, a centered conversation, and a persistent composer. Use original four-tile identities, muted colour accents, and minimal result cards. Activity is a compact expandable row; completed work appears inline.
 
-Give Hub a dedicated pinned area above the Other bots list, with a larger neutral icon, “Your main chat” label, whitespace, and a subtle divider. Keep that separation when another bot is selected. Specialist rows show one short latest-message preview and a small activity indicator; search/new-chat controls stay compact at the top and Settings stays at the bottom. The narrow sidebar retains a separate Hub shortcut above the specialists. Reuse existing chat selection and history; these are presentation changes, not a second conversation model.
+Keep Main Bot pinned as a compact row above the other bots. Bot/project search and New bot sit above it; Settings stays at the bottom. Idle rows show names and tile identities; active rows retain their task preview and indicator. Search reveals matching children under their creators. Settings opens a separate pane with a vertical category rail, becoming horizontal tabs on narrow screens. Reuse existing chat selection and history; these are presentation changes, not a second conversation model.
 
 Define shared CSS color tokens for two neutral palettes. Add Dark, Light, and System to Settings → Appearance, persist the selected mode as a UI preference, and apply it before first paint. System is the default and follows live OS appearance changes through `prefers-color-scheme` or native `color-scheme` resolution. Persist `system`, not its current resolved palette. Explicit Dark or Light overrides the OS until the preference changes.
 
@@ -169,9 +169,9 @@ Plain-folder batching is also implemented: the same snapshot path accepts projec
 
 ## Follow with groups and routines
 
-Add group chats and @mentions over the same asynchronous mailbox, ownership, access, and result rules. Group membership does not grant file or tool access. Keep one owner per outcome; group conversations do not broadcast every message to every model by default. Show only useful handoffs and let the user open the underlying detail.
+Group chats share conversation history and start a bot only when addressed. Membership does not grant file or tool access. Ordinary replies should not create delegated assignments or require a coordinator review.
 
-Current group slice: groups are durable Hub-owned conversations with existing members, a separate sidebar list and a small member picker. A leading `@Name` sends one ordinary assignment directly, preserving the selected bot and permissions without a Hub inference call. Other members receive no call; unmentioned messages use Hub. Replies and relevant context resolve to the originating group, while its draft, queue and activity remain separate from other chats. Stop is scoped to that group; archive and removal of a working member reject outstanding assignments. Clear preserves membership and the pinned Hub conversation. Creation, failed saves, permissions, context, busy queues, restart/migration, cancellation and UI controls pass deterministic tests. Native-provider live acceptance remains part of the overall acceptance gate.
+Current group slice (2026-10-24): groups are durable conversations with existing members, a separate sidebar list and an inline @member picker. A leading `@Name` starts that member's own model directly, with recent shared group history loaded at turn start and older messages available through context search. Its replies stream into the group under its name; no delegated assignment, acknowledgement/report card or Hub review is created. Each member keeps a separate native conversation per group and retains its workspace instructions, wiki, model, permissions and configured checks. Other members stay idle; unmentioned messages use Hub. Main Bot remains available while a member replies. Group queues, Stop and questions target the correct worker context; archive and member removal refuse active replies. Interrupted turns never replay after a restart. Helper follow-ups remain connected; Stop cancels their subtree without replaying cancelled notices on the next question. Direct member replies do not trigger a suggestion call through an earlier Main route. Deterministic tests cover these paths, including a real local configured check and the renderer/IPC round trip. Three isolated live turns through Codex and Cursor verified shared context, project instructions and active wiki path injection without Main inference; observed response times were 12.7 s, 16.6 s and 4.7 s (resumed Codex). These individual runs are not a performance guarantee, and other providers remain unverified live.
 
 Add a small durable routine scheduler inside the runner. Persist owner, workflow reference, timezone, next run, limits, and occurrence identity. Deduplicate restarts, prevent self-overlap, and coalesce missed runs. Schedule creation/edit/pause happens through chat with a clear next-run summary. Add event triggers only after scheduled execution is reliable.
 

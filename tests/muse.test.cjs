@@ -89,6 +89,9 @@ test('Muse resumes with the selected profile and session-bound MCP helpers', asy
   assert.equal(request.config.mcpServers.phasma_harness.env.TOKEN, 'fixture');
   assert.equal(request.excludeItems, true);
   assert.ok(calls.find(([method]) => method === 'session/setModel'));
+  const moved = await fixture(t, { resumedSessionId: 'session-2' });
+  await assert.rejects(moved.backend.run({ ...runOptions(), resume: 'session-1' }), /different conversation/);
+  assert.equal(moved.calls.some(([method]) => method === 'turn/start'), false, 'a worker that skips unchanged instructions never prompts another session');
 });
 
 test('Muse usage counts native prompt projections once and never adds raw cache counters twice', async t => {

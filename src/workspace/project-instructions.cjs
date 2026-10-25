@@ -3,12 +3,11 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const ENTRY_NAME = 'PhasmaHarness.md';
 const LEGACY = /(^|\/)(AGENTS(?:\.override)?|CLAUDE(?:\.local)?|GEMINI|\.?HERMES|INSTRUCTIONS)\.md$|(^|\/)\.github\/copilot-instructions\.md$|(^|\/)\.cursor\/rules\/.*\.mdc$/i;
-const EXCLUDED = /^(?:\.git|node_modules|third_party|vendor|\.scratch|\.cache|build.*|dist|Wikis|Workspaces|workspace-data)$/;
 const STARTER = '# Project instructions\n\n' +
   'This is the shared entry point for every agent launched by Harness in this workspace.\n\n' +
   '## Working rules\n\n' +
   '- Inspect relevant live source before editing. Preserve unrelated changes. Run focused checks and report what was actually verified.\n' +
-  '- Keep project rules in PhasmaHarness.md. Do not create parallel AGENTS.md, CLAUDE.md or other provider instruction files.\n\n' +
+  '- Keep project rules in PhasmaHarness.md. Provider entry files such as CLAUDE.md or AGENTS.md may exist only as pointers to it; put no separate rules in them.\n\n' +
   '## Project knowledge\n\n' +
   'Use the active workspace wiki index supplied by Harness with each worker request (Settings > Wiki). Its location can change; do not create a competing wiki here. Search focused pages with project_context when available, then verify claims in live source. Do not load the whole wiki.\n\n' +
   '## Improving these instructions\n\n' +
@@ -24,23 +23,18 @@ function readEntry(root, relative) {
   return { relative, body };
 }
 
-function legacyInstructionFiles(workspace, { recursive = true } = {}) {
-  const root = fs.realpathSync(workspace), names = [], deadline = Date.now() + 10000;
+// Only the workspace root holds rules: its PhasmaHarness.md or, while that is missing, the root's own provider files and
+// its .cursor/rules and .github files. Subfolders are never searched, so a snapshot or another project inside the folder
+// adds no rules and a large folder is not walked on every turn. Linked folders are not followed.
+function legacyInstructionFiles(workspace) {
+  const root = fs.realpathSync(workspace), names = [];
   const visit = relative => {
-    if (Date.now() > deadline) throw new Error('Project instruction discovery took too long.');
     for (const entry of fs.readdirSync(path.join(root, relative), { withFileTypes: true })) {
       const name = relative ? relative + '/' + entry.name : entry.name;
       if (entry.isDirectory()) {
-        if (EXCLUDED.test(entry.name) || (!recursive && !['.cursor', '.cursor/rules', '.github'].includes(name))) continue;
-        // Prune independent projects before enumeration, not after collecting their files.
-        if (fs.lstatSync(path.join(root, name, '.git'), { throwIfNoEntry: false }) ||
-            fs.lstatSync(path.join(root, name, ENTRY_NAME), { throwIfNoEntry: false })) continue;
-        visit(name);
-      } else if (LEGACY.test(name) && (recursive || !name.includes('/') ||
-        /^\.cursor\/rules\/[^/]+\.mdc$/i.test(name) || /^\.github\/copilot-instructions\.md$/i.test(name))) {
-        names.push(name);
-        if (names.length > 200) throw new Error('Too many project instruction files.');
-      }
+        if (['.cursor', '.cursor/rules', '.github'].includes(name)) visit(name);
+      } else if (LEGACY.test(name) && (!name.includes('/') || /^\.cursor\/rules\/[^/]+\.mdc$/i.test(name) ||
+        /^\.github\/copilot-instructions\.md$/i.test(name))) names.push(name);
     }
   };
   visit('');
@@ -53,13 +47,12 @@ function legacyInstructionFiles(workspace, { recursive = true } = {}) {
 function consolidatedInstructions(entries) {
   const groups = new Map();
   for (const { relative, body } of entries) {
-    const scope = path.posix.dirname(relative.replace(/(^|\/)\.cursor\/rules\/.*$/, '$1rule.mdc').replace(/(^|\/)\.github\//, '$1'));
-    const key = scope + '\0' + body.trim();
-    const group = groups.get(key) || { scope, body, files: [] };
+    const key = body.trim();
+    const group = groups.get(key) || { body, files: [] };
     group.files.push(relative); groups.set(key, group);
   }
-  const body = STARTER + (groups.size ? '\n## Imported project rules\n\nThe sections below preserve existing project guidance. Apply scoped rules only inside that workspace subfolder; paths in those sections are relative to that scope. Deeper scopes override parent scopes. Maintain these rules here; old entry filenames and mirror-sync instructions refer to this consolidated file. The active wiki supplied by Harness replaces old docs/wiki pointers.\n' : '') +
-    [...groups.values()].map(group => '\n### Workspace scope: ' + group.scope + '\n\nImported from: ' + group.files.join(', ') + '\n\n' + group.body.trim() + '\n').join('');
+  const body = STARTER + (groups.size ? '\n## Imported project rules\n\nThe sections below preserve the workspace root\'s existing provider rules. Maintain these rules here; old entry filenames and mirror-sync instructions refer to this consolidated file. The active wiki supplied by Harness replaces old docs/wiki pointers.\n' : '') +
+    [...groups.values()].map(group => '\n### Imported from: ' + group.files.join(', ') + '\n\n' + group.body.trim() + '\n').join('');
   if (Buffer.byteLength(body) > 64 * 1024) throw new Error('Consolidated project instructions exceed 64 KiB. Move detailed knowledge into the wiki.');
   return body;
 }
@@ -81,21 +74,21 @@ function projectEntry(workspace, create = false) {
   return file;
 }
 
-function projectBody(workspace, create = false, options) {
+function projectBody(workspace, create = false) {
   const file = projectEntry(workspace, create);
   try { return readEntry(path.dirname(file), ENTRY_NAME).body; }
   catch (error) {
     if (error.code !== 'ENOENT') throw error;
     // Ask mode must not write into the workspace just to initialize its entry.
-    return 'The shared entry is missing and was not created in read-only mode.\n' + consolidatedInstructions(legacyInstructionFiles(workspace, options));
+    return 'The shared entry is missing and was not created in read-only mode.\n' + consolidatedInstructions(legacyInstructionFiles(workspace));
   }
 }
 
-function projectInstructions(workspace, create = false, options) {
-  const body = projectBody(workspace, create, options), file = path.join(fs.realpathSync(workspace), ENTRY_NAME);
+function projectInstructions(workspace, create = false) {
+  const body = projectBody(workspace, create), file = path.join(fs.realpathSync(workspace), ENTRY_NAME);
   return '\nShared project entry: ' + JSON.stringify(file) +
     '\nThese are the current project rules for this turn, replacing earlier snapshots and legacy provider entry files. ' +
-    'Maintain project instructions only in PhasmaHarness.md; do not recreate legacy entry files. ' +
+    'Maintain project rules in PhasmaHarness.md. Provider entry files such as CLAUDE.md or AGENTS.md may point to it so interactive tools load it; keep rules out of them. ' +
     'The active wiki path supplied by Harness replaces old docs/wiki locations. Existing access permissions still apply. ' +
     'Use Harness agent tools for delegation so workers receive the same project rules.\n' + body;
 }
