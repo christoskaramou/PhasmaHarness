@@ -65,7 +65,10 @@ class DeepSeekCLI {
     } catch (error) {
       // A dsh that quits at start says why on stderr (its first line); "ACP connection closed" alone does not. Its
       // output is complete once it has closed, which a crash does at once; a Stop does not wait for it.
-      if (!signal?.aborted) await Promise.race([host.exited, new Promise(resolve => setTimeout(resolve, 1000).unref())]);
+      // The timer stays referenced: unref'd, a dsh that is still running leaves Node nothing to wait on, and it exits.
+      let timer;
+      if (!signal?.aborted) await Promise.race([host.exited, new Promise(resolve => { timer = setTimeout(resolve, 1000); })]);
+      clearTimeout(timer);
       const reason = host.stderr.split('\n').find(line => line.trim());
       if (reason && error instanceof Error) error.message += `: ${reason.trim()}`;
       await this.closeHost(host);
