@@ -46,6 +46,7 @@
     { id: 'commands', text: 'Type / in the message box for commands: /context shows how full the model\'s memory is, /compact frees it, /export saves the chat as Markdown.' },
     { id: 'context-ring', text: 'The small ring next to the microphone shows how full the model\'s memory is. Hover for the numbers; click it to compact.' },
     { id: 'clear', text: 'Type /clear to start fresh; the old chat is archived on this computer. Use /export first if you want a copy of it.' },
+    { id: 'wiki-suggest', text: 'Type /wiki to have this chat\'s model suggest updates to the project\'s docs/wiki from the conversation. Nothing is written until you click Apply.' },
     { id: 'header', text: 'The three icons at the top right of a chat show the files it changed, let you browse the project, and show its Git changes.' },
     { id: 'attach', text: 'Paste images or files into the message box, or use +, to attach PDFs, Word files, code or images (up to four per message).' },
     { id: 'dictation', when: desktop,
