@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
+const zlib = require('node:zlib');
 const { randomBytes, randomUUID } = require('node:crypto');
 const { RemoteRunner, remoteKey, originValue } = require('../src/remote.cjs');
 const { RemoteSettings } = require('../src/remote-settings.cjs');
@@ -292,6 +293,15 @@ test('public browser assets expose the UI with a network CSP, while source, keys
   assert.equal((await f.request('/ui/connectors.js')).status, 200);
   assert.match(html, /connect-src 'self'/);
   assert.doesNotMatch(html, /connect-src 'none'/);
+  // Installable on a phone: the page links a manifest, served with its type, and its icons are public UI assets.
+  assert.match(html, /<link rel="manifest" href="manifest\.webmanifest">/);
+  const manifest = await f.request('/ui/manifest.webmanifest');
+  assert.equal(manifest.status, 200);
+  assert.equal(manifest.headers.get('content-type'), 'application/manifest+json');
+  const app = await manifest.json();
+  assert.deepEqual([app.start_url, app.scope, app.display, app.icons.map(icon => icon.sizes)], ['/ui/index.html', '/ui/', 'standalone', ['192x192', '512x512']]);
+  for (const icon of app.icons)
+    assert.equal((await f.request('/ui/' + icon.src)).headers.get('content-type'), 'image/png', icon.src);
   assert.ok(!html.includes(f.key));
   for (const resource of ['/src/main.cjs', '/credentials.phasma-remote', '/ui/..%2fsrc/main.cjs', '/node_modules/../package.json',
     '/ui/%5c..%5csrc%5cmain.cjs', '/ui/%00'])
@@ -324,6 +334,62 @@ test('independent browser commands and state streams preserve asynchronous Stop 
   await pause(20);
   const reconnected = await stream(f, token, client); t.after(() => reconnected.close());
   assert.deepEqual((await reconnected.next()).value.jobs, ['kept']);
+});
+
+// 2026-10-26: every update sent the phone the whole fleet uncompressed (65 MB to it within minutes), while the desktop
+// window already got only the bots that changed.
+test('a browser gets only the bots whose chats changed, and one that falls behind gets the newest state with nothing skipped', async t => {
+  const chat = (id, count) => ({ id, status: 'idle', items: Array.from({ length: count }, (_, i) => ({ id: `${id}-${i}`, text: 'x'.repeat(200) })) });
+  const bot = (revision, chatId, count) => ({ stateRevision: revision, sessions: [chat(chatId, count)] });
+  let current = { agentStates: { a: bot(1, 'a1', 2), b: bot(1, 'b1', 3) }, settings: {} };
+  const f = await fixture(t);
+  f.remote.snapshot = () => current;
+  const token = await f.pair(), client = randomUUID();
+  const events = await stream(f, token, client); t.after(() => events.close());
+  const first = (await events.next()).value;
+  assert.deepEqual([first.agentStates.a.sessions.length, first.agentStates.b.sessions.length], [1, 1], 'the first state is complete');
+
+  current = { agentStates: { a: bot(2, 'a1', 3), b: bot(1, 'b1', 3) }, settings: {} };
+  f.remote.broadcast('state', current);
+  const next = (await events.next()).value;
+  assert.equal(next.agentStates.a.sessions[0].items.length, 3, 'the changed bot comes in full');
+  assert.deepEqual([next.agentStates.b.sessionsKept, next.agentStates.b.sessions], [true, undefined], 'the unchanged one is left out');
+
+  // Behind: two states arrive while the connection is full; on drain only the newest is sent, with both changes in it.
+  const [entry] = f.remote.clients.values();
+  entry.blocked = true;
+  f.remote.broadcast('state', { agentStates: { a: bot(3, 'a1', 4), b: bot(1, 'b1', 3) }, settings: {} });
+  f.remote.broadcast('state', { agentStates: { a: bot(3, 'a1', 4), b: bot(2, 'b1', 4) }, settings: {} });
+  entry.out.emit('drain');
+  const caught = (await events.next()).value;
+  assert.deepEqual([caught.agentStates.a.sessions?.[0].items.length, caught.agentStates.b.sessions?.[0].items.length], [4, 4],
+    'a change made while behind is not lost to the state that replaced it');
+});
+
+test('the update stream, replies and UI files are gzip-compressed for a browser that accepts it, and plain otherwise', async t => {
+  const f = await fixture(t, async () => ({ history: 'y'.repeat(5000) }));
+  const token = await f.pair(), client = randomUUID();
+  const raw = await new Promise((resolve, reject) => {
+    const req = http.request(`${f.url}/api/events?client=${randomUUID()}`, { headers: { Host: new URL(f.remote.origin).host,
+      Authorization: 'Bearer ' + token, 'Accept-Encoding': 'gzip' } }, resolve);
+    req.on('error', reject); req.end();
+  });
+  t.after(() => raw.destroy());
+  assert.equal(raw.headers['content-encoding'], 'gzip');
+  const decoded = raw.pipe(zlib.createGunzip());
+  const text = await new Promise(resolve => {
+    let received = '';
+    decoded.on('data', chunk => { received += chunk; if (received.includes('\n\n')) resolve(received); });
+  });
+  assert.match(text, /^event: state\ndata: \{"jobs":\["kept"\]\}\n\n/, 'each event arrives at once, not held for a full gzip block');
+
+  const compressed = await f.request('/api/call', { client, method: 'bootstrap', args: [] }, token, { 'Accept-Encoding': 'gzip' });
+  assert.equal(compressed.headers.get('content-encoding'), 'gzip');
+  assert.equal(JSON.parse(zlib.gunzipSync(Buffer.from(await compressed.arrayBuffer()))).result.history.length, 5000);
+  const plain = await f.call(token, client, 'bootstrap');
+  assert.equal(plain.headers.get('content-encoding'), null);
+  assert.equal((await plain.json()).result.history.length, 5000);
+  assert.equal((await f.request('/ui/app.js', undefined, null, { 'Accept-Encoding': 'gzip' })).headers.get('content-encoding'), 'gzip');
 });
 
 test('remote confirmations belong to their originating authenticated view and disconnect declines pending changes', async t => {
@@ -394,8 +460,14 @@ test('remote document bytes keep their type and provider authentication errors c
   assert.equal((await f.request('/api/status', undefined, token)).status, 200);
 });
 
-function browserView(responses) {
+// saved: the session ticket already on this device (local) or kept by the tab before tickets were per device (session).
+function browserView(responses, saved = { local: 'saved-ticket', session: null }) {
   const timers = [], elements = [], requests = [];
+  const store = initial => {
+    const values = new Map(initial ? [['runner-session', initial]] : []);
+    return { values, getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, String(value)), removeItem: key => values.delete(key) };
+  };
+  const localStorage = store(saved.local), sessionStorage = store(saved.session);
   const node = () => {
     const value = { hidden: false, textContent: '', children: {}, setAttribute() {}, append() {}, focus() {}, addEventListener() {} };
     value.querySelector = selector => (value.children[selector] ||= node());
@@ -405,15 +477,28 @@ function browserView(responses) {
   const context = {
     window: { addEventListener() {} }, crypto, TextDecoder, URLSearchParams, AbortController, console, navigator: {},
     document: { body: { classList: { add() {} }, append() {} }, createElement: node },
-    sessionStorage: { getItem: () => 'saved-ticket', setItem() {}, removeItem() {} },
+    localStorage, sessionStorage,
     location: { hash: '', pathname: '/ui/index.html', search: '' }, history: { replaceState() {} },
     setTimeout: callback => timers.push(callback),
     fetch: async url => { requests.push(url); return responses.shift()(); },
   };
   require('node:vm').runInNewContext(fs.readFileSync(path.join(__dirname, '../ui/remote-api.js'), 'utf8'), context);
   const [notice, login] = elements;
-  return { timers, requests, notice, login, settle: async () => { for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve)); } };
+  return { timers, requests, notice, login, localStorage, sessionStorage, settle: async () => { for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve)); } };
 }
+
+// 2026-10-26: an installed phone app opens in a new context, so a per-tab ticket signed it out on every launch.
+test('the browser view keeps its session on the device until the runner refuses it, and moves a tab session over', async () => {
+  const reply = (status, body) => () => ({ ok: status < 300, status, json: async () => body });
+  const moved = browserView([reply(200, { connected: true })], { local: null, session: 'tab-ticket' });
+  await moved.settle();
+  assert.deepEqual([moved.localStorage.values.get('runner-session'), moved.sessionStorage.values.has('runner-session')], ['tab-ticket', false]);
+  assert.equal(moved.login.hidden, true, 'the moved ticket connects without the key');
+  const refused = browserView([reply(401, { error: 'Unknown browser session.' })]);
+  await refused.settle();
+  assert.equal(refused.localStorage.values.has('runner-session'), false, 'a refused ticket is forgotten on the device');
+  assert.equal(refused.login.hidden, false, 'and the connection key is asked for');
+});
 
 test('the browser view keeps its session through a network blip and shows runner refusals instead of looping', async () => {
   const reply = (status, body) => () => ({ ok: status < 300, status, json: async () => body });

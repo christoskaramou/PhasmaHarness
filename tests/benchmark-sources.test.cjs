@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { BenchmarkStore, validateSnapshot, pruneSources, routerCatalog, SOURCES, POLICY, ROUTER_POLICY } = require('../src/routing/benchmarks.cjs');
+const { BenchmarkStore, validateSnapshot, pruneSources, routerCatalog, SOURCES, CATALOG_POLICY } = require('../src/routing/benchmarks.cjs');
 const bundled = require('../benchmarks/snapshot.json');
 
 test('the registry and the bundled table hold only the seven evaluations that cover every current model', () => {
@@ -33,9 +33,8 @@ test('the AA cost figure reaches the routers as the average cost per task, not t
   assert.match(SOURCES['aa-index'].metrics.costUsd, /per AA task/);
   const [row] = routerCatalog([{ id: 'a', label: 'A', benchmarks: [{ source: 'aa-index', version: '1', harness: 'api', score: 53.6, costUsd: 1.82 }] }]);
   assert.equal(row.taskCostUsd, 1.82);
-  assert.match(ROUTER_POLICY, /taskCostUsd = average API USD per Intelligence Index task/);
-  assert.match(POLICY, /average API USD per index task/);
-  assert.doesNotMatch(POLICY + ROUTER_POLICY, /whole index|indexCostUsd/);
+  assert.match(CATALOG_POLICY, /taskCostUsd = average API USD per Intelligence Index task/);
+  assert.doesNotMatch(CATALOG_POLICY, /whole index|indexCostUsd/);
 });
 
 test('a context-size variant (claude-opus-5-5[1m]) gets its model\'s measurements', () => {
@@ -56,7 +55,7 @@ test('the router sees a model measured only with a provider fallback (Opus 5.5 a
   assert.ok(Number.isFinite(opus.terminal) && Number.isFinite(opus.sciCode), 'every key, from the same test versions');
   assert.equal(sonnet.index, 31.7);
   assert.equal(sonnet.fallback, undefined);
-  assert.match(ROUTER_POLICY, /fallback = some values come from the evaluator runs labelled as allowing a provider fallback/);
+  assert.match(CATALOG_POLICY, /fallback = some values come from the evaluator runs labelled as allowing a provider fallback/);
 });
 
 test('the refresh prompt covers models released since the snapshot, under the provider\'s model ID', () => {

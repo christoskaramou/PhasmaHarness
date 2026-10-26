@@ -57,11 +57,6 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
   handle('saveGroup', value => agents.saveGroup(value));
   handle('readDocument', value => documents.read(value));
   handle('deleteAgent', id => agents.deleteAgent(id));
-  // The workspace's own docs/wiki, shown in Settings; Harness does not create it.
-  handle('workspaceWiki', (id, agentId) => {
-    const root = require('node:path').join(id ? agents.owner(id).session(id).workspace : agents.controller(agentId).data.settings.workspace, 'docs', 'wiki');
-    return { root, exists: require('node:fs').existsSync(root) };
-  });
   handle('browseWorkspace', (id, action, relative, kind, agentId) => require('./workspace/workspace-browser.cjs').browse(
     id ? agents.owner(id).session(id).workspace : agents.controller(agentId).data.settings.workspace, action, relative, kind));
   handle('settings', (values, agentId) => { const snapshot = agents.settings(values, agentId); controller.warmRouter(); return snapshot; });
@@ -123,6 +118,7 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
   });
   handle('compact', id => agents.owner(id).compact(id));
   handle('replySuggestion', id => agents.owner(id).replySuggestion(id));
+  handle('suggestWiki', id => agents.owner(id).suggestWiki(id));
   handle('clearConversation', async (agentId, groupId) => {
     const session = await agents.clearConversation(agentId, name => ask({
       title: 'Start a fresh conversation?', message: `Clear the current context for ${name} and start with a blank chat.`,

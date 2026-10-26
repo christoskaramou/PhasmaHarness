@@ -816,8 +816,9 @@ class Agents extends EventEmitter {
       throw new Error(`${this.profile(agentId).name} works for the bot that made it and follows its settings. Change that bot instead.`);
     if (inheritable.length)
       this.requireDependentsIdle(agentId, inheritable);
-    // The chat checker runs between turns, so picking it never waits for agents to stop.
-    const local = Object.keys(values).every(key => ['workspace', 'mode', 'access', 'replySuggestions', 'chatScanModel', 'showTips'].includes(key));
+    // The chat checker runs between turns and the simple-messages model is read when a message is routed, so picking
+    // either never waits for agents to stop.
+    const local = Object.keys(values).every(key => ['workspace', 'mode', 'access', 'replySuggestions', 'chatScanModel', 'autoLowModel', 'showTips'].includes(key));
     if (!local && this.busy) throw new Error('Stop all agents before changing shared settings.');
     if (agentId === 'main') this.primary.settings(values);
     else {

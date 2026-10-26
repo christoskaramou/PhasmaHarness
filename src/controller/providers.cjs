@@ -406,7 +406,8 @@ module.exports = {
     const unlimited = usable.filter(p => !this.limits.limited(p.provider || 'codex', p.model));
     // A copy of the conversation as it was before this message, like the router saw it.
     const context = { ...session, ...previousState, items: [...(session.items || [])], routes: [...(session.routes || [])], directContext: [...(session.directContext || [])],
-      configuredChecks: settings.checks?.[session.workspace] || [], routingCatalog: unlimited.length ? unlimited : usable, attachedImageCount: images.length };
+      configuredChecks: settings.checks?.[session.workspace] || [], routingCatalog: unlimited.length ? unlimited : usable, attachedImageCount: images.length,
+      autoLowModel: settings.autoLowModel };
     const used = { id: selected.id, provider: selected.provider || 'codex', model: selected.model, effort: selected.effort || null, source: selected.source === 'manual' ? 'manual' : 'router' };
     const abort = new AbortController();
     this.jevComparing = abort;

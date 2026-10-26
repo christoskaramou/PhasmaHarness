@@ -24,6 +24,8 @@ test('workers are told rtk starts programs only: shell built-ins and PowerShell 
 test('workers get the request rules: build what was asked, marked-up images, two readings, logs, no Co-Authored-By', () => {
   assert.match(WORKER_INSTRUCTIONS, /remove what they say to remove, for good/);
   assert.match(WORKER_INSTRUCTIONS, /a question gets an answer, not an edit/);
+  // 2026-10-26: a bare "hi" made a worker resume its pending task for over a minute of repository searches.
+  assert.match(WORKER_INSTRUCTIONS, /A message with no request \(hi, thanks, ok\) gets a short reply; resume unfinished work only when asked/);
   assert.match(WORKER_INSTRUCTIONS, /name each mark back/);
   assert.match(WORKER_INSTRUCTIONS, /If two readings fit, ask one short question first/);
   assert.match(WORKER_INSTRUCTIONS, /no Co-Authored-By lines/);

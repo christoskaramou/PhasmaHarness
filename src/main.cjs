@@ -249,14 +249,6 @@ async function start() {
   });
   // The recorded audio; Dictation checks it is the open recording's and valid PCM before it reaches the engine.
   handle('voiceTranscribe', (id, audio) => voice.transcribe(id, audio));
-  handle('openWorkspaceWiki', async (id, agentId) => {
-    const root = path.join(id ? agents.owner(id).session(id).workspace : agents.controller(agentId).data.settings.workspace, 'docs', 'wiki');
-    if (!fs.existsSync(root))
-      throw new Error('This workspace has no docs/wiki folder.');
-
-    const error = await shell.openPath(root);
-    if (error) throw new Error(error);
-  });
   const benchmarkWorkers = () => controller.catalog().filter(p => p.worker && p.enabled && controller.available(p));
   handle('benchmarkRefresh', () => {
     const workspace = path.join(app.getPath('userData'), 'benchmark-refresh');
@@ -423,7 +415,7 @@ async function start() {
   handle('jevRemoveKey', () => {
     if (controller.busy) throw new Error('Stop the current turn before removing the Jev key.');
     jevKey.remove(); controller.smartRouter.jev.resetHealth();
-    return controller.settings({ routing: controller.data.settings.routing === 'jev' ? 'smart' : controller.data.settings.routing, contextRanking: 'local', toolSelection: 'off', jevCompare: false, wikiAssessment: false });
+    return controller.settings({ routing: controller.data.settings.routing === 'jev' ? 'smart' : controller.data.settings.routing, contextRanking: 'local', toolSelection: 'off', jevCompare: false });
   });
   handle('jevTest', async () => {
     if (controller.busy) throw new Error('Wait for the current turn to finish before testing Jev.');

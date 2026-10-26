@@ -84,18 +84,50 @@ module.exports = async window => {
       assert.equal(await run(`$('#job-dialog').open`), false, 'Task close still dismisses the panel');
       window.webContents.setZoomFactor(1); await frame();
     }
-    for (const width of [1100, 600, 390]) {
-      window.setSize(width, 820); await frame();
+    // Desktop widths, then a phone held upright and on its side (about 412x800 and 915x360 visible in its browser).
+    for (const [width, height] of [[1100, 820], [600, 820], [412, 800], [915, 360], [390, 820]]) {
+      window.setSize(width, height); await frame();
       await run(`renderSidebarWidth(); $('#settings-dialog').showModal(); true`);
       const geometry = await run(`(() => { const body = $('.settings-body'), dialog = $('#settings-dialog').getBoundingClientRect(); return { fits: body.scrollWidth <= body.clientWidth + 1 && dialog.left >= 0 && dialog.right <= innerWidth + 1, close: $('#settings-close').getBoundingClientRect().bottom <= dialog.bottom }; })()`);
       assert.deepEqual(geometry, { fits: true, close: true }, `Settings fits at ${width}px`);
-      await capture(`settings-dark-${width}`);
-      assert.equal(await run(`$('.settings-tabs').getAttribute('aria-orientation')`), width <= 720 ? 'horizontal' : 'vertical');
+      await capture(`settings-dark-${width}x${height}`);
+      assert.equal(await run(`$('.settings-tabs').getAttribute('aria-orientation')`), width <= 720 || height <= 500 ? 'horizontal' : 'vertical');
       await run(`$('#settings-dialog').close(); true`);
       assert.equal(await run(`$('#send').getBoundingClientRect().right <= innerWidth && $('#composer').scrollWidth <= $('#composer').clientWidth + 1`), true, `composer fits at ${width}px`);
-      await capture(`chat-dark-${width}`);
+      assert.equal(await run(`$('#composer').getBoundingClientRect().bottom <= innerHeight`), true, `composer is on screen at ${width}x${height}`);
+      await capture(`chat-dark-${width}x${height}`);
+      // Phones show one screen at a time (like Grok): the chat fills the screen with a back button, or the bot list does.
+      const phone = width <= 720 || height <= 500;
+      // As a phone browser sees it: no desktop window buttons to keep clear of.
+      if (phone) { await run(`document.body.classList.add('remote-view'); true`); await frame(); }
+      const chat = await run(`(() => { const title = $('#session-title');
+        return { sidebar: getComputedStyle($('.sidebar')).display !== 'none', back: $('#phone-back').getBoundingClientRect().width > 0,
+          titleFits: title.scrollWidth <= title.clientWidth + 1 }; })()`);
+      assert.deepEqual(chat, phone ? { sidebar: false, back: true, titleFits: true } : { sidebar: true, back: false, titleFits: chat.titleFits },
+        `chat screen at ${width}x${height}`);
+      if (phone)
+        await capture(`phone-chat-dark-${width}x${height}`);
+      if (phone) {
+        // Back shows the bot list; opening a chat adds one history entry, so the phone's back gesture returns to the list.
+        // (Tapping a row opens a chat through selectAgent, which needs the full fleet state this check does not load.)
+        await run(`$('#phone-back').click(); true`); await frame();
+        const list = await run(`(() => ({ main: getComputedStyle($('main')).display === 'none',
+          full: $('.sidebar').getBoundingClientRect().width >= innerWidth - 1,
+          label: $('#main-agent-list .agent-nav-label').getBoundingClientRect().width > 20 }))()`);
+        assert.deepEqual(list, { main: true, full: true, label: true }, `back shows the bot list, filling the screen at ${width}x${height}`);
+        await capture(`list-dark-${width}x${height}`);
+        assert.equal(await run(`(() => { const last = [...document.querySelectorAll('#agent-list .agent-nav')].at(-1), sidebar = $('.sidebar');
+          sidebar.scrollTop = sidebar.scrollHeight; const box = last.getBoundingClientRect(), bottom = $('.sidebar-bottom').getBoundingClientRect();
+          const shown = box.bottom <= bottom.top + 1 && box.top >= 0 && bottom.bottom <= innerHeight + 1; sidebar.scrollTop = 0; return shown; })()`), true, `every bot can be scrolled into view at ${width}x${height}`);
+        await run('showPhoneChat(); true'); await frame();
+        assert.deepEqual(await run(`[document.body.classList.contains('phone-list'), history.state?.phoneChat]`), [false, true], 'opening a chat adds a history entry');
+        await run(`$('#phone-back').click(); new Promise(r => setTimeout(r, 150))`); await frame();
+        assert.equal(await run(`document.body.classList.contains('phone-list')`), true, 'back (the gesture or the button) returns to the list');
+        await run('showPhoneChat(); true'); await frame();
+        await run(`document.body.classList.remove('remote-view'); true`);
+      }
     }
-    console.log('Mosaic light/dark screenshots, search hierarchy, visible tiles, connector actions and 390/600/1100px layout passed');
+    console.log('Mosaic light/dark screenshots, search hierarchy, visible tiles, connector actions and 390/600/1100px and phone layouts passed');
   } finally {
     await run(`(() => { $('#settings-dialog').close(); const saved = window.mosaicSaved; state=saved.state; fleetState=saved.fleetState; selectedAgent=saved.selectedAgent; selectedId=saved.selectedId; $('#prompt').value=saved.draft; document.documentElement.dataset.appearance=saved.appearance; render(); delete window.mosaicSaved; })()`);
   }

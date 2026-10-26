@@ -1,5 +1,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const suggestions = require('../src/controller/suggestions.cjs');
 
 // A controller stand-in with just what replySuggestion reads.
@@ -97,4 +100,46 @@ test('a reply suggestion uses the answer’s model at its lowest available effor
     { id: 'codex:other:minimal', provider: 'codex', model: 'other', effort: 'minimal' }];
   await controller.replySuggestion('s');
   assert.equal(calls[0].choice.id, 'codex:gpt:low');
+});
+
+// /wiki (2026-10-25): the quick model suggests wiki changes from the chat and the docs/wiki index; nothing is written.
+test('/wiki suggestions come from the chat and the wiki index, as a notice that writes nothing', async t => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-wiki-suggest-'));
+  t.after(() => fs.rmSync(workspace, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(workspace, 'docs', 'wiki'), { recursive: true });
+  fs.writeFileSync(path.join(workspace, 'docs', 'wiki', 'index.md'), '# Wiki\n- [Rendering](rendering.md)\n');
+  const reply = { suggestions: [{ page: 'docs/wiki/rendering.md', change: 'Shadow maps use 4 cascades (src/shadow.cpp:12).', reason: 'A decision.' }] };
+  const { controller, session, calls } = chat({ reply });
+  Object.assign(session, { workspace });
+  Object.assign(controller, { save() {}, changed() {} });
+  assert.equal(await controller.suggestWiki('s'), 1);
+  const sent = JSON.parse(calls[0].request.prompt);
+  assert.match(sent.wikiIndex, /Rendering/);
+  assert.deepEqual(sent.conversation.map(entry => entry.role), ['user', 'assistant']);
+  assert.ok(calls[0].request.schema.required.includes('suggestions'));
+  const notice = session.items.at(-1);
+  assert.equal(notice.type, 'notice');
+  assert.deepEqual(notice.wikiSuggestion.suggestions, reply.suggestions);
+  assert.deepEqual(fs.readdirSync(path.join(workspace, 'docs', 'wiki')), ['index.md'], 'nothing is written');
+
+  const none = chat({ reply: { suggestions: [] } });
+  Object.assign(none.session, { workspace });
+  Object.assign(none.controller, { save() {}, changed() {} });
+  assert.equal(await none.controller.suggestWiki('s'), 0);
+  assert.equal(none.session.items.at(-1).wikiSuggestion, undefined);
+  assert.match(none.session.items.at(-1).text, /No durable wiki update/);
+
+  const fresh = chat({ route: null });
+  await assert.rejects(fresh.controller.suggestWiki('s'), /send it a message first/);
+});
+
+test('/wiki and reply suggestions skip a reply Jev gave itself and use the last worker model', async t => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-wiki-jev-'));
+  t.after(() => fs.rmSync(workspace, { recursive: true, force: true }));
+  const { controller, session, calls } = chat({ reply: { suggestions: [] } });
+  session.routes.push({ id: 'jev', model: 'jev-1.14.0', label: 'Jev', directAnswer: 'Yes.' });
+  Object.assign(session, { workspace });
+  Object.assign(controller, { save() {}, changed() {} });
+  assert.equal(await controller.suggestWiki('s'), 0);
+  assert.equal(calls[0].choice.model, 'gpt', 'the worker before the Jev answer writes the suggestions');
 });

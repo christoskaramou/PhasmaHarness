@@ -58,10 +58,10 @@
 
     // What Auto does.
     { id: 'auto', text: 'Auto picks a model for every message to a bot: an economical one for simple asks, the strongest for hard ones, and the same one while you continue a task.' },
-    { id: 'routing-model', text: 'Auto\'s choice is made by the routing model, Settings → General → Routing model (Auto). A fast, cheap model there keeps routing quick.' },
+    { id: 'routing-model', text: 'Auto\'s choice is made by the routing model, Settings → Routing → Routing model (Auto). A fast, cheap model there keeps routing quick.' },
     { id: 'jev-router', when: () => !!state.jev?.configured,
       text: 'With your Jev key you can pick Jev as the routing model. If a Jev call fails, Harness routes that message with the normal router instead.' },
-    { id: 'effort', text: 'Settings → General → Effort cap for Auto limits how hard Auto lets models think; a lower cap saves usage. Models you pick by hand are not capped.' },
+    { id: 'effort', text: 'Settings → Routing → Effort cap for Auto limits how hard Auto lets models think; a lower cap saves usage. Models you pick by hand are not capped.' },
     { id: 'auto-models', text: 'Auto only picks from the models ticked in Settings → Providers. Untick the ones you do not want it to use.' },
     { id: 'usage-limit', text: 'When a provider hits its usage limit, Harness pauses that task for you to review, and new Auto messages use another provider until the limit resets.' },
     { id: 'hub-model', text: () => `${hub()} itself runs on the one model set in its Edit dialog; picking per message is for bots.` },
@@ -79,13 +79,11 @@
     { id: 'renew', text: 'Settings → Providers → Renew refreshes the model lists, for example after a provider releases a new model.' },
     { id: 'zoom', when: desktop, text: 'Ctrl + and Ctrl − zoom the whole window.' },
     { id: 'phone', when: desktop,
-      text: 'Settings → General → Browser access opens Harness in a browser. For your phone or another computer it needs an HTTPS address through your own proxy, and the link is the key, so keep it private.' },
+      text: 'Settings → Browser opens Harness in a browser. For your phone or another computer it needs an HTTPS address through your own proxy, and the link is the key, so keep it private.' },
 
     // Getting better results.
     { id: 'instructions', text: 'Put your project\'s rules in AGENTS.md at the project root (CLAUDE.md can just say @AGENTS.md): every bot reads it.' },
     { id: 'rules', text: 'Rules Harness learns stay in Harness, which passes them with each turn; each one\'s line in the chat has an Undo.' },
-    { id: 'learned', text: 'To see what Harness has learned, open the project\'s wiki folder (Settings → Wiki → Show in folder): lessons.md, rules.md, notes.md and setups.md.' },
-    { id: 'wiki', text: 'Each project has a wiki that Harness keeps up to date after tasks whose checks pass. Settings → Wiki shows where it is, and Show in folder opens it.' },
     { id: 'correction', when: () => projectChecks().length > 0,
       text: 'When a check fails, Harness asks the bot for one fix by itself before the task comes back to you.' },
     { id: 'read-only-checks', when: () => projectChecks().length > 0,

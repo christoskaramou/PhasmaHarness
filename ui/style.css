@@ -44,6 +44,8 @@
 body {
   margin:0;
   height:100vh;
+  /* The visible height between a phone browser's bars; 100vh alone hid the composer under them. */
+  height:100dvh;
   display:flex;
   background:var(--bg);
   color:var(--text);
@@ -972,6 +974,18 @@ dialog label select {
   display:flex;
   gap:8px;
   margin-top:10px
+}
+
+/* A model and its effort side by side, like the Edit dialogs. */
+.model-effort-field {
+  display:grid;
+  grid-template-columns:minmax(0,2fr) minmax(0,1fr);
+  gap:8px;
+  margin-top:10px
+}
+
+.model-effort-field select {
+  margin:0
 }
 
 .path-field input {
@@ -2062,13 +2076,6 @@ dialog {
   color:var(--text)
 }
 
-#wiki-location {
-  color:var(--text);
-  font-size:calc(15px * var(--font-scale,1));
-  overflow-wrap:anywhere;
-  margin:14px 0 16px
-}
-
 .provider-install {
   padding:2px 10px;
   font-size:calc(12px * var(--font-scale,1))
@@ -2142,7 +2149,7 @@ dialog {
   white-space:pre-wrap
 }
 
-#panel-general label {
+#panel-general label,#panel-routing label,#panel-tools label {
   margin:14px 0
 }
 
@@ -3313,6 +3320,11 @@ button,button *,[role=button],[role=button] *,input[type=button],input[type=subm
   position:relative
 }
 
+.wiki-suggestions p {
+  white-space:pre-wrap;
+  margin:4px 0
+}
+
 .provider-plug-row>.provider-plug {
   position:absolute;
   top:0;
@@ -3670,26 +3682,23 @@ body:has(#job-dialog[open]) main {
   #settings-dialog { inset:24px; width:calc(100vw - 48px); max-width:calc(100vw - 48px); height:calc(100dvh - 48px); max-height:calc(100dvh - 48px); }
 }
 
-@media (max-width: 720px) {
-  .sidebar { width: 64px !important; flex: 0 0 64px; padding: 12px 6px; }
-  #agent-list > p.muted { display: none; }
-  #agent-list { overflow-x: hidden; }
-  #sidebar-resizer, .sidebar .brand, .sidebar .empty, .sidebar .sidebar-hint { display: none; }
-  .sidebar-toolbar { justify-content: center; margin-bottom: 16px; }
-  #agent-new { width: 44px; min-height: 44px; }
-  .main-agent { padding-bottom:0; margin-bottom:8px; }
-  #main-agent-list .agent-nav { width: 52px; padding: 8px; }
-  #main-agent-list .agent-avatar { width:26px; height:26px; }
-  .sidebar .agent-nav { min-height: 44px; justify-content: center; padding: 8px 4px; }
-  .sidebar .agent-nav-label, .sidebar .agents-heading > span {
-    position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
-  }
-  .sidebar .agents-heading { justify-content: center; }
-  #agents-overview { min-height: 40px; width: 44px; font-size: 0; }
-  #agents-overview::before { content: '…'; font-size: 22px; }
-  .sidebar .settings-button { font-size: 0; min-height: 44px; justify-content: center; padding: 8px; }
-  .sidebar .settings-button > span { font-size: 22px; }
-  #main-agent-list .agent-indicator { right: 4px; top: 4px; }
+#phone-back { display: none; }
+
+/* Phones, upright or on their side: one screen at a time, like phone chat apps. The bot list fills the screen
+   (body.phone-list) or the chat does, with a back button to the list (showPhoneList in ui/app.js). */
+@media (max-width: 720px), (max-height: 500px) {
+  #sidebar-resizer { display: none; }
+  body:not(.phone-list) .sidebar { display: none; }
+  body.phone-list .sidebar { width: 100% !important; max-width: none; flex: 1 1 auto; border-right: 0; }
+  body.phone-list main { display: none; }
+  /* The whole list scrolls as one page, with Settings kept at the bottom, instead of a small box inside it. */
+  body.phone-list .sidebar { overflow-y: auto; padding-bottom: 0; }
+  body.phone-list .agent-picker, body.phone-list #agent-list { flex: none; min-height: auto; overflow: visible; }
+  body.phone-list .sidebar-bottom { position: sticky; bottom: 0; margin-top: auto; padding-bottom: 12px; background: var(--sidebar); }
+  #phone-back { display: inline-flex; flex: none; }
+  .message:not(.user) { max-width: 100%; }
+  /* A phone browser has no window buttons to keep clear of (the desktop header's right padding below). */
+  .remote-view main > header { padding-right: 12px; }
   main > header { padding: 10px 12px; min-height: 64px; gap: 8px; }
   .header-actions { gap: 4px; }
   #group-mention { max-width: 100%; }
@@ -3712,9 +3721,6 @@ body:has(#job-dialog[open]) main {
   .settings-tab { flex:none; padding:10px; }
   .settings-tab svg { display:none; }
   .settings-body { padding:20px 16px; }
-  .roster-search, #agent-new span, #settings .settings-label { display:none; }
-  .roster-tools { justify-content:center; }
-  .sidebar-bottom { flex-wrap:wrap; justify-content:center; }
   .job-result-preview { margin-left:0; }
   #job-dialog { width: calc(100vw - 64px); max-width: none; }
   body:has(#job-dialog[open]) main { margin-right: 0; }
@@ -3931,6 +3937,25 @@ main > header {
 
 #prompt-ghost span {
   color: transparent;
+}
+
+/* Accepts the grey suggestion on touch screens; with a keyboard the Right arrow does. */
+#suggestion-accept[hidden] {
+  display: none;
+}
+
+@media not (pointer: coarse) {
+  #suggestion-accept {
+    display: none;
+  }
+}
+
+/* Its own column between the microphone and Send, on touch screens only, so the desktop row keeps its columns. */
+@media (pointer: coarse) {
+  .composer-bottom { grid-template-columns: auto minmax(0, 1fr) repeat(5, auto); }
+  #suggestion-accept { grid-column: 5; }
+  #send { grid-column: 6; }
+  #stop { grid-column: 7; }
 }
 
 /* A tip on the new-chat screen (ui/tips.js). */

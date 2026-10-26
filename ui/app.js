@@ -104,8 +104,6 @@ const api = { ...window.router,
   create: (workspace, access) => window.router.create(workspace, access, selectedAgent),
   stop: (id = selectedId) => id ? window.router.stop(id) : Promise.resolve(),
   answer: (id, answer) => window.router.answer(id, answer, selectedAgent),
-  workspaceWiki: id => window.router.workspaceWiki(id, selectedAgent),
-  openWorkspaceWiki: id => window.router.openWorkspaceWiki(id, selectedAgent),
   browseWorkspace: (id, action, relative, kind) => window.router.browseWorkspace(id, action, relative, kind, selectedAgent),
   preview: (id, text, mode) => window.router.preview(id, text, mode, selectedAgent),
 };
@@ -387,6 +385,7 @@ function renderModelPickers() {
   if ($('#settings-dialog').open) {
     renderRoutingModels();
     renderChatScanModels();
+    renderLowModels();
     renderBenchmarkWorkers();
   }
   if ($('#agent-dialog').open)
@@ -786,9 +785,39 @@ async function selectAgent(id, groupId = null) {
   $('#prompt').value = drafts.get(draftKey()) || '';
   applyState(fleetState);
   $('#prompt').value = drafts.get(draftKey()) || ''; renderImages(); updatePreview();
+  // Before loading, so a chat that fails to load still opens and shows its error.
+  showPhoneChat();
   if (selectedId && !state.watching) applyState(await api.load(selectedId));
   $('#agent-list .agent-nav[aria-pressed="true"]')?.scrollIntoView({ block: 'nearest' });
 }
+
+// Phones show one screen at a time, like phone chat apps: the bot list (body.phone-list) or the open chat. Opening a
+// chat from the list adds one history entry, so the phone's back gesture returns to the list instead of leaving.
+const phoneLayout = matchMedia('(max-width:720px), (max-height:500px)');
+let phoneChatEntry = false;
+
+function showPhoneChat() {
+  if (!phoneLayout.matches || !document.body.classList.contains('phone-list'))
+    return;
+
+  document.body.classList.remove('phone-list');
+  history.pushState({ phoneChat: true }, '');
+  phoneChatEntry = true;
+}
+
+$('#phone-back').onclick = () => {
+  if (phoneChatEntry)
+    history.back();
+  else
+    document.body.classList.add('phone-list');
+};
+addEventListener('popstate', () => {
+  phoneChatEntry = false;
+  if (phoneLayout.matches)
+    document.body.classList.add('phone-list');
+});
+if (phoneLayout.matches)
+  document.body.classList.add('phone-list');
 
 $('#agents-overview').onclick = () => $('#agents-dialog').showModal();
 $('#agents-add').onclick = () => editAgent();
@@ -1275,7 +1304,6 @@ function jevHealth() {
   if (s.routing === 'jev') uses.push('the Smart router routes');
   if (s.contextRanking === 'jev') uses.push('project search uses local ranking');
   if (s.toolSelection === 'jev') uses.push('tool recommendations use local candidates');
-  if (s.wikiAssessment === true) uses.push('wiki additions are not judged');
   const since = new Date(health.since), today = since.toDateString() === new Date().toDateString();
   const time = since.toLocaleString([], today ? { hour: '2-digit', minute: '2-digit' } : { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   return `Unavailable since ${time}: ${health.error}${uses.length ? ` Meanwhile ${uses.join(', ')}.` : ''}`;
@@ -2068,6 +2096,30 @@ function renderNotice(item, node, session) {
     line.append(' ', undo);
   }
   node.replaceChildren(line);
+  if (item.wikiSuggestion) node.append(...wikiSuggestionParts(item.wikiSuggestion, session));
+}
+
+// /wiki's suggestions, and an Apply that asks this chat's bot to make them under the workspace's own rules.
+function wikiSuggestionParts(suggestion, session) {
+  const list = element('ol', 'wiki-suggestions');
+  for (const entry of suggestion.suggestions) {
+    const row = element('li');
+    row.append(element('strong', '', entry.page), element('p', '', entry.change), element('p', 'muted', entry.reason));
+    list.append(row);
+  }
+  const apply = element('button', 'compact-action', 'Apply'); apply.type = 'button';
+  apply.setAttribute('aria-label', 'Ask this bot to apply the wiki suggestions');
+  apply.onclick = () => {
+    apply.disabled = true;
+    const text = 'Apply these wiki suggestions to docs/wiki, following this workspace\'s rules (AGENTS.md). Check each against the ' +
+      'current source first, skip any that no longer hold, and say what you changed:\n\n' +
+      suggestion.suggestions.map((entry, index) => `${index + 1}. ${entry.page}: ${entry.change}`).join('\n\n');
+    api.send({ id: session.id, text, mode: currentMode(), task: 'on' }).catch(error => {
+      apply.disabled = false;
+      notify(error);
+    });
+  };
+  return [list, apply];
 }
 
 // One thing that happened to the project, with its Undo.
@@ -2514,6 +2566,12 @@ const COMMANDS = {
     notify(`Conversation saved to ${file}`);
   } },
   status: { description: 'Show the current task, queued work and child agents.', run: () => openCommandPanel('status') },
+  // Not awaited: the suggestion call can take a while, and a waiting command keeps the composer locked.
+  wiki: { description: 'Suggest wiki updates from this chat; nothing is written until you click Apply.', run: () => {
+    if (!selectedId) throw new Error('Open a chat first.');
+    notify('Looking for wiki updates in this chat…');
+    api.suggestWiki(selectedId).catch(notify);
+  } },
 };
 let commandPanel = null, commandPicking = false;
 function openCommandPanel(name) {
@@ -2943,6 +3001,7 @@ function showSuggestion() {
   const matches = text.length > typed.length && text.toLowerCase().startsWith(typed.toLowerCase());
   const visible = matches && prompt.offsetParent !== null;
   promptGhost.hidden = !visible;
+  $('#suggestion-accept').hidden = !visible;
   prompt.style.minHeight = '';
   if (visible) prompt.setAttribute('aria-description', `Suggested reply, Right arrow accepts: ${text}`);
   else prompt.removeAttribute('aria-description');
@@ -2972,61 +3031,104 @@ $('#prompt').addEventListener('keydown', event => {
   const plain = !event.isComposing && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey;
   if (event.key !== 'ArrowRight' || promptGhost.hidden || !atEnd || !plain) return;
   event.preventDefault();
+  acceptSuggestion();
+});
+// Touch screens have no Right arrow: the button beside Send (shown only there, see #suggestion-accept in the CSS) does the
+// same.
+$('#suggestion-accept').onclick = acceptSuggestion;
+
+function acceptSuggestion() {
+  const prompt = $('#prompt');
+  if (promptGhost.hidden || !suggestion)
+    return;
+
   prompt.value += suggestion.text.slice(prompt.value.length);
   prompt.dispatchEvent(new Event('input', { bubbles: true }));
-});
-// A Settings model option: unavailable ones stay listed but cannot be picked.
-function presetOption(p) {
-  const option = new Option(`${p.label} · ${p.provider}${!p.available ? ' · unavailable' : ''}`, p.id);
-  option.disabled = !p.available;
-  return option;
 }
-
-// Settings pickers show the saved choice, except while their own change is being saved.
-function renderRoutingModels(selected = state.settings.routing === 'jev' ? 'jev' : state.settings.routerPreset) {
-  const select = $('#settings-router-preset');
-  if (providersConnecting().active) {
-    showConnecting(select);
-    renderRoutingDetail();
-    return;
-  }
-
-  const options = [new Option('Jev', 'jev'), ...state.routerPresets.map(presetOption)];
-  if (selected !== 'jev' && !state.routerPresets.some(p => p.id === selected)) {
-    const placeholder = new Option(state.routerPresets.length ? 'Choose an enabled routing model' : 'Enable a routing model in Providers', '');
-    placeholder.disabled = true;
-    options.unshift(placeholder);
-    selected = '';
-  }
-  fillPicker(select, options, selected);
-  if (!select.dataset.saving)
-    select.value = selected;
-  renderRoutingDetail();
-}
-
-// Off (the default), or any enabled model that answers in a schema; a picked model that is no longer offered still shows,
-// as unavailable.
-function renderChatScanModels() {
-  const select = $('#settings-chat-scan');
-  if (providersConnecting().active) {
-    showConnecting(select);
-    return;
-  }
-
-  const saved = state.settings.chatScanModel || 'off';
-  const options = [new Option('Off', 'off'), ...(state.chatScanPresets || []).map(presetOption)];
-  if (!options.some(option => option.value === saved)) {
+// Settings model pickers work like the Edit dialogs: the model, grouped by provider, and its effort in a picker beside
+// it. `first` holds the choices that are not a model (Jev, Off, Auto). A saved model no longer offered shows as
+// unavailable. The saved choice shows, except while its own change is being saved.
+function fillModelEffort(select, effort, presets, saved, first) {
+  const groups = presetGroups(presets, false);
+  const group = groups.find(g => g.variants.some(p => p.id === saved));
+  const options = [...first, ...groupedOptions(groups)];
+  if (saved && !group && !first.some(option => option.value === saved)) {
     const missing = new Option(`${saved} · unavailable`, saved);
     missing.disabled = true;
     options.push(missing);
   }
-  fillPicker(select, options, saved);
+  fillPicker(select, options, group?.key || saved);
   if (!select.dataset.saving)
-    select.value = saved;
+    select.value = group?.key || saved;
+  showDialogEfforts(select, effort, groups, saved);
+}
+
+// The picked model at the effort beside it, or its lowest effort when it has no such level; any other choice as it is.
+function modelEffortChoice(select, effort, presets) {
+  const group = presetGroups(presets, false).find(g => g.key === select.value);
+  if (!group)
+    return select.value;
+
+  return (group.variants.find(p => (p.effort || '') === effort.value) || group.variants[0]).id;
+}
+
+// The Settings choices saved as one preset ID from a model picker and the effort picker beside it.
+const modelEffortSettings = {
+  routingModel: () => [$('#settings-router-preset'), $('#settings-router-effort'), state.routerPresets],
+  chatScanModel: () => [$('#settings-chat-scan'), $('#settings-chat-scan-effort'), state.chatScanPresets || []],
+  autoLowModel: () => [$('#settings-low-model'), $('#settings-low-effort'), state.presets],
+};
+
+function renderRoutingModels(selected = state.settings.routing === 'jev' ? 'jev' : state.settings.routerPreset) {
+  const select = $('#settings-router-preset');
+  if (providersConnecting().active) {
+    showConnecting(select);
+    $('#settings-router-effort').disabled = true;
+    renderRoutingDetail();
+    return;
+  }
+
+  const first = [new Option('Jev', 'jev')];
+  if (selected !== 'jev' && !state.routerPresets.some(p => p.id === selected)) {
+    const placeholder = new Option(state.routerPresets.length ? 'Choose an enabled routing model' : 'Enable a routing model in Providers', '');
+    placeholder.disabled = true;
+    first.unshift(placeholder);
+    selected = '';
+  }
+  fillModelEffort(select, $('#settings-router-effort'), state.routerPresets, selected, first);
+  renderRoutingDetail();
+}
+
+// Off (the default), or any enabled model that answers in a schema.
+function renderChatScanModels() {
+  const select = $('#settings-chat-scan');
+  if (providersConnecting().active) {
+    showConnecting(select);
+    $('#settings-chat-scan-effort').disabled = true;
+    return;
+  }
+
+  fillModelEffort(select, $('#settings-chat-scan-effort'), state.chatScanPresets || [], state.settings.chatScanModel || 'off',
+    [new Option('Off', 'off')]);
+}
+
+// Auto (the default: Harness picks from benchmarks) or any worker model.
+function renderLowModels() {
+  const select = $('#settings-low-model');
+  if (providersConnecting().active) {
+    showConnecting(select);
+    $('#settings-low-effort').disabled = true;
+    return;
+  }
+
+  fillModelEffort(select, $('#settings-low-effort'), state.presets, state.settings.autoLowModel || 'auto', [new Option('Auto', 'auto')]);
 }
 $('#settings').onclick = async () => {
-  try { applyState(await api.bootstrap()); }
-  catch (error) { notify(error); return; }
+  // A browser opens from the state the runner keeps pushing to it; fetching all of it again took seconds on a phone.
+  if (!api.remote) {
+    try { applyState(await api.bootstrap()); }
+    catch (error) { notify(error); return; }
+  }
   renderRoutingModels();
   $('#settings-effort-cap').value = state.settings.effortCap || 'high';
   $('#settings-effort-cap').onchange();
@@ -3034,10 +3136,10 @@ $('#settings').onclick = async () => {
   $('#settings-tools').value = state.settings.toolSelection || 'off';
   $('#settings-quick').value = state.settings.jevQuickAnswers === false ? 'off' : 'on';
   $('#settings-jev-compare').value = state.settings.jevCompare === true ? 'on' : 'off';
-  $('#settings-wiki-check').value = state.settings.wikiAssessment === true ? 'on' : 'off';
   $('#settings-reply-suggestions').value = state.settings.replySuggestions === false ? 'off' : 'on';
   $('#settings-show-tips').value = state.settings.showTips === false ? 'off' : 'on';
   renderChatScanModels();
+  renderLowModels();
   renderRoutingDetail();
   $('#jev-key').value = '';
   $('#jev-result').textContent = '';
@@ -3219,16 +3321,26 @@ function renderBenchmarkWorkers() {
   const select = $('#benchmark-worker');
   if (providersConnecting().active) {
     showConnecting(select);
+    $('#benchmark-worker-effort').disabled = true;
     $('#benchmark-refresh').disabled = true;
     return;
   }
 
+  // The worker picked so far stays; the first time, the suggested one.
   const workers = state.presets.filter(p => p.available && p.enabled !== false && p.id !== 'jev');
-  const suggested = workers.find(p => p.model === 'gpt-6-astra' && p.effort === 'xhigh');
-  if (fillPicker(select, workers.map(p => new Option(p.label, p.id)), workers[0]?.id || '') && suggested)
-    select.value = suggested.id;
+  const picked = benchmarkWorker();
+  const suggested = workers.find(p => p.model === 'gpt-6-astra' && p.effort === 'xhigh') || workers[0];
+  fillModelEffort(select, $('#benchmark-worker-effort'), workers, workers.some(p => p.id === picked) ? picked : suggested?.id || '', []);
   $('#benchmark-refresh').disabled = !!state.busy || !workers.length;
 }
+
+function benchmarkWorker() {
+  return modelEffortChoice($('#benchmark-worker'), $('#benchmark-worker-effort'),
+    state.presets.filter(p => p.available && p.enabled !== false && p.id !== 'jev'));
+}
+
+for (const picker of ['#benchmark-worker', '#benchmark-worker-effort'])
+  $(picker).onchange = renderBenchmarkWorkers;
 
 async function showBenchmarks() {
   const { data, summary } = await api.benchmarkData();
@@ -3275,7 +3387,7 @@ $('#benchmark-refresh').onclick = async () => {
   const button = $('#benchmark-refresh'); button.disabled = true;
   try {
     if (state.busy) throw new Error('Finish the current turn before preparing a benchmark refresh.');
-    const mode = $('#benchmark-worker').value;
+    const mode = benchmarkWorker();
     if (!mode) throw new Error('Choose a connected refresh worker first.');
     const { prompt, workspace } = await api.benchmarkRefresh();
     const agent = await api.saveAgent({ name: `Benchmark refresh ${new Date().toISOString()}`, workspace, mode, access: 'workspace-write', instructions: 'Research and update model benchmark evidence.' });
@@ -3300,16 +3412,6 @@ function renderJevCompare() {
     `${s.manual ? `; your manual picks ${pct(s.manualSameModel, s.manual)} same model` : ''} · Jev cost $${s.costUsd.toFixed(4)}${s.errors ? ` · ${s.errors} failed` : ''}.`;
   $('#jev-compare-detail').textContent = 'Log only. When on, Jev is also asked which model it would pick, so each message is sent to Jev and billed by Jev; routing and the model that runs do not change.' + stats;
 }
-// Shown with a saved Jev key. Log only: automatic wiki updates are judged afterwards and nothing in the wiki changes.
-function renderWikiCheck() {
-  const shown = !!state.jev?.configured;
-  $('#wiki-check-row').hidden = $('#wiki-check-detail').hidden = !shown;
-  if (!shown) return;
-  const w = state.decisions?.wiki;
-  const parts = counts => Object.entries(counts || {}).map(([name, n]) => `${n} ${name}`).join(', ');
-  const stats = !w?.additions ? '' : ` ${w.additions} additions: ${w.assessed} judged${w.assessed ? ` (${parts(w.support)}; ${parts(w.novelty)})` : ''}, ${w.unassessable} not assessable · Jev cost $${w.jevCostUsd.toFixed(4)}.`;
-  $('#wiki-check-detail').textContent = 'Log only. When on, after an automatic wiki update Jev judges each small addition that cites a file:line source: does the source support it, and did the wiki already have it? The addition, the cited source lines and related wiki passages are sent to Jev and billed by Jev; nothing in the wiki changes. Results are in decisions.jsonl in the logs folder.' + stats;
-}
 function renderRoutingDetail() {
   const jev = $('#settings-router-preset option[value=jev]');
   if (jev) {
@@ -3318,9 +3420,10 @@ function renderRoutingDetail() {
     jev.disabled = !state.jev?.configured;
   }
   renderJevCompare();
-  renderWikiCheck();
   const provider = $('#settings-router-preset').value === 'jev' ? 'jev' : 'smart';
   $('#settings-router-preset').disabled = !!state.planRouting || providersConnecting().active;
+  if ($('#settings-router-preset').disabled)
+    $('#settings-router-effort').disabled = true;
   $('#settings-router-preset').title = state.planRouting ? state.planRouting.reason + ' This overrides the saved routing preference.'
     : provider === 'jev' && state.jev.enabled === false ? 'Jev is disabled in Providers. Auto uses Smart until you enable Jev again.'
     : provider === 'jev' && !state.jev.configured ? 'Save your Jev API key in Providers to enable this routing option.' : '';
@@ -3336,7 +3439,7 @@ $('#jev-plug').onclick = async event => {
 };
 $('#jev-save').onclick = async () => {
   const key = $('#jev-key').value; $('#jev-key').value = '';
-  try { applyState(await withProviderAction('jev', 'Saving key…', () => api.jevSaveKey(key))); renderJevCompare(); renderWikiCheck(); $('#jev-result').textContent = state.jev.enabled === false ? 'Key saved. Use the plug to enable Jev.' : 'Key saved. Test the connection, then pick Jev as General → Routing model (Auto).'; }
+  try { applyState(await withProviderAction('jev', 'Saving key…', () => api.jevSaveKey(key))); renderJevCompare(); $('#jev-result').textContent = state.jev.enabled === false ? 'Key saved. Use the plug to enable Jev.' : 'Key saved. Test the connection, then pick Jev as General → Routing model (Auto).'; }
   catch (error) { notify(error); }
 };
 $('#jev-test').onclick = async () => {
@@ -3349,7 +3452,7 @@ $('#jev-test').onclick = async () => {
   finally { testingJev = false; render(); }
 };
 $('#jev-remove').onclick = async () => {
-  try { applyState(await withProviderAction('jev', 'Removing key…', () => api.jevRemoveKey())); renderRoutingModels(); $('#settings-context').value = state.settings.contextRanking || 'local'; $('#settings-tools').value = state.settings.toolSelection || 'off'; $('#settings-jev-compare').value = 'off'; $('#settings-wiki-check').value = 'off'; renderRoutingDetail(); $('#jev-result').textContent = 'Saved key removed.'; }
+  try { applyState(await withProviderAction('jev', 'Removing key…', () => api.jevRemoveKey())); renderRoutingModels(); $('#settings-context').value = state.settings.contextRanking || 'local'; $('#settings-tools').value = state.settings.toolSelection || 'off'; $('#settings-jev-compare').value = 'off'; renderRoutingDetail(); $('#jev-result').textContent = 'Saved key removed.'; }
   catch (error) { notify(error); }
 };
 let settingsWrites = Promise.resolve();
@@ -3372,8 +3475,8 @@ async function saveSetting(control, key, value, agentId = selectedAgent) {
   } catch (error) {
     if (agentId === selectedAgent) {
       const saved = key === 'routingModel' ? (state.settings.routing === 'jev' ? 'jev' : state.settings.routerPreset) : ((key === 'workspace' || key === 'access') ? current()?.[key] ?? state.settings[key] : state.settings[key])
-        ?? { effortCap: 'high', contextRanking: 'local', toolSelection: 'off', jevQuickAnswers: true, jevCompare: false, wikiAssessment: false,
-          chatScanModel: 'off', showTips: true }[key];
+        ?? { effortCap: 'high', contextRanking: 'local', toolSelection: 'off', jevQuickAnswers: true, jevCompare: false,
+          chatScanModel: 'off', autoLowModel: 'auto', showTips: true }[key];
       control.value = typeof value === 'boolean' ? (saved ? 'on' : 'off') : String(saved ?? '');
       control.onchange?.();
     }
@@ -3383,19 +3486,24 @@ async function saveSetting(control, key, value, agentId = selectedAgent) {
     delete control.dataset.saving;
     // A model picker that switched to "Connecting…" meanwhile stays disabled.
     control.disabled = control.dataset.signature === 'connecting';
+    // Model and effort pickers hold a model and a level, not the saved preset ID; show the saved choice again.
+    ({ routingModel: renderRoutingModels, chatScanModel: renderChatScanModels, autoLowModel: renderLowModels })[key]?.();
     renderRoutingDetail();
   }
 }
 const settingsFields = {
   'settings-router-preset': 'routingModel', 'settings-effort-cap': 'effortCap',
   'settings-context': 'contextRanking', 'settings-tools': 'toolSelection',
-  'settings-quick': 'jevQuickAnswers', 'settings-jev-compare': 'jevCompare', 'settings-wiki-check': 'wikiAssessment',
-  'settings-reply-suggestions': 'replySuggestions', 'settings-chat-scan': 'chatScanModel', 'settings-show-tips': 'showTips',
+  'settings-quick': 'jevQuickAnswers', 'settings-jev-compare': 'jevCompare',
+  'settings-reply-suggestions': 'replySuggestions', 'settings-chat-scan': 'chatScanModel', 'settings-low-model': 'autoLowModel',
+  'settings-low-effort': 'autoLowModel', 'settings-show-tips': 'showTips', 'settings-router-effort': 'routingModel',
+  'settings-chat-scan-effort': 'chatScanModel',
 };
 $('#settings-form').addEventListener('change', event => {
   const control = event.target, key = settingsFields[control.id];
   if (!key) return;
-  const value = ['jevQuickAnswers', 'jevCompare', 'wikiAssessment', 'replySuggestions', 'showTips'].includes(key) ? control.value === 'on' : control.value;
+  const toggle = ['jevQuickAnswers', 'jevCompare', 'replySuggestions', 'showTips'].includes(key);
+  const value = toggle ? control.value === 'on' : modelEffortSettings[key] ? modelEffortChoice(...modelEffortSettings[key]()) : control.value;
   saveSetting(control, key, value);
 });
 $('#settings-form').onsubmit = event => event.preventDefault();
@@ -3831,18 +3939,16 @@ document.querySelectorAll('.settings-tab').forEach(tab => {
       t.setAttribute('aria-selected', on ? 'true' : 'false');
     });
     $('#panel-general').hidden = name !== 'general';
+    $('#panel-browser').hidden = name !== 'browser';
+    $('#panel-routing').hidden = name !== 'routing';
+    $('#panel-tools').hidden = name !== 'tools';
     $('#panel-providers').hidden = name !== 'providers';
     $('#panel-connectors').hidden = name !== 'connectors';
     $('#panel-checks').hidden = name !== 'checks';
-    $('#panel-wiki').hidden = name !== 'wiki';
     $('#panel-about').hidden = name !== 'about';
     $('#panel-benchmarks').hidden = name !== 'benchmarks';
     if (name === 'benchmarks') showBenchmarks().catch(notify);
     if (name === 'connectors') HarnessConnectors.show();
-    if (name === 'wiki') {
-      $('#wiki-location').textContent = 'Loading…';
-      api.workspaceWiki(selectedId).then(showWiki).catch(error => { $('#wiki-location').textContent = error.message; });
-    }
     if (name === 'checks') renderChecks();
     if (name === 'providers') {
       renderProviders();
@@ -3851,11 +3957,6 @@ document.querySelectorAll('.settings-tab').forEach(tab => {
     body.scrollTop = settingsScroll[name] || 0;
   };
 });
-
-function showWiki(wiki) {
-  $('#wiki-location').textContent = wiki.exists ? wiki.root : `${wiki.root} (not created; Harness never creates it)`;
-}
-$('#wiki-open').onclick = () => api.openWorkspaceWiki(selectedId).catch(notify);
 
 function splitCommand(text) {
   const args = [];

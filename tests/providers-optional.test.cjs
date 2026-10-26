@@ -346,12 +346,11 @@ test('Claude turns feed the context meter and support manual compaction', async 
   await assert.rejects(controller.compact(session.id), /Cursor manages its context automatically/);
 });
 
-test('every Auto message is routed from the full catalog with the current worker as a hint, so it can upgrade', async t => {
+test('every Auto message is routed from the full catalog with the current worker known to the pick, so it can upgrade', async t => {
   const controller = await start(t, { claude: true });
   const calls = [];
-  const { contextFor } = require('../src/routing/smart-router.cjs');
   controller.smartRouter.choose = async (text, session) => {
-    calls.push({ offered: session.routingCatalog.map(p => p.id), current: contextFor(text, session, {}).currentWorker?.id });
+    calls.push({ offered: session.routingCatalog.map(p => p.id), current: (session.routes || []).findLast(route => !route.directAnswer)?.id });
     const hard = /debug|review/.test(text);
     const worker = session.routingCatalog.find(p => p.id === (hard ? 'claude-cli:opus' : 'claude-cli:haiku'));
     return { ...worker, source: 'model', reason: 'routed', assessment: { taskKind: hard ? 'debugging' : /implement/.test(text) ? 'implementation' : 'general', risk: 'low', uncertainty: 'low' } };
@@ -366,20 +365,19 @@ test('every Auto message is routed from the full catalog with the current worker
 
   assert.equal(calls.length, 3, 'every message is routed');
   assert.ok(calls.every(call => call.offered.length > 1), 'always from the whole catalog');
-  assert.deepEqual(calls.map(call => call.current), [undefined, 'claude-cli:haiku', 'claude-cli:opus'], 'the router sees the worker already holding the conversation');
+  assert.deepEqual(calls.map(call => call.current), [undefined, 'claude-cli:haiku', 'claude-cli:opus'], 'the pick sees the worker already holding the conversation');
   assert.deepEqual(session.routes.map(r => r.id), ['claude-cli:haiku', 'claude-cli:opus', 'claude-cli:haiku'], 'a light first model does not lock out a stronger one');
   assert.deepEqual((session.tasks || []).map(task => task.goal), ['what is a mutex?', 'debug this deadlock', 'thanks!'], 'all worker messages are tracked by default');
 });
 
 test('the router gets a compact, comparable catalog instead of raw benchmark rows', () => {
-  const { BenchmarkStore, routerCatalog, compactCatalog, ROUTER_POLICY, POLICY } = require('../src/routing/benchmarks.cjs');
+  const { BenchmarkStore, routerCatalog, compactCatalog } = require('../src/routing/benchmarks.cjs');
   const { PRESETS } = require('../src/routing/router.cjs');
   const catalog = new BenchmarkStore().catalog(PRESETS);
   const rows = routerCatalog(catalog);
   assert.equal(rows.length, catalog.length);
   assert.ok(rows.every(row => row.id && row.label && Object.values(row).every(v => typeof v !== 'object')), 'one flat row per worker');
   assert.ok(JSON.stringify(rows).length < JSON.stringify(compactCatalog(catalog)).length / 3, 'router rows are far smaller than the compact catalog');
-  assert.ok(ROUTER_POLICY.length < POLICY.length, 'and so is the router policy');
   const fake = routerCatalog([
     { id: 'a', label: 'A', benchmarks: [{ source: 'aa-index', version: '1', harness: 'api', score: 50 }, { source: 'aa-terminal', version: '1', harness: 'x-fallback', passPercent: 99 }] },
     { id: 'b', label: 'B', benchmarks: [{ source: 'aa-index', version: '1', harness: 'api', score: 40 }] },

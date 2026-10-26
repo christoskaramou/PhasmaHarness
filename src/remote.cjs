@@ -3,17 +3,26 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const { pipeline } = require('node:stream/promises');
+const { promisify } = require('node:util');
+const zlib = require('node:zlib');
 const { randomBytes, randomUUID, createHmac, timingSafeEqual } = require('node:crypto');
+const { trimFleet } = require('../ui/agent-state.js');
+
+const gzip = promisify(zlib.gzip);
+// A browser gets everything at least this often, as the desktop window does every 5 s: it repairs a chat whose edit did
+// not move its bot's revision. Rarely here: at 60 s it was about 1 MB compressed per connection per minute on the user's
+// phone (2026-10-26), and opening or reloading the page always starts with everything.
+const FULL_STATE_MS = 10 * 60000;
 
 const MAX_BODY = 16 * 1024 * 1024;
 const MAX_EVENT = 32 * 1024 * 1024;
 const SESSION_MS = 30 * 24 * 60 * 60 * 1000;
 const CLIENT_ID = /^[a-f0-9-]{36}$/;
 const REMOTE_METHODS = new Set([
-  'bootstrap', 'saveAgent', 'renameHub', 'saveGroup', 'deleteAgent', 'workspaceWiki',
+  'bootstrap', 'saveAgent', 'renameHub', 'saveGroup', 'deleteAgent',
   'browseWorkspace', 'settings', 'benchmarkData', 'create', 'permissions', 'load', 'image', 'rename', 'archive',
   'deleteSession', 'preview', 'send', 'stop', 'reviseJob', 'reconcileJob', 'jobBudget',
-  'stopArtifactRun', 'artifactAction', 'artifactDownload', 'stopDownloads', 'appInfo', 'runnerInfo', 'updateStatus', 'queuedMessage', 'replySuggestion', 'compact',
+  'stopArtifactRun', 'artifactAction', 'artifactDownload', 'stopDownloads', 'appInfo', 'runnerInfo', 'updateStatus', 'queuedMessage', 'replySuggestion', 'suggestWiki', 'compact',
   'clearConversation', 'acknowledgeTask', 'applyCopy', 'undoComparison', 'undoRule', 'dismissSkillNotice', 'proposeWiki', 'answer', 'readDocument', 'answerConfirmation',
   'providerConnection', 'renewModels', 'providerModels',
   'connectorList', 'connectorSave', 'connectorAction',
@@ -137,11 +146,25 @@ class RemoteRunner {
     res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
   }
 
+  // Snapshots run to megabytes, so a browser that accepts gzip gets them compressed, off the main thread.
   json(res, status, value) {
     const body = JSON.stringify(value);
     if (Buffer.byteLength(body) > MAX_EVENT) throw failure(413, 'This response is too large for browser access.');
-    this.headers(res); res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(body);
+    this.headers(res);
+    const plain = () => {
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(body);
+    };
+    if (!res.acceptsGzip || body.length < 1024) {
+      plain();
+      return;
+    }
+
+    gzip(body).then(compressed => {
+      if (res.destroyed) return;
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' });
+      res.end(compressed);
+    }, () => { if (!res.destroyed) plain(); });
   }
 
   sign(value) { return createHmac('sha256', this.key).update(value).digest('base64url'); }
@@ -181,6 +204,7 @@ class RemoteRunner {
 
   async route(req, res) {
     this.headers(res);
+    res.acceptsGzip = /\bgzip\b/.test(String(req.headers['accept-encoding'] || ''));
     if (req.headers.host !== new URL(this.origin).host) throw failure(403, 'Unexpected runner address.');
     if (req.headers.origin && req.headers.origin !== this.origin) throw failure(403, 'Use the runner’s own address.');
     const url = new URL(req.url, this.origin);
@@ -311,25 +335,62 @@ class RemoteRunner {
     const previous = this.clients.get(key);
     if (!previous && this.clients.size >= 8) throw failure(429, 'Too many connected browser views.');
     if (previous) this.disconnect(key, previous);
-    const initial = this.event('state', this.snapshot());
-    const client = { key, res, expires: session.expires, blocked: false, latest: new Map() };
+    // The first state is complete and records what this browser holds; later ones carry only the bots that changed.
+    const sent = new Map();
+    const initial = this.event('state', trimFleet(this.snapshot(), sent, true));
+    // A gzip stream flushed after every event: compressed, yet each update still arrives at once.
+    const out = res.acceptsGzip ? zlib.createGzip({ flush: zlib.constants.Z_SYNC_FLUSH }) : res;
+    const client = { key, res, out, expires: session.expires, blocked: false, latest: new Map(), sent, fullAt: Date.now(), pendingState: null };
     this.clients.set(key, client);
-    res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+    res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', Connection: 'keep-alive', 'X-Accel-Buffering': 'no',
+      ...(out === res ? {} : { 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' }) });
     res.setTimeout(0);
+    if (out !== res) {
+      out.pipe(res);
+      out.on('error', () => this.disconnect(key, client));
+    }
     client.timer = setInterval(() => {
       if (Date.now() >= client.expires) this.disconnect(key, client);
-      else if (!client.blocked) client.blocked = !res.write(': heartbeat\n\n');
+      else if (!client.blocked) client.blocked = !out.write(': heartbeat\n\n');
     }, 20000);
     client.timer.unref();
-    res.on('drain', () => {
+    out.on('drain', () => {
       client.blocked = false;
+      const pending = client.pendingState;
+      if (pending) {
+        client.pendingState = null;
+        try {
+          this.sendState(client, pending);
+        } catch {
+          this.disconnect(key, client);
+          return;
+        }
+      }
       for (const [type, event] of client.latest) {
         if (client.blocked) break;
         client.latest.delete(type); this.write(client, event, type);
       }
     });
-    res.once('close', () => this.disconnect(key, client));
-    this.write(client, initial, 'state');
+    res.once('close', () => {
+      this.disconnect(key, client);
+      if (out !== res) out.destroy();
+    });
+    this.write(client, initial);
+  }
+
+  // Only the bots whose chats changed since this browser's last state (trimFleet), and everything every FULL_STATE_MS.
+  // While the browser is behind, only the newest state waits, trimmed when it is written: trimming records what was sent,
+  // so a state replaced before sending would leave the browser holding chats it never got.
+  sendState(client, value) {
+    if (client.blocked) {
+      client.pendingState = value;
+      return;
+    }
+
+    const full = Date.now() - client.fullAt >= FULL_STATE_MS;
+    if (full)
+      client.fullAt = Date.now();
+    this.write(client, this.event('state', trimFleet(value, client.sent, full)));
   }
 
   event(type, value) {
@@ -345,12 +406,23 @@ class RemoteRunner {
       if (replaceable) { client.latest.set(replaceable, data); return; }
       throw failure(503, 'The browser connection is busy. Retry after it reconnects.');
     }
-    client.blocked = !client.res.write(data);
+    client.blocked = !client.out.write(data);
   }
 
   broadcast(type, value) {
     if (!['state', 'update'].includes(type)) throw new Error('Only runner state and update snapshots may be broadcast.');
     if (!this.clients.size) return;
+    if (type === 'state') {
+      for (const [key, client] of this.clients) {
+        try {
+          this.sendState(client, value);
+        } catch {
+          this.disconnect(key, client);
+        }
+      }
+      return;
+    }
+
     let event;
     try { event = this.event(type, value); }
     catch { for (const [key, client] of this.clients) this.disconnect(key, client); return; }
@@ -385,7 +457,8 @@ class RemoteRunner {
 
   disconnect(key, client) {
     if (this.clients.get(key) !== client) return;
-    this.clients.delete(key); clearInterval(client.timer); client.res.end();
+    // Ending the gzip stream flushes it and ends the response through the pipe.
+    this.clients.delete(key); clearInterval(client.timer); client.out.end();
     for (const [id, pending] of this.pending) if (pending.client === key) this.settle(id, false);
   }
 
@@ -404,14 +477,22 @@ class RemoteRunner {
     if (!filename.startsWith(base + path.sep) || !fs.statSync(filename).isFile()) throw failure(404, 'Unknown asset.');
     const extension = path.extname(filename).toLowerCase();
     const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml',
-      '.png': 'image/png', '.ico': 'image/x-icon', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf' }[extension];
+      '.png': 'image/png', '.ico': 'image/x-icon', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf',
+      '.webmanifest': 'application/manifest+json' }[extension];
     if (!mime) throw failure(404, 'Unknown asset.');
     let body = await fs.promises.readFile(filename);
+    // The browser page is also an installable app (ui/manifest.webmanifest); the desktop window has no use for it.
     if (ui && path.basename(filename) === 'index.html') body = Buffer.from(body.toString('utf8')
       .replace("connect-src 'none'", "connect-src 'self'")
+      .replace('<meta name="viewport" content="width=device-width, initial-scale=1">', '<meta name="viewport" content="width=device-width, initial-scale=1">\n' +
+        '  <link rel="manifest" href="manifest.webmanifest">\n  <meta name="theme-color" content="#121212">')
       .replace('<script defer src="dialogs.js"></script>', '<script defer src="remote-api.js"></script>\n  <script defer src="dialogs.js"></script>'));
-    res.writeHead(200, { 'Content-Type': mime + (['.html', '.js', '.css'].includes(extension) ? '; charset=utf-8' : ''),
-      'Content-Length': body.length });
+    const headers = { 'Content-Type': mime + (['.html', '.js', '.css'].includes(extension) ? '; charset=utf-8' : '') };
+    if (res.acceptsGzip && ['.html', '.js', '.css', '.svg', '.webmanifest'].includes(extension)) {
+      body = await gzip(body);
+      Object.assign(headers, { 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' });
+    }
+    res.writeHead(200, { ...headers, 'Content-Length': body.length });
     res.end(req.method === 'HEAD' ? undefined : body);
   }
 

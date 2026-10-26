@@ -1780,6 +1780,10 @@ test('the chat checker is off until a model is picked, and Off turns it off agai
   controller.settings({ chatScanModel: 'codex:gpt-5.6-sol:high' });
   assert.equal(controller.chatScanner().id, 'codex:gpt-5.6-sol:high');
   controller.settings({ chatScanModel: 'off' });
+  assert.throws(() => controller.settings({ autoLowModel: 'no-such-model' }), /Unknown model for simple messages/);
+  controller.settings({ autoLowModel: 'codex:gpt-5.6-sol:high' });
+  assert.equal(controller.data.settings.autoLowModel, 'codex:gpt-5.6-sol:high', 'any worker model, picked by hand');
+  controller.settings({ autoLowModel: 'auto' });
   await chatExchange(controller, fake, session, 'Thanks, that is all', 'Glad to help.');
   await flush();
   assert.deepEqual(calls, []);
@@ -2781,25 +2785,6 @@ test('traced worker tokens cover the whole turn, not only its last model call', 
   complete(controller, codex, turn);
   await flush();
   assert.deepEqual(records.filter(r => r.event === 'turn').at(-1).worker.tokens, { input: 300, cached: 100, output: 70 });
-});
-
-test('without the wiki check setting, maintenance reads nothing extra and calls no Jev', async t => {
-  const { controller, fake, smartRouter } = await setup(t);
-  let calls = 0;
-  smartRouter.jev = { configured: true, async evaluate() { calls++; return {}; } };
-  const session = controller.create();
-  controller.permissions(session.id, 'danger-full-access');
-  arm(controller, fake);
-  addCheck(controller, session, ['unit-tests']);
-  fs.mkdirSync(path.join(session.workspace, 'docs', 'wiki'), { recursive: true });
-  fs.writeFileSync(path.join(session.workspace, 'docs', 'wiki', 'index.md'), '# Wiki\n');
-  await controller.send({ id: session.id, text: 'Implement retry handling', mode: 'terra-light' });
-  complete(controller, session, fake.turnIds[0]);
-  await controller.gateDone;
-  assert.equal(controller.wikiSnapshots.size, 0);
-  complete(controller, session, fake.turnIds[1]);
-  await flush();
-  assert.equal(calls, 0);
 });
 
 test('Codex usage windows are tracked and a full window marks the limit until its reset', async t => {

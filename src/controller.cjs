@@ -78,10 +78,8 @@ class Controller extends EventEmitter {
     this.loadedModelConfigs = new Map();
     // Opt-in Jev comparison log (set by the app) and the comparison in flight, if any.
     this.jevCompare = null; this.jevComparing = null;
-    // Local decision trace (set by the app; see src/trace.cjs), wiki reads taken before maintenance turns for the
-    // opt-in log-only wiki check, and the abort for checks still running when the app closes.
+    // Local decision trace (set by the app; see src/trace.cjs).
     this.trace = NO_TRACE; this.startedAt = Date.now();
-    this.wikiSnapshots = new Map(); this.wikiChecks = new AbortController();
     this.log = NO_LOG; // replaced by the app's rotating log file
     // Worker cleanups after Stop (src/process-tree.cjs): new work waits while one runs, and stays blocked while one
     // could not be confirmed (data.workerCleanup, retried until confirmed, also after a restart).
@@ -262,7 +260,6 @@ class Controller extends EventEmitter {
       sessions: this.data.sessions.map(({ groupChatContext, coordinatorConversation, ...session }) => withoutImages({ ...session, tasks: (session.tasks || []).map(({ inputImages, ...task }) => task) })),
       routing: this.routing, routingProvider: this.routingProvider, routerModel: this.routingProvider === 'jev' ? this.smartRouter.jev?.model || JEV_MODEL : this.routerChoices().find(p => p.id === this.data.settings.routerPreset)?.model || null,
       jev: { configured: !!this.smartRouter.jev?.configured, keySaved: !!(this.smartRouter.jev?.keyStore?.configured ?? this.smartRouter.jev?.configured), enabled: this.data.settings.jevEnabled !== false, model: this.smartRouter.jev?.model || null, requestedModel: JEV_MODEL, compare: this.jevCompare?.summary() || null, health: this.smartRouter.jev?.health || null },
-      decisions: this.trace.summary(),
       helperCapabilities: {
         projectContext: { codex: true, responsesApi: true, claudeCli: true, cursorCli: true },
         jevToolRecommendations: { codex: true, responsesApi: true, claudeCli: 'codex-thread-mcp-catalog', cursorCli: 'codex-thread-mcp-catalog' },
@@ -382,6 +379,15 @@ class Controller extends EventEmitter {
 
       next.chatScanModel = values.chatScanModel;
     }
+    if (values.autoLowModel !== undefined) {
+      const choice = this.catalog().find(p => p.worker && p.id === values.autoLowModel);
+      if (values.autoLowModel !== 'auto' && !choice)
+        throw new Error('Unknown model for simple messages.');
+      if (choice && !this.available(choice))
+        throw new Error('This model for simple messages is unavailable on your account.');
+
+      next.autoLowModel = values.autoLowModel;
+    }
     if (values.fontScale !== undefined) {
       if (![85, 100, 115, 130, 150].includes(values.fontScale)) throw new Error('Invalid font scale.');
       next.fontScale = values.fontScale;
@@ -434,11 +440,6 @@ class Controller extends EventEmitter {
       if (values.jevCompare && !next.jevCompare && !this.smartRouter.jev?.configured) throw new Error('Add a Jev API key and enable Jev in Providers first.');
       next.jevCompare = values.jevCompare;
       if (!values.jevCompare) this.jevComparing?.abort();
-    }
-    if (values.wikiAssessment !== undefined) {
-      if (typeof values.wikiAssessment !== 'boolean') throw new Error('Invalid wiki check setting.');
-      if (values.wikiAssessment && !next.wikiAssessment && !this.smartRouter.jev?.configured) throw new Error('Add a Jev API key and enable Jev in Providers first.');
-      next.wikiAssessment = values.wikiAssessment;
     }
     if (values.contextRanking !== undefined) {
       if (!['local', 'jev'].includes(values.contextRanking)) throw new Error('Unknown context ranking mode.');
@@ -729,7 +730,7 @@ class Controller extends EventEmitter {
         };
         const context = { ...session, ...previousState, configuredChecks: this.data.settings.checks?.[session.workspace] || [], routingCatalog: routingCatalog(), routerChoice: router, jevQuickAnswers: session.groupChatId ? false : this.data.settings.jevQuickAnswers, attachedImageCount: images.length,
           // The presets this project's checks proved per kind of work (src/setups.cjs).
-          provenSetups: this.provenSetupsFor(session.workspace) };
+          provenSetups: this.provenSetupsFor(session.workspace), autoLowModel: this.data.settings.autoLowModel };
         // A fresh delegation is not forced onto the model of an older, possibly misinterpreted task.
         if (originalRequest && session.job?.originalRequestId !== originalRequest.id) context.job = null;
         const smart = async () => {
@@ -1619,7 +1620,6 @@ class Controller extends EventEmitter {
   close() {
     this.stopTestPools().catch(error => this.log?.error('Test pool cleanup failed', { message: error.message }));
     this.jevComparing?.abort();
-    this.wikiChecks.abort();
     this.claude.close(); this.cursor.close();
     for (const backend of this.nativeCLIs.values()) Promise.resolve(backend.close()).catch(error => this.log.error('Native CLI close failed', { message: error.message }));
     this.cancelHelpers();

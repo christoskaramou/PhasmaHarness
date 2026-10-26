@@ -41,6 +41,7 @@ api.onConfirmation = callback => {
 };
 api.queuedMessage = (...args) => ipcRenderer.invoke('queuedMessage', ...args);
 api.replySuggestion = id => ipcRenderer.invoke('replySuggestion', id);
+api.suggestWiki = id => ipcRenderer.invoke('suggestWiki', id);
 api.connectorList = () => ipcRenderer.invoke('connectorList');
 api.connectorSave = input => ipcRenderer.invoke('connectorSave', input);
 api.connectorAction = (id, action) => ipcRenderer.invoke('connectorAction', id, action);
@@ -52,7 +53,7 @@ api.jobBudget = args => ipcRenderer.invoke('jobBudget', args);
 api.stopArtifactRun = id => ipcRenderer.invoke('stopArtifactRun', id);
 api.stopDownloads = () => ipcRenderer.invoke('stopDownloads');
 api.browseWorkspace = (...args) => ipcRenderer.invoke('browseWorkspace', ...args);
-for (const method of ['cursorLogin', 'cursorRefresh', 'cursorLogout', 'claudeLogin', 'claudeRefresh', 'claudeLogout', 'connectChatGPT', 'logoutChatGPT', 'installProvider', 'providerSettings', 'providerKey', 'providerModels', 'localModel', 'renewModels', 'bootstrap', 'settings', 'jevSaveKey', 'jevRemoveKey', 'jevTest', 'create', 'permissions', 'load', 'image', 'rename', 'archive', 'deleteSession', 'preview', 'send', 'compact', 'stop', 'answer', 'checks', 'acknowledgeTask', 'applyCopy', 'undoComparison', 'undoRule', 'dismissSkillNotice', 'proposeWiki', 'workspaceWiki', 'openWorkspaceWiki', 'chooseWorkspace', 'openLink', 'diagnostics', 'openLogs', 'appInfo', 'checkUpdates']) {
+for (const method of ['cursorLogin', 'cursorRefresh', 'cursorLogout', 'claudeLogin', 'claudeRefresh', 'claudeLogout', 'connectChatGPT', 'logoutChatGPT', 'installProvider', 'providerSettings', 'providerKey', 'providerModels', 'localModel', 'renewModels', 'bootstrap', 'settings', 'jevSaveKey', 'jevRemoveKey', 'jevTest', 'create', 'permissions', 'load', 'image', 'rename', 'archive', 'deleteSession', 'preview', 'send', 'compact', 'stop', 'answer', 'checks', 'acknowledgeTask', 'applyCopy', 'undoComparison', 'undoRule', 'dismissSkillNotice', 'proposeWiki', 'chooseWorkspace', 'openLink', 'diagnostics', 'openLogs', 'appInfo', 'checkUpdates']) {
   api[method] = (...args) => ipcRenderer.invoke(method, ...args);
 }
 api.updateStatus = () => ipcRenderer.invoke('updateStatus');

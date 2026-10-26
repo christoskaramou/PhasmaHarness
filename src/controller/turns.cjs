@@ -135,14 +135,6 @@ module.exports = {
         origin.wikiMaintenance.state = outcome.status === 'completed' ? 'finished' : 'interrupted';
         origin.wikiMaintenance.result = stripTaskStatus(session.items.filter(item => item.turnId === submission.turnId && item.type === 'agentMessage' && item.phase !== 'commentary').at(-1)?.text) || outcome.error || '';
         this.writeTaskFile(session, origin);
-        // Opt-in, log only: judge what this update added (see src/workspace/wiki-assess.cjs).
-        const before = this.wikiSnapshots.get(origin.id);
-        this.wikiSnapshots.delete(origin.id);
-        // Deferred, so the turn finishes and the session is free before the wiki is read again and compared.
-        if (before && outcome.status === 'completed') {
-          const assess = () => new Promise(resolve => setImmediate(() => resolve(this.assessWiki(session, origin, before))));
-          this.wikiCheckDone = this.agents ? this.agents.budgets.scoped(session, assess) : assess();
-        }
       }
     }
     if (submission.kind === 'turn' && !maintenanceRoute) this.updateJob(session, submission, outcome);

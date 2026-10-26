@@ -72,6 +72,12 @@
   <div id="sidebar-resizer" role="separator" tabindex="0" aria-label="Resize agents area" aria-controls="agents-sidebar" aria-orientation="vertical" title="Drag to resize agents. Arrow keys adjust; double-click or Enter resets."></div>
   <main>
 <header>
+ <button aria-label="Back to bots" class="compact-action" id="phone-back" title="Back to bots" type="button">
+  <svg aria-hidden="true" fill="none" height="20" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" viewbox="0 0 24 24" width="20">
+   <path d="m15 18-6-6 6-6">
+   </path>
+  </svg>
+ </button>
  <div class="session-heading">
   <span id="session-icon" aria-hidden="true"></span>
   <h1 id="session-title">
@@ -158,7 +164,7 @@
 <div id="slash-menu" hidden><div class="slash-menu-heading"><span>Commands</span><span>↑ ↓ select · Enter run · Tab complete</span></div><div id="slash-options" role="listbox" aria-label="Slash commands"></div><p id="slash-empty" role="status" hidden>No matching commands</p></div><div id="image-previews" aria-label="Attachments"></div><div class="composer-bottom"><div class="composer-controls"><button id="attach-files" type="button" class="icon-button" title="Attach text/code files or images" aria-label="Attach files"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><input id="file-input" type="file" multiple hidden><label class="composer-access"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6Z"/><path d="m9 12 2 2 4-4"/></svg><select id="permissions" class="permissions-control" aria-label="Session permissions"></select></label></div><textarea id="prompt" rows="1" placeholder="Message Hub…" aria-label="Message" role="combobox" aria-autocomplete="list" aria-controls="slash-options" aria-haspopup="listbox" aria-expanded="false" maxlength="200000"></textarea><div class="context-meter-wrap">
   <button aria-describedby="context-meter-tip" aria-label="Context usage" id="context-meter" type="button"><span aria-hidden="true" class="context-ring"></span></button>
   <span id="context-meter-tip" role="tooltip"><span id="context-detail">Context usage unavailable</span><span id="usage"></span></span>
-</div><button id="send" type="submit" aria-label="Send message" title="Send message">↑</button><button id="stop" type="button" class="stop" aria-label="Stop task" title="Stop task" hidden><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1" fill="currentColor"/></svg></button></div></form>
+</div><button id="suggestion-accept" type="button" class="icon-button" aria-label="Use the suggested reply" title="Use the suggested reply" hidden><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h12M11 6l6 6-6 6M20 5v14"/></svg></button><button id="send" type="submit" aria-label="Send message" title="Send message">↑</button><button id="stop" type="button" class="stop" aria-label="Stop task" title="Stop task" hidden><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1" fill="currentColor"/></svg></button></div></form>
     </div>
   </main>
   <dialog id="commands-dialog" aria-labelledby="commands-title"><div class="dialog-heading"><h2 id="commands-title">Commands</h2><button type="button" class="close-dialog icon-button" aria-label="Close commands">×</button></div><p class="hint">Type a command and press Enter, or choose one below. Commands apply to the selected agent.</p><div id="commands-list"></div></dialog>
@@ -203,11 +209,13 @@
     <div class="dialog-heading"><h2>Settings</h2><button type="button" class="close-dialog icon-button" aria-label="Close settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
     <div class="settings-tabs" role="tablist" aria-label="Settings sections" aria-orientation="vertical">
       <button type="button" class="settings-tab active" role="tab" id="tab-general" aria-selected="true" aria-controls="panel-general" data-tab="general">General</button>
+      <button type="button" class="settings-tab" role="tab" id="tab-browser" aria-selected="false" aria-controls="panel-browser" data-tab="browser">Browser</button>
+      <button type="button" class="settings-tab" role="tab" id="tab-routing" aria-selected="false" aria-controls="panel-routing" data-tab="routing">Routing</button>
+      <button type="button" class="settings-tab" role="tab" id="tab-tools" aria-selected="false" aria-controls="panel-tools" data-tab="tools">Tools</button>
       <button type="button" class="settings-tab" role="tab" id="tab-providers" aria-selected="false" aria-controls="panel-providers" data-tab="providers">Providers</button>
       <button type="button" class="settings-tab" role="tab" id="tab-connectors" aria-selected="false" aria-controls="panel-connectors" data-tab="connectors">Connectors</button>
       <button type="button" class="settings-tab" role="tab" id="tab-benchmarks" aria-selected="false" aria-controls="panel-benchmarks" data-tab="benchmarks">Benchmarks</button>
       <button type="button" class="settings-tab" role="tab" id="tab-checks" aria-selected="false" aria-controls="panel-checks" data-tab="checks">Checks</button>
-      <button type="button" class="settings-tab" role="tab" id="tab-wiki" aria-selected="false" aria-controls="panel-wiki" data-tab="wiki">Wiki</button>
       <button type="button" class="settings-tab" role="tab" id="tab-about" aria-selected="false" aria-controls="panel-about" data-tab="about">About</button>
     </div>
     <div class="settings-body">
@@ -236,15 +244,9 @@
         <div class="compact-actions"><button type="button" id="connector-cancel">Cancel</button><button type="button" id="connector-save" class="primary">Save and connect</button></div>
       </div>
     </div>
-    <div id="panel-wiki" class="settings-panel" role="tabpanel" aria-labelledby="tab-wiki" hidden>
-      <h3 class="settings-section">Workspace wiki</h3>
-      <p id="wiki-location" role="status"></p>
-      <div class="compact-actions"><button type="button" id="wiki-open">Show in folder</button></div>
-      <label id="wiki-check-row">Check wiki updates with Jev<select id="settings-wiki-check" aria-describedby="wiki-check-detail"><option value="off">Off</option><option value="on">Log only</option></select></label>
-      <p id="wiki-check-detail" class="hint"></p>
-    </div>
     <div id="panel-general" class="settings-panel" role="tabpanel" aria-labelledby="tab-general">
     <h3 class="settings-section">General</h3>
+    <p class="hint">How Harness looks and starts, and the helpers that work alongside every chat.</p>
       <label>Appearance
         <select id="settings-appearance">
           <option value="system">System</option>
@@ -255,12 +257,16 @@
     <label id="runner-exit-row">On Exit<select id="settings-runner-exit" disabled><option value="close">Close App</option><option value="tray" selected>Stay on Tray</option></select></label>
     <label id="runner-start-row">Start at sign-in<select id="settings-runner-start" disabled><option value="off">Off</option><option value="on">On</option></select></label>
     <label>Reply suggestions<select id="settings-reply-suggestions" aria-describedby="reply-suggestions-detail"><option value="off">Off</option><option value="on">On</option></select></label>
-    <p id="reply-suggestions-detail" class="hint">After each answer, the model that wrote it suggests your next message as grey text. Right arrow accepts it. One extra model call per answer.</p>
-    <label>Chat checker model<select id="settings-chat-scan" aria-describedby="chat-scan-detail"></select></label>
+    <p id="reply-suggestions-detail" class="hint">After each answer, the model that wrote it suggests your next message as grey text. Right arrow accepts it; on a touch screen, the button beside Send does. One extra model call per answer.</p>
+    <label>Chat checker model<span class="model-effort-field"><select id="settings-chat-scan" aria-label="Chat checker model" aria-describedby="chat-scan-detail"></select><select id="settings-chat-scan-effort" aria-label="Chat checker effort" aria-describedby="chat-scan-detail"></select></span></label>
     <p id="chat-scan-detail" class="hint">Off by default. The model you pick reads each exchange you reply to and flags mistakes worth a project rule or note; for tasks without checks, whether you accepted or corrected the work also teaches Auto which model fits. One call per message you send. While it is unavailable, nothing is checked.</p>
     <label>Show tips<select id="settings-show-tips" aria-describedby="show-tips-detail"><option value="on">On</option><option value="off">Off</option></select></label>
     <p id="show-tips-detail" class="hint">Tips on the new-chat screen and behind the bulb next to Settings, starting with the ones that fit your setup.</p>
-    <details id="remote-settings"><summary>Browser access</summary>
+    </div>
+    <div id="panel-browser" class="settings-panel" role="tabpanel" aria-labelledby="tab-browser" hidden>
+    <h3 class="settings-section">Browser access</h3>
+    <p class="hint">Use Harness from a browser on this computer, or from your phone or another computer through your own HTTPS proxy. Bots keep running here.</p>
+    <div id="remote-settings">
       <p class="muted" id="remote-status">Off. Jobs stay on this runner.</p>
       <label>Local port<input id="remote-port" type="number" min="1" max="65535" value="8788"></label>
       <label>HTTPS address (optional)<input id="remote-origin" type="url" placeholder="https://your-runner.example"></label>
@@ -270,16 +276,24 @@
         <button type="button" id="remote-disconnect-all" hidden>Disconnect browsers</button>
         <button type="button" id="remote-reset-link" hidden>Reset connection link</button></div>
       <p class="hint">The connection link grants access to this runner. Keep it private.</p>
-    </details>
+    </div>
     <button type="button" id="remote-logout">Disconnect this browser</button>
+    </div>
+    <div id="panel-routing" class="settings-panel" role="tabpanel" aria-labelledby="tab-routing" hidden>
     <h3 class="settings-section">Routing</h3>
-    <label>Routing model (Auto)<select id="settings-router-preset"></select></label>
+    <p class="hint">Routing picks a model and effort for each message. These options only apply when a bot's model is set to Auto; a model you pick by hand is used as it is.</p>
+    <label>Routing model (Auto)<span class="model-effort-field"><select id="settings-router-preset" aria-label="Routing model (Auto)"></select><select id="settings-router-effort" aria-label="Routing model effort"></select></span></label>
     <label>Jev quick answers<select id="settings-quick"><option value="on">On</option><option value="off">Off</option></select></label>
     <label>Effort cap for Auto<select id="settings-effort-cap" aria-describedby="effort-cap-detail"><option value="low">Up to low effort</option><option value="medium">Up to medium effort</option><option value="high">Up to high effort (recommended)</option><option value="xhigh">Up to xhigh effort</option><option value="max">⚠ Up to max effort</option></select></label>
     <p id="effort-cap-detail" class="hint"></p>
+    <label>Model for simple messages (Auto)<span class="model-effort-field"><select id="settings-low-model" aria-label="Model for simple messages (Auto)" aria-describedby="low-model-detail"></select><select id="settings-low-effort" aria-label="Effort for simple messages" aria-describedby="low-model-detail"></select></span></label>
+    <p id="low-model-detail" class="hint">Only for messages sent on Auto. Pick a cheap model at low effort, or leave it on Auto to let Harness pick from benchmark scores.</p>
     <label id="jev-compare-row">Compare with Jev<select id="settings-jev-compare" aria-describedby="jev-compare-detail"><option value="off">Off</option><option value="on">Log only</option></select></label>
     <p id="jev-compare-detail" class="hint"></p>
+    </div>
+    <div id="panel-tools" class="settings-panel" role="tabpanel" aria-labelledby="tab-tools" hidden>
     <h3 class="settings-section">Tools</h3>
+    <p class="hint">How bots search: Project search ranks what a bot finds in its workspace, and Tool recommendations pick a connected tool when a Codex bot asks for one. The Jev options send the query to Jev.</p>
     <label>Project search<select id="settings-context"><option value="local">Local</option><option value="jev">Local + Jev ranking</option></select></label>
     <label>Tool recommendations<select id="settings-tools"><option value="off">Off</option><option value="jev">Jev</option></select></label>
     </div>
@@ -289,7 +303,7 @@
       <p id="benchmark-status" role="status"></p>
       <p class="muted">Separate intelligence, coding, cost and speed measurements. Unknown efforts and moving aliases receive no invented scores. API costs are not subscription quotas.</p>
       <div id="benchmark-sources"></div>
-      <label>Refresh worker<select id="benchmark-worker" aria-label="Worker for benchmark refresh"></select></label>
+      <label>Refresh worker<span class="model-effort-field"><select id="benchmark-worker" aria-label="Worker for benchmark refresh"></select><select id="benchmark-worker-effort" aria-label="Effort for benchmark refresh"></select></span></label>
       <p class="muted">Prepare an unsent research task with sources and the current table. Review and Send to run it using the selected worker. Import its JSON here afterwards.</p>
       <button type="button" id="benchmark-refresh">Prepare refresh</button>
       <button type="button" id="benchmark-import">Import candidate</button>

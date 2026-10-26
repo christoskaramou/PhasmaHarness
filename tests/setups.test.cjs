@@ -86,6 +86,8 @@ test('Auto, through Smart or Jev, takes the proven preset on low and medium diff
   difficulty = 'low';
   assert.equal((await router.choose('fix the crash', { ...session, routingCatalog: [picked] }, [], 'jev')).id, 'picked', 'only while the preset is offered');
   assert.equal((await router.choose('fix the crash', { ...session, provenSetups: {} }, [])).id, 'picked');
+  assert.equal((await router.choose('fix the crash', { ...session, autoLowModel: 'picked' }, [])).id, 'picked',
+    'your model for simple messages beats a proven setup');
 });
 
 test('a task is recorded once, and records the chat checker judged say so on the page', t => {

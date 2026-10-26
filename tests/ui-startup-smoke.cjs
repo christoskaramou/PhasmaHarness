@@ -1164,6 +1164,17 @@ app.whenReady().then(async () => {
     return result;
   })()`);
   assert.ok(settingsLayout.visible && settingsLayout.loaded && settingsLayout.fits, 'benchmark tab loads inside settings');
+  // The refresh worker is a model with its effort beside it, like the other model pickers.
+  const refreshWorker = await window.webContents.executeJavaScript(`(async () => {
+    document.querySelector('#tab-benchmarks').click();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    document.querySelector('#benchmark-worker').scrollIntoView({ block: 'center' });
+    return [benchmarkWorker(), document.querySelector('#benchmark-worker-effort').options.length];
+  })()`);
+  assert.ok(controller.snapshot().presets.some(p => p.id === refreshWorker[0]), 'the refresh worker is one model at one effort');
+  assert.ok(refreshWorker[1] >= 1);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/benchmark-worker-setting.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript("document.querySelector('#tab-general').click(); true");
   assert.ok(Math.abs(settingsLayout.ratio - .75) < .02, 'form fields are one-quarter shorter');
   const compactGear = await window.webContents.executeJavaScript(`(() => {
     const button = document.querySelector('#settings');
@@ -1357,7 +1368,7 @@ app.whenReady().then(async () => {
   await providerAction('');
   assert.equal(controller.data.settings.jevEnabled, true, 'plug supports keyboard re-enabling');
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#jev-provider').open"), false);
-  await providerAction("document.querySelector('#tab-general').click()");
+  await providerAction("document.querySelector('#tab-routing').click()");
   const [hidden, detail] = await compareRow();
   assert.equal(hidden, false);
   assert.match(detail, /^Log only\. When on, .*do not change\. 4 compared: same model 50% \(and effort 25%\), same provider 75%; your manual picks 50% same model · Jev cost \$0\.0004 · 1 failed\.$/);
@@ -1382,23 +1393,28 @@ app.whenReady().then(async () => {
     const select = document.querySelector('#settings-router-preset');
     const option = [...select.options].find(option => option.value && option.value !== 'jev' && !option.disabled);
     if (!option) throw new Error('Fixture needs an available routing model');
+    const expected = presetGroups(state.routerPresets, false).find(group => group.key === option.value).variants[0].id;
     select.value = option.value;
     select.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise(r => setTimeout(r, 200));
-    return option.value;
+    return expected;
   })()`);
   assert.equal(controller.data.settings.routing, 'smart', 'model selection switches routing in the same save');
   assert.equal(controller.data.settings.routerPreset, chosenRoutingModel);
+  await window.webContents.executeJavaScript("document.querySelector('#settings-router-preset').scrollIntoView({ block: 'center' }); new Promise(r => setTimeout(r, 100))");
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/router-model-setting.png'), (await window.webContents.capturePage()).toPNG());
   assert.equal((await compareRow())[0], false);
   // The chat checker is Off by default and saves any enabled model picked by hand; there is no Auto.
+  await window.webContents.executeJavaScript("document.querySelector('#tab-general').click(); true");
   const chatChecker = await window.webContents.executeJavaScript(`(async () => {
     const select = document.querySelector('#settings-chat-scan');
     const first = [select.options[0].textContent, select.value];
     const option = [...select.options].find(option => option.value !== 'off' && !option.disabled);
+    const expected = presetGroups(state.chatScanPresets, false).find(group => group.key === option.value).variants[0].id;
     select.value = option.value;
     select.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise(r => setTimeout(r, 200));
-    return [...first, option.value];
+    return [...first, expected];
   })()`);
   assert.deepEqual(chatChecker.slice(0, 2), ['Off', 'off']);
   assert.equal(controller.data.settings.chatScanModel, chatChecker[2]);
@@ -1411,6 +1427,53 @@ app.whenReady().then(async () => {
     await new Promise(r => setTimeout(r, 200));
   })()`);
   assert.equal(controller.data.settings.chatScanModel, 'off', 'Off turns the checker off again');
+  // Auto's model for simple messages: Auto (Harness picks) or any worker model, its effort in a picker beside it, with a
+  // hint to pick a cheap, low-effort one.
+  await window.webContents.executeJavaScript("document.querySelector('#tab-routing').click(); true");
+  const lowPickers = () => window.webContents.executeJavaScript(`['#settings-low-model', '#settings-low-effort'].map(id => {
+    const select = document.querySelector(id);
+    return [select.value, select.disabled, select.selectedOptions[0]?.textContent, select.options.length];
+  })`);
+  const pickLow = (id, pick) => window.webContents.executeJavaScript(`(async () => {
+    const select = document.querySelector('${id}');
+    const option = [...select.options].filter(option => !option.disabled && option.value !== select.value && option.value !== 'auto')[${pick}];
+    select.value = option.value;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 200));
+  })()`);
+  assert.deepEqual((await lowPickers()).map(([value, disabled, text]) => [value, disabled, text]), [['auto', false, 'Auto'], ['', true, 'Chosen by Auto']], 'Auto by default, its effort chosen by Auto');
+  assert.match(await window.webContents.executeJavaScript("document.querySelector('#low-model-detail').textContent"), /cheap model at low effort/);
+  const efforts = presets => presets.map(p => p.effort || '');
+  const multi = controller.snapshot().presets.filter(p => p.available && controller.snapshot().presets.filter(q => q.available && q.model === p.model && q.provider === p.provider).length > 1);
+  const target = multi[0];
+  assert.ok(target, 'the fixture offers a model with several efforts');
+  await window.webContents.executeJavaScript(`(async () => {
+    const select = document.querySelector('#settings-low-model');
+    select.value = ${JSON.stringify(`${target.provider || 'codex'}|${target.model}`)};
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 200));
+  })()`);
+  const variants = controller.snapshot().presets.filter(p => p.available && p.model === target.model && p.provider === target.provider);
+  const lowest = variants.sort((a, b) => ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].indexOf(a.effort) - ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].indexOf(b.effort))[0];
+  assert.equal(controller.data.settings.autoLowModel, lowest.id, 'a picked model starts at its lowest effort');
+  let [model, effort] = await lowPickers();
+  assert.equal(effort[1], false, 'its effort picker is usable');
+  assert.equal(effort[3], efforts(variants).length, 'and lists that model\'s efforts');
+  await pickLow('#settings-low-effort', 0);
+  assert.notEqual(controller.data.settings.autoLowModel, lowest.id, 'the effort beside it saves the same model at that effort');
+  assert.equal(controller.data.settings.autoLowModel.split(':').slice(0, -1).join(':'), lowest.id.split(':').slice(0, -1).join(':'));
+  [model, effort] = await lowPickers();
+  assert.equal(model[0], `${target.provider || 'codex'}|${target.model}`, 'the model stays picked after saving');
+  await window.webContents.executeJavaScript("document.querySelector('#settings-low-model').scrollIntoView({ block: 'center' }); new Promise(r => setTimeout(r, 100))");
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/low-model-setting.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript(`(async () => {
+    const select = document.querySelector('#settings-low-model');
+    select.value = 'auto';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 200));
+  })()`);
+  assert.equal(controller.data.settings.autoLowModel, 'auto', 'Auto hands simple messages back to Harness');
+  assert.deepEqual((await lowPickers()).map(([value, disabled]) => [value, disabled]), [['auto', false], ['', true]]);
   // While any provider connects, every model picker shows only "Connecting…"; once all are ready, open ones fill in place.
   const pickers = () => window.webContents.executeJavaScript(`['#preset', '#settings-router-preset', '#settings-chat-scan', '#agent-model', '#hub-model']
     .map(id => { const select = document.querySelector(id); return [id, select.disabled, [...select.options].map(option => option.textContent)]; })`);
@@ -1427,7 +1490,7 @@ app.whenReady().then(async () => {
     assert.equal(disabled, false, `${id} is usable again`);
     assert.ok(options.length > 1 && !options.includes('Connecting…'), `${id} fills in place without reopening Settings`);
   }
-  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-router-preset').value"), controller.data.settings.routerPreset, 'the saved choice shows again');
+  assert.equal(await window.webContents.executeJavaScript("modelEffortChoice($('#settings-router-preset'), $('#settings-router-effort'), state.routerPresets)"), controller.data.settings.routerPreset, 'the saved choice shows again');
   await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').close(); true");
   // The agent dialog's model list and Save wait the same way.
   controller.connectingProviders.set('claude-cli', 1);
@@ -1440,13 +1503,6 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#agent-save').disabled"), false);
   await window.webContents.executeJavaScript("document.querySelector('#agent-dialog').close(); document.querySelector('#settings-dialog').showModal(); true");
 
-  await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').close(); true");
-  // The log-only wiki check: shown with a Jev key, whatever the router, with the verdicts so far.
-  controller.trace = { record() {}, summary: () => ({ turns: 3, wiki: { additions: 5, assessed: 3, unassessable: 2, support: { supported: 2, partial: 1 }, novelty: { addition: 2, covered: 1 }, jevCalls: 1, jevCostUsd: 0.0002 } }) };
-  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + "); document.querySelector('#settings').click(); new Promise(r => setTimeout(r, 200))");
-  const wikiCheck = await window.webContents.executeJavaScript("[document.querySelector('#wiki-check-row').hidden, document.querySelector('#wiki-check-detail').textContent]");
-  assert.equal(wikiCheck[0], false);
-  assert.match(wikiCheck[1], /^Log only\. When on, .*nothing in the wiki changes\..* 5 additions: 3 judged \(2 supported, 1 partial; 2 addition, 1 covered\), 2 not assessable · Jev cost \$0\.0002\.$/);
   await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').close(); true");
   // Jev failing: the Jev section says since when and which saved settings are on their fallbacks.
   const savedRanking = controller.data.settings.contextRanking;
@@ -1463,12 +1519,39 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-output')"), null, 'large output is always captured, not a setting');
   console.log('Jev fallback status passed');
   controller.smartRouter.jev = undefined; controller.jevCompare = null;
-  controller.trace = require('../src/trace.cjs').NO_TRACE;
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + "); document.querySelector('#settings').click(); new Promise(r => setTimeout(r, 200))");
-  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#wiki-check-row').hidden"), true, 'hidden without a Jev key');
+  // Settings has no Wiki tab: the workspace's docs/wiki is reached through project_context, not a panel.
+  assert.deepEqual(await window.webContents.executeJavaScript("[...document.querySelectorAll('.settings-tab')].map(tab => tab.dataset.tab)"),
+    ['general', 'browser', 'routing', 'tools', 'providers', 'connectors', 'benchmarks', 'checks', 'about']);
+  // Browser access, Routing and Tools each have their own tab with their options, and General keeps the rest.
+  for (const [tab, controls] of Object.entries({ browser: ['#remote-port', '#remote-toggle'],
+    routing: ['#settings-router-preset', '#settings-quick', '#settings-effort-cap', '#settings-low-model', '#settings-jev-compare'],
+    tools: ['#settings-context', '#settings-tools'] })) {
+    const shown = await window.webContents.executeJavaScript(`(async () => {
+      document.querySelector('#tab-${tab}').click();
+      await new Promise(r => setTimeout(r, 50));
+      const panel = document.querySelector('#panel-${tab}');
+      document.querySelector('.settings-body').scrollTop = 0;
+      await new Promise(r => setTimeout(r, 100));
+      return [panel.hidden, document.querySelector('#panel-general').hidden, document.querySelector('#tab-${tab} svg') !== null,
+        ${JSON.stringify(controls)}.map(id => panel.contains(document.querySelector(id))),
+        panel.querySelector(':scope > .settings-section:first-child + .hint')?.textContent || ''];
+    })()`);
+    const intro = shown.pop();
+    assert.deepEqual(shown, [false, true, true, controls.map(() => true)], `${tab} tab shows its options, with an icon`);
+    assert.ok(intro.length > 20, `${tab} tab explains itself under its title`);
+    if (tab === 'routing')
+      assert.match(intro, /only apply when a bot's model is set to Auto/);
+    fs.writeFileSync(path.resolve(__dirname, `../.scratch/settings-tab-${tab}.png`), (await window.webContents.capturePage()).toPNG());
+  }
+  await window.webContents.executeJavaScript("document.querySelector('#tab-general').click(); document.querySelector('.settings-body').scrollTop = 0; new Promise(r => setTimeout(r, 100))");
+  assert.match(await window.webContents.executeJavaScript("document.querySelector('#panel-general > .settings-section:first-child + .hint').textContent"), /every chat/);
+  assert.equal(await window.webContents.executeJavaScript("['#remote-port', '#settings-router-preset', '#settings-context'].some(id => document.querySelector('#panel-general').contains(document.querySelector(id)))"), false,
+    'General keeps none of them');
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/settings-tab-general.png'), (await window.webContents.capturePage()).toPNG());
   await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').close(); true");
-  console.log('Compare with Jev and wiki check settings passed');
-  phase = 'agent controls';
+  console.log('Compare with Jev settings passed');
+  deadline.refresh(); phase = 'agent controls';
   const { Agents } = require('../src/agents.cjs');
   const { EventEmitter } = require('node:events');
   const agents = new Agents(controller, async () => {}, (file, workspace, options) => {
@@ -1913,7 +1996,7 @@ app.whenReady().then(async () => {
   const mainConversationId = agents.conversation(controller).id;
   oldConversation.items.push({ id: 'clear-history', type: 'agentMessage', text: 'Earlier agent history.' });
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
-  const commandNames = ['/help', '/compact', '/clear', '/stop', '/agents', '/settings', '/context', '/model', '/effort', '/access', '/switch', '/export', '/status'];
+  const commandNames = ['/help', '/compact', '/clear', '/stop', '/agents', '/settings', '/context', '/model', '/effort', '/access', '/switch', '/export', '/status', '/wiki'];
   const sentBeforeCommands = sent.length, previewsBeforeCommands = previews;
   const typeCommand = text => window.webContents.executeJavaScript(`(() => {
     const prompt = document.querySelector('#prompt'); prompt.focus(); prompt.value = ${JSON.stringify(text)};
@@ -3314,6 +3397,26 @@ app.whenReady().then(async () => {
     return { empty, typed, aligned, rect: { x: Math.floor(rect.x), y: Math.floor(rect.y), width: Math.ceil(rect.width), height: Math.ceil(rect.height) } };
   })()`);
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/reply-suggestion-typed.png'), (await window.webContents.capturePage(suggestionUi.rect)).toPNG());
+  // Touch screens have no Right arrow: a button beside Send accepts the suggestion there, and only there.
+  const acceptButton = () => window.webContents.executeJavaScript(`(() => { const button = document.querySelector('#suggestion-accept');
+    const box = button.getBoundingClientRect(), composer = document.querySelector('#composer').getBoundingClientRect();
+    const send = document.querySelector('#send').getBoundingClientRect();
+    return [button.hidden, box.width > 20 && box.left >= composer.left && box.right <= send.left, matchMedia('(pointer: coarse)').matches]; })()`);
+  assert.deepEqual(await acceptButton(), [false, false, false], 'with a mouse, the suggestion button stays out of the way');
+  window.webContents.debugger.attach('1.3');
+  await window.webContents.debugger.sendCommand('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+  assert.deepEqual(await acceptButton(), [false, true, true], 'on a touch screen the suggestion has a button beside Send');
+  await window.webContents.executeJavaScript('painted()');
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/reply-suggestion-touch.png'), (await window.webContents.capturePage(suggestionUi.rect)).toPNG());
+  assert.deepEqual(await window.webContents.executeJavaScript(`(() => {
+    document.querySelector('#suggestion-accept').click();
+    const prompt = document.querySelector('#prompt'), result = [prompt.value, document.querySelector('#suggestion-accept').hidden];
+    prompt.value = 'now add';
+    prompt.dispatchEvent(new Event('input', { bubbles: true }));
+    return result;
+  })()`), ['now add tests for it.', true], 'tapping it accepts the suggestion');
+  await window.webContents.debugger.sendCommand('Emulation.setTouchEmulationEnabled', { enabled: false });
+  window.webContents.debugger.detach();
   Object.assign(suggestionUi, await window.webContents.executeJavaScript(`(async () => {
     const prompt = document.querySelector('#prompt'), ghost = document.querySelector('#prompt-ghost');
     prompt.setSelectionRange(prompt.value.length, prompt.value.length);

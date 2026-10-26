@@ -1,10 +1,9 @@
-const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 
 const GENERAL = {
   routingModel: 'jev or an ID from routerChoices',
   effortCap: ['low', 'medium', 'high', 'xhigh', 'max'],
-  jevEnabled: 'boolean', jevQuickAnswers: 'boolean', jevCompare: 'boolean', wikiAssessment: 'boolean',
+  jevEnabled: 'boolean', jevQuickAnswers: 'boolean', jevCompare: 'boolean',
   contextRanking: ['local', 'jev'], toolSelection: ['off', 'jev'], largeResponses: 'boolean',
 };
 const LOCAL = { workspace: 'Absolute folder path', access: ['read-only', 'workspace-write', 'danger-full-access'], mode: 'auto or a model ID' };
@@ -16,10 +15,10 @@ const SPECIAL = {
   models: 'Model action: { action: toggle, id, enabled }, { action: toggleCodexModel, model, enabled }, or { action: enableDiscovered, provider, model, label }',
   providerKey: '{ id: provider ID, key: new secret or null to remove }; reads show configured flags only',
   jevKey: 'New secret or null to remove; reads show configured status only',
-  checks: 'Array of workspace checks using the existing Checks format', wikiFolder: 'This workspace’s docs/wiki folder (read only)',
+  checks: 'Array of workspace checks using the existing Checks format',
   benchmarks: 'Validated benchmark snapshot or null to reset to bundled evidence',
 };
-const MANUAL = new Set(['access', 'workspace', 'browserAccess', 'providers', 'providerConnection', 'providerKey', 'jevKey', 'checks', 'wikiFolder', 'startAtSignIn']);
+const MANUAL = new Set(['access', 'workspace', 'browserAccess', 'providers', 'providerConnection', 'providerKey', 'jevKey', 'checks', 'startAtSignIn']);
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 // How long an agent's settings request waits for the user before it counts as declined.
 const CONFIRM_MS = 120000;
@@ -50,7 +49,6 @@ class SettingsTools {
       else if (Object.hasOwn(GENERAL, name)) value = primary.data.settings[name] ?? null;
       else if (Object.hasOwn(LOCAL, name)) value = target.data.settings[name];
       else if (name === 'checks') value = primary.data.settings.checks?.[target.data.settings.workspace] || [];
-      else if (name === 'wikiFolder') value = this.wikiFolder(target.data.settings.workspace);
       else if (name === 'models') value = primary.catalog();
       else if (name === 'providers' || name === 'providerKey') value = (primary.data.settings.providers || []).map(({ id, name: label, baseUrl, enabled }) =>
         ({ id, name: label, ...(name === 'providerKey' ? {} : { baseUrl, enabled }), configured: !!primary.providers?.configured(id) }));
@@ -69,11 +67,6 @@ class SettingsTools {
     }
     return { agentId: target.agentId, settings, routerChoices: primary.routerChoices(), changes: this.snapshot(),
       note: 'Security settings are manual-only. Secrets are never returned. Write one setting per call; queued changes apply after active work finishes. Queued requests are cancelled on app restart.' };
-  }
-
-  // The workspace's own wiki folder; reading it creates nothing.
-  wikiFolder(workspace) {
-    return typeof workspace === 'string' ? path.join(workspace, 'docs', 'wiki') : null;
   }
 
   async write(caller, args) {

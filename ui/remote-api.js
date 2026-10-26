@@ -3,7 +3,17 @@
   const client = crypto.randomUUID();
   const listeners = new Map();
   let stream, connecting, ready, stopped = false, token = null;
-  try { token = sessionStorage.getItem('runner-session'); } catch { /* Memory-only access still works. */ }
+  // The session ticket stays on this device until Disconnect (or the runner refuses it), so an installed app opens
+  // signed in. A ticket a tab kept before this was per device moves over.
+  const remember = value => {
+    try {
+      if (value) localStorage.setItem('runner-session', value);
+      else localStorage.removeItem('runner-session');
+      sessionStorage.removeItem('runner-session');
+    } catch { /* Memory-only access still works. */ }
+  };
+  try { token = localStorage.getItem('runner-session') || sessionStorage.getItem('runner-session'); } catch { /* Memory-only access still works. */ }
+  if (token) remember(token);
   const headers = () => token ? { Authorization: 'Bearer ' + token } : {};
   document.body.classList.add('remote-view');
   const notice = document.createElement('div');
@@ -23,7 +33,7 @@
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'Could not connect.');
     token = result.token;
-    try { sessionStorage.setItem('runner-session', token); } catch { /* Keep this tab connected. */ }
+    remember(token);
   }
 
   function credentials() {
@@ -113,6 +123,8 @@
         const response = await fetch('/api/status', { headers: headers(), credentials: 'omit', redirect: 'error' }).catch(() => null);
         if (response?.ok) break;
         if (response?.status === 401) {
+          token = null;
+          remember(null);
           await credentials();
           continue;
         }
@@ -147,13 +159,13 @@
 
   const api = { remote: true };
   for (const method of ['bootstrap', 'saveAgent', 'renameHub', 'saveGroup', 'deleteAgent',
-    'workspaceWiki', 'browseWorkspace', 'settings', 'benchmarkData', 'create', 'permissions', 'load', 'image', 'rename',
+    'browseWorkspace', 'settings', 'benchmarkData', 'create', 'permissions', 'load', 'image', 'rename',
     'archive', 'deleteSession', 'preview', 'send', 'stop', 'reviseJob', 'reconcileJob', 'jobBudget',
-    'stopArtifactRun', 'artifactAction', 'stopDownloads', 'appInfo', 'runnerInfo', 'updateStatus', 'queuedMessage', 'replySuggestion', 'compact',
+    'stopArtifactRun', 'artifactAction', 'stopDownloads', 'appInfo', 'runnerInfo', 'updateStatus', 'queuedMessage', 'replySuggestion', 'suggestWiki', 'compact',
     'clearConversation', 'acknowledgeTask', 'applyCopy', 'undoComparison', 'undoRule', 'dismissSkillNotice', 'proposeWiki', 'answer', 'answerConfirmation', 'renewModels', 'providerModels'])
     api[method] = (...args) => call(method, args);
   for (const method of ['benchmarkRefresh', 'benchmarkImport', 'benchmarkApply', 'benchmarkReset', 'nativeProviderAction',
-    'runnerAutostart', 'quitRunner', 'exportConversation', 'openWorkspaceWiki', 'cursorLogin',
+    'runnerAutostart', 'quitRunner', 'exportConversation', 'cursorLogin',
     'cursorRefresh', 'cursorLogout', 'claudeLogin', 'claudeRefresh', 'claudeLogout', 'connectChatGPT', 'logoutChatGPT',
     'installProvider', 'providerSettings', 'providerKey', 'localModel', 'jevSaveKey',
     'jevRemoveKey', 'jevTest', 'checks', 'phasmaGameChecks', 'diagnostics', 'openLogs', 'checkUpdates', 'installUpdate', 'chooseWorkspace',
@@ -197,7 +209,7 @@
       headers: { ...headers(), 'Content-Type': 'application/json' }, body: '{}' });
     if (!response.ok) throw new Error('Could not disconnect.');
     stream?.abort(); token = null;
-    try { sessionStorage.removeItem('runner-session'); } catch { /* No stored ticket. */ }
+    remember(null);
     ready = connect();
   };
   api.readDocument = async ({ name, bytes }) => {

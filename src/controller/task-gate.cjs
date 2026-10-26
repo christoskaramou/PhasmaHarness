@@ -10,7 +10,6 @@ const { CHECKER: PHASMA_GAME_CHECKS, restoreMcpOptIn } = require('../phasma-game
 const { FINAL, OUTPUT_CAP, canProposeWiki, capStream, childBlocksClear, confirmTermination, correctionText, createTask, gateOutcome, hasProjectWiki, identityFromProbe, lookupState, parentExitReaps, parseChecklist, resolveCitations, shouldTrack, summaryLine, validateChecks } = require('../tasks.cjs');
 const { accessMode, treeEntries } = require('./shared.cjs');
 const { stripTaskStatus } = require('../routing/task-state.cjs');
-const { readWiki, assessWikiUpdate } = require('../workspace/wiki-assess.cjs');
 const { lessonFromTask, recordLesson, readLessons, relevantLessons, lessonsOffer, sameLesson, diffHashes } = require('../lessons.cjs');
 const { restoreCheckFiles } = require('../comparisons.cjs');
 
@@ -137,22 +136,6 @@ module.exports = {
         corrections: task.corrections || 0, attempts: task.attempts.length,
         checks: { configured: task.checks.length, ran: results.length, passed: count('passed'), failed: count('failed'), blocked: count('blocked') + count('unknown') } });
     }
-  },
-
-  // Opt-in, log only (Settings → Wiki): judge each small cited addition of an automatic wiki update against its source
-  // and the wiki as it was before, and trace the result. Nothing is written to the wiki.
-  async assessWiki(session, task, before) {
-    const started = Date.now();
-    try {
-      const { entries, totals } = await assessWikiUpdate({ jev: this.smartRouter.jev, workspace: before.workspace,
-        before: before.files, after: readWiki(before.root), signal: this.wikiChecks.signal });
-      for (const entry of entries) this.trace.record({ event: 'wiki-assessment', session: session.id, task: task.id, ...entry });
-      this.trace.record({ event: 'wiki-update', session: session.id, task: task.id, ...totals, durationMs: Date.now() - started });
-    } catch (error) {
-      if (this.wikiChecks.signal.aborted) return;
-      this.trace.record({ event: 'wiki-update', session: session.id, task: task.id, error: String(error?.message || error).slice(0, 200), durationMs: Date.now() - started });
-    }
-    this.changed();
   },
 
   sandboxFor(access, workspace) {

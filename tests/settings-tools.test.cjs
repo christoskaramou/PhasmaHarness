@@ -1,7 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const path = require('node:path');
 const { SettingsTools } = require('../src/settings-tools.cjs');
 
 function setup() {
@@ -91,7 +90,7 @@ test('failed writes report failure instead of success and discard the submitted 
 
 test('security settings stay readable but cannot be changed even with confirmation available', async () => {
   const { service, worker, saved, prompts } = setup();
-  for (const name of ['access', 'workspace', 'browserAccess', 'providers', 'providerConnection', 'providerKey', 'jevKey', 'checks', 'wikiFolder', 'startAtSignIn']) {
+  for (const name of ['access', 'workspace', 'browserAccess', 'providers', 'providerConnection', 'providerKey', 'jevKey', 'checks', 'startAtSignIn']) {
     assert.equal(service.read(worker, { names: [name] }).settings[name].writable, false, name);
     await assert.rejects(service.write(worker, { name, value: null }), /manual-only/);
   }
@@ -123,13 +122,6 @@ test('Routing model changes method and model together while retaining the Jev fa
   await service.flush();
   assert.deepEqual(saved[1].values, { routing: 'smart', routerPreset: 'router' });
   assert.equal(service.read(worker, { names: ['routingModel'] }).settings.routingModel.value, 'router');
-});
-
-test('the wiki folder is the workspace docs/wiki, and reading it creates nothing', () => {
-  const { service, worker } = setup();
-  assert.equal(service.read(worker, { names: ['wikiFolder'] }).settings.wikiFolder.value, path.join('/project', 'docs', 'wiki'));
-  worker.data.settings.workspace = '/moved';
-  assert.equal(service.read(worker, {}).settings.wikiFolder.value, path.join('/moved', 'docs', 'wiki'));
 });
 
 test('a confirmation answered after its turn ended, or never answered, applies nothing', async t => {
