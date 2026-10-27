@@ -1111,6 +1111,22 @@ dialog label select {
   z-index:9
 }
 
+/* The "Saved" popup: showSaved() pins it to the bottom-right corner of the dialog that saved; it is a popover, so it
+   shows above that dialog. */
+#saved-popup {
+  position:fixed;
+  inset:auto 16px 16px auto;
+  margin:0;
+  padding:8px 14px;
+  border:1px solid var(--border);
+  border-radius:10px;
+  background:var(--panel);
+  color:var(--text);
+  font-size:calc(13px * var(--font-scale,1));
+  box-shadow:0 8px 28px #0006;
+  pointer-events:none
+}
+
 @media(max-width:1050px) {
   .sidebar {
     width:225px
@@ -1383,7 +1399,8 @@ dialog {
   align-items:center
 }
 
-#settings-form>.dialog-heading .close-dialog {
+/* Every dialog's X looks like Settings': the same size and icon, red on hover. */
+.dialog-heading .close-dialog,.confirmation-close {
   display:grid;
   place-items:center;
   width:calc(26px * var(--font-scale,1));
@@ -1391,6 +1408,11 @@ dialog {
   padding:0;
   font-size:calc(19px * var(--font-scale,1));
   line-height:1
+}
+
+/* The pointer lands on the button, not its icon. */
+.dialog-heading .close-dialog svg,.confirmation-close svg {
+  pointer-events:none
 }
 
 #settings-form>.dialog-footer {
@@ -1771,7 +1793,7 @@ dialog {
   font-weight:600
 }
 
-#settings-form>.dialog-heading .close-dialog:hover {
+.dialog-heading .close-dialog:hover:not(:disabled),.confirmation-close:hover:not(:disabled) {
   color:var(--error)
 }
 
@@ -3036,7 +3058,7 @@ button,button *,[role=button],[role=button] *,input[type=button],input[type=subm
   margin-right: 8px;
 }
 
-#group-members {
+#group-members, #group-repliers {
   border: 1px solid var(--border);
   border-radius: 10px;
   max-height: 36vh;
@@ -3045,12 +3067,20 @@ button,button *,[role=button],[role=button] *,input[type=button],input[type=subm
   padding: 12px;
 }
 
+#group-repliers { margin-top: 12px; }
+.group-replier { display:flex; align-items:center; gap:4px; cursor:grab; }
+.group-replier .group-member { flex:1; min-width:0; }
+.group-replier .drag-handle { color:var(--muted); letter-spacing:-1px; padding-right:6px; }
+.group-replier .replier-rank { min-width:1.2em; color:var(--muted); font-variant-numeric:tabular-nums; }
+.group-replier .icon-button { padding:4px 8px; font-size:calc(16px * var(--font-scale,1)); }
+.group-replier .icon-button:disabled { opacity:.35; }
+
 #group-form > label { display:flex; flex-direction:column; gap:8px; }
 #group-name { width:100%; min-width:0; }
 #group-form > .hint { margin:12px 0; }
 #group-error:empty { display:none; }
 
-#group-members .group-member {
+#group-members .group-member, #group-repliers .group-member {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -3058,7 +3088,7 @@ button,button *,[role=button],[role=button] *,input[type=button],input[type=subm
   margin: 0;
 }
 
-#group-members input {
+#group-members input, #group-repliers input {
   width: auto;
   margin: 0;
 }

@@ -29,7 +29,7 @@ function confirmAction(options) {
     dialog.setAttribute('aria-labelledby', 'confirmation-heading');
     dialog.setAttribute('aria-describedby', 'confirmation-description');
     dialog.innerHTML = `<form method="dialog">
-      <div class="dialog-heading"><h2 id="confirmation-heading"></h2><button type="button" class="icon-button confirmation-close" aria-label="Cancel">×</button></div>
+      <div class="dialog-heading"><h2 id="confirmation-heading"></h2><button type="button" class="icon-button confirmation-close" aria-label="Cancel"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
       <p id="confirmation-description" class="muted"></p>
       <div class="confirmation-details"></div><p class="confirmation-note"></p>
       <div class="dialog-footer"><button type="button" class="confirmation-cancel"></button><button type="submit" value="confirm" class="confirmation-accept"></button></div>

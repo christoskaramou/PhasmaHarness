@@ -115,10 +115,10 @@ class JobWorkspaces {
   }
 
   record(workspace) {
-    const actual = identity(sync.realpathSync(workspace));
+    const real = sync.realpathSync(workspace), actual = identity(real);
     const record = Object.values(this.records).find(record => record && identity(record.workspace) === identity(path.resolve(workspace)));
     if (!record) {
-      if ([this.directory, this.legacyDirectory].some(directory => inside(directory, path.resolve(workspace)) || inside(directory, sync.realpathSync(workspace))))
+      if ([this.directory, this.legacyDirectory].some(directory => inside(directory, path.resolve(workspace)) || inside(directory, real)))
         throw new Error('This project copy has no saved workspace registration. Review its files before starting work.');
       return null;
     }

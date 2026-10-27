@@ -511,6 +511,7 @@ const TASK_LINE = /^[\s>*_`+-]*\[task:[ \t]*(done|pending|needs-input)[ \t]*\][\
 const TASK_FENCE = /^\s*(```|~~~)\s*\w*\s*$/;
 const TASK_PARTIAL = /(?:^|\n)[\s>*_`+-]*\[task(?::[^\]\n]*)?$/i;
 const TASK_STATUS_LABELS = { pending: 'Task pending', 'needs-input': 'Needs your input' };
+const GROUP_STANCE_LABELS = { done: 'Done', more: 'More to say', stuck: 'Stuck · asks you', agree: 'Agrees', continue: 'Continues' };
 function taskLine(text) {
   const value = String(text || '');
   const lines = value.trimEnd().split('\n');
@@ -822,14 +823,95 @@ if (phoneLayout.matches)
 $('#agents-overview').onclick = () => $('#agents-dialog').showModal();
 $('#agents-add').onclick = () => editAgent();
 $('#groups-add').onclick = () => editGroup();
-$('#group-edit').onclick = () => editGroup(current());
+
+// The Edit dialogs save each change as it is made, like Settings: one save at a time, in order, and only when something
+// changed. Text fields save on Enter or when focus leaves them. A refused change shows why and puts the saved values back.
+// X and Esc save a change still in progress first. New agent and New group keep their Create button instead.
+// Settings, Checks and the Edit dialogs say "Saved" in one popup pinned to the bottom-right corner of the dialog that
+// saved, where scrolling the dialog cannot hide it. It is a popover, so it shows above that dialog. It stays for a moment
+// and goes as soon as you edit again, so it never stands for a change made after it.
+const savedPopup = $('#saved-popup');
+let savedTimer;
+function showSaved(dialog) {
+  clearTimeout(savedTimer);
+  if (savedPopup.matches(':popover-open'))
+    savedPopup.hidePopover();
+  // Inside the dialog it is not inert, so screen readers announce it while the dialog is modal.
+  dialog.append(savedPopup);
+  savedPopup.showPopover();
+  // Clear of the dialog's scrollbar on the right.
+  const box = dialog.getBoundingClientRect();
+  savedPopup.style.right = `${Math.max(8, innerWidth - box.right + 28)}px`;
+  savedPopup.style.bottom = `${Math.max(8, innerHeight - box.bottom + 16)}px`;
+  savedTimer = setTimeout(clearSaved, 2000);
+}
+
+function clearSaved() {
+  clearTimeout(savedTimer);
+  if (savedPopup.matches(':popover-open'))
+    savedPopup.hidePopover();
+}
+
+function autosaveEditor(dialog, { read, fill, save }) {
+  const error = dialog.querySelector('[role=alert]');
+  let saves = Promise.resolve();
+  const commit = () => {
+    saves = saves.catch(() => {}).then(async () => {
+      if (!dialog.dataset.editing)
+        return;
+
+      const next = read(), saved = JSON.parse(dialog.dataset.saved);
+      if (JSON.stringify(next) === dialog.dataset.saved)
+        return;
+
+      try {
+        await save(next, saved);
+        dialog.dataset.saved = JSON.stringify(next);
+        error.textContent = '';
+        showSaved(dialog);
+      } catch (failure) {
+        clearSaved();
+        error.textContent = String(failure.message || failure).replace(/^Error invoking remote method '[^']+': Error: /, '');
+        fill(saved);
+        throw failure;
+      }
+    });
+    return saves;
+  };
+  const close = () => commit().then(() => dialog.close(), () => {});
+  dialog.addEventListener('cancel', event => {
+    if (!dialog.dataset.editing)
+      return;
+
+    event.preventDefault();
+    close();
+  });
+  dialog.querySelector('form').addEventListener('change', () => {
+    if (dialog.dataset.editing)
+      commit().catch(() => {});
+  });
+  dialog.querySelector('form').addEventListener('input', clearSaved);
+  dialog.closeEditor = close;
+  return {
+    commit: () => commit().catch(() => {}),
+    start: editing => {
+      if (!editing) {
+        delete dialog.dataset.editing;
+        return;
+      }
+
+      dialog.dataset.editing = 'true';
+      dialog.dataset.saved = JSON.stringify(read());
+    },
+  };
+}
+
 function editGroup(session) {
   const dialog = $('#group-dialog'); dialog.dataset.sessionId = session?.id || '';
   $('#group-heading').textContent = session ? 'Edit group' : 'New group';
   $('#group-name').value = session?.title || '';
-  $('#group-save').textContent = session ? 'Save changes' : 'Create group';
-  $('#group-archive').hidden = !session;
-  $('#group-members').replaceChildren(element('legend', '', 'Members'), element('p', 'muted', `${state.agents?.find(agent => agent.id === 'main')?.name || 'Hub'} · coordinator`));
+  $('#group-dialog .dialog-footer').hidden = !!session;
+  $('#group-members').replaceChildren(element('legend', '', 'Members'), element('p', 'muted', `${state.agents?.find(agent => agent.id === 'main')?.name || 'Assistant'} · coordinator`));
   for (const bot of (fleetState?.agents || []).filter(bot => bot.id !== 'main')) {
     const label = element('label', 'group-member');
     const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.value = bot.id;
@@ -839,25 +921,88 @@ function editGroup(session) {
   if (!(fleetState?.agents || []).some(bot => bot.id !== 'main')) {
     $('#group-members').append(element('p', 'muted', 'Create a bot first, then add it to a group.'));
   }
+  const order = session?.group?.replyOrder || [];
+  renderRepliers(order, order);
+  groupEditor.start(!!session);
   $('#group-error').textContent = ''; dialog.showModal(); $('#group-name').focus();
 }
+// Who replies: the row order is the reply order, and ticked rows reply.
+const replierRows = () => [...$('#group-repliers').querySelectorAll('.group-replier')];
+const replyOrder = () => replierRows().filter(row => row.querySelector('input').checked).map(row => row.dataset.id);
+let draggedReplier = null;
+function renderRepliers(ticked, sequence) {
+  const members = [...$('#group-members').querySelectorAll('input:checked')].map(input => input.value);
+  const bots = [...new Set([...sequence, ...members])].filter(id => members.includes(id))
+    .map(id => (fleetState?.agents || []).find(bot => bot.id === id)).filter(Boolean);
+  $('#group-repliers').replaceChildren(element('legend', '', 'Who replies'), ...bots.map(bot => replierRow(bot, ticked.includes(bot.id))));
+  if (!bots.length) $('#group-repliers').append(element('p', 'muted', 'Choose members first.'));
+  numberRepliers();
+}
+function replierRow(bot, checked) {
+  const row = element('div', 'group-replier'); row.dataset.id = bot.id; row.draggable = true;
+  const label = element('label', 'group-member'), checkbox = document.createElement('input');
+  checkbox.type = 'checkbox'; checkbox.checked = checked; checkbox.onchange = numberRepliers;
+  label.append(checkbox, element('span', 'replier-rank'), document.createTextNode(bot.name));
+  const move = (text, direction, step) => {
+    const button = element('button', 'icon-button', text); button.type = 'button'; button.dataset.step = step;
+    button.title = `Move ${direction}`; button.setAttribute('aria-label', `Move ${bot.name} ${direction}`);
+    button.onclick = () => {
+      const other = step < 0 ? row.previousElementSibling : row.nextElementSibling;
+      if (other?.classList.contains('group-replier')) step < 0 ? other.before(row) : other.after(row);
+      numberRepliers(); button.focus();
+      groupEditor.commit();
+    };
+    return button;
+  };
+  row.append(element('span', 'drag-handle', '⋮⋮'), label, move('↑', 'up', -1), move('↓', 'down', 1));
+  row.ondragstart = event => { draggedReplier = row; event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', bot.id); };
+  row.ondragover = event => {
+    if (!draggedReplier || draggedReplier === row) return;
+    event.preventDefault();
+    const box = row.getBoundingClientRect();
+    if (event.clientY > box.top + box.height / 2) row.after(draggedReplier); else row.before(draggedReplier);
+    numberRepliers();
+  };
+  row.ondragend = () => {
+    draggedReplier = null;
+    groupEditor.commit();
+  };
+  return row;
+}
+function numberRepliers() {
+  const rows = replierRows();
+  let rank = 0;
+  rows.forEach((row, index) => {
+    row.querySelector('.replier-rank').textContent = row.querySelector('input').checked ? String(++rank) : '';
+    row.querySelector('[data-step="-1"]').disabled = index === 0;
+    row.querySelector('[data-step="1"]').disabled = index === rows.length - 1;
+  });
+}
+$('#group-members').onchange = () => renderRepliers(replyOrder(), replierRows().map(row => row.dataset.id));
+const groupForm = () => ({ id: $('#group-dialog').dataset.sessionId || undefined, name: $('#group-name').value,
+  members: [...$('#group-members').querySelectorAll('input:checked')].map(input => input.value), replyOrder: replyOrder() });
+const groupEditor = autosaveEditor($('#group-dialog'), {
+  read: groupForm,
+  fill: saved => {
+    $('#group-name').value = saved.name;
+    for (const input of $('#group-members').querySelectorAll('input'))
+      input.checked = saved.members.includes(input.value);
+    renderRepliers(saved.replyOrder, saved.replyOrder);
+  },
+  save: next => api.saveGroup(next),
+});
 $('#group-form').onsubmit = async event => {
-  event.preventDefault(); $('#group-save').disabled = true;
+  event.preventDefault();
+  if ($('#group-dialog').dataset.editing)
+    return groupEditor.commit();
+
+  $('#group-save').disabled = true;
   try {
-    const session = await api.saveGroup({ id: $('#group-dialog').dataset.sessionId || undefined,
-      name: $('#group-name').value, members: [...$('#group-members').querySelectorAll('input:checked')].map(input => input.value) });
+    const session = await api.saveGroup(groupForm());
     $('#group-dialog').close(); $('#agents-dialog').close();
     applyState(await api.bootstrap()); await selectAgent('main', session.id);
   } catch (error) { $('#group-error').textContent = error.message; }
   finally { $('#group-save').disabled = false; }
-};
-$('#group-archive').onclick = async () => {
-  $('#group-archive').disabled = true;
-  try {
-    await api.archive($('#group-dialog').dataset.sessionId); $('#group-dialog').close();
-    applyState(await api.bootstrap());
-  } catch (error) { $('#group-error').textContent = error.message; }
-  finally { $('#group-archive').disabled = false; }
 };
 let groupRenderKey = '';
 function mentionMembers() {
@@ -903,7 +1048,7 @@ function editAgent(profile) {
   const conversation = worker?.sessions.find(s => s.id === worker.conversationId);
   const dialog = $('#agent-dialog'); dialog.dataset.agentId = profile?.id || '';
   $('#agent-heading').textContent = profile ? 'Edit agent' : 'New agent';
-  $('#agent-save').textContent = profile ? 'Save changes' : 'Create agent';
+  $('#agent-dialog .dialog-footer').hidden = !!profile;
   $('#agent-name').value = profile?.name || '';
   $('#agent-instructions').value = profile?.instructions || '';
   $('#agent-workspace').value = conversation?.workspace || profile?.workspace || state.settings.workspace;
@@ -918,6 +1063,7 @@ function editAgent(profile) {
   renderAgentModels();
   $('#agent-access').replaceChildren(...state.accessModes.map(p => new Option(p.label, p.id)));
   $('#agent-access').value = conversation?.access || profile?.access || 'read-only';
+  agentEditor.start(!!profile);
   $('#agent-error').textContent = ''; dialog.showModal(); $('#agent-name').focus();
 }
 // The Edit dialogs pick a model like the composer: models grouped by provider, a model's efforts in a picker beside it.
@@ -981,11 +1127,9 @@ function renderHubModels() {
   if (providersConnecting().active) {
     showConnecting(select);
     $('#hub-effort').disabled = true;
-    $('#hub-save').disabled = true;
     return;
   }
 
-  const wasConnecting = select.dataset.signature === 'connecting';
   const groups = hubGroups();
   const placeholder = new Option('Choose a model', '');
   placeholder.disabled = true;
@@ -993,8 +1137,6 @@ function renderHubModels() {
   const group = groups.find(g => g.variants.some(p => p.id === mode));
   fillPicker(select, [placeholder, ...groupedOptions(groups)], group?.key || '');
   showDialogEfforts(select, $('#hub-effort'), groups, mode);
-  if (wasConnecting)
-    $('#hub-save').disabled = false;
 }
 
 function hubChoice() {
@@ -1021,32 +1163,46 @@ function editHub(profile) {
   $('#hub-dialog').dataset.mode = main.settings.mode === 'auto' ? main.hubMode : main.settings.mode;
   $('#hub-model').dataset.signature = '';
   $('#hub-model').replaceChildren();
-  $('#hub-save').disabled = false;
   renderHubModels();
+  hubEditor.start(true);
   $('#hub-error').textContent = '';
   $('#hub-dialog').showModal();
   $('#hub-name').select();
 }
-$('#hub-form').onsubmit = async event => {
-  event.preventDefault();
-  $('#hub-save').disabled = true;
-  try {
-    const dialog = $('#hub-dialog');
-    const changed = Object.fromEntries([['workspace', $('#hub-workspace').value.trim()], ['access', $('#hub-access').value]]
-      .filter(([key, value]) => value && value !== dialog.dataset[key]));
+// Workspace and access are the main bot's settings; name and model go through renameHub. Each save sends only what changed.
+const hubEditor = autosaveEditor($('#hub-dialog'), {
+  read: () => ({ name: $('#hub-name').value, workspace: $('#hub-workspace').value.trim(), access: $('#hub-access').value,
+    mode: $('#hub-dialog').dataset.mode }),
+  fill: saved => {
+    $('#hub-name').value = saved.name;
+    $('#hub-workspace').value = saved.workspace;
+    $('#hub-access').value = saved.access;
+    $('#hub-dialog').dataset.mode = saved.mode;
+    renderHubModels();
+  },
+  save: async (next, saved) => {
+    const changed = Object.fromEntries(['workspace', 'access'].filter(key => next[key] !== saved[key]).map(key => [key, next[key]]));
     if (Object.keys(changed).length)
       applyState(await window.router.settings(changed, 'main'));
-    await api.renameHub({ name: $('#hub-name').value, mode: hubChoice() });
-    $('#hub-dialog').close();
-    applyState(await api.bootstrap());
-  } catch (error) {
-    $('#hub-error').textContent = String(error.message || error).replace(/^Error invoking remote method '[^']+': Error: /, '');
-  } finally {
-    $('#hub-save').disabled = false;
-  }
+    // The model is checked only when it changed, so a rename still works while providers reconnect.
+    if (next.name !== saved.name || next.mode !== saved.mode)
+      await api.renameHub({ name: next.name, ...(next.mode !== saved.mode ? { mode: next.mode } : {}) });
+  },
+});
+$('#hub-form').onsubmit = event => {
+  event.preventDefault();
+  hubEditor.commit();
 };
 $('#agent-new').onclick = () => editAgent();
-$('#agent-browse').onclick = async () => { try { const folder = await api.chooseWorkspace(); if (folder) $('#agent-workspace').value = folder; } catch (error) { $('#agent-error').textContent = error.message; } };
+$('#agent-browse').onclick = async () => {
+  try {
+    const folder = await api.chooseWorkspace();
+    if (folder) {
+      $('#agent-workspace').value = folder;
+      agentEditor.commit();
+    }
+  } catch (error) { $('#agent-error').textContent = error.message; }
+};
 // Inherit hides the folder and leaves it out of the form's checks; the runner works out the inherited one.
 function showInherit() {
   const inherit = $('#agent-inherit').checked;
@@ -1057,17 +1213,40 @@ $('#agent-inherit').onchange = showInherit;
 $('#hub-browse').onclick = async () => {
   try {
     const folder = await api.chooseWorkspace();
-    if (folder)
+    if (folder) {
       $('#hub-workspace').value = folder;
+      hubEditor.commit();
+    }
   } catch (error) { $('#hub-error').textContent = error.message; }
 };
+const agentForm = () => ({ id: $('#agent-dialog').dataset.agentId || undefined, name: $('#agent-name').value,
+  instructions: $('#agent-instructions').value, workspace: $('#agent-workspace').value, inheritWorkspace: $('#agent-inherit').checked,
+  mode: $('#agent-dialog').dataset.mode, access: $('#agent-access').value });
+const agentEditor = autosaveEditor($('#agent-dialog'), {
+  read: agentForm,
+  fill: saved => {
+    $('#agent-name').value = saved.name;
+    $('#agent-instructions').value = saved.instructions;
+    $('#agent-workspace').value = saved.workspace;
+    $('#agent-inherit').checked = saved.inheritWorkspace;
+    showInherit();
+    $('#agent-dialog').dataset.mode = saved.mode;
+    renderAgentModels();
+    $('#agent-access').value = saved.access;
+  },
+  save: next => api.saveAgent(next),
+});
 $('#agent-form').onsubmit = async event => {
-  event.preventDefault(); $('#agent-save').disabled = true; $('#agent-save').textContent = 'Saving…';
+  event.preventDefault();
+  if ($('#agent-dialog').dataset.editing)
+    return agentEditor.commit();
+
+  $('#agent-save').disabled = true; $('#agent-save').textContent = 'Saving…';
   try {
-    const profile = await api.saveAgent({ id: $('#agent-dialog').dataset.agentId || undefined, name: $('#agent-name').value, instructions: $('#agent-instructions').value, workspace: $('#agent-workspace').value, inheritWorkspace: $('#agent-inherit').checked, mode: agentChoice(), access: $('#agent-access').value });
+    const profile = await api.saveAgent({ ...agentForm(), mode: agentChoice() });
     $('#agent-dialog').close(); applyState(await api.bootstrap()); await selectAgent(profile.id);
   } catch (error) { $('#agent-error').textContent = error.message; }
-  finally { $('#agent-save').disabled = false; $('#agent-save').textContent = $('#agent-dialog').dataset.agentId ? 'Save changes' : 'Create agent'; }
+  finally { $('#agent-save').disabled = false; $('#agent-save').textContent = 'Create agent'; }
 };
 async function agentAction(event) {
   const button = event.target.closest('button[data-agent]');
@@ -1077,6 +1256,9 @@ async function agentAction(event) {
     if (button.dataset.action === 'edit') return id === 'main' ? editHub(profile) : editAgent(profile);
     if (button.dataset.action === 'delete') {
       window.getSelection()?.removeAllRanges();
+      delete $('#delete-dialog').dataset.groupId;
+      $('#delete-heading').textContent = 'Delete agent?';
+      $('#delete-description').textContent = agentDeleteText;
       $('#delete-dialog').dataset.agentId = id; $('#delete-title').textContent = profile.name;
       const subBots = subBotsOf(id);
       $('#delete-subbots').hidden = !subBots.length;
@@ -1106,19 +1288,41 @@ function closeAgentMenu(restoreFocus = false) {
 function preferredMode(group, effort = $('#effort')) {
   return (group.variants.find(p => (p.effort || '') === effort.value) || group.variants.find(p => p.effort === 'medium') || group.variants[0]).id;
 }
+const groupSession = id => (fleetState?.agentStates?.main?.sessions || state.sessions).find(chat => chat.id === id);
+const agentDeleteText = $('#delete-description').textContent;
+function confirmGroupDelete(session) {
+  const dialog = $('#delete-dialog');
+  delete dialog.dataset.agentId;
+  dialog.dataset.groupId = session.id;
+  $('#delete-heading').textContent = 'Delete group?';
+  $('#delete-title').textContent = session.title;
+  $('#delete-description').textContent = 'Remove this group chat and its messages from the app. Its bots stay.';
+  $('#delete-subbots').hidden = true;
+  $('#delete-error').hidden = true;
+  dialog.showModal();
+}
+
 function agentContextMenu(event) {
   const entry = event.target.closest('.agent-nav, .agent-card');
-  const id = entry?.dataset.agent || entry?.querySelector('button[data-agent]')?.dataset.agent;
-  if (!id) return;
+  // Group rows carry their own options; bot rows mirror their Overview card's actions.
+  const group = entry?.dataset.group;
+  const id = group ? null : entry?.dataset.agent || entry?.querySelector('button[data-agent]')?.dataset.agent;
+  if (!id && !group) return;
   event.preventDefault();
-  const actions = [...$('#agent-cards').querySelectorAll('button[data-agent]')].filter(button => button.dataset.agent === id);
+  const replying = group && !!groupSession(group)?.groupTurn;
+  const actions = group
+    ? [{ action: 'open' }, { action: 'edit' }, { action: 'delete', disabled: replying }]
+    : [...$('#agent-cards').querySelectorAll('button[data-agent]')].filter(button => button.dataset.agent === id)
+      .map(button => ({ action: button.dataset.action, disabled: button.disabled }));
   closeAgentMenu();
   agentMenuOpener = entry.matches('button') ? entry : entry.querySelector('button[data-agent]');
   const labels = { open: 'Open', rename: 'Rename', edit: 'Edit', stop: 'Stop', delete: 'Delete' };
-  agentMenu.replaceChildren(...actions.map(action => {
-    const item = element('button', 'agent-menu-item', labels[action.dataset.action]);
+  agentMenu.replaceChildren(...actions.map(({ action, disabled }) => {
+    const item = element('button', 'agent-menu-item', labels[action]);
     item.type = 'button'; item.tabIndex = -1; item.setAttribute('role', 'menuitem');
-    item.dataset.agent = id; item.dataset.action = action.dataset.action; item.disabled = action.disabled;
+    if (group) item.dataset.group = group;
+    else item.dataset.agent = id;
+    item.dataset.action = action; item.disabled = !!disabled;
     return item;
   }));
   (entry.closest('dialog') || document.body).append(agentMenu);
@@ -1133,6 +1337,17 @@ function agentContextMenu(event) {
 agentMenu.addEventListener('click', event => {
   const item = event.target.closest('button');
   if (!item || item.disabled) return;
+  if (item.dataset.group) {
+    closeAgentMenu(true);
+    const session = groupSession(item.dataset.group);
+    if (!session)
+      return;
+
+    if (item.dataset.action === 'edit') editGroup(session);
+    else if (item.dataset.action === 'delete') confirmGroupDelete(session);
+    else selectAgent('main', session.id).catch(notify);
+    return;
+  }
   const target = [...$('#agent-cards').querySelectorAll('button[data-agent]')].find(button => button.dataset.agent === item.dataset.agent && button.dataset.action === item.dataset.action && !button.disabled);
   closeAgentMenu(true); target?.click();
 });
@@ -1148,7 +1363,7 @@ agentMenu.addEventListener('keydown', event => {
   } else if (event.key === 'Tab') closeAgentMenu(true);
   else if (event.key === ' ') { event.preventDefault(); document.activeElement?.click(); }
 });
-for (const container of [$('#agent-list'), $('#main-agent-list'), $('#agent-cards')]) {
+for (const container of [$('#agent-list'), $('#main-agent-list'), $('#group-list'), $('#agent-cards')]) {
   container.addEventListener('contextmenu', agentContextMenu);
   container.addEventListener('keydown', event => {
     if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) agentContextMenu(event);
@@ -1160,7 +1375,7 @@ $('#agent-search').addEventListener('keydown', event => {
   if (event.key === 'Escape') { event.preventDefault(); event.target.value = ''; renderAgents(); }
 });
 function renderAgents() {
-  const agents = state.agents || [{ id: 'main', name: 'Hub' }];
+  const agents = state.agents || [{ id: 'main', name: 'Assistant' }];
   const switching = submitting || readingImages || changingPermissions;
   const pendingWork = context => context && (context.busy || context.requests.length ||
     context.sessions.some(chat => chat.queue?.length || (chat.delegation && !chat.delegation.delivered) ||
@@ -1478,13 +1693,12 @@ function render() {
   renderGroups();
   $('#route-preview').hidden = !!state.coordinator;
   const ready = state.connection === 'ready';
-  $('#session-title').textContent = session?.group ? session.title : state.agents?.find(a => a.id === selectedAgent)?.name || 'Hub';
+  $('#session-title').textContent = session?.group ? session.title : state.agents?.find(a => a.id === selectedAgent)?.name || 'Assistant';
   $('#session-icon').replaceChildren(HarnessMosaic.icon(session?.group ? session.id : selectedAgent, !session?.group && selectedAgent === 'main'));
   const readOnly = readOnlyNote();
   $('#prompt').placeholder = readOnly || `Message ${$('#session-title').textContent}…`;
   $('#prompt').readOnly = !!readOnly;
   $('#welcome .suggestions').hidden = !!readOnly;
-  $('#group-edit').hidden = !session?.group;
   $('#group-owner').hidden = !session?.group;
   $('#group-mention').hidden = !session?.group;
   $('#group-mention').disabled = submitting || readingImages || changingPermissions;
@@ -1581,7 +1795,7 @@ function render() {
   $('#turn-error').textContent = turnError ? `${session.status === 'interrupted' ? 'Stopped' : 'Turn failed'}: ${turnError}` : '';
   $('#turn-error').hidden = !turnError;
   renderModelFetching();
-  $('#working-text').textContent = (session?.groupTurn ? `${session.groupTurn.name} ${session.groupTurn.state === 'needs-input' ? 'needs your input' : session.groupTurn.state === 'waiting' ? 'is waiting to reply' : 'is replying'}…` : '') || session?.waitingForAgent || (session?.compacting ? 'Compacting conversation context…' : state.routing === selectedId && state.routing
+  $('#working-text').textContent = (session?.groupTurn ? `${session.groupTurn.round > 1 ? `Round ${session.groupTurn.round} · ` : ''}${session.groupTurn.name} ${session.groupTurn.state === 'needs-input' ? 'needs your input' : session.groupTurn.state === 'waiting' ? 'is waiting to reply' : 'is replying'}…` : '') || session?.waitingForAgent || (session?.compacting ? 'Compacting conversation context…' : state.routing === selectedId && state.routing
     ? `Choosing a model with ${routerName(state.routerModel)}…` : `${session?.routes.at(-1)?.label || 'Codex CLI'} is working…`);
   const usage = session?.usage;
   const total = usage?.total;
@@ -1821,7 +2035,7 @@ function renderJobActivity(session) {
   const queued = [...(session?.queue || []), ...(session?.items || []).flatMap(item => item.pendingReply ? [item.pendingReply] : [])];
   const replies = queued.filter(message => message.agentReply && !message.agentMail).length;
   const mail = queued.filter(message => message.agentMail).length;
-  const owner = state.agents?.find(agent => agent.id === selectedAgent)?.name || 'Hub';
+  const owner = state.agents?.find(agent => agent.id === selectedAgent)?.name || 'Assistant';
   const comparisonBatches = new Set((session?.items || []).filter(item => item.comparisonId && item.hubBatch).map(item => item.hubBatch.id));
   const batch = Object.values(fleetState?.batchReports || {}).findLast(report => report.sessionId === session?.id && !comparisonBatches.has(report.id));
   const key = JSON.stringify([session?.id, session?.queuePaused, jobs, runs, downloads, queued.map(message => message.id), replies, mail, owner, batch?.id, batch?.summary]);
@@ -2298,6 +2512,7 @@ function renderMessages(session) {
       const text = attachment?.displayText ?? sourceText;
       const taskStatus = TASK_STATUS_LABELS[reply?.status] && item.phase !== 'commentary'
         ? element('span', 'task-status', TASK_STATUS_LABELS[reply.status]) : null;
+      const stance = GROUP_STANCE_LABELS[item.groupStance] ? element('span', 'task-status', GROUP_STANCE_LABELS[item.groupStance]) : null;
       const actions = element('div', 'message-actions');
       const timestamp = item.createdAt || selected?.at;
       if (timestamp) {
@@ -2328,6 +2543,7 @@ function renderMessages(session) {
       const bubble = element('div', 'message-bubble');
       bubble.append(body);
       if (taskStatus) bubble.append(taskStatus);
+      if (stance) bubble.append(stance);
       bubble.onclick = event => {
         if (!event.target.closest('a, button, summary, input, select, textarea')) node.focus({ preventScroll: true });
       };
@@ -2540,6 +2756,8 @@ async function clearConversation() {
   const result = await api.clearConversation(agentId, groupId);
   if (!result.cleared) return false;
   drafts.delete(key); imageDrafts.delete(key); fileDrafts.delete(key);
+  // The fresh chat starts empty; a group keeps its draft key for the old chat, so runCommand would not empty the box.
+  $('#prompt').value = '';
   sentHistory = null; sentHistoryIndex = -1; draftAccess = null;
   if (groupId) selectedId = result.sessionId;
   applyState(result.state); renderImages(); updatePreview();
@@ -2598,12 +2816,12 @@ function openCommandPanel(name) {
 }
 function commandChoices(name) {
   if (name === 'access') return state.accessModes.map(a => ({ id: a.id, label: a.label, detail: a.description, selected: a.id === (current()?.access || draftAccess || state.settings.access), disabled: !!state.busy || !!state.waitingForAgents?.length }));
-  if (name === 'switch') return (state.agents || [{ id: 'main', name: 'Hub' }]).map(a => ({ id: a.id, label: a.name, detail: a.workspace || '', selected: a.id === selectedAgent }));
+  if (name === 'switch') return (state.agents || [{ id: 'main', name: 'Assistant' }]).map(a => ({ id: a.id, label: a.name, detail: a.workspace || '', selected: a.id === selectedAgent }));
   return [];
 }
 function commandDetails(name) {
   const session = current();
-  const agentName = state.agents?.find(a => a.id === selectedAgent)?.name || 'Hub';
+  const agentName = state.agents?.find(a => a.id === selectedAgent)?.name || 'Assistant';
   if (name === 'context') {
     const { contextTokens, contextWindow, contextKnown } = contextUsage(session);
     const timestamp = session?.lastCompactedAt;
@@ -3212,7 +3430,7 @@ $('#settings-runner-exit').onchange = async event => {
   control.disabled = true;
   try {
     await api.runnerOnExit(control.value);
-    $('#settings-save-status').textContent = 'Saved';
+    showSaved($('#settings-dialog'));
   } catch (error) { notify(error); }
   finally { await loadRunnerSettings(); }
 };
@@ -3222,7 +3440,10 @@ $('#settings-runner-start').onchange = async event => {
   try {
     const saved = await api.runnerAutostart(control.value === 'on');
     control.value = saved.enabled ? 'on' : 'off';
-    $('#settings-save-status').textContent = saved.needsApproval ? 'Approve the login item in system settings.' : 'Saved';
+    if (saved.needsApproval)
+      $('#settings-save-status').textContent = 'Approve the login item in system settings.';
+    else
+      showSaved($('#settings-dialog'));
   } catch (error) { notify(error); await loadRunnerSettings(); }
   finally { control.disabled = false; }
 };
@@ -3471,7 +3692,8 @@ async function saveSetting(control, key, value, agentId = selectedAgent) {
     if (agentId === selectedAgent) control.value = typeof value === 'boolean' ? (value ? 'on' : 'off') : String(value);
     updatePreview();
     if (key === 'workspace' && agentId === selectedAgent) renderChecks();
-    $('#settings-save-status').textContent = 'Saved';
+    $('#settings-save-status').textContent = '';
+    showSaved($('#settings-dialog'));
   } catch (error) {
     if (agentId === selectedAgent) {
       const saved = key === 'routingModel' ? (state.settings.routing === 'jev' ? 'jev' : state.settings.routerPreset) : ((key === 'workspace' || key === 'access') ? current()?.[key] ?? state.settings[key] : state.settings[key])
@@ -3499,6 +3721,7 @@ const settingsFields = {
   'settings-low-effort': 'autoLowModel', 'settings-show-tips': 'showTips', 'settings-router-effort': 'routingModel',
   'settings-chat-scan-effort': 'chatScanModel',
 };
+$('#settings-form').addEventListener('input', clearSaved);
 $('#settings-form').addEventListener('change', event => {
   const control = event.target, key = settingsFields[control.id];
   if (!key) return;
@@ -3517,7 +3740,6 @@ async function closeSettings() {
     notify(error);
   }
 }
-$('#settings-close').onclick = closeSettings;
 $('#settings-dialog').addEventListener('cancel', event => { event.preventDefault(); closeSettings(); });
 $('#context-meter').onclick = () => {
   if ($('#context-meter').getAttribute('aria-disabled') !== 'true') runCommand('compact');
@@ -3526,6 +3748,9 @@ $('#delete-form').onsubmit = async event => {
   event.preventDefault();
   if (deletingAgent) return;
   const dialog = $('#delete-dialog');
+  if (dialog.dataset.groupId)
+    return deleteGroup(dialog.dataset.groupId);
+
   const id = dialog.dataset.agentId;
   const sessions = fleetState.agentStates[id]?.sessions || [];
   deletingAgent = true; $('#delete-confirm').disabled = true; render();
@@ -3537,10 +3762,27 @@ $('#delete-form').onsubmit = async event => {
   } catch (error) { $('#delete-error').textContent = error.message; $('#delete-error').hidden = false; }
   finally { deletingAgent = false; $('#delete-confirm').disabled = false; render(); }
 };
+// The runner refuses while the group is replying or still has work; that reason shows in the dialog.
+async function deleteGroup(id) {
+  deletingAgent = true; $('#delete-confirm').disabled = true; render();
+  try {
+    await api.deleteSession(id);
+    $('#delete-dialog').close();
+    drafts.delete(id); imageDrafts.delete(id); fileDrafts.delete(id);
+    if (selectedAgent === 'main' && selectedId === id)
+      await selectAgent('main');
+    updatePreview();
+  } catch (error) {
+    $('#delete-error').textContent = String(error.message || error).replace(/^Error invoking remote method '[^']+': Error: /, '');
+    $('#delete-error').hidden = false;
+  } finally { deletingAgent = false; $('#delete-confirm').disabled = false; render(); }
+}
 $('#delete-dialog').addEventListener('close', () => window.getSelection()?.removeAllRanges());
 document.querySelectorAll('.close-dialog').forEach(button => { button.onclick = () => {
   const dialog = button.closest('dialog');
-  if (dialog.id === 'settings-dialog') closeSettings(); else dialog.close();
+  if (dialog.id === 'settings-dialog') closeSettings();
+  else if (dialog.dataset.editing) dialog.closeEditor();
+  else dialog.close();
 }; });
 $('#request-dialog').addEventListener('cancel', event => {
   // Your own chat's approvals must be answered; background ones (reviewed, or in a watched chat) can wait. A watched one
@@ -4066,7 +4308,7 @@ async function saveChecks() {
   try {
     const saved = await queueSettingsWrite(() => api.checks(workspace, list));
     state.settings.checks = { ...(state.settings.checks || {}), [workspace]: saved };
-    if (checksRevision === revision) { checksDirty = false; $('#checks-status').textContent = 'Saved'; }
+    if (checksRevision === revision) { checksDirty = false; $('#checks-status').textContent = ''; showSaved($('#settings-dialog')); }
   } catch (error) {
     $('#checks-status').textContent = 'Not saved: ' + String(error.message || error).replace(/^Error invoking remote method '[^']+': Error: /, '');
     throw error;

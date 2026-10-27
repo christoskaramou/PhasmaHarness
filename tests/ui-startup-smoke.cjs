@@ -1105,7 +1105,7 @@ app.whenReady().then(async () => {
     const dialog = document.querySelector('#settings-dialog'), box = dialog.getBoundingClientRect();
     return { width: box.width, height: box.height, right: box.right, bottom: box.bottom, resize: getComputedStyle(dialog).resize,
       fits: box.left >= 0 && box.top >= 0 && box.right <= innerWidth && box.bottom <= innerHeight,
-      footerFits: document.querySelector('#settings-close').getBoundingClientRect().bottom <= box.bottom };
+      footerFits: document.querySelector('#settings-dialog .dialog-footer').getBoundingClientRect().bottom <= box.bottom };
   })()`);
   const originalDialog = await dialogSize();
   assert.equal(originalDialog.resize, 'both');
@@ -1119,7 +1119,7 @@ app.whenReady().then(async () => {
   assert.ok(resizedDialog.width < originalDialog.width, 'the Settings corner resizes horizontally');
   assert.ok(resizedDialog.height < originalDialog.height, 'the Settings corner resizes vertically');
   assert.ok(resizedDialog.fits && resizedDialog.footerFits);
-  await window.webContents.executeJavaScript("document.querySelector('#settings-close').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true, cancelable: true })); true");
+  await window.webContents.executeJavaScript("document.querySelector('#settings-dialog .close-dialog').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true, cancelable: true })); true");
   assert.equal((await dialogSize()).width, resizedDialog.width - 20, 'Alt and arrow keys resize the focused dialog');
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/resized-settings.png'), (await window.webContents.capturePage()).toPNG());
   await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').style.removeProperty('width'); document.querySelector('#settings-dialog').style.removeProperty('height'); true");
@@ -1131,7 +1131,7 @@ app.whenReady().then(async () => {
   })()`);
 
 
-  // The Main Bot's workspace is chosen in its Edit dialog (Settings has none); Browse fills the field, Save applies it.
+  // The Main Bot's workspace is chosen in its Edit dialog (Settings has none); Browse fills the field and saves it.
   await window.webContents.executeJavaScript("editHub({ name: 'Hub' }); document.querySelector('#hub-browse').onclick()");
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#hub-workspace').value"), root, 'Browse fills in the chosen folder');
   await window.webContents.executeJavaScript("document.querySelector('#hub-dialog').close(); true");
@@ -1141,14 +1141,21 @@ app.whenReady().then(async () => {
 
   await changeSetting('settings-quick', 'off');
   assert.equal(controller.data.settings.jevQuickAnswers, false, 'the write queue recovers after rejection');
+  assert.equal(await window.webContents.executeJavaScript(`(() => {
+    const popup = document.querySelector('#saved-popup'), box = popup.getBoundingClientRect();
+    const edge = document.querySelector('#settings-dialog').getBoundingClientRect();
+    return popup.matches(':popover-open') && box.right <= edge.right && edge.right - box.right <= 40
+      && box.bottom <= edge.bottom && edge.bottom - box.bottom <= 24;
+  })()`), true, 'Saved shows at the bottom right of the Settings window');
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/mosaic/saved-popup-settings.png'), (await window.webContents.capturePage()).toPNG());
 
   await changeSetting('settings-quick', 'on');
   await window.webContents.executeJavaScript(`(async () => {
-    document.querySelector('#settings-close').click(); await new Promise(r => setTimeout(r, 20));
+    document.querySelector('#settings-dialog .close-dialog').click(); await new Promise(r => setTimeout(r, 20));
     document.querySelector('#settings').click(); await new Promise(r => setTimeout(r, 100));
   })()`);
 
-  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-close').textContent"), 'Close');
+  assert.equal(await window.webContents.executeJavaScript("!!document.querySelector('#settings-close')"), false, 'Settings closes with its X; there is no Close button');
   const settingsLayout = await window.webContents.executeJavaScript(`(async () => {
     document.querySelector('#tab-benchmarks').click();
     await new Promise(resolve => setTimeout(resolve, 50));
@@ -1195,7 +1202,7 @@ app.whenReady().then(async () => {
     document.querySelector('#checks-list .check-name').value = 'Auto saved check';
     document.querySelector('#checks-list .check-name').dispatchEvent(new Event('change', { bubbles: true })); true`);
   await window.webContents.executeJavaScript('settingsWrites.catch(() => {})');
-  for (const action of ["document.querySelector('#settings-close').click()", "document.querySelector('#settings-dialog .close-dialog').click()", "document.querySelector('#settings-dialog').dispatchEvent(new Event('cancel', { cancelable: true }))"]) {
+  for (const action of ["document.querySelector('#settings-dialog .close-dialog').click()", "document.querySelector('#settings-dialog').dispatchEvent(new Event('cancel', { cancelable: true }))"]) {
     await window.webContents.executeJavaScript(action + '; new Promise(r => setTimeout(r, 20))');
     assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').open"), true);
   }
@@ -1208,7 +1215,7 @@ app.whenReady().then(async () => {
   assert.equal(controller.data.settings.checks[controller.data.settings.workspace][0].name, 'Auto saved check');
   await window.webContents.executeJavaScript(`(async () => {
     document.querySelector('#checks-list button').click(); await settingsWrites;
-    document.querySelector('#settings-close').click(); await new Promise(r => setTimeout(r, 20));
+    document.querySelector('#settings-dialog .close-dialog').click(); await new Promise(r => setTimeout(r, 20));
   })()`);
   assert.deepEqual(controller.data.settings.checks[controller.data.settings.workspace], []);
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').open"), false);
@@ -1302,7 +1309,7 @@ app.whenReady().then(async () => {
   const settingsCap = await window.webContents.executeJavaScript("[document.querySelector('#settings-effort-cap').value, document.querySelector('#effort-cap-detail').textContent]");
   assert.equal(settingsCap[0], 'max');
   assert.match(settingsCap[1], /^⚠ No cap: Auto may pick max effort.*Your manual picks are not capped\.$/);
-  await window.webContents.executeJavaScript("document.querySelector('#settings-effort-cap').value = 'high'; document.querySelector('#settings-effort-cap').dispatchEvent(new Event('change', { bubbles: true })); document.querySelector('#settings-close').click(); new Promise(r => setTimeout(r, 300))");
+  await window.webContents.executeJavaScript("document.querySelector('#settings-effort-cap').value = 'high'; document.querySelector('#settings-effort-cap').dispatchEvent(new Event('change', { bubbles: true })); document.querySelector('#settings-dialog .close-dialog').click(); new Promise(r => setTimeout(r, 300))");
   assert.equal(controller.data.settings.effortCap, 'high');
   assert.deepEqual((await cap()).filter((_, i) => i === 1 || i === 3), ['high', false]);
   const manual = controller.catalog().find(p => p.worker && controller.available(p));
@@ -1561,7 +1568,7 @@ app.whenReady().then(async () => {
     worker.initialize = async () => { worker.connection = 'ready'; worker.models = controller.models; worker.account = controller.account; };
     return worker;
   });
-  assert.equal(agents.snapshot().agents[0].name, 'Hub');
+  assert.equal(agents.snapshot().agents[0].name, 'Assistant');
   ipcMain.removeHandler('bootstrap'); ipcMain.handle('bootstrap', () => agents.snapshot());
   ipcMain.removeHandler('settings'); ipcMain.handle('settings', (_event, values, agentId) => agents.settings(values, agentId));
   ipcMain.handle('permissions', (_event, id, access) => { agents.owner(id).permissions(id, access); return agents.snapshot(); });
@@ -1569,6 +1576,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('renameHub', (_event, name) => agents.renameHub(name));
   ipcMain.handle('saveGroup', (_event, value) => agents.saveGroup(value));
   ipcMain.handle('archive', (_event, id) => { agents.owner(id).archive(id); return agents.snapshot(); });
+  ipcMain.handle('deleteSession', (_event, id) => agents.owner(id).deleteSession(id));
   ipcMain.handle('deleteAgent', (_event, id) => agents.deleteAgent(id));
   ipcMain.removeHandler('create'); ipcMain.handle('create', (_event, workspace, access, agentId) => agents.conversation(agents.controller(agentId), true, workspace, access));
   let stoppedAgent;
@@ -1612,7 +1620,7 @@ app.whenReady().then(async () => {
   await until(async () => await window.webContents.executeJavaScript('selectedAgent') === profile.id, 'a finished batch worker opens from Overview');
   assert.equal(await window.webContents.executeJavaScript('!!document.querySelector(' + JSON.stringify(batchNav) + ')'), true, 'the selected batch chat stays in the sidebar');
   await window.webContents.executeJavaScript('selectAgent("main")');
-  await window.webContents.executeJavaScript('document.querySelector("#agents-overview").click(); document.querySelector(' + JSON.stringify(batchCard + '[data-action="edit"]') + ').click(); document.querySelector("#agent-form").dispatchEvent(new Event("submit",{cancelable:true})); true');
+  await window.webContents.executeJavaScript('document.querySelector("#agents-overview").click(); document.querySelector(' + JSON.stringify(batchCard + '[data-action="edit"]') + ').click(); const role = document.querySelector("#agent-instructions"); role.value += " Keep the evidence."; role.dispatchEvent(new Event("change",{bubbles:true})); document.querySelector("#agent-dialog .close-dialog").click(); true');
   await until(() => !controller.data.agents[0].temporaryBatch, 'editing and saving keeps a batch worker');
   await window.webContents.executeJavaScript('document.querySelector("#agents-dialog").close(); true');
   await window.webContents.executeJavaScript('selectAgent("main")');
@@ -1623,7 +1631,8 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript(`document.querySelector('#agents-overview').click();
     document.querySelector('#agent-cards [data-agent="main"][data-action="edit"]').click();
     document.querySelector('#hub-name').value = 'Atlas';
-    document.querySelector('#hub-model').value = [...document.querySelector('#hub-model').options].find(option => option.value).value; new Promise(r => setTimeout(r, 100))`);
+    document.querySelector('#hub-model').value = [...document.querySelector('#hub-model').options].find(option => option.value).value;
+    document.querySelector('#hub-model').dispatchEvent(new Event('change', { bubbles: true })); new Promise(r => setTimeout(r, 100))`);
   const chosenHubMode = await window.webContents.executeJavaScript('hubChoice()');
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/hub-rename.png'), (await window.webContents.capturePage()).toPNG());
   await window.webContents.executeJavaScript("document.querySelector('#hub-form').dispatchEvent(new Event('submit', { cancelable: true })); true");
@@ -1631,7 +1640,9 @@ app.whenReady().then(async () => {
     const list = document.querySelector('#main-agent-list');
     return list.textContent.includes('Atlas') && list.querySelectorAll('.agent-avatar i').length === 4;
   })()`), 'the renamed Hub retains its Mosaic identity in the sidebar');
-  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#hub-dialog').open"), false);
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#hub-dialog').open"), true, 'the Edit dialog stays open while it autosaves');
+  await window.webContents.executeJavaScript("document.querySelector('#hub-dialog .close-dialog').click(); true");
+  await until(async () => !(await window.webContents.executeJavaScript("document.querySelector('#hub-dialog').open")), 'X closes the main bot editor');
   assert.equal(agents.hubName(), 'Atlas');
   assert.equal(controller.data.settings.mode, chosenHubMode, 'the Hub saves the model and effort its two pickers show');
   const editedMainMode = controller.data.settings.mode;
@@ -1639,7 +1650,7 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('selectAgent(' + JSON.stringify(profile.id) + ')');
   await window.webContents.executeJavaScript(`document.querySelector('#agent-cards [data-agent="main"][data-action="edit"]').click(); true`);
   assert.equal(await window.webContents.executeJavaScript('hubChoice()'), editedMainMode, 'reopening shows the saved model and effort');
-  await window.webContents.executeJavaScript("document.querySelector('#hub-name').value = 'Hub'; document.querySelector('#hub-form').requestSubmit(); true");
+  await window.webContents.executeJavaScript("document.querySelector('#hub-name').value = 'Hub'; document.querySelector('#hub-form').requestSubmit(); document.querySelector('#hub-dialog .close-dialog').click(); true");
   await until(() => agents.hubName() === 'Hub', 'Main edit saves while a worker is selected');
   assert.equal(agents.controller(profile.id).data.settings.mode, workerModeBeforeHubEdit);
   await window.webContents.executeJavaScript('document.querySelector("#agents-dialog").close(); applyState(' + JSON.stringify(agents.snapshot()) + '); true');
@@ -1696,7 +1707,7 @@ app.whenReady().then(async () => {
   const mainAccessBefore = controller.data.settings.access, agentAccessBefore = agents.profile(profile.id).access;
   const editMainAccess = access => window.webContents.executeJavaScript(`editHub({ name: state.agents?.find(agent => agent.id === 'main')?.name || 'Hub' });
     document.querySelector('#hub-access').value = ${JSON.stringify(access)};
-    document.querySelector('#hub-form').requestSubmit(); true`);
+    document.querySelector('#hub-form').requestSubmit(); document.querySelector('#hub-dialog .close-dialog').click(); true`);
   assert.deepEqual(await window.webContents.executeJavaScript(`[!!document.querySelector('#settings-workspace'), !!document.querySelector('#settings-access'),
     !!document.querySelector('#hub-workspace'), !!document.querySelector('#hub-access')]`), [false, false, true, true], 'workspace and access moved from Settings to the Main Bot');
   const newMainAccess = mainAccessBefore === 'danger-full-access' ? 'read-only' : 'danger-full-access';
@@ -2128,10 +2139,12 @@ app.whenReady().then(async () => {
     await window.webContents.executeJavaScript(`document.querySelector('#agent-model').value = ${JSON.stringify(model)};
       document.querySelector('#agent-model').dispatchEvent(new Event('change'));
       document.querySelector('#agent-effort').value = ${JSON.stringify(effort)};
-      document.querySelector('#agent-save').click(); true`);
+      document.querySelector('#agent-effort').dispatchEvent(new Event('change', { bubbles: true }));
+      document.querySelector('#agent-dialog .close-dialog').click(); true`);
     await until(() => commandWorker.data.settings.mode === mode, 'Edit saves the worker model and effort');
     assert.equal(controller.data.settings.mode, originalMainMode, 'Edit changes only the selected agent');
-    await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 20))');
+    // Autosave no longer reloads everything; the runner's state push (forwarded by main.cjs, not by this harness) brings it.
+    await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); new Promise(resolve => setTimeout(resolve, 20))');
   }
   await openCommand('access'); await pickChoice('read-only');
   assert.equal(oldConversation.access, 'read-only');
@@ -3270,10 +3283,81 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('document.querySelector("#group-list button").click(); true');
   await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 40))');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), '@' + groupMember.name + ' Review this design', 'group draft survives switching');
-  await window.webContents.executeJavaScript(`document.querySelector('#group-edit').click();
+  // Group options live in the group's right-click menu, not in the chat header.
+  const groupMenu = action => `document.querySelector('#group-list [data-group=${JSON.stringify(group.id)}]')
+    .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    document.querySelector('#agent-menu [data-action=${action}]').click();`;
+  await window.webContents.executeJavaScript(`(() => {
+    const row = document.querySelector('#group-list [data-group]'), box = row.getBoundingClientRect();
+    row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: box.left + 40, clientY: box.bottom - 8 }));
+    return new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  })()`);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/mosaic/group-menu.png'), (await window.webContents.capturePage()).toPNG());
+  assert.deepEqual(await window.webContents.executeJavaScript(`(() => {
+    const labels = [...document.querySelectorAll('#agent-menu button')].map(item => item.textContent);
+    document.querySelector('#agent-menu').hidePopover();
+    return { labels, header: !!document.querySelector('#group-edit') };
+  })()`), { labels: ['Open', 'Edit', 'Delete'], header: false }, 'a group right-click offers Open, Edit and Delete, and the header has no Group button');
+  await window.webContents.executeJavaScript(`selectAgent('main').then(() => { ${groupMenu('open')} })`);
+  await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 40))');
+  assert.equal(await window.webContents.executeJavaScript('selectedId'), group.id, 'Open in the group menu opens the group');
+  await window.webContents.executeJavaScript(`${groupMenu('edit')}
     document.querySelector('#group-name').value = 'Game team updated'; document.querySelector('#group-form').requestSubmit(); true`);
-  await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 50))');
-  assert.equal(group.title, 'Game team updated');
+  await until(() => group.title === 'Game team updated', 'Enter in the name saves the group');
+  // "Saved" shows in a popup at the dialog's bottom-right corner, above it, however the dialog is scrolled.
+  const savedView = await window.webContents.executeJavaScript(`(() => {
+    const popup = document.querySelector('#saved-popup'), box = popup.getBoundingClientRect();
+    const dialog = document.querySelector('#group-dialog'), edge = dialog.getBoundingClientRect(); dialog.scrollTop = 0;
+    // The popup ignores the pointer, so it takes part in the hit test only while this checks it is on top.
+    popup.style.pointerEvents = 'auto';
+    const atCenter = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    popup.style.pointerEvents = '';
+    return { open: dialog.open, footerHidden: dialog.querySelector('.dialog-footer').hidden, shown: popup.matches(':popover-open'),
+      text: popup.textContent, onTop: popup.contains(atCenter) || atCenter === popup,
+      corner: box.right <= edge.right && edge.right - box.right <= 40 && box.bottom <= edge.bottom && edge.bottom - box.bottom <= 24 };
+  })()`);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/mosaic/saved-popup.png'), (await window.webContents.capturePage()).toPNG());
+  assert.deepEqual(savedView, { open: true, footerHidden: true, shown: true, text: 'Saved', corner: true, onTop: true },
+    'the group editor autosaves and stays open, with no Save button, and Saved shows bottom right above it');
+  // "Saved" is brief: it goes when you type again, and on its own after a moment.
+  assert.equal(await window.webContents.executeJavaScript(`document.querySelector('#group-name').dispatchEvent(new Event('input', { bubbles: true }));
+    document.querySelector('#saved-popup').matches(':popover-open')`), false, 'Saved clears as soon as you edit again');
+  await window.webContents.executeJavaScript(`document.querySelector('#group-name').value = 'Game team brief'; document.querySelector('#group-form').requestSubmit(); true`);
+  await until(() => group.title === 'Game team brief', 'the second name saved');
+  await new Promise(resolve => setTimeout(resolve, 2300));
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#saved-popup').matches(':popover-open')"), false, 'Saved disappears on its own');
+  await window.webContents.executeJavaScript(`document.querySelector('#group-name').value = 'Game team updated'; document.querySelector('#group-form').requestSubmit(); true`);
+  await until(() => group.title === 'Game team updated', 'the name restored');
+  // Every dialog's X matches Settings': the same size and icon, red under the pointer.
+  const closeButtons = await window.webContents.executeJavaScript(`[...document.querySelectorAll('dialog .close-dialog, .confirmation-close')]
+    .filter(button => button.closest('.dialog-heading'))
+    .map(button => [getComputedStyle(button).width, getComputedStyle(button).height, button.querySelector('svg path')?.getAttribute('d') || button.textContent])`);
+  assert.ok(closeButtons.length >= 9, 'every dialog has an X: ' + closeButtons.length);
+  assert.deepEqual([...new Set(closeButtons.map(button => button.join(' ')))], ['26px 26px m6 6 12 12M18 6 6 18'], 'all X buttons share one size and icon');
+  const groupClose = await window.webContents.executeJavaScript(`(() => {
+    const box = document.querySelector('#group-dialog .close-dialog').getBoundingClientRect();
+    return { x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2), box: [box.left, box.top, box.width, box.height].map(Math.round) };
+  })()`);
+  window.webContents.sendInputEvent({ type: 'mouseMove', x: groupClose.x, y: groupClose.y });
+  await new Promise(resolve => setTimeout(resolve, 80));
+  const closeHover = await window.webContents.executeJavaScript(`(() => {
+    const probe = document.createElement('span'); probe.style.color = 'var(--error)'; document.body.append(probe);
+    const red = getComputedStyle(probe).color; probe.remove();
+    return [getComputedStyle(document.querySelector('#group-dialog .close-dialog')).color, red];
+  })()`);
+  const [left, top, width, height] = groupClose.box;
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/mosaic/close-hover.png'),
+    (await window.webContents.capturePage({ x: Math.max(0, left - 60), y: Math.max(0, top - 20), width: width + 80, height: height + 40 })).toPNG());
+  window.webContents.sendInputEvent({ type: 'mouseMove', x: 5, y: 5 });
+  assert.equal(closeHover[0], closeHover[1], 'the X turns red on hover');
+  await window.webContents.executeJavaScript(`document.querySelector('#group-name').value = 'Game team typed';
+    document.querySelector('#group-dialog').dispatchEvent(new Event('cancel', { cancelable: true })); true`);
+  await until(() => group.title === 'Game team typed', 'Esc saves a name still being typed');
+  await until(async () => !(await window.webContents.executeJavaScript("document.querySelector('#group-dialog').open")), 'Esc closes the group editor after saving');
+  await window.webContents.executeJavaScript(`${groupMenu('edit')}
+    document.querySelector('#group-name').value = 'Game team updated'; document.querySelector('#group-dialog .close-dialog').click(); true`);
+  await until(() => group.title === 'Game team updated', 'X saves before closing');
+  await publish();
   assert.equal(await sendIsReachable(), true);
   // A direct group reply belongs to its worker context, including Stop and questions.
   const groupWorker = agents.execution(groupMember.id), beforeGroupBusy = groupWorker.busy;
@@ -3321,12 +3405,66 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript(`document.documentElement.dataset.appearance = ${JSON.stringify(groupAppearance)}; true`);
   ipcMain.removeHandler('stop'); ipcMain.handle('stop', (_event, id) => { stoppedAgent = agents.owner(id).agentId; });
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/group-chat.png'), (await window.webContents.capturePage()).toPNG());
-  await window.webContents.executeJavaScript(`document.querySelector('#group-edit').click();
-    document.querySelector('#group-archive').click(); true`);
-  await window.webContents.executeJavaScript('new Promise(resolve => setTimeout(resolve, 50))');
-  assert.equal(group.archived, true);
-  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#group-section").hidden'), true);
-  console.log('Group creation, targeted mention controls, preserved drafts, edits and archive passed');
+  // Who replies: members appear unticked, ticks number the reply order, and the arrows and drag reorder it.
+  const otherMember = agents.primary.data.agents.find(bot => bot.id !== groupMember.id);
+  const repliers = await window.webContents.executeJavaScript(`(() => {
+    ${groupMenu('edit')}
+    const member = [...document.querySelectorAll('#group-members input')].find(input => input.value === ${JSON.stringify(otherMember.id)});
+    member.checked = true; member.dispatchEvent(new Event('change', { bubbles: true }));
+    const rows = () => [...document.querySelectorAll('#group-repliers .group-replier')];
+    const before = rows().map(row => [row.dataset.id, row.querySelector('input').checked]);
+    for (const row of rows()) row.querySelector('input').click();
+    rows()[0].querySelector('[data-step="1"]').click();
+    const swapped = rows().map(row => [row.dataset.id, row.querySelector('.replier-rank').textContent,
+      row.querySelector('[data-step="-1"]').disabled, row.querySelector('[data-step="1"]').disabled]);
+    const transfer = new DataTransfer(), [top, bottom] = rows(), box = bottom.getBoundingClientRect();
+    top.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: transfer }));
+    bottom.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: transfer, clientY: box.bottom - 1 }));
+    top.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: transfer }));
+    const list = document.querySelector('#group-repliers');
+    return { before, swapped, dragged: replyOrder(), fits: list.scrollWidth <= list.clientWidth };
+  })()`);
+  assert.deepEqual(repliers.before, [[groupMember.id, false], [otherMember.id, false]], 'members join Who replies unticked, in member order');
+  assert.deepEqual(repliers.swapped, [[otherMember.id, '1', true, false], [groupMember.id, '2', false, true]], 'the down arrow swaps the order and renumbers it');
+  assert.deepEqual(repliers.dragged, [groupMember.id, otherMember.id], 'dragging a row below another moves it there');
+  assert.equal(repliers.fits, true, 'Who replies rows fit without horizontal scrolling');
+  for (const theme of ['light', 'dark']) {
+    await window.webContents.executeJavaScript(`document.documentElement.dataset.appearance = '${theme}'; new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))`);
+    fs.writeFileSync(path.resolve(__dirname, '../.scratch/mosaic/group-repliers-' + theme + '.png'), (await window.webContents.capturePage()).toPNG());
+  }
+  const repliersWindowSize = window.getSize();
+  window.setSize(390, 844); await new Promise(resolve => setTimeout(resolve, 80));
+  const narrow = await window.webContents.executeJavaScript(`(() => {
+    const list = document.querySelector('#group-repliers'), arrow = list.querySelector('[data-step="1"]').getBoundingClientRect();
+    return { width: innerWidth, fits: list.scrollWidth <= list.clientWidth, arrow: [Math.round(arrow.width), Math.round(arrow.height)] };
+  })()`);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/mosaic/group-repliers-narrow.png'), (await window.webContents.capturePage()).toPNG());
+  window.setSize(...repliersWindowSize); await new Promise(resolve => setTimeout(resolve, 50));
+  console.log(`Who replies at ${narrow.width} px: rows fit ${narrow.fits}, arrow ${narrow.arrow.join('×')} px`);
+  assert.equal(narrow.fits, true, 'Who replies rows fit a narrow window');
+  assert.ok(narrow.arrow[0] >= 24 && narrow.arrow[1] >= 24, 'Who replies arrows stay tappable');
+  await window.webContents.executeJavaScript(`document.documentElement.dataset.appearance = ${JSON.stringify(groupAppearance)};
+    true`);
+  await until(() => group.group.members.length === 2 && group.group.replyOrder.length === 2, 'ticks, arrows and drag autosaved the Who replies edit');
+  assert.deepEqual(group.group.replyOrder, [groupMember.id, otherMember.id]);
+  await window.webContents.executeJavaScript("document.querySelector('#group-dialog .close-dialog').click(); true");
+  await until(async () => !(await window.webContents.executeJavaScript("document.querySelector('#group-dialog').open")), 'X closes the group editor');
+  // The runner's state push (main.cjs forwards it; this harness publishes by hand) brings the saved order back.
+  await publish();
+  await window.webContents.executeJavaScript(`${groupMenu('edit')}
+    const order = replyOrder(); document.querySelector('#group-dialog').close(); order`).then(order =>
+    assert.deepEqual(order, [groupMember.id, otherMember.id], 'reopening the editor shows the saved order ticked'));
+  assert.equal(await window.webContents.executeJavaScript(`${groupMenu('edit')}
+    const archive = !!document.querySelector('#group-archive'); document.querySelector('#group-dialog').close(); archive`), false, 'the group editor has no Archive button');
+  await window.webContents.executeJavaScript(`${groupMenu('delete')}
+    document.querySelector('#delete-heading').textContent + '|' + document.querySelector('#delete-title').textContent`).then(text =>
+    assert.equal(text, 'Delete group?|Game team updated', 'Delete asks to confirm, naming the group'));
+  await window.webContents.executeJavaScript("document.querySelector('#delete-form').requestSubmit(); new Promise(resolve => setTimeout(resolve, 300))");
+  const deleteRefusal = await window.webContents.executeJavaScript("document.querySelector('#delete-error').hidden ? '' : document.querySelector('#delete-error').textContent");
+  await until(() => !controller.data.sessions.some(chat => chat.id === group.id), 'the group was deleted' + (deleteRefusal ? ': ' + deleteRefusal : ''));
+  await until(async () => await window.webContents.executeJavaScript('document.querySelector("#group-section").hidden'), 'the deleted group leaves the sidebar');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#delete-dialog").open'), false);
+  console.log('Group creation, targeted mention controls, preserved drafts, autosaved edits and delete passed');
   phase = 'routines are chat-only';
   // Routines are created, changed and removed only by asking in chat; nothing in the UI or the IPC exposes them.
   const routineUi = await window.webContents.executeJavaScript(`({

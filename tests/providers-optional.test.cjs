@@ -489,6 +489,20 @@ test('CLIs install the newest release, and Update is offered only for an older i
   };
   assert.deepEqual(await updates(['claude-cli', 'cursor-cli', 'native:antigravity', 'codex'], { fetcher, run }),
     { 'claude-cli': { installed: '2.1.302', latest: '2.1.303' } });
+
+  // On Windows, Muse's version comes from its install folder, never from its PowerShell launcher (antivirus blocks it).
+  const local = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-muse-version-'));
+  fs.mkdirSync(path.join(local, 'Programs', 'muse'), { recursive: true });
+  fs.writeFileSync(path.join(local, 'Programs', 'muse', '.muse-version'), '1.4.13-R6996.1\n');
+  const launched = [];
+  const museFetcher = async () => new Response(JSON.stringify({ version: '1.4.14-R7001.1' }));
+  const blocked = (_file, args, _options, done) => { launched.push(args); done(new Error('Blocked by antivirus')); };
+  const museCheck = () => updates(['native:muse'], { fetcher: museFetcher, run: blocked, platform: 'win32', env: { LOCALAPPDATA: local } });
+  assert.deepEqual(await museCheck(), { 'native:muse': { installed: '1.4.13-R6996.1', latest: '1.4.14-R7001.1' } });
+  assert.equal(launched.length, 0, 'the Muse launcher is not started');
+  fs.rmSync(local, { recursive: true, force: true });
+  assert.deepEqual(await museCheck(), {}, 'a missing version file offers no update');
+  assert.equal(launched.length, 0);
 });
 
 test('CLIs install side by side, while global npm installs take turns, even after one fails', async () => {

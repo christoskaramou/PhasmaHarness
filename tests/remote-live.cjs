@@ -95,7 +95,7 @@ if (wrapper) {
     phone.webContents.on('console-message', (_event, level, message) => { if (level >= 3) errors.push(String(message)); });
     phase = 'phone authentication and initial UI';
     await phone.loadURL(info.connectionURL);
-    await until(() => phone.webContents.executeJavaScript('!!window.router && !!document.querySelector("#session-title")?.textContent.includes("Hub")'));
+    await until(() => phone.webContents.executeJavaScript('!!window.router && !!document.querySelector("#session-title")?.textContent.includes("Assistant")'));
     assert.equal(await phone.webContents.executeJavaScript('window.router.remote'), true);
     assert.equal(await phone.webContents.executeJavaScript('location.hash'), '', 'the shared key leaves the visible URL immediately');
     assert.equal(await phone.webContents.executeJavaScript('document.querySelector(".remote-login").hidden'), true);

@@ -40,9 +40,11 @@ var HarnessAgentState = (() => {
   }
 
   // The desktop window gets a bot's chats only when they changed since it last got them, and everything when full is set;
-  // the Main Bot's chats are not repeated at the top level. A change is the bot's stateRevision moving, or a chat's
-  // message count or status changing, which also catches edits other bots' code makes. sent: context key -> mark.
-  /** @param {any} state @param {Map<string, string>} sent @param {boolean} full */
+  // the Main Bot's chats are not repeated at the top level. A chat changed when its revision moved (the bot's
+  // sharedRevision, or its own chatRevisions entry for a change confined to it) or its message count or status changed,
+  // which also catches edits other bots' code makes. When only some chats changed, just those are sent, with sessionIds
+  // giving the full order. sent: context key -> chat id -> mark.
+  /** @param {any} state @param {Map<string, Map<string, string>>} sent @param {boolean} full */
   function trimFleet(state, sent, full) {
     if (!state?.agentStates) return state;
     const { sessions, ...trimmed } = state;
@@ -50,32 +52,41 @@ var HarnessAgentState = (() => {
       if (!state[group]) continue;
       trimmed[group] = {};
       for (const [id, context] of Object.entries(state[group])) {
-        const key = group + ':' + id;
-        const mark = context.stateRevision + '|' + (context.sessions || []).map((/** @type {any} */ chat) => `${chat.id}:${chat.items?.length ?? 0}:${chat.status}`).join(',');
-        if (!full && sent.get(key) === mark) {
-          const { sessions: unchanged, ...light } = context;
-          trimmed[group][id] = { ...light, sessionsKept: true };
-        } else {
-          sent.set(key, mark);
-          trimmed[group][id] = context;
-        }
+        const key = group + ':' + id, chats = context.sessions || [];
+        const shared = context.sharedRevision ?? context.stateRevision;
+        const marks = new Map(chats.map((/** @type {any} */ chat) =>
+          [chat.id, `${chat.items?.length ?? 0}:${chat.status}:${Math.max(shared, context.chatRevisions?.[chat.id] || 0)}`]));
+        const previous = sent.get(key);
+        sent.set(key, marks);
+        const changed = full || !previous || previous.size !== marks.size ? chats
+          : chats.filter((/** @type {any} */ chat) => previous.get(chat.id) !== marks.get(chat.id));
+        const { sessions: all, ...light } = context;
+        if (previous && !full && !changed.length) trimmed[group][id] = { ...light, sessionsKept: true };
+        else if (changed.length === chats.length) trimmed[group][id] = context;
+        else trimmed[group][id] = { ...light, sessions: changed, sessionIds: chats.map((/** @type {any} */ chat) => chat.id) };
       }
     }
     return trimmed;
   }
 
-  // The window side: a context marked sessionsKept reuses the chats it already holds. Null means one is missing (after a
-  // reload, say), so the caller asks for a full state.
+  // The window side: a context marked sessionsKept reuses the chats it already holds, and one with sessionIds fills the
+  // chats it was not sent from them. Null means one is missing (after a reload, say), so the caller asks for a full state.
   /** @param {any} next @param {any} previous */
   function keepSessions(next, previous) {
     if (!next?.agentStates) return next;
     for (const group of ['agentStates', 'executionStates']) {
       for (const [id, context] of Object.entries(next[group] || {})) {
-        if (!context.sessionsKept) continue;
+        if (!context.sessionsKept && !context.sessionIds) continue;
         const kept = previous?.[group]?.[id]?.sessions;
         if (!kept) return null;
-        context.sessions = kept;
+        if (context.sessionsKept) context.sessions = kept;
+        else {
+          const chats = new Map([...kept, ...context.sessions].map(chat => [chat.id, chat]));
+          context.sessions = context.sessionIds.map((/** @type {string} */ chatId) => chats.get(chatId));
+          if (context.sessions.some((/** @type {any} */ chat) => !chat)) return null;
+        }
         delete context.sessionsKept;
+        delete context.sessionIds;
       }
     }
     return next;

@@ -98,7 +98,18 @@ module.exports = async function groupChatUiCheck(window, root, ipcMain) {
     assert.equal(group.status, 'interrupted');
     assert.equal(worker.client.calls.filter(call => call.method === 'turn/interrupt').length, 1);
     assert.equal(coordinatorCalls, 0, 'direct replies never call Main for review or suggestions');
-    console.log('Group renderer → preload → IPC → runner → worker round trip, scoped question and Stop passed');
+    // /clear in a group opens its fresh chat and empties the message box (the group keeps its old draft key).
+    ipcMain.removeHandler('clearConversation');
+    ipcMain.handle('clearConversation', async (_event, id, groupId) => {
+      const fresh = await agents.clearConversation(id, () => true, groupId);
+      return { cleared: !!fresh, sessionId: fresh?.id, state: agents.snapshot() };
+    });
+    await js(`document.querySelector('#prompt').value = '/clear'; document.querySelector('#prompt').dispatchEvent(new Event('input', {bubbles:true}));
+      document.querySelector('#composer').dispatchEvent(new Event('submit', { cancelable: true })); true`);
+    await until(() => js(`selectedId !== ${JSON.stringify(group.id)} && !submitting`), '/clear opens the fresh group chat');
+    assert.deepEqual(await js(`({ prompt: document.querySelector('#prompt').value, items: current().items.length, group: !!current().group })`),
+      { prompt: '', items: 0, group: true }, '/clear in a group empties the message box');
+    console.log('Group renderer → preload → IPC → runner → worker round trip, scoped question, Stop and /clear passed');
   } finally {
     await agents.shutdown({ stopMs:1000 });
   }

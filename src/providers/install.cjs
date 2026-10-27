@@ -1,4 +1,7 @@
 const { spawn, execFile } = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 const npmLatest = pkg => ({ url: `https://registry.npmjs.org/${pkg}/latest`, field: 'version' });
 const ANTIGRAVITY_PLATFORM = `${process.platform === 'win32' ? 'windows' : process.platform}_${process.arch === 'x64' ? 'amd64' : process.arch}`;
@@ -75,8 +78,17 @@ async function latestVersion(id, fetcher = fetch) {
   return typeof value === 'string' ? versionIn(value) : null;
 }
 
-function installedVersion(id, run = execFile) {
-  const [file, args] = process.platform === 'win32'
+// Muse's Windows launcher is a PowerShell script started with -ExecutionPolicy Bypass, which antivirus heuristics block
+// (Bitdefender Gen:Suspicious.Cloud, 2026-10-27). Its install folder records the version, so that is read instead.
+function museVersionFile(env) {
+  return path.join(env.LOCALAPPDATA || path.join(env.USERPROFILE || os.homedir(), 'AppData', 'Local'), 'Programs', 'muse', '.muse-version');
+}
+
+function installedVersion(id, run = execFile, { platform = process.platform, env = process.env } = {}) {
+  if (id === 'native:muse' && platform === 'win32')
+    return fs.promises.readFile(museVersionFile(env), 'utf8').then(versionIn, () => null);
+
+  const [file, args] = platform === 'win32'
     ? ['cmd.exe', ['/d', '/s', '/c', `${INSTALLERS[id].cli} --version`]]
     : ['bash', ['-lc', `${INSTALLERS[id].cli} --version`]];
   return new Promise(resolve => run(file, args, { windowsHide: true, timeout: 15000 },
@@ -84,9 +96,9 @@ function installedVersion(id, run = execFile) {
 }
 
 // Installed CLIs with a newer official release, as { id: { installed, latest } }. A failed lookup means no update is offered.
-async function updates(ids, { fetcher = fetch, run = execFile } = {}) {
+async function updates(ids, { fetcher = fetch, run = execFile, platform, env } = {}) {
   const found = await Promise.all(ids.map(async id => {
-    const [installed, latest] = await Promise.all([installedVersion(id, run), latestVersion(id, fetcher).catch(() => null)]);
+    const [installed, latest] = await Promise.all([installedVersion(id, run, { platform, env }), latestVersion(id, fetcher).catch(() => null)]);
     return installed && latest && newer(latest, installed) ? [id, { installed, latest }] : null;
   }));
   return Object.fromEntries(found.filter(Boolean));

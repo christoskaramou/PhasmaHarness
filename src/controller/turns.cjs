@@ -301,7 +301,9 @@ module.exports = {
       if (item) item.aggregatedOutput = ((item.aggregatedOutput || '') + p.delta).slice(-60000);
     }
     if (method === 'error') session.error = p.error?.message || p.message;
-    session.updated = Date.now(); this.changed();
+    // Streamed text and command output touch only this chat; other events can change the bot's own state too.
+    const streamed = method === 'item/agentMessage/delta' || method === 'item/commandExecution/outputDelta';
+    session.updated = Date.now(); this.changed(streamed ? session : undefined);
   },
 
   serverRequest(message) {

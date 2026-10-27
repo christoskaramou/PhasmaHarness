@@ -98,6 +98,47 @@ test('window updates carry only the bots whose chats changed, and the window kee
   assert.equal(keepSessions(plain, null), plain);
 });
 
+test('a change confined to one chat resends only that chat, and the window fills in the rest in order', () => {
+  const { trimFleet, keepSessions } = require('../ui/agent-state.js');
+  const chat = (id, text) => ({ id, status: 'idle', items: [{ id: id + '-item', type: 'agentMessage', text }] });
+  const fleet = (shared, revisions, texts) => ({ agentStates: { main: { stateRevision: 9, sharedRevision: shared, chatRevisions: revisions,
+    sessions: ['a', 'b', 'c'].map(id => chat(id, texts[id] || id)) } } });
+  const sent = new Map();
+  const window = keepSessions(structuredClone(trimFleet(fleet(1, {}, {}), sent, false)), null);
+  const scoped = trimFleet(fleet(1, { b: 2 }, { b: 'streaming' }), sent, false);
+  assert.deepEqual(scoped.agentStates.main.sessions.map(item => item.id), ['b'], 'only the changed chat is sent');
+  assert.deepEqual(scoped.agentStates.main.sessionIds, ['a', 'b', 'c']);
+  const merged = keepSessions(structuredClone(scoped), window);
+  assert.deepEqual(merged.agentStates.main.sessions.map(item => item.items[0].text), ['a', 'streaming', 'c']);
+  assert.equal(merged.agentStates.main.sessionIds, undefined);
+  assert.equal(keepSessions(structuredClone(scoped), null), null, 'a window without copies asks for a full state');
+  assert.equal(keepSessions(structuredClone(scoped), { agentStates: { main: { sessions: [chat('a', 'a')] } } }), null,
+    'a missing kept chat asks for a full state');
+  const shared = trimFleet(fleet(3, { b: 2 }, { b: 'streaming' }), sent, false);
+  assert.equal(shared.agentStates.main.sessionIds, undefined, 'an unscoped change resends every chat');
+  assert.equal(shared.agentStates.main.sessions.length, 3);
+});
+
+test('changed(session) marks one chat, changed() and save() mark them all, and the throttled save marks nothing new', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-chat-revision-'));
+  const controller = new Controller(path.join(directory, 'sessions.json'), directory, new EventEmitter(), { cancel() {}, close() {}, jev: null });
+  t.after(() => { clearTimeout(controller.timer); clearTimeout(controller.saveTimer); controller.store.closeJournal(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const session = { id: 's1', items: [], routes: [] };
+  controller.data.sessions.push(session);
+  controller.save();
+  const shared = controller.sharedRevision;
+  controller.changed(session);
+  assert.equal(controller.sharedRevision, shared);
+  assert.ok(controller.chatRevisions.get('s1') > shared);
+  controller.flushSave();
+  assert.equal(controller.sharedRevision, shared, 'persisting reported changes is not a change to every chat');
+  controller.changed();
+  assert.ok(controller.sharedRevision > controller.chatRevisions.get('s1'));
+  const before = controller.sharedRevision;
+  controller.save();
+  assert.ok(controller.sharedRevision > before);
+});
+
 test('a change notice and a save both advance the bot revision that decides whether its chats are resent', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-revision-'));
   const controller = new Controller(path.join(directory, 'sessions.json'), directory, new EventEmitter(), { cancel() {}, close() {}, jev: null });

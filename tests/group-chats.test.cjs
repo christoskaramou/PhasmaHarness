@@ -21,7 +21,7 @@ test('groups persist only explicit membership, retain default permissions and ro
   const session = groups.save(agents, { name: ' Game team ', members: ['one', 'two'] });
   assert.equal(session.title, 'Game team');
   assert.equal(session.access, 'read-only');
-  assert.deepEqual(session.group, { members: ['one', 'two'], owner: 'main' });
+  assert.deepEqual(session.group, { members: ['one', 'two'], owner: 'main', replyOrder: [] });
   assert.deepEqual(groups.members(agents, session).map(member => member.name), ['Hub', 'Code', 'Code Review']);
   agents.primary.save = () => { throw new Error('Disk unavailable'); };
   assert.throws(() => groups.save(agents, { id: session.id, name: 'Changed', members: ['two'] }), /Disk unavailable/);
@@ -59,6 +59,23 @@ test('group membership rejects unknown, repeated, empty, oversized and archived 
   assert.throws(() => groups.save(agents, { id: session.id, name: 'Changed', members: ['one'] }), /no longer available/);
 });
 
+test('Who replies keeps an ordered subset of members, survives edits that omit it and decides unmentioned recipients', () => {
+  const { agents } = fixture();
+  for (const replyOrder of [['missing'], ['main'], ['one', 'one'], 'one']) {
+    assert.throws(() => groups.save(agents, { name: 'Team', members: ['one', 'two'], replyOrder }), /who replies/);
+  }
+  const session = groups.save(agents, { name: 'Team', members: ['one', 'two'], replyOrder: ['two', 'one'] });
+  assert.deepEqual(groups.directRecipients(agents, session, { text: 'Plan this' }).map(bot => bot.id), ['two', 'one']);
+  assert.deepEqual(groups.directRecipients(agents, session, { text: '@Code only you' }).map(bot => bot.id), ['one']);
+  assert.equal(groups.directRecipients(agents, session, { text: '@Hub plan this' }), null, '@Hub keeps the coordinator path');
+  assert.equal(groups.directRecipients(agents, session, { text: 'Plan this', agentReply: true }), null);
+  assert.equal(groups.directRecipients(agents, session, { text: 'Plan this', routineRun: { id: 'r' } }), null, 'routine runs stay on the tracked Hub path');
+  groups.save(agents, { id: session.id, name: 'Renamed', members: ['two'] });
+  assert.deepEqual(session.group.replyOrder, ['two'], 'an edit without an order keeps it, minus removed bots');
+  groups.save(agents, { id: session.id, name: 'Renamed', members: ['two'], replyOrder: [] });
+  assert.equal(groups.directRecipients(agents, session, { text: 'Plan this' }), null, 'with nobody ticked, Hub answers');
+});
+
 test('a failed group message save cannot dispatch inference or replace the preceding request', () => {
   const { agents } = fixture();
   const session = groups.save(agents, { name: 'Team', members: ['one'] });
@@ -66,7 +83,7 @@ test('a failed group message save cannot dispatch inference or replace the prece
   let dispatched = false;
   agents.delegate = () => { dispatched = true; };
   const controller = { agents, save() { throw new Error('Disk unavailable'); }, changed() {} };
-  assert.throws(() => groups.dispatch(controller, session, { id: 'one', name: 'Code' },
+  assert.throws(() => groups.dispatch(controller, session, [{ id: 'one', name: 'Code' }],
     { text: '@Code inspect', images: [], turnId: 'turn' }), /Disk unavailable/);
   assert.equal(dispatched, false);
   assert.equal(session.items.length, 0);

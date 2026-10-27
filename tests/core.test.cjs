@@ -705,12 +705,13 @@ function addCheck(controller, session, argv, extra = {}) {
   controller.checks(session.workspace, [{ name: extra.name || 'unit', argv, cwd: session.workspace, timeoutMs: extra.timeoutMs || 5000, readOnlySafe: extra.readOnlySafe !== false }]);
 }
 
+// Bounded by time, not ticks: the check gate's git reads are asynchronous and take tens of milliseconds to start.
 async function until(fn) {
-  for (let i = 0; i < 40; i++) {
+  for (const end = Date.now() + 3000; Date.now() < end;) {
     if (fn()) return;
     await new Promise(setImmediate);
   }
-  throw new Error('condition was not reached');
+  if (!fn()) throw new Error('condition was not reached');
 }
 
 function reopen(controller, options) {
@@ -1030,7 +1031,8 @@ test('configured checks stay frozen and hold the slot', async t => {
   await controller.send({ id: session.id, text: 'implement', mode: 'terra-light', task: 'on' });
   controller.checks(session.workspace, [{ name: 'other', argv: ['second'], cwd: session.workspace, timeoutMs: 5000, readOnlySafe: true }]);
   complete(controller, session, fake.turnIds[0]);
-  await until(() => controller.gate && session.tasks[0].state === 'checking');
+  // The check is running once its command starts (the gate first reads the diff asynchronously).
+  await until(() => controller.gate && session.tasks[0].state === 'checking' && release);
   assert.equal(controller.busy, session.id);
   const other = controller.create();
   await assert.rejects(controller.send({ id: other.id, text: 'elsewhere', mode: 'terra-light' }), /still be running/);
@@ -1895,7 +1897,7 @@ test('steering amends a running task and is rejected while checks run', async t 
   let release;
   fake.onExec = () => new Promise(resolve => { release = resolve; });
   complete(controller, session, fake.turnIds[0]);
-  await until(() => session.tasks[0].state === 'checking');
+  await until(() => session.tasks[0].state === 'checking' && release);
   await assert.rejects(controller.queuedMessage(session.id, session.queue.at(-1).id, 'steer'), /Checks are running/);
   release({ exitCode: 0, stdout: '', stderr: '' });
   await controller.gateDone;

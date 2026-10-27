@@ -1857,7 +1857,7 @@ test('the Hub can be renamed; it keeps the name, and no bot can take it, "hub" o
   primary.save = () => { throw new Error('Disk full'); };
   assert.throws(() => agents.renameHub('Atlas'), /Disk full/);
   primary.save = save;
-  assert.equal(agents.hubName(), 'Hub', 'a failed save keeps the old name');
+  assert.equal(agents.hubName(), 'Assistant', 'a failed save keeps the old name');
 
   assert.equal(agents.renameHub('  Atlas '), 'Atlas');
   assert.equal(readSessionData(primary.filename).hubName, 'Atlas');
@@ -1883,14 +1883,14 @@ test('Hub edits validate and atomically save the name and explicit model', async
   primary.resolveWorker = resolve;
   for (const mode of ['auto', 'unknown-model']) {
     assert.throws(() => agents.renameHub({ name: 'Atlas', mode }), /available model/);
-    assert.equal(agents.hubName(), 'Hub');
+    assert.equal(agents.hubName(), 'Assistant');
     assert.equal(primary.data.settings.mode, previousMode);
   }
   const save = primary.save;
   primary.save = () => { throw new Error('Disk full'); };
   assert.throws(() => agents.renameHub({ name: 'Atlas', mode: model.id }), /Disk full/);
   primary.save = save;
-  assert.equal(agents.hubName(), 'Hub');
+  assert.equal(agents.hubName(), 'Assistant');
   assert.equal(primary.data.settings.mode, previousMode);
   agents.renameHub({ name: 'Atlas', mode: model.id });
   const saved = readSessionData(primary.filename);
@@ -2107,7 +2107,7 @@ test('clear requires confirmation, archives history and starts fresh context for
     const before = JSON.stringify(readSessionData(controller.filename));
     assert.equal(await agents.clearConversation(controller.agentId, () => false), null);
     assert.equal(JSON.stringify(readSessionData(controller.filename)), before);
-    const fresh = await agents.clearConversation(controller.agentId, name => { assert.equal(name, controller === primary ? 'Hub' : 'Reviewer'); return true; });
+    const fresh = await agents.clearConversation(controller.agentId, name => { assert.equal(name, controller === primary ? 'Assistant' : 'Reviewer'); return true; });
     assert.notEqual(fresh.id, old.id);
     assert.equal(fresh.workspace, workspace); assert.equal(fresh.access, 'read-only');
     assert.deepEqual(fresh.items, []); assert.equal(fresh.usage, null);
@@ -2202,7 +2202,7 @@ test('one conversation is retained per agent and old chats migrate once without 
   migrated.migrateConversations();
   assert.equal(restored.data.agents.length, 1);
   assert.equal(restored.data.sessions.length, 1);
-  assert.equal(migrated.snapshot().agents[0].name, 'Hub');
+  assert.equal(migrated.snapshot().agents[0].name, 'Assistant');
 });
 
 test('agent deletion protects Main and pending work, persists removal, and keeps recovery files', async t => {
@@ -2469,7 +2469,7 @@ test('named agents can stop Main and change its access but cannot delete Main', 
   manager.permissions(source.id, 'danger-full-access');
   await start(manager, source);
   const changed = await manager.bridgeTool(source.id, 'agent_set_access', { agentId: 'main', access: 'read-only' });
-  assert.equal(changed.name, 'Hub'); assert.equal(main.access, 'read-only');
+  assert.equal(changed.name, 'Assistant'); assert.equal(main.access, 'read-only');
   assert.equal(primary.data.settings.access, 'read-only');
   assert.equal(readSessionData(primary.filename).settings.access, 'read-only');
   complete(manager, source);
@@ -2554,7 +2554,7 @@ test('successive delegated tasks reuse the conversation and deliver only their o
   agents.pump(); assert.equal(source.queue.length, 2);
   const receipts = source.items.filter(item => item.type === 'agentResult');
   assert.deepEqual(receipts.map(item => item.text), ['First answer', 'Second answer']);
-  assert.equal(receipts[0].ownerName, 'Hub');
+  assert.equal(receipts[0].ownerName, 'Assistant');
   assert.equal(receipts[0].agentId, worker.agentId);
   assert.equal(receipts[0].sessionId, chat.id);
   assert.notEqual(receipts[0].deliveryId, receipts[1].deliveryId);
@@ -3009,7 +3009,7 @@ test('every provider can send pasted text to Main and receive its result', async
     await start(requester, source);
     source.activeProvider = provider;
     const result = await requester.bridgeTool(source.id, 'agent_delegate', { agentId: 'main', task: pasted });
-    assert.equal(result.agent, 'Hub');
+    assert.equal(result.agent, 'Assistant');
     const hub = agents.owner(result.sessionId), target = hub.session(result.sessionId);
     assert.ok(target.delegation.task.endsWith(pasted), 'pasted whitespace and content are preserved');
     assert.match(target.delegation.task, /Task from agent "Requester"/);
@@ -3019,7 +3019,7 @@ test('every provider can send pasted text to Main and receive its result', async
     await until(() => !!target.turnId);
     complete(hub, target, `Reviewed pasted text for ${provider}.`);
     await hub.gateDone; agents.pump();
-    assert.match(source.queue[0].text, /Result from agent "Hub"/);
+    assert.match(source.queue[0].text, /Result from agent "Assistant"/);
     assert.ok(source.queue[0].text.includes(provider));
     await requester.queuedMessage(source.id, source.queue[0].id, 'remove');
   }
@@ -3113,7 +3113,7 @@ test('agents search bounded visible context and Main through every provider brid
   const source = primary.create(workspace, 'read-only');
   await start(primary, source);
   const roster = await primary.bridgeTool(source.id, 'agents_list', {});
-  assert.ok(roster.some(agent => agent.id === 'main' && agent.name === 'Hub'));
+  assert.ok(roster.some(agent => agent.id === 'main' && agent.name === 'Assistant'));
   const result = await primary.bridgeTool(source.id, 'agent_read_context', { agentId: worker.agentId, query: 'MATERIAL' });
   assert.equal(result.origin.agentId, worker.agentId);
   assert.equal(result.origin.sessionId, target.id);
@@ -3146,7 +3146,7 @@ test('agents search bounded visible context and Main through every provider brid
     target.activeProvider = provider;
     const main = await worker.bridgeTool(target.id, 'agent_read_context', { agentId: 'main', query: 'Main context evidence' });
     assert.match(main.excerpts[0].text, /Main context evidence/);
-    assert.equal(main.origin.name, 'Hub');
+    assert.equal(main.origin.name, 'Assistant');
   }
   delete target.delegation; target.activeProvider = 'codex';
   complete(worker, target);
@@ -3722,16 +3722,18 @@ nodeTest('Stop ends the commands a Codex turn started, spares the app-server and
   processTree.scan.procTable = () => { throw new Error('/proc unavailable'); };
   await agents.stop(second.jobId);
   await wait(() => !worker.cleanupPending.size);
-  assert.equal(worker.data.workerCleanup?.length, 1);
+  // Hub keeps the one record (every controller hears the cleanup); the bot reads it and stays blocked.
+  assert.equal(primary.data.workerCleanup?.length, 1);
+  assert.equal(worker.data.workerCleanup, undefined, 'the bot keeps no copy of its own');
   assert.match(worker.blockedReason(), /could not be confirmed stopped/);
   assert.ok(alive(survivor) && alive(helper) && alive(server.pid));
-  assert.deepEqual(worker.data.workerCleanup[0].roots, [], 'a retry never reaches the app-server');
+  assert.deepEqual(primary.data.workerCleanup[0].roots, [], 'a retry never reaches the app-server');
 
   // The retry finds the same turn's command from the saved anchor once the list can be read, and only then confirms.
   Object.assign(processTree.scan, { runAsync, procTable });
-  await worker.retryCleanupNow();
+  await primary.retryCleanupNow();
   assert.equal(alive(survivor), false, 'a retry confirmed the cleanup while the command still ran');
-  assert.equal(worker.data.workerCleanup, undefined);
+  assert.equal(primary.data.workerCleanup, undefined);
   assert.equal(worker.blockedReason(), null);
   assert.ok(alive(helper) && alive(server.pid));
 });

@@ -87,7 +87,10 @@ class Controller extends EventEmitter {
     this.onCleanupPending = id => { this.cleanupPending.add(id); };
     this.onCleanupDone = ({ id, remaining, record }) => {
       this.cleanupPending.delete(id);
-      if (remaining.length) this.holdCleanup(record);
+      // Every controller hears every cleanup. With several bots, Hub alone keeps an unconfirmed one (blockedReason reads
+      // it for all of them): each holding its own copy logged, saved and retried it once per controller, 33 times on the
+      // user's setup (2026-10-27).
+      if (remaining.length && (!this.agents?.primary || this.agents.primary === this)) this.holdCleanup(record);
       this.cleanupChanged();
     };
     processTree.cleanup.on('pending', this.onCleanupPending).on('done', this.onCleanupDone);
@@ -294,6 +297,7 @@ class Controller extends EventEmitter {
     // Persisting must not cancel a pending UI state update. Saves and changes advance stateRevision, which tells the
     // window whether this bot's chats need sending again.
     this.stateRevision = (this.stateRevision || 0) + 1;
+    this.sharedRevision = this.stateRevision;
     this.store.save(this.data);
   }
 
@@ -313,8 +317,11 @@ class Controller extends EventEmitter {
   // The UI hears of changes 100 ms after the first unreported one, so a token stream shows while it runs instead of
   // after its next pause. Saves fsync (about 10 ms on a large store), so a stream saves at most once a second and its
   // last change is always saved.
-  changed() {
+  // A change confined to one chat (session given) resends only that chat to the window; any other change resends them all.
+  changed(session) {
     this.stateRevision = (this.stateRevision || 0) + 1;
+    if (session) (this.chatRevisions ||= new Map()).set(session.id, this.stateRevision);
+    else this.sharedRevision = this.stateRevision;
     if (this.timer) return;
     this.timer = setTimeout(() => {
       this.timer = null;
@@ -327,7 +334,10 @@ class Controller extends EventEmitter {
 
   flushSave() {
     clearTimeout(this.saveTimer); this.saveTimer = null; this.savedAt = Date.now();
+    // Persisting what changed() already reported is not a new change to every chat.
+    const shared = this.sharedRevision;
     try { this.save(); } catch (error) { this.error = `Could not save sessions: ${error.message}`; }
+    this.sharedRevision = shared;
   }
 
   session(id) {
@@ -645,8 +655,13 @@ class Controller extends EventEmitter {
       task = 'off';
     }
     if (this.isCoordinator() && session.group && this.busy !== id && !this.agents.groupRuns.has(id)) {
-      const target = groupChats.directRecipient(this.agents, session, { text, fileMessage, agentReply });
-      if (target) return groupChats.dispatch(this, session, target, { text, images, fileMessage, turnId: randomUUID() });
+      const targets = groupChats.directRecipients(this.agents, session, { text, fileMessage, agentReply, routineRun });
+      if (targets) return groupChats.dispatch(this, session, targets, { text, images, fileMessage });
+    }
+    // Typing stop while bots reply in a group ends their discussion, like the Stop button.
+    if (session.group && this.agents?.groupRuns.has(id) && !agentReply && /^stop[.!]?$/i.test(text.trim())) {
+      await this.agents.stop(id);
+      return { stopped: true };
     }
     if (this.busy || this.agents?.groupRuns.has(id)) {
       if (this.busy && this.busy !== id && !(this.isCoordinator() && (session.group || this.session(this.busy).group))) {
@@ -1103,7 +1118,8 @@ class Controller extends EventEmitter {
             const item = session.items.find(i => i.id === output.tool_use_id);
             if (item) { item.status = output.is_error ? 'failed' : 'completed'; item.result = output.content; }
           }
-          this.changed();
+          // Streamed text touches only this chat.
+          this.changed(event.type === 'stream_event' && event.event?.type === 'content_block_delta' ? session : undefined);
         }
       });
       this.agents?.executionAccepted?.(this, session, submission);
@@ -1182,7 +1198,7 @@ class Controller extends EventEmitter {
       if (!next || next.error) return;
       if (this.busy) {
         if (!session.group || this.busy === session.id) return;
-        try { if (!groupChats.directRecipient(this.agents, session, next)) return; }
+        try { if (!groupChats.directRecipients(this.agents, session, next)) return; }
         catch { return; } // Invalid queued mentions are handled when the coordinator becomes idle.
       }
       if (next.agentReply && this.agents && !this.agents.canStartReply(this, session, next)) return;
@@ -1196,7 +1212,7 @@ class Controller extends EventEmitter {
     if (!message || session.queueSending) throw new Error('This queued message is no longer available.');
     if (['send', 'steer', 'live'].includes(action) && this.agents?.groupRuns.has(id)) {
       if (message.uncertain) throw new Error('Delivery was not confirmed. Check the conversation before removing this message.');
-      if (this.busy && !groupChats.directRecipient(this.agents, session, message)) throw new Error('Wait for the active turn to finish.');
+      if (this.busy && !groupChats.directRecipients(this.agents, session, message)) throw new Error('Wait for the active turn to finish.');
       await this.agents.stop(id); action = 'send';
     }
     if (action === 'steer' && this.agents && !message.agentReply && !message.uncertain && session.delegation && !session.delegation.delivered) {
@@ -1219,7 +1235,7 @@ class Controller extends EventEmitter {
     if (['steer', 'live'].includes(action) && (this.busy !== id ||
         (!turnId && capabilities(session.activeProvider).steer && !this.isCoordinator()) ||
         session.compacting || this.stopping.has(id))) throw new Error('Wait for an active turn before steering.');
-    if (action === 'send' && this.busy && (this.busy === id || !session.group || !groupChats.directRecipient(this.agents, session, message))) throw new Error('Wait for the active turn to finish.');
+    if (action === 'send' && this.busy && (this.busy === id || !session.group || !groupChats.directRecipients(this.agents, session, message))) throw new Error('Wait for the active turn to finish.');
     if (action === 'send') session.queuePaused = false;
     if (action === 'live' && (!this.liveInput || session.delegation || message.agentReply || activeTask?.state === 'checking'))
       throw new Error('Live input is unavailable for this turn.');
@@ -1539,7 +1555,8 @@ class Controller extends EventEmitter {
     const controlledCheck = otherContext && this.gate?.checkRunning && this.ownsGate(this.gate) &&
       this.connection === 'ready' && this.gate.processId === this.data.executionBlock?.processId;
     if (this.data.executionBlock && !controlledCheck) return 'A check may still be running.';
-    if (this.data.workerCleanup?.length) return 'Processes from a stopped task could not be confirmed stopped. Phasma Harness keeps trying; restart it if this persists.';
+    if (this.data.workerCleanup?.length || this.agents?.primary?.data.workerCleanup?.length)
+      return 'Processes from a stopped task could not be confirmed stopped. Phasma Harness keeps trying; restart it if this persists.';
     return null;
   }
 
@@ -1609,7 +1626,8 @@ class Controller extends EventEmitter {
     if (left.length) this.data.workerCleanup = left; else delete this.data.workerCleanup;
     if (!notify) return;
     try { this.save(); } catch { /* retried with the next change */ }
-    this.cleanupChanged();
+    // Hub's record blocks every bot, so its result lets each one start its waiting work.
+    for (const controller of this.agents?.primary === this ? this.agents.allControllers() : [this]) controller.cleanupChanged();
   }
 
   cleanupChanged() {

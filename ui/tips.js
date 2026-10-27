@@ -22,7 +22,7 @@
   const desktop = () => !window.router?.remote;
 
   // The main chat's own name (it can be renamed).
-  const hub = () => state.agents?.find(agent => agent.id === 'main')?.name || 'Hub';
+  const hub = () => state.agents?.find(agent => agent.id === 'main')?.name || 'Assistant';
 
   // `fits`: shown first while true; `when`: shown at all only while true; `text` may depend on the setup. Every tip was
   // checked against the code (2026-10-21); keep them true when the feature they name changes.

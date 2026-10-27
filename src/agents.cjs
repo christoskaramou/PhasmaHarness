@@ -188,6 +188,27 @@ class Agents extends EventEmitter {
 
   allControllers() { return [...this.controllers.values(), ...this.executions.values()]; }
 
+  // Bots copy Hub's provider model lists when they start, but Hub can finish loading one later (Cursor's loads in the
+  // background), and loading replaces the list. A bot started first then never knew those models, so a Cursor level
+  // such as grok-4.7:xhigh failed with "Unknown model selection" in group replies.
+  shareProviderModels() {
+    const primary = this.primary;
+    for (const controller of this.allControllers()) {
+      if (controller === primary)
+        continue;
+
+      if (primary.cursor.models.length && controller.cursor.models !== primary.cursor.models)
+        controller.cursor.models = primary.cursor.models;
+      if (primary.claude.models.length && controller.claude.models !== primary.claude.models)
+        controller.claude.models = primary.claude.models;
+      for (const [id, backend] of controller.nativeCLIs) {
+        const source = primary.nativeCLIs.get(id);
+        if (source?.models.length && backend.models !== source.models)
+          backend.models = source.models;
+      }
+    }
+  }
+
   attach(id, controller, execution = false) {
     controller.agents = this; controller.agentId = id;
     controller.executionContext = execution;
@@ -206,6 +227,9 @@ class Agents extends EventEmitter {
     };
     controller.on('state', () => {
       try {
+        if (controller === this.primary)
+          this.shareProviderModels();
+
         const limits = JSON.stringify([this.primary.data.providerLimits, this.primary.data.providerQuotas]);
         if (limits !== this.savedLimits) { this.primary.save(); this.savedLimits = limits; }
         this.pump();
@@ -340,7 +364,7 @@ class Agents extends EventEmitter {
   }
 
   hubName() {
-    return this.primary.data.hubName || 'Hub';
+    return this.primary.data.hubName || 'Assistant';
   }
 
   agentName(id) {
@@ -593,7 +617,7 @@ class Agents extends EventEmitter {
     this.requireIdle(controller, current);
     const now = Date.now();
     const fresh = { id: randomUUID(), threadId: null, title: current.group ? current.title : 'New session',
-      ...(current.group ? { group: { ...current.group, members: [...current.group.members] } } : {}), workspace: current.workspace, access: current.access,
+      ...(current.group ? { group: { ...current.group, members: [...current.group.members], replyOrder: [...(current.group.replyOrder || [])] } } : {}), workspace: current.workspace, access: current.access,
       created: now, updated: now, status: 'idle', archived: false, items: [], routes: [], usage: null };
     const previous = controller.data.sessions, previousId = controller.data.agentSessionId;
     const routineOwners = Object.values(this.routines.records).filter(routine => routine.ownerId === current.id)
@@ -735,7 +759,8 @@ class Agents extends EventEmitter {
   snapshot() {
     const snapshot = controller => ({ ...controller.snapshot(), conversationId: this.conversation(controller)?.id || null,
       waitingForAgents: controller.data.sessions.filter(session => this.pendingDelegations(session.id)).map(session => session.id),
-      stateRevision: controller.stateRevision || 0 });
+      stateRevision: controller.stateRevision || 0, sharedRevision: controller.sharedRevision || 0,
+      chatRevisions: Object.fromEntries(controller.chatRevisions || []) });
     const jobBudgets = this.budgets.snapshot();
     const sessions = this.allControllers().flatMap(controller => controller.data.sessions.map(session => ({ ...session, agentId: controller.agentId })));
     const assignments = this.allControllers().flatMap(controller => controller.data.sessions.flatMap(session =>
@@ -746,10 +771,13 @@ class Agents extends EventEmitter {
     const jobVerification = Object.fromEntries(assignments.map(({ session, job }) => [job.id,
       reports.verification((session.tasks || []).findLast(task => task.assignmentId === job.id), job)]));
     const batchReports = reports.batchReports({ sessions, assignments, names, budgets: jobBudgets, copies: this.workspaces.records });
-    return { ...this.primary.snapshot(), settingsChanges: this.settingsTools?.snapshot() || [], anyAgentBusy: this.busy, updateBlockedReason: this.updateBlockedReason?.() || null, artifactRuns: this.artifactRuns.snapshot(), downloads: this.downloads.snapshot(), jobBudgets, batchReports, jobVerification,
+    const agentStates = Object.fromEntries([...this.controllers].map(([id, controller]) => [id, snapshot(controller)]));
+    // The top level is Hub's own snapshot; it reuses the one built for agentStates (Hub's chats are the largest store).
+    const { conversationId, waitingForAgents, stateRevision, sharedRevision, chatRevisions, ...primary } = agentStates.main;
+    return { ...primary, settingsChanges: this.settingsTools?.snapshot() || [], anyAgentBusy: this.busy, updateBlockedReason: this.updateBlockedReason?.() || null, artifactRuns: this.artifactRuns.snapshot(), downloads: this.downloads.snapshot(), jobBudgets, batchReports, jobVerification,
       agents: [{ id: 'main', name: this.hubName(), workspace: this.primary.data.settings.workspace }, ...this.primary.data.agents].map(profile => ({ ...profile,
         busy: this.controller(profile.id).busy || this.executions.get(profile.id)?.busy || null })),
-      agentStates: Object.fromEntries([...this.controllers].map(([id, controller]) => [id, snapshot(controller)])),
+      agentStates,
       executionStates: Object.fromEntries([...this.executions].map(([id, controller]) => [id, snapshot(controller)])),
     };
   }

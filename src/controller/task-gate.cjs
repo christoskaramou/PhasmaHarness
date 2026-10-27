@@ -4,12 +4,16 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
-const { spawn, spawnSync } = require('node:child_process');
+const { execFile, spawn, spawnSync } = require('node:child_process');
 const { TAG: PROCESS_TAG, Watch, stopLeftovers, spawnOwned, stopTree } = require('../process-tree.cjs');
 const { CHECKER: PHASMA_GAME_CHECKS, restoreMcpOptIn } = require('../phasma-game-checks.cjs');
 const { FINAL, OUTPUT_CAP, canProposeWiki, capStream, childBlocksClear, confirmTermination, correctionText, createTask, gateOutcome, hasProjectWiki, identityFromProbe, lookupState, parentExitReaps, parseChecklist, resolveCitations, shouldTrack, summaryLine, validateChecks } = require('../tasks.cjs');
 const { accessMode, treeEntries } = require('./shared.cjs');
 const { stripTaskStatus } = require('../routing/task-state.cjs');
+
+// A Windows process's creation time (or nothing when it is gone), which tells this instance of a pid from a later reuse.
+const identityProbe = pid => ['-NoProfile', '-NonInteractive', '-Command',
+  `$p = Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}' -ErrorAction Stop; if ($null -eq $p) { exit 0 }; $p.CreationDate.ToFileTimeUtc()`];
 const { lessonFromTask, recordLesson, readLessons, relevantLessons, lessonsOffer, sameLesson, diffHashes } = require('../lessons.cjs');
 const { restoreCheckFiles } = require('../comparisons.cjs');
 
@@ -162,10 +166,17 @@ module.exports = {
         return /^\d+$/.test(rest[18]) ? { status: 'present', pid, creationTime: rest[18] } : { status: 'unknown' };
       } catch (error) { return error.code === 'ENOENT' ? { status: 'absent' } : { status: 'unknown' }; }
     }
-    const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-      `$p = Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}' -ErrorAction Stop; if ($null -eq $p) { exit 0 }; $p.CreationDate.ToFileTimeUtc()`],
-      { encoding: 'utf8', timeout: 8000, windowsHide: true });
-    return identityFromProbe(result, pid);
+    return identityFromProbe(spawnSync('powershell.exe', identityProbe(pid), { encoding: 'utf8', timeout: 8000, windowsHide: true }), pid);
+  },
+
+  // The same lookup for a check that is about to run. PowerShell takes about 0.9 s to start, and the synchronous lookup
+  // froze the whole app meanwhile (2026-10-27); recovery at startup keeps the synchronous one.
+  processIdentityAsync(pid) {
+    if (this.lookupProcess || process.platform !== 'win32' || !Number.isInteger(pid) || pid <= 0)
+      return Promise.resolve(this.processIdentity(pid));
+
+    return new Promise(resolve => execFile('powershell.exe', identityProbe(pid), { encoding: 'utf8', timeout: 8000, windowsHide: true },
+      (error, stdout) => resolve(identityFromProbe({ error, status: error ? 1 : 0, stdout }, pid))));
   },
 
   // Stops a local check's tree by its root pid. Windows: not once the root has exited, when the pid may already be
@@ -300,7 +311,11 @@ module.exports = {
       const final = session.items.filter(item => item.type === 'agentMessage' && item.turnId === submission.turnId && item.phase !== 'commentary').at(-1)?.text || '';
       if (!task.corrections) Object.assign(task, parseChecklist(final));
       attempt.citations = resolveCitations(session.workspace, final);
-      attempt.evidence = this.captureEvidence(session, task, attempt);
+      // The diff feeds correction lessons and comparison receipts, which both need checks, so a check-less turn skips git.
+      if (task.checks.length) {
+        attempt.evidence = await this.captureEvidence(session, task, attempt);
+        if (!this.ownsGate(gate)) return this.cancelGate(session, task);
+      }
       // A comparison run is judged by the snapshot's check files, after its own diff was captured.
       const comparison = this.comparisonOf(session);
       if (comparison)
@@ -520,7 +535,8 @@ module.exports = {
     const processId = randomUUID();
     gate.processId = processId;
     const pid = this.client.process?.pid;
-    const ident = pid ? this.processIdentity(pid) : null;
+    const ident = pid ? await this.processIdentityAsync(pid) : null;
+    if (!this.ownsGate(gate)) return null;
     if (!ident?.creationTime) return blocked('Codex process identity unavailable');
     const previous = this.data.executionBlock || null;
     const sandboxPolicy = this.sandboxFor(task.access, session.workspace);
@@ -724,23 +740,22 @@ module.exports = {
     }
   },
 
-  captureEvidence(session, task, attempt) {
+  // The two git reads run off the main thread: synchronously they froze the whole app for 0.3-0.6 s after every task turn
+  // on the user's repositories (2026-10-27).
+  async captureEvidence(session, task, attempt) {
     const snapshot = { turnId: attempt.turnId, at: attempt.at, goal: task.goal, amendments: [...task.amendments], checks: task.checks.map(check => ({ ...check })), limitations: [] };
-    const root = session.workspace;
-    const result = spawnSync('git', ['--no-optional-locks', '-c', 'core.fsmonitor=false', 'diff', '--stat'], {
-      cwd: root, encoding: 'utf8', timeout: 4000, windowsHide: true, maxBuffer: 64 * 1024,
-    });
+    const git = (args, maxBuffer) => new Promise(resolve => execFile('git', ['--no-optional-locks', '-c', 'core.fsmonitor=false', ...args],
+      { cwd: session.workspace, encoding: 'utf8', timeout: 4000, windowsHide: true, maxBuffer }, (error, stdout) => resolve({ error, stdout })));
+    const result = await git(['diff', '--stat'], 64 * 1024);
     const privatePath = /(^|[\\/])(\.env(?:\..*)?|auth\.json|credentials[^\\/]*|secrets?[^\\/]*|id_rsa|id_ed25519)([\\/]|$)|\.(pem|key|pfx|p12)$/i;
-    if (result.error || result.status !== 0) snapshot.limitations.push('Diff unavailable.');
+    if (result.error) snapshot.limitations.push('Diff unavailable.');
     else {
       const lines = String(result.stdout || '').split(/\r?\n/).filter(line => line && !privatePath.test(line));
       if (lines.length !== String(result.stdout || '').split(/\r?\n/).filter(Boolean).length) snapshot.limitations.push('Private paths omitted from the diff excerpt.');
       snapshot.diff = lines.join('\n').slice(0, 8000);
       // Per-file hashes of the full diff (no content kept), so a lesson can tell an edit that leaves --stat unchanged.
-      const patch = spawnSync('git', ['--no-optional-locks', '-c', 'core.fsmonitor=false', 'diff', '--no-ext-diff', '--no-color'], {
-        cwd: root, encoding: 'utf8', timeout: 4000, windowsHide: true, maxBuffer: 16 * 1024 * 1024,
-      });
-      if (!patch.error && patch.status === 0)
+      const patch = await git(['diff', '--no-ext-diff', '--no-color'], 16 * 1024 * 1024);
+      if (!patch.error)
         snapshot.files = diffHashes(patch.stdout, privatePath);
     }
     return snapshot;

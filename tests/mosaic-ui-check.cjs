@@ -88,7 +88,7 @@ module.exports = async window => {
     for (const [width, height] of [[1100, 820], [600, 820], [412, 800], [915, 360], [390, 820]]) {
       window.setSize(width, height); await frame();
       await run(`renderSidebarWidth(); $('#settings-dialog').showModal(); true`);
-      const geometry = await run(`(() => { const body = $('.settings-body'), dialog = $('#settings-dialog').getBoundingClientRect(); return { fits: body.scrollWidth <= body.clientWidth + 1 && dialog.left >= 0 && dialog.right <= innerWidth + 1, close: $('#settings-close').getBoundingClientRect().bottom <= dialog.bottom }; })()`);
+      const geometry = await run(`(() => { const body = $('.settings-body'), dialog = $('#settings-dialog').getBoundingClientRect(); return { fits: body.scrollWidth <= body.clientWidth + 1 && dialog.left >= 0 && dialog.right <= innerWidth + 1, close: $('#settings-dialog .dialog-footer').getBoundingClientRect().bottom <= dialog.bottom }; })()`);
       assert.deepEqual(geometry, { fits: true, close: true }, `Settings fits at ${width}px`);
       await capture(`settings-dark-${width}x${height}`);
       assert.equal(await run(`$('.settings-tabs').getAttribute('aria-orientation')`), width <= 720 || height <= 500 ? 'horizontal' : 'vertical');

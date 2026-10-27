@@ -542,8 +542,9 @@ module.exports = {
   },
 
   planPreset() {
-    if (this.catalog().some(p => p.enabled && p.worker && p.provider !== 'codex' && this.available(p))) return null;
+    // The plan check first: it is cheap, and every snapshot asks, while building the catalog is not.
     if (!(this.account?.type === 'chatgpt' && ['free', 'go'].includes(this.account.plan))) return null;
+    if (this.catalog().some(p => p.enabled && p.worker && p.provider !== 'codex' && this.available(p))) return null;
     const terra = this.resolveWorker('terra-light') || { ...PRESETS.find(p => p.id === 'terra-light'), provider: 'codex', worker: true, images: true };
     return { ...terra, source: 'plan', reason: `Your ${this.account.plan} plan uses Terra light. No model-routing call is needed.` };
   },

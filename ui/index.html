@@ -90,7 +90,6 @@
   <select id="group-mention" class="permissions-control" aria-label="Mention a group member" hidden></select>
  </div>
  <div class="header-actions">
-  <button type="button" id="group-edit" class="compact-action" aria-label="Edit group members" title="Edit group members" hidden>Group</button>
 <span hidden="" id="provider-connection" role="status">
  <span aria-hidden="true" class="models-spinner">
  </span>
@@ -167,30 +166,31 @@
 </div><button id="suggestion-accept" type="button" class="icon-button" aria-label="Use the suggested reply" title="Use the suggested reply" hidden><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h12M11 6l6 6-6 6M20 5v14"/></svg></button><button id="send" type="submit" aria-label="Send message" title="Send message">↑</button><button id="stop" type="button" class="stop" aria-label="Stop task" title="Stop task" hidden><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1" fill="currentColor"/></svg></button></div></form>
     </div>
   </main>
-  <dialog id="commands-dialog" aria-labelledby="commands-title"><div class="dialog-heading"><h2 id="commands-title">Commands</h2><button type="button" class="close-dialog icon-button" aria-label="Close commands">×</button></div><p class="hint">Type a command and press Enter, or choose one below. Commands apply to the selected agent.</p><div id="commands-list"></div></dialog>
+  <dialog id="commands-dialog" aria-labelledby="commands-title"><div class="dialog-heading"><h2 id="commands-title">Commands</h2><button type="button" class="close-dialog icon-button" aria-label="Close commands"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div><p class="hint">Type a command and press Enter, or choose one below. Commands apply to the selected agent.</p><div id="commands-list"></div></dialog>
   <dialog id="command-dialog" aria-labelledby="command-title" aria-describedby="command-description">
-    <div class="dialog-heading"><h2 id="command-title"></h2><button type="button" class="close-dialog icon-button" aria-label="Close command">×</button></div>
+    <div class="dialog-heading"><h2 id="command-title"></h2><button type="button" class="close-dialog icon-button" aria-label="Close command"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
     <p id="command-description" class="hint"></p>
     <input id="command-search" type="search" placeholder="Search choices…" aria-label="Search command choices" autocomplete="off">
     <div id="command-content"></div><p id="command-error" class="error" role="alert"></p>
   </dialog>
   <div id="agent-menu" popover="auto" role="menu" aria-label="Agent options"></div>
   <dialog id="agents-dialog" aria-labelledby="agents-title">
-    <div class="dialog-heading"><div><div class="eyebrow">LOCAL AGENT TEAM</div><h2 id="agents-title">Your agents</h2></div><button type="button" class="close-dialog icon-button" aria-label="Close agent overview">×</button></div>
+    <div class="dialog-heading"><div><div class="eyebrow">LOCAL AGENT TEAM</div><h2 id="agents-title">Your agents</h2></div><button type="button" class="close-dialog icon-button" aria-label="Close agent overview"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
     <div class="agents-toolbar"><p id="agents-summary" class="muted"></p><button id="groups-add" type="button">New group</button><button id="agents-add" type="button" class="primary">＋ New agent</button></div>
     <div id="agent-cards"></div>
     <p class="hint">Separate conversations and roles, running on this computer. Shared workspaces run one task at a time.</p>
   </dialog>
   <dialog id="group-dialog" aria-labelledby="group-heading"><form id="group-form">
-    <div class="dialog-heading"><h2 id="group-heading">New group</h2><button type="button" class="close-dialog icon-button" aria-label="Close group editor">×</button></div>
+    <div class="dialog-heading"><h2 id="group-heading">New group</h2><button type="button" class="close-dialog icon-button" aria-label="Close group editor"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
     <label>Name<input id="group-name" required maxlength="80" placeholder="Game team"></label>
     <fieldset id="group-members"><legend>Members</legend></fieldset>
-    <p class="hint">Start with @Name for a direct reply using this group’s history. Other bots stay idle. Each bot keeps its existing access.</p>
+    <fieldset id="group-repliers"><legend>Who replies</legend></fieldset>
+    <p class="hint">Ticked bots discuss each message that does not start with @Name, one at a time from the top, round after round, until none has anything new to add. If they keep disagreeing, they stop and ask you. Stop, Esc or typing stop ends a discussion. Drag or use the arrows to set the order. With none ticked, the main bot answers. Start with @Name to ask one bot. Each bot keeps its existing access.</p>
     <p id="group-error" class="turn-error" role="alert"></p>
-    <div class="dialog-footer"><button id="group-archive" type="button" hidden>Archive group</button><button id="group-save" class="primary" type="submit">Create group</button></div>
+    <div class="dialog-footer"><button id="group-save" class="primary" type="submit">Create group</button></div>
   </form></dialog>
   <dialog id="agent-dialog"><form id="agent-form">
-    <div class="dialog-heading"><h2 id="agent-heading">New agent</h2><button type="button" class="close-dialog icon-button" aria-label="Close agent editor">×</button></div>
+    <div class="dialog-heading"><h2 id="agent-heading">New agent</h2><button type="button" class="close-dialog icon-button" aria-label="Close agent editor"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
     <label>Name<input id="agent-name" required maxlength="60" placeholder="Researcher"></label>
     <label>Role &amp; instructions<textarea id="agent-instructions" rows="4" maxlength="8000" placeholder="e.g. Review code for bugs. Explain each finding and keep changes read-only."></textarea></label>
     <div class="workspace-field"><span>Workspace</span><label class="inherit-check"><input type="checkbox" id="agent-inherit">Inherit</label><span class="path-field" id="agent-workspace-row"><input id="agent-workspace" required aria-label="Workspace"><button id="agent-browse" type="button">Browse…</button></span></div>
@@ -199,11 +199,11 @@
     <p id="agent-error" class="turn-error" role="alert"></p><div class="dialog-footer"><button id="agent-save" class="primary" type="submit">Create agent</button></div>
   </form></dialog>
   <dialog id="hub-dialog" aria-labelledby="hub-heading"><form id="hub-form">
-    <div class="dialog-heading"><h2 id="hub-heading">Edit main Bot</h2><button type="button" class="close-dialog icon-button" aria-label="Close edit">×</button></div>
+    <div class="dialog-heading"><h2 id="hub-heading">Edit main Bot</h2><button type="button" class="close-dialog icon-button" aria-label="Close edit"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
     <label>Name<input id="hub-name" required maxlength="60"></label>
     <label>Workspace<span class="path-field"><input id="hub-workspace" required><button id="hub-browse" type="button">Browse…</button></span></label>
     <div class="agent-form-options"><label>Model<select id="hub-model" required></select></label><label>Effort<select id="hub-effort"></select></label><label>Access<select id="hub-access"></select></label></div>
-    <p id="hub-error" class="turn-error" role="alert"></p><div class="dialog-footer"><button id="hub-save" class="primary" type="submit">Save</button></div>
+    <p id="hub-error" class="turn-error" role="alert"></p>
   </form></dialog>
   <dialog id="settings-dialog"><form id="settings-form">
     <div class="dialog-heading"><h2>Settings</h2><button type="button" class="close-dialog icon-button" aria-label="Close settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
@@ -368,11 +368,11 @@
       <p id="checks-status" class="hint" role="status"></p>
     </div>
     </div>
-    <div class="dialog-footer"><p id="settings-save-status" class="hint" role="status"></p><button id="settings-close" class="primary" type="button">Close</button></div>
+    <div class="dialog-footer"><p id="settings-save-status" class="hint" role="status"></p></div>
   </form></dialog>
   <dialog id="request-dialog"><div id="request-content"></div></dialog>
   <dialog id="job-dialog" class="job-details" aria-labelledby="job-details-heading">
-    <div class="dialog-heading"><h2 id="job-details-heading">Assignment</h2><button type="button" class="close-dialog" aria-label="Close assignment details">×</button></div>
+    <div class="dialog-heading"><h2 id="job-details-heading">Assignment</h2><button type="button" class="close-dialog icon-button" aria-label="Close assignment details"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
     <p id="job-details-status" class="muted"></p>
     <p id="job-copy-location" class="muted" hidden></p>
     <button type="button" id="job-copy-apply" class="compact-action" hidden>Apply changes to my project…</button>
@@ -416,8 +416,9 @@
     <div class="dialog-footer"><button type="button" class="close-dialog">Cancel</button><button id="delete-confirm" class="danger" type="submit">Delete</button></div>
   </form></dialog>
   <div id="toast" role="alert" hidden></div>
+  <div id="saved-popup" popover="manual" role="status">Saved</div>
   <dialog id="browser-dialog" aria-labelledby="browser-heading">
-    <div class="dialog-heading"><h2 id="browser-heading">Workspace files</h2><div class="browser-window-actions"><button id="browser-maximize" type="button" title="Expand panel" aria-label="Expand panel">⛶</button><button type="button" class="close-dialog" aria-label="Close workspace panel">×</button></div></div>
+    <div class="dialog-heading"><h2 id="browser-heading">Workspace files</h2><div class="browser-window-actions"><button id="browser-maximize" type="button" title="Expand panel" aria-label="Expand panel">⛶</button><button type="button" class="close-dialog icon-button" aria-label="Close workspace panel"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div></div>
     <p id="browser-root" class="muted"></p>
     <div class="workspace-actions"><select id="browser-view" aria-label="File layout"><option value="tree">Tree</option><option value="files">Files</option></select><button id="browser-refresh" type="button">Refresh</button><button id="browser-attach" type="button" disabled>Add file to message</button></div>
     <p id="browser-status" role="status" class="muted"></p>
