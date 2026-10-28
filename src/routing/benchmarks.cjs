@@ -87,7 +87,8 @@ class BenchmarkStore {
       } catch { this.warning = 'Saved benchmark table is invalid; using the bundled table. Original file preserved.'; }
     }
   }
-  get id() { return createHash('sha256').update(JSON.stringify(this.data)).digest('hex').slice(0, 12); }
+  // Cached until replace(): every bot's snapshot asks on each window update, and hashing the table takes milliseconds.
+  get id() { return this.cachedId ??= createHash('sha256').update(JSON.stringify(this.data)).digest('hex').slice(0, 12); }
   replace(data) {
     const next = structuredClone(validateSnapshot(data));
     if (this.filename) {
@@ -100,6 +101,8 @@ class BenchmarkStore {
       fs.renameSync(this.filename + '.tmp', this.filename);
     }
     this.data = next; this.warning = null;
+    this.cachedId = null;
+    this.index = null;
   }
   catalog(workers) {
     return workers.map(worker => ({ ...worker, benchmarks: this.data.records
@@ -110,11 +113,15 @@ class BenchmarkStore {
         ...row.metrics })) }));
   }
   summary(workers = []) {
-    const matched = this.catalog(workers);
-    return { id: this.id, updatedAt: this.data.updatedAt, records: this.data.records.length,
-      matched: matched.filter(p => p.benchmarks.length).length, workers: workers.length, warning: this.warning,
+    // Indexed once per table (see id): a worker is matched when any record has its model and effort, as in catalog().
+    this.index ??= {
+      measured: new Set(this.data.records.map(row => row.model + '\n' + row.effort)),
       sources: Object.entries(SOURCES).map(([id, source]) => ({ id, name: source.name, url: source.url,
-        records: this.data.records.filter(row => row.source === id).length })) };
+        records: this.data.records.filter(row => row.source === id).length })),
+    };
+    const matched = workers.filter(worker => this.index.measured.has(measuredModel(worker.model) + '\n' + (worker.effort || 'default')));
+    return { id: this.id, updatedAt: this.data.updatedAt, records: this.data.records.length,
+      matched: matched.length, workers: workers.length, warning: this.warning, sources: this.index.sources };
   }
   refreshPrompt(workers) {
     return fs.readFileSync(path.join(__dirname, '..', '..', 'benchmarks', 'REFRESH.md'), 'utf8') +

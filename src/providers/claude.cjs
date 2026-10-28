@@ -279,13 +279,14 @@ class ClaudeCLI {
       args.push('--permission-mode', access === 'danger-full-access' && !schema ? 'bypassPermissions'
         : ask ? (access === 'workspace-write' ? 'acceptEdits' : 'default') : 'dontAsk');
       let settled = false, rateLimited = false, limitInfo = null;
-      const deliveries = new Map();
+      const deliveries = new Map(), controls = new Map();
       const done = (fn, value) => {
         if (settled) return;
         settled = true;
         onInput?.(null);
         for (const delivery of deliveries.values()) delivery.reject(new Error('Claude closed before confirming message delivery.'));
         deliveries.clear();
+        for (const request of controls.values()) request.reject(new Error('Claude closed before answering.'));
         fn(value);
       };
       const child = this.start(args, cwd); let buffer = '', result, stderr = '';
@@ -293,6 +294,27 @@ class ClaudeCLI {
       const abort = () => stopTree(child); signal?.addEventListener('abort', abort, { once: true });
       child.stdin.on('error', () => {});
       let closed = false;
+      // After a result Claude keeps running while a background task of it (background Bash, Monitor) runs, and answers
+      // again when one ends. Its input stays open until then, so follow-ups reach it instead of waiting for the task.
+      let idle = false, background = 0;
+      const closeIfIdle = () => {
+        if (!idle || deliveries.size || background || !child.stdin.writable || child.stdin.writableEnded) return;
+        onInput?.(null);
+        child.stdin.end();
+      };
+      // Requests Harness makes of the running CLI (stop_task, get_task_output); like follow-ups they need its input open.
+      let controlCount = 0;
+      const control = request => new Promise((resolve, reject) => {
+        if (settled || closed || !child.stdin.writable || child.stdin.writableEnded)
+          return reject(new Error('Claude is no longer accepting requests.'));
+        const id = `harness-${++controlCount}`;
+        const timer = setTimeout(() => controls.get(id)?.reject(new Error('Claude did not answer in time.')), 10000);
+        controls.set(id, {
+          resolve: value => { clearTimeout(timer); controls.delete(id); resolve(value); },
+          reject: error => { clearTimeout(timer); controls.delete(id); reject(error); },
+        });
+        child.stdin.write(JSON.stringify({ type: 'control_request', request_id: id, request }) + '\n');
+      });
       const pending = new Map();
       const reply = (request_id, response) => {
         pending.delete(request_id);
@@ -332,26 +354,36 @@ class ClaudeCLI {
           let event;
           try { event = JSON.parse(line); }
           catch { done(reject, new Error('Invalid Claude Code stream event.')); stopTree(child); return; }
+          if (event.type === 'control_response' && controls.has(event.response?.request_id)) {
+            const answer = event.response;
+            if (answer.subtype === 'success') controls.get(answer.request_id).resolve(answer.response || {});
+            else controls.get(answer.request_id).reject(new Error(answer.error || 'Claude refused the request.'));
+            continue;
+          }
           if (ask && event.type === 'control_request') { permission(event).catch(() => {}); continue; }
           if (ask && event.type === 'control_cancel_request') { pending.get(event.request_id)?.abort(); continue; }
           if (event.type === 'user' && deliveries.has(event.uuid)) {
             deliveries.get(event.uuid).resolve();
             deliveries.delete(event.uuid);
+            idle = false;
+          }
+          if (event.type === 'system' && event.subtype === 'background_tasks_changed' && Array.isArray(event.tasks)) {
+            // Each event lists every live task; ambient ones are the CLI's own watchers, not the bot's work.
+            background = event.tasks.filter(task => !task?.ambient).length;
+            closeIfIdle();
           }
           if (event.type === 'result') {
+            // usage covers one result's calls; total_cost_usd and modelUsage are the session's running totals, so the
+            // last result already holds them.
             if (result && onInput) {
               for (const key of ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens']) {
                 if (Number.isFinite(result.usage?.[key]) && Number.isFinite(event.usage?.[key]))
                   event.usage[key] += result.usage[key];
               }
-              if (Number.isFinite(result.total_cost_usd) && Number.isFinite(event.total_cost_usd))
-                event.total_cost_usd += result.total_cost_usd;
             }
             result = event;
-            if ((ask || onInput) && !deliveries.size) {
-              onInput?.(null);
-              child.stdin.end();
-            }
+            idle = true;
+            closeIfIdle();
           }
           // Plan usage limits: the rate-limit event carries the window and its reset; a blocked reply is marked "rate_limit".
           if (event.type === 'rate_limit_event' && event.rate_limit_info) {
@@ -395,10 +427,7 @@ class ClaudeCLI {
             clearTimeout(timer);
             deliveries.delete(id);
             reject(error);
-            if (result && !deliveries.size && child.stdin.writable && !child.stdin.writableEnded) {
-              onInput(null);
-              child.stdin.end();
-            }
+            closeIfIdle();
           };
           const timer = setTimeout(() => drop(new Error('Claude message delivery timed out. Check the conversation before resending.')), DELIVERY_MS);
           deliveries.set(id, {
@@ -410,7 +439,7 @@ class ClaudeCLI {
             if (error) deliveries.get(id)?.reject(new Error('Claude input disconnected before delivery was confirmed.'));
           });
         });
-      });
+      }, control);
     }).finally(() => {
       if (promptDirectory) fs.rmSync(promptDirectory, { recursive: true, force: true });
     });

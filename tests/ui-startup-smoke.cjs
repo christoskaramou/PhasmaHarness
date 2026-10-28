@@ -3567,6 +3567,81 @@ app.whenReady().then(async () => {
   })()`);
   assert.deepEqual(queueRows, [1, 0], 'Send now removes the message and its Send now button from the queue list');
   console.log('A sent queued message leaves the queue list passed');
+  phase = 'running tasks';
+  // Claude's background tasks and Codex commands past 5 s are listed with their own Stop; a quick command stays out.
+  const taskCalls = [];
+  ipcMain.removeHandler('backgroundTask');
+  ipcMain.handle('backgroundTask', (_event, id, taskId, action) => {
+    taskCalls.push([taskId, action]);
+    return action === 'output' ? { output: '\u001b[32mtick 7\u001b[0m\n', truncated: true } : undefined;
+  });
+  const taskUi = await window.webContents.executeJavaScript(`(async () => {
+    const session = current();
+    const saved = { busy: state.busy, background: session.background, items: session.items, turnId: session.turnId };
+    state.busy = session.id;
+    session.turnId = 'turn-now';
+    session.background = { idle: true, tasks: [
+      { id: 'b1', description: 'Wait until Dota 2 closes', type: 'local_bash', agent: null, startedAt: Date.now() - 60000 },
+      { id: 'a1', description: 'Review the diff', type: 'local_agent', agent: 'general-purpose', startedAt: Date.now() }] };
+    session.items = [...session.items,
+      { id: 'stale', turnId: 'turn-before', type: 'commandExecution', status: 'inProgress', command: 'npm run dev', processId: '9', createdAt: Date.now() - 600000 },
+      { id: 'quick', turnId: 'turn-now', type: 'commandExecution', status: 'inProgress', command: 'git status', processId: '1', createdAt: Date.now() },
+      { id: 'long', turnId: 'turn-now', type: 'commandExecution', status: 'inProgress', command: 'ninja', processId: '2', createdAt: Date.now() - 60000 }];
+    render();
+    const rows = () => [...document.querySelectorAll('#background-tasks .queued-message')]
+      .map(row => [row.querySelector('span').textContent, [...row.querySelectorAll('button')].map(button => button.textContent)]);
+    const listed = rows();
+    const working = $('#working-text').textContent;
+    document.querySelector('#background-tasks button').click();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const output = document.querySelector('#background-tasks .background-output')?.textContent;
+    window.savedTaskState = saved;
+    return { listed, working, output, toggled: rows()[0][1] };
+  })()`);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/running-tasks.png'), (await window.webContents.capturePage()).toPNG());
+  Object.assign(taskUi, await window.webContents.executeJavaScript(`(async () => {
+    const session = current();
+    document.querySelector('#background-tasks [aria-label^="Stop background task: Wait"]').click();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    state.busy = window.savedTaskState.busy;
+    session.background = window.savedTaskState.background;
+    session.items = window.savedTaskState.items;
+    session.turnId = window.savedTaskState.turnId;
+    render();
+    return { hidden: $('#background-tasks').hidden, open: !!taskOutput };
+  })()`));
+  assert.deepEqual(taskUi.listed, [['Background: Wait until Dota 2 closes', ['Output', 'Stop']], ['Subagent (general-purpose): Review the diff', ['Stop']],
+    ['Running: ninja', ['Output', 'Stop']]], 'neither a command that just started nor one an earlier turn left behind is listed');
+  assert.match(taskUi.working, /is waiting on 2 background tasks…$/);
+  assert.equal(taskUi.output, '…tick 7\n', 'the output tail is plain text');
+  assert.deepEqual(taskUi.toggled, ['Hide output', 'Stop']);
+  assert.deepEqual(taskCalls, [['b1', 'output'], ['b1', 'stop']]);
+  assert.equal(taskUi.hidden, true, 'the list leaves with the tasks');
+  assert.equal(taskUi.open, false, 'and stops reading output');
+  console.log('Running tasks list, output and Stop passed');
+  // A provider that does not report its tasks says so while it works; one that does stays quiet with no tasks.
+  const unreported = await window.webContents.executeJavaScript(`(() => {
+    const session = current();
+    window.savedTaskState = { busy: state.busy, provider: session.activeProvider };
+    state.busy = session.id;
+    session.activeProvider = 'cursor-cli';
+    render();
+    return { note: $('#background-tasks .background-note')?.textContent, hidden: $('#background-tasks').hidden };
+  })()`);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/unreported-tasks.png'), (await window.webContents.capturePage()).toPNG());
+  const reported = await window.webContents.executeJavaScript(`(() => {
+    const session = current();
+    session.activeProvider = 'claude-cli';
+    render();
+    const shown = !$('#background-tasks').hidden;
+    state.busy = window.savedTaskState.busy;
+    session.activeProvider = window.savedTaskState.provider;
+    render();
+    return { shown, after: !$('#background-tasks').hidden };
+  })()`);
+  assert.deepEqual(unreported, { note: 'This provider does not report its background tasks, so any it leaves running are not listed here.', hidden: false });
+  assert.deepEqual(reported, { shown: false, after: false });
+  console.log('Providers without task reports say so passed');
   phase = 'reply suggestions';
   // One call per answer; grey text while the draft matches its start; Right arrow at the end accepts; off hides it.
   const suggestionCalls = [];

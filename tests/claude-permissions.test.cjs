@@ -208,6 +208,27 @@ test('Claude streams follow-ups during full-access work and waits for acknowledg
   assert.equal(input, null);
 });
 
+test('several Claude results in one process add their usage but keep the last running cost and model totals', async () => {
+  const { cli, send } = fake();
+  let input;
+  const run = cli.run({ model: 'claude-opus-5-5', prompt: 'first', access: 'danger-full-access',
+    onInput: value => { input = value; } });
+  const delivery = input({ id: 'follow-up', text: 'Reply with only: OK', images: [] });
+  // Real numbers (Opus 5.5, 2026-10-28): usage is per result, total_cost_usd and modelUsage are the session's running totals.
+  send({ type: 'result', result: 'first finished', total_cost_usd: 0.46631159999999994,
+    usage: { input_tokens: 20, cache_read_input_tokens: 309258, cache_creation_input_tokens: 28825, output_tokens: 8689 },
+    modelUsage: { 'claude-opus-5-5': { inputTokens: 20, cacheReadInputTokens: 309258, cacheCreationInputTokens: 28825, outputTokens: 8689 } } });
+  send({ type: 'user', uuid: 'follow-up', message: { role: 'user', content: [{ type: 'text', text: 'Reply with only: OK' }] } });
+  await delivery;
+  const last = { 'claude-opus-5-5': { inputTokens: 22, cacheReadInputTokens: 325822, cacheCreationInputTokens: 62833, outputTokens: 8693 } };
+  send({ type: 'result', result: 'OK', total_cost_usd: 0.7417763999999999, modelUsage: last,
+    usage: { input_tokens: 2, cache_read_input_tokens: 16564, cache_creation_input_tokens: 34008, output_tokens: 4 } });
+  const result = await run;
+  assert.deepEqual(result.usage, { input_tokens: 22, cache_read_input_tokens: 325822, cache_creation_input_tokens: 62833, output_tokens: 8693 });
+  assert.equal(result.total_cost_usd, 0.7417763999999999);
+  assert.deepEqual(result.modelUsage, last);
+});
+
 test('a live follow-up Claude never echoes times out without keeping a finished turn open', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const { cli, state, send } = fake();
@@ -225,6 +246,79 @@ test('a live follow-up Claude never echoes times out without keeping a finished 
   assert.equal(state.ended, true, 'the turn closes Claude input once the follow-up is given up');
   assert.equal(input, null);
   assert.equal((await run).result, 'first finished');
+});
+
+// 2026-10-28: a bot's background "wait until Dota closes" command kept Claude alive after its answer; Harness had closed
+// its input at the result, so the chat stayed busy for an hour and Send now could not reach Claude.
+test('Claude takes follow-ups while a background task runs after its result and closes input when the task ends', async () => {
+  const { cli, state, send } = fake();
+  let input;
+  const run = cli.run({ model: 'claude-opus-5-5', prompt: 'wait for it', access: 'danger-full-access',
+    onInput: value => { input = value; } });
+  const watcher = { task_id: 'w', task_type: 'local_bash', description: 'CLI watcher', ambient: true };
+  send({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'b1', task_type: 'local_bash', description: 'wait' }, watcher] });
+  send({ type: 'result', result: 'started' });
+  await new Promise(setImmediate);
+  assert.equal(state.ended, false, 'the running task keeps Claude input open after the result');
+  assert.equal(typeof input, 'function', 'follow-ups still go straight to Claude');
+
+  const delivery = input({ id: 'status', text: 'status', images: [] });
+  send({ type: 'user', uuid: 'status', message: { role: 'user', content: [{ type: 'text', text: 'status' }] } });
+  await delivery;
+  send({ type: 'result', result: 'still waiting' });
+  await new Promise(setImmediate);
+  assert.equal(state.ended, false, 'the answered follow-up leaves input open while the task runs');
+
+  send({ type: 'system', subtype: 'background_tasks_changed', tasks: [watcher] });
+  await new Promise(setImmediate);
+  assert.equal(state.ended, true, 'input closes once only ambient tasks remain');
+  assert.equal(input, null);
+  assert.equal((await run).result, 'still waiting');
+});
+
+test('a background task that ends while Claude answers a follow-up keeps input open until that answer', async () => {
+  const { cli, state, send } = fake();
+  let input;
+  const run = cli.run({ model: 'claude-opus-5-5', prompt: 'wait for it', access: 'danger-full-access',
+    onInput: value => { input = value; } });
+  send({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'b1', task_type: 'local_bash', description: 'wait' }] });
+  send({ type: 'result', result: 'started' });
+  const delivery = input({ id: 'status', text: 'status', images: [] });
+  send({ type: 'user', uuid: 'status', message: { role: 'user', content: [{ type: 'text', text: 'status' }] } });
+  await delivery;
+
+  send({ type: 'system', subtype: 'background_tasks_changed', tasks: [] });
+  await new Promise(setImmediate);
+  assert.equal(state.ended, false, 'Claude is still answering the follow-up');
+
+  send({ type: 'result', result: 'answered' });
+  await new Promise(setImmediate);
+  assert.equal(state.ended, true);
+  assert.equal((await run).result, 'answered');
+});
+
+test('Harness asks the running Claude for a task’s output and to stop it, matching each answer by request id', async () => {
+  const { cli, state, send } = fake();
+  let control;
+  const run = cli.run({ model: 'claude-opus-5-5', prompt: 'wait for it', access: 'danger-full-access',
+    onInput: (value, request) => { control = value ? request : null; } });
+  const output = control({ subtype: 'get_task_output', task_id: 'b1' });
+  const stop = control({ subtype: 'stop_task', task_id: 'gone' });
+  const [read, stopped] = state.input.slice(1);
+  assert.deepEqual(read.request, { subtype: 'get_task_output', task_id: 'b1' });
+  assert.equal(read.type, 'control_request');
+  assert.notEqual(read.request_id, stopped.request_id);
+
+  send({ type: 'control_response', response: { request_id: stopped.request_id, subtype: 'error', error: 'No task gone' } });
+  send({ type: 'control_response', response: { request_id: read.request_id, subtype: 'success', response: { output: 'tick\n', total_bytes: 5, truncated: false } } });
+  assert.deepEqual(await output, { output: 'tick\n', total_bytes: 5, truncated: false });
+  await assert.rejects(stop, /No task gone/);
+
+  const pending = control({ subtype: 'stop_task', task_id: 'b2' });
+  send({ type: 'result', result: 'done' });
+  await assert.rejects(pending, /closed before answering|no longer accepting/);
+  assert.equal((await run).result, 'done');
+  assert.equal(control, null);
 });
 
 test('Claude retains uncertainty when its process closes before acknowledging live input', async () => {

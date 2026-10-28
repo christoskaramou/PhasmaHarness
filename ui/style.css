@@ -1750,6 +1750,30 @@ dialog {
   overflow:auto
 }
 
+#background-tasks {
+  max-height:240px;
+  overflow:auto
+}
+
+.background-note {
+  margin:0 0 6px;
+  color:var(--muted);
+  font-size:12px
+}
+
+.background-output {
+  max-height:160px;
+  overflow:auto;
+  margin:0 0 6px;
+  padding:6px 8px;
+  border-radius:6px;
+  background:var(--code-bg);
+  font-family:Consolas,monospace;
+  font-size:12px;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere
+}
+
 .queued-message {
   display:flex;
   align-items:center;

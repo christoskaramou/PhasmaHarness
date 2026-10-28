@@ -3,10 +3,11 @@
 // (src/providers/api-agent.cjs) on the CLI turn path, never through Codex.
 // steer: Codex's native turn/steer. liveQueue: the running turn accepts follow-ups into the provider's own queue
 // (answered after the current step). liveSteer: the running turn applies a Send now message within that turn.
+// tasks: the provider reports the turn's running tasks, so Harness lists them and stops each one (Controller.backgroundTask).
 const API = Object.freeze({ cli: true, api: true, steer: false, compact: false, usage: true, liveQueue: true, liveSteer: true });
 const CAPABILITIES = Object.freeze({
-  codex: Object.freeze({ cli: false, steer: true, compact: true, usage: true }),
-  'claude-cli': Object.freeze({ cli: true, steer: false, compact: true, usage: true, liveQueue: true }),
+  codex: Object.freeze({ cli: false, steer: true, compact: true, usage: true, tasks: true }),
+  'claude-cli': Object.freeze({ cli: true, steer: false, compact: true, usage: true, liveQueue: true, tasks: true }),
   'cursor-cli': Object.freeze({ cli: true, steer: false, compact: false, usage: false, liveSteer: true }),
   'native:deepseek': Object.freeze({ cli: true, steer: false, compact: false, usage: false, liveSteer: true }),
   // structured: false = refuses schema replies (worker-only), so it cannot run the Hub or routing.

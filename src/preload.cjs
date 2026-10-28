@@ -40,6 +40,7 @@ api.onConfirmation = callback => {
   return () => ipcRenderer.removeListener('confirmation', listener);
 };
 api.queuedMessage = (...args) => ipcRenderer.invoke('queuedMessage', ...args);
+api.backgroundTask = (...args) => ipcRenderer.invoke('backgroundTask', ...args);
 api.replySuggestion = id => ipcRenderer.invoke('replySuggestion', id);
 api.suggestWiki = id => ipcRenderer.invoke('suggestWiki', id);
 api.connectorList = () => ipcRenderer.invoke('connectorList');

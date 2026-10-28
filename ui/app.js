@@ -81,7 +81,7 @@ window.addEventListener('blur', () => finishSidebarResize(false));
 renderSidebarWidth();
 
 // Backend capabilities come from the main process; unknown or missing providers run through Codex.
-const CODEX_CAPS = { cli: false, steer: true, compact: true, usage: true };
+const CODEX_CAPS = { cli: false, steer: true, compact: true, usage: true, tasks: true };
 function providerCaps(provider) {
   const all = state?.providerCapabilities || {};
   if (Object.hasOwn(all, provider) && all[provider]) return all[provider];
@@ -1561,7 +1561,7 @@ function probeWorkspace() {
   probedWorkspace = root;
   $('#browse-changes').disabled = true;
   if ($('#browser-dialog').open) $('#browser-dialog').close();
-  api.browseWorkspace(selectedId, 'changes').then(result => {
+  api.browseWorkspace(selectedId, 'repository').then(result => {
     if (probedWorkspace === root) {
       $('#browse-changes').disabled = !result.available;
       $('#browse-changes').title = result.available ? 'View Git changes' : 'Git unavailable or workspace is not a Git repository';
@@ -1721,6 +1721,120 @@ $('#browser-attach').onclick = () => {
   $('#prompt').dispatchEvent(new Event('input', { bubbles: true }));
   $('#browser-dialog').close(); $('#prompt').focus();
 };
+
+// The bot's running tasks, each with its output and its own Stop: Claude's background commands, Monitors and
+// subagents, and Codex commands that have run a while (quick ones would only flash by).
+const LONG_COMMAND_MS = 5000;
+let taskOutput = null; // { sessionId, taskId, text } while one task's output is open
+let taskOutputTimer = null;
+let longCommandTimer = null;
+
+function runningTasks(session) {
+  if (!session || state.busy !== session.id)
+    return [];
+
+  const now = Date.now();
+  // Only this turn's: an item a crash left "inProgress" is not running.
+  const commands = session.items.filter(item => item.type === 'commandExecution' && item.status === 'inProgress' &&
+    item.processId && item.turnId === session.turnId);
+  const waiting = commands.filter(item => now - item.createdAt < LONG_COMMAND_MS);
+  clearTimeout(longCommandTimer);
+  if (waiting.length)
+    longCommandTimer = setTimeout(renderBackgroundTasks, Math.min(...waiting.map(item => item.createdAt + LONG_COMMAND_MS - now)) + 50);
+
+  const long = commands.filter(item => !waiting.includes(item))
+    .map(item => ({ id: item.processId, description: item.command, type: 'command', startedAt: item.createdAt }));
+  return [...(session.background?.tasks || []), ...long];
+}
+
+function closeTaskOutput() {
+  clearInterval(taskOutputTimer);
+  taskOutput = null;
+}
+
+async function openTaskOutput(sessionId, taskId) {
+  closeTaskOutput();
+  taskOutput = { sessionId, taskId, text: 'Reading output…' };
+  const read = async () => {
+    let text;
+    try {
+      const { output, truncated } = await api.backgroundTask(sessionId, taskId, 'output');
+      // Claude keeps the last 8 KiB, escape sequences included.
+      text = (truncated ? '…' : '') + (String(output || '').replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '') || '(no output yet)');
+    } catch (error) { text = error.message; }
+    if (taskOutput?.taskId !== taskId)
+      return;
+
+    taskOutput.text = text;
+    renderBackgroundTasks();
+  };
+  taskOutputTimer = setInterval(read, 2000);
+  renderBackgroundTasks();
+  await read();
+}
+
+// Claude answered and only its background tasks are left running.
+function backgroundWait(session) {
+  const count = session?.background?.idle ? session.background.tasks.length : 0;
+  return count ? `is waiting on ${count} background task${count === 1 ? '' : 's'}` : '';
+}
+
+function renderBackgroundTasks() {
+  const session = current();
+  const tasks = runningTasks(session);
+  if (taskOutput && (taskOutput.sessionId !== session?.id || !tasks.some(task => task.id === taskOutput.taskId)))
+    closeTaskOutput();
+
+  const list = $('#background-tasks');
+  list.replaceChildren();
+  // A provider that keeps its tasks to itself gets a note instead of an empty list, so nothing looks finished that may not be.
+  const unreported = !!session && state.busy === session.id && state.routing !== session.id && !session.groupTurn &&
+    !providerCaps(session.activeProvider).tasks;
+  list.hidden = !tasks.length && !unreported;
+  if (unreported)
+    list.append(element('p', 'background-note', 'This provider does not report its background tasks, so any it leaves running are not listed here.'));
+  for (const task of tasks) {
+    const row = element('div', 'queued-message');
+    const shell = ['local_bash', 'command'].includes(task.type);
+    const kind = task.agent ? `Subagent (${task.agent})` : task.type === 'command' ? 'Running' : shell ? 'Background' : 'Task';
+    const label = element('span', '', `${kind}: ${task.description}`);
+    label.title = task.startedAt ? `${task.description}\nStarted ${new Date(task.startedAt).toLocaleTimeString()}` : task.description;
+    row.append(label);
+    if (shell) {
+      const open = taskOutput?.taskId === task.id;
+      const output = element('button', 'compact-action', open ? 'Hide output' : 'Output');
+      output.type = 'button';
+      output.onclick = () => {
+        if (!open)
+          return openTaskOutput(session.id, task.id);
+
+        closeTaskOutput();
+        renderBackgroundTasks();
+      };
+      row.append(output);
+    }
+    const stop = element('button', 'compact-action', 'Stop');
+    stop.type = 'button';
+    stop.title = 'Stop only this task; the chat and its other tasks go on';
+    stop.setAttribute('aria-label', `Stop background task: ${task.description}`);
+    stop.onclick = async () => {
+      stop.disabled = true;
+      try { await api.backgroundTask(session.id, task.id, 'stop'); }
+      catch (error) {
+        stop.disabled = false;
+        notify(error);
+      }
+    };
+    row.append(stop);
+    list.append(row);
+    if (taskOutput?.taskId === task.id) {
+      const output = element('pre', 'background-output', taskOutput.text);
+      list.append(output);
+      output.scrollTop = output.scrollHeight; // the newest lines, like a terminal
+    }
+  }
+}
+
 function render() {
   if (!state) return;
   renderSlashMenu();
@@ -1826,6 +1940,7 @@ function render() {
     }
     $('#message-queue').append(row);
   }
+  renderBackgroundTasks();
   $('#send').disabled = ((!ready || (state.coordinator && !currentMode())) && !slashCommand($('#prompt').value)) || !!session?.queueSending || !!session?.compacting || (state.busy && state.busy !== selectedId && !state.coordinator) || changingPermissions || submitting || readingImages || (!$('#prompt').value.trim() && !attachedImages().length && !attachedFiles().length);
   renderImages();
   $('#working').hidden = !session?.groupTurn && (!state.busy || state.busy !== selectedId || !!session?.pendingMessage);
@@ -1834,7 +1949,7 @@ function render() {
   $('#turn-error').hidden = !turnError;
   renderModelFetching();
   $('#working-text').textContent = (session?.groupTurn ? `${session.groupTurn.round > 1 ? `Round ${session.groupTurn.round} · ` : ''}${session.groupTurn.name} ${session.groupTurn.state === 'needs-input' ? 'needs your input' : session.groupTurn.state === 'waiting' ? 'is waiting to reply' : 'is replying'}…` : '') || session?.waitingForAgent || (session?.compacting ? 'Compacting conversation context…' : state.routing === selectedId && state.routing
-    ? `Choosing a model with ${routerName(state.routerModel)}…` : `${session?.routes.at(-1)?.label || 'Codex CLI'} is working…`);
+    ? `Choosing a model with ${routerName(state.routerModel)}…` : `${session?.routes.at(-1)?.label || 'Codex CLI'} ${backgroundWait(session) || 'is working'}…`);
   const usage = session?.usage;
   const total = usage?.total;
   const { contextWindow, contextTokens, contextKnown } = contextUsage(session);

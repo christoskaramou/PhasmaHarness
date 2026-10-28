@@ -387,6 +387,51 @@ Gate 24 code review (2026-10-20): four read-only reviewers covered every commit 
 - **Whose code:** the updater, update-gate (`src/runner.cjs`) and settings-tools (`src/settings-tools.cjs`) fixes change Codex's code, as do the approval dialog and Claude live input from the v0.2.1 work. The DeepSeek, Cursor, API-loop, Muse and Hub-admission fixes change Claude's Send now and restart commits (`ca06226`, `faadf3c`).
 - **Approvals:** a request that opens on its own focuses Decline (`ui/app.js` `renderRequest`). Opening one with Review keeps Enter-to-allow. Smoke: "Approvals that open on their own focus Decline".
 - **Claude live input:** a follow-up that is never echoed, or whose write fails, leaves `deliveries` after `DELIVERY_MS` (30 s), so a finished turn closes stdin instead of hanging with a live process. Send now on a Claude turn without live input (it is finishing) leaves the message queued instead of restarting and dropping the saved Claude session.
+- **Claude background tasks hold the turn (fixed 2026-10-28):**
+  - **Symptom.** The user reported "stuck here and send now is not working". The PhasmaEngine bot had answered at 18:56, but its chat stayed "running" for an hour with "status" queued.
+  - **Cause.** The bot's own background command (`while (Get-Process dota2) { Start-Sleep 30 }`, `run_in_background`) kept the CLI alive. Harness had closed Claude's input at the `result`, so `liveInput` was null and Send now took the Claude "finishing" path (the message stayed queued).
+  - **What the real CLI does** (2.1.309, Haiku probe; the same for Bash `run_in_background` and Monitor):
+    - after `result` it keeps running while any task is live;
+    - it emits `system`/`background_tasks_changed` with the full live set (REPLACE semantics, an `ambient` flag for the CLI's own watchers);
+    - when the task ends it sends `task_notification`, runs one more turn, emits a second `result`, then exits, even with stdin already closed.
+  - **Fix.** `ClaudeCLI.run` (`src/providers/claude.cjs`, `closeIfIdle`) keeps input open after a result while any non-ambient task is live, so Send now and queued messages reach Claude. It closes input once Claude is idle (the last event was a result, not an echoed follow-up), no delivery is pending and the set is empty.
+  - **Limit.** The chat still shows "running" and holds the bot's busy slot until the task ends. The working line then reads "… is waiting on N background tasks" (below).
+  - **Verified.**
+    - Fake-process tests "Claude takes follow-ups while a background task runs…" and "a background task that ends while Claude answers…" in `tests/claude-permissions.test.cjs` both fail on the old close-at-result logic.
+    - Real CLI through `ClaudeCLI.run` (Haiku, background `sleep 25`): a follow-up sent after the first result was answered at 20 s, input closed when the set emptied at 42 s, and the run resolved after the "bg done" wake-up turn at 44 s.
+- **Running tasks list (added 2026-10-28):**
+  - **What it shows.** Above the message box, each task the bot has running, with an Output toggle and its own Stop:
+    - Claude: background commands, Monitors and background subagents.
+    - Codex: commands that have run 5 s or longer. Shorter ones would only flash by.
+  - **Claude.**
+    - The list comes from `background_tasks_changed` (`Controller.trackBackground`, the `background` map, never saved, cleared when the turn ends).
+    - Output and Stop are CLI control requests sent over the open input (`control` in `ClaudeCLI.run`, matched by `request_id`): `get_task_output` returns the last 8 KiB and `stop_task` ends one task.
+    - Real CLI 2.1.309: both work without an `initialize`. `stop_task` ended a 60 s task at 14 s with no further turn, and the run then resolved.
+  - **Codex.**
+    - The list is the chat's in-progress `commandExecution` items with a `processId`; output is their `aggregatedOutput`.
+    - Stop is `thread/backgroundTerminals/terminate`. Real Codex 0.164: `thread/backgroundTerminals/list` showed the running command, and `terminate` returned `{terminated:true}`. The item ended as `failed` and the turn went on to its answer.
+    - Commands Codex detaches itself (`Start-Process`) are tracked by neither Codex nor Harness.
+  - **Other providers.** Cursor and DeepSeek run as ACP with `terminal: false`, so their commands stay inside their own agent. Muse, Antigravity and the API loop report no background work.
+    - The `tasks` capability (`src/providers/capabilities.cjs`) is set only for Codex and Claude.
+    - While a chat on any other provider works, the list area says "This provider does not report its background tasks, so any it leaves running are not listed here." It doesn't show during routing or group turns.
+    - Covered by the "Providers without task reports say so" smoke phase, which saves `.scratch/unreported-tasks.png`.
+  - **Wiring.** `backgroundTask` IPC (`src/runner-commands.cjs`; Stop refused on a watched sub-bot), `Controller.backgroundTask`, `renderBackgroundTasks` in `ui/app.js`. Output is polled every 2 s only while open.
+  - **Tests.**
+    - "a Claude turn lists its background tasks…" and "a running Codex command shows its output…" (`tests/core.test.cjs`).
+    - "Harness asks the running Claude for a task's output…" (`tests/claude-permissions.test.cjs`).
+    - The "running tasks" phase of `tests/ui-startup-smoke.cjs`, which saves `.scratch/running-tasks.png`.
+  - **End to end (2026-10-28).** `.scratch/tasks-e2e.cjs` (git-ignored, built from the freeze bench) runs `createRunner`, the real window offscreen and the real IPC on a sanitized copy holding only the PhasmaEngine and Grok bots. It allows only the test's own `tick` command. All steps pass (`E2E_ONLY=claude`: 9/9; full run: 16/17, the one failure explained below).
+    - **Claude** (Haiku low, a background 120-tick loop):
+      - the row appears with Output and Stop, and the status reads "waiting on 1 background task";
+      - Output shows the real ticks and keeps updating;
+      - a follow-up sent on the same model went straight to Claude and was answered at 11 s while the loop ran;
+      - Stop removed the task at once, and the turn completed at 13 s with the Claude session kept.
+    - **Codex** (`gpt-5.6-terra:low`, a 60-tick PowerShell command):
+      - the command is not listed for its first seconds, then appears as "Running: …";
+      - Output shows ticks 1–5;
+      - Stop ended only the command (item `failed`), and the turn went on to answer at 22 s.
+    - **Cursor:** the note appears while it works and leaves when the turn ends.
+    - **Pitfall.** A queued message on a *different* model from the running turn (`flushLiveQueue` compares `mode` with `liveInputMode`) is not handed to the running Claude. It waits for its own turn, so a long background task holds it until Send now. In the full run the copy's composer sent on the bot's saved Opus xhigh while the turn ran Haiku; Send now delivered it in 2 s.
 - **DeepSeek and Cursor Send now:** after cleanup, `steer` refuses to prompt if the run already ended (Stop or failure during cleanup). The message then stays queued instead of counting as delivered on a closing connection.
 - **API loop:** a follow-up counts as delivered only after the model call carrying it succeeds. If that call fails it is rejected with "connection closed", so it stays queued as uncertain.
 - **Restart:** Hub-run tracked jobs now save `admittedAt` too (`Controller.markAdmitted`, called by `send` and `sendCoordinator`), so a crash cannot replay them.
@@ -431,6 +476,29 @@ Checked against `HEAD` `6741df5` plus the uncommitted prompt-cache and group-cha
 - **Fixed by the uncommitted prompt-cache work (live on the next restart of a checkout run, not in releases until committed):** a reloaded Codex thread no longer re-injects the full worker instructions every time (`codexInstructionHash`); Cursor, DeepSeek and Muse get the instructions once per session instead of in every prompt (`keptInstructions`); Hub kept conversations survive restarts and also work for CLI and API routers; API requests carry documented prompt-cache keys (`src/providers/prompt-cache.cjs`).
 - **Fixed 2026-10-25:** reply suggestions use the answer's model at its lowest available effort (`src/controller/suggestions.cjs`; a preset with no level counts as above the known ones), not the chat's effort; `handoff()` (backend switches and retained delegated chats) leaves out Codex progress notes (`phase: commentary`). Tests: "a reply suggestion uses the answer's model at its lowest available effort", "a handoff to another backend carries requests and final answers, not progress notes".
 - **Measured** from the user's stores (Oct 22-25, `routes[].turnUsage`): Claude bot turns 92% cached (97% on later turns), Claude jobs 64%, Codex jobs 76% (78% on later turns). Two back-to-back Codex bot turns on one thread (PhasmaHarness bot, 2026-10-22 02:19) were 0% cached while input fell from 71k to 21k; cause unverified (a compaction or history rewrite is the likely one).
+- **CLI turns counted only what the final result reported (fixed 2026-10-28):** the PhasmaEngine bot's chat showed 18.2M input tokens while its Claude transcripts held 52.4M. Checked turn by turn against the transcripts: each completed Claude turn's `result.usage` equals the sum of its main-conversation calls (deduplicated by message id; for example 3,011,921 / 27,044 both ways), but it leaves out subagent calls (one 35-call subagent, 3.6M input), and cancelled turns recorded nothing (0.8M and 6.6M). Subagent events do reach `onEvent` (all 36 of that subagent's tool ids were in the chat items). `sendCLI` (`src/controller.cjs`) now keeps each streamed call's usage by message id, counting `message_start` too, so a call cut off by Stop counts its input. It adds only what changed since its last count to `session.usage.total`, so other writers such as the coordinator's `recordUsage` keep theirs, and keeps `route.turnUsage` live. A stopped turn keeps what it streamed. At the end the result tops up the main-conversation calls (those without `parent_tool_use_id`) to its exact counts, or is the whole count when nothing streamed (Muse, Antigravity), and the turn's usage also becomes `budgetFinalUsage` for the job budget. Output counts (found live the same day on the "Bench Opus" bot, 9 calls: 59 output recorded against 8.1k in its transcript): Claude's `assistant` events carry the output count at the time each was sent, while the transcript keeps the final one. So each call keeps its largest output count, the stream's `message_delta` raises the current call to its final count, and the result tops up the rest. Subagent calls send neither `message_delta` nor a result of their own, so their output stays undercounted (the probe below: 1 streamed against 4 in the transcript), while their input is exact. Codex was already counted live through `thread/tokenUsage/updated`. Tests: tests/core.test.cjs "Claude token counts include subagent calls, update while the turn runs and keep a stopped turn’s calls" (its live, subagent and stop checks each fail on the old code), "Claude output tokens come from message_delta and the result, not the partial counts on assistant events" (fails on the first version of this fix) and "traced worker tokens cover the whole turn…", whose fake calls now add up to the fake result as real ones do; pool test `cli-token-counts`. Real stream check (2026-10-28, Claude Code 2.1.311, one Haiku turn through `ClaudeCLI.run` that started one Agent call): `message_start` carries usage under the same message id as its `assistant` events. The subagent's `assistant` event carries usage with `parent_tool_use_id` set (29,513 input), but its calls send no `message_start`, so a subagent call cut off by Stop still goes uncounted. The three main calls streamed 120,729 input tokens, and the stream total exceeded that by exactly the subagent's call. That Agent ran in the background, so the CLI emitted two results: calls 1-2, then call 3 after the task notification. `claude.cjs` adds results together only with live input (which Harness passes); without it, the last result held call 3 alone (40,938). Not checked in the live app. The `total_cost_usd` question is settled in the next entry.
+- **Completed Claude turns count from Claude's cost tracker (2026-10-28):**
+  - **Test:** an end-to-end run through the real `Controller.sendCLI`, `ClaudeCLI` and `claude.exe` (Opus 5.5 xhigh). Raw output: `counter_test/out/raw-{A,B,C,D}.jsonl` in that session's scratchpad.
+  - **Streaming is exact for some turns:** a 10-call turn, and a stopped turn (plus the cut-off call's `message_start` input).
+  - **Streaming cannot give subagent totals:** the subagent's final call never streamed as an `assistant` event. Its usage was only in the parent's Agent `tool_use_result.usage`, which covers that one call. Turn B's stream held 98,856 in / 537 out against 123,272 / 1,666 in its transcripts.
+  - **`result.modelUsage` and `total_cost_usd` are Claude's cost tracker:**
+    - They cover every call of the Claude session, subagents included (123,272 = main 55,448 + subagent 67,824).
+    - They carry on across `--resume`: a resumed "Reply OK" turn reported cache reads 325,822 = 309,258 + 16,564 and cost $0.7418 = $0.4663 + that turn, while its `result.usage` was its own 50,574 / 4.
+    - So `route.providerEstimateUsd` was cumulative on every resumed chat; that is where the $14.64 for a 0.77M turn came from.
+    - `claude.cjs` also added `total_cost_usd` across the results of one process, counting it twice.
+  - **Now:**
+    - `trackedTurn` (`src/controller.cjs`) takes a completed Claude turn's usage and cost as the change in the tracker since the session's previous completed run. Input is input + cache read + cache write over all models; cached is cache read; output is output.
+    - The running totals are kept in `claudeUsageBase` with their session id, and a new session starts from zero.
+    - The result replaces the streamed count (`turnUsage`, `budgetFinalUsage`, `providerEstimateUsd`, and the chat total by the difference).
+    - Compaction (`compactClaude`) counts its own change and moves the totals on.
+    - Live display and stopped or failed turns still use the streamed count.
+    - When the change is unknown, Harness keeps the streamed count and the old cumulative cost for that turn and saves the totals, so the next turn is exact. It is unknown for a resumed session with no saved totals (chats from before this change), a session that came back under a different id, or totals that went down.
+    - With several results in one process (live queue), `claude.cjs` still adds the per-result `usage` and now leaves the last result's `total_cost_usd` and `modelUsage`.
+  - **Tests:**
+    - tests/core.test.cjs "a completed Claude turn counts the change in Claude's cost tracker…" and "a resumed Claude session without saved totals keeps the streamed count once…" (both use the real A/B/D numbers);
+    - tests/claude-permissions.test.cjs "several Claude results in one process add their usage but keep the last running cost and model totals".
+    - All three fail with the tracker unused and the cost added up.
+  - **Unverified:** that `modelUsage` is the running total in later results of a live-queue process (assumed from the resume behaviour). The live-queue rerun (E) checks it.
 - **Open:** API-provider chats cannot compact (`capabilities` `compact: false`), so their full history, tool output included, goes out on every request; a retained delegated chat still injects its whole task and final answers once (`retainDelegatedChat`, no size cap); a workspace without `PhasmaHarness.md` sends every nested instruction file found under it on every worker turn and walks the tree synchronously each time project rules are read (537 ms for `C:\Users\Christos\repos`, 152 ms for AgainstTheHero), several times per turn; PhasmaEngine's consolidated `PhasmaHarness.md` is 27 KB (~6.8k tokens) on every worker turn.
 
 ## Provider entry files point to PhasmaHarness.md (2026-10-25, at the user's request)
@@ -467,6 +535,43 @@ Measured on a copy of the user's stores (main + 13 bots + worker contexts, 20 co
 - **"Unknown provider" after connecting Claude:** Settings asks every provider it connects for its models (`loadDiscoveredModels`), and `providerModels` (`src/runner-commands.cjs`) had no `claude-cli` case. It now returns Claude's models (`tests/runner-commands.test.cjs`).
 - **Reply suggestion "you got cut off":** `replySuggestion` sent each message clipped to its first 1,500 characters with no marker, so a longer answer looked unfinished and the suggestion asked the bot to finish. Long messages now keep their first 500 and last 1,000 characters with the omission marked.
 - Test cases: `tests/cursor-diff-compaction.test.cjs` (compaction edge cases, load-time migration with backup, scan order and staged/unstaged text) and `tests/state-throttle.test.cjs` (updates and bounded saves during a 20 ms stream, one journal handle across saves, fleet pushes at least 100 ms apart ending on the final state); `tests/reply-suggestions.test.cjs` covers the long-answer excerpt.
+- **Freezes with real providers (fixed 2026-10-28, user: "when agents replying or start replying or connecting… the harness is freezing for a bit"):**
+  - **Bench:** `.scratch/freeze-bench.cjs` (ignored by git). It boots `createRunner` (real controllers, Agents, providers, connectors, Jev), the `trimFleet` relay and the real UI, on a sanitized copy of the user's data:
+    - no jobs, workers, queues or provider session ids; browser access off;
+    - every path into the live data folder rewritten to the copy, because old job chats keep workspaces in `Phasma Harness\jobs`;
+    - kills of any process that existed before the run are refused;
+    - tool approvals are declined automatically.
+  - **Scenarios:** `runner.initialize()` as `main.cjs` does, then Claude CLI (haiku) in a new chat and in a copy of the user's 605-item PhasmaEngine chat, then Cursor. The bench records 5 ms main-process and window gap probes plus CPU profiles per phase. Run with `node_modules/electron/dist/electron.exe .scratch/freeze-bench.cjs`, `ELECTRON_RUN_AS_NODE` unset, `BENCH_OUT=<json>`, `BENCH_SCENARIOS=claude,claude-bigchat,cursor`.
+  - **Cause, by CPU profile:** every window update builds every bot's snapshot (about 20). Each snapshot rebuilt the provider catalog once per preset, because `presets` called `planPreset()` for each one and, on a free or Go ChatGPT plan, every call builds the catalog (83 builds per snapshot). The same snapshot also:
+    - hashed the 236 KB benchmark table (`id`) and re-filtered it per model (`summary`);
+    - checked each API key file on disk (`JevKey.configured`; `Providers.key()` makes a new key object per call).
+  - **Start-up:** each bot searched PATH for the native CLIs and re-read the Codex skill folders while its own Codex app-server started (21 at once).
+  - **Fixes:**
+    - `snapshot()` builds the catalog and plan check once (`planPreset(catalog)`).
+    - `BenchmarkStore` caches `id` and a lookup index until `replace()`.
+    - Key-file existence is remembered per file for the process; `save()` and `remove()` keep it current.
+    - `findNativeCLI` (live environment only) and Codex's `withoutPersonalSetup` reuse their answer for 10 s.
+    - A controller under Agents no longer builds the snapshot its `state` event used to carry; only standalone controllers' listeners get one.
+    - Switching workspace asks `browseWorkspace(..., 'repository')` (one `git rev-parse`) instead of a full `git status --untracked-files=all`.
+    - `send()` waits for Codex only for Codex turns, Auto and Hub; a Claude, Cursor or native/API turn starts while Codex connects. Before, sends were refused for 31-63 s after launch in the bench.
+  - **Before** (v0.3.17 worktree) **→ after**, two alternating runs each, main process:
+
+    | Phase | Before | After |
+    |---|---|---|
+    | Claude send → first text | 2.15/2.31 s blocked, 8 blocks >100 ms | 0.93/0.92 s, 0 |
+    | Claude streaming | 0.81/1.01 s, 5 blocks | 0.48/0.42 s, 0 |
+    | Big-chat streaming | 9.0/6.4 s over 53/45 s, 56/34 blocks | 4.8/3.6 s over 63/53 s, 1/0 |
+    | Cursor send | one 3.1/2.9 s block | longest 0.20/0.14 s |
+    | initialize → Codex ready | 12.9/9.9 s, 27 blocks, longest 2.3 s | 7.3/5.8 s, 7 blocks, longest 0.71/0.60 s |
+    | Switching to a bot | 0.61 s, 2 blocks | 0.18-0.21 s, 0 |
+
+    A third "after" run with the last fixes had 0 blocks over 100 ms while streaming; the longest big-chat block was 74 ms. The window's own gaps stayed under 100 ms while streaming throughout.
+  - **Still open:**
+    - 21 Codex app-servers start at launch, one per bot: about 1.2 s of process creation, since Windows `spawn` blocks.
+    - Start-up before the window shows: about 2 s, including a 1.4-1.6 s block (store reads, backups, the document reader).
+    - Each update re-sends the whole changed chat to the window: about 10 ms/s while streaming in a 605-item chat.
+    - `withoutImages` walks every chat on each snapshot (about 4 ms/s). A cache keyed on revisions would repeat the stale-snapshot problem of the removed 10-27 cache.
+  - **Tests:** `tests/core.test.cjs` "a snapshot builds the model catalog a fixed number of times…" (7 builds now; 83 when the plan check runs per preset) and "a Claude turn does not wait for Codex to connect…" (fails with the old gate). Test pool: `responsiveness`. Full suite: 1077 tests, 1073 passed, 4 skipped; UI smoke passed.
 
 ## Concurrent host checks
 

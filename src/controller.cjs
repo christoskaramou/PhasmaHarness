@@ -35,6 +35,54 @@ const processTree = require('./process-tree.cjs');
 const { prepare: prepareFiles } = require('../ui/attachments.js');
 const { CONTEXT_INSTRUCTIONS, ACCESS_MODES, sameEffort, DEFAULT_ROUTER, sessionAllowKey, accessMode, isMcpConfirmation } = require('./controller/shared.cjs');
 const groupChats = require('./group-chats.cjs');
+const { normalizedUsage } = require('./job-budgets.cjs');
+
+// Token counts summed over model calls; an unknown cached count stays unknown.
+function sumUsage(counts) {
+  return counts.reduce((sum, item) => ({
+    inputTokens: sum.inputTokens + (item.inputTokens || 0),
+    cachedInputTokens: sum.cachedInputTokens === null || item.cachedInputTokens === null ? null : sum.cachedInputTokens + (item.cachedInputTokens || 0),
+    outputTokens: sum.outputTokens + (item.outputTokens || 0),
+  }), { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 });
+}
+
+// Claude's cost tracker (result.modelUsage, total_cost_usd) counts every call of a Claude session, subagents included,
+// and carries on across resumes, so a completed run is the change since the session's previous one. The running totals
+// are kept as claudeUsageBase. Returns null when the change is unknown: a resumed session with no saved totals (chats
+// from before they were kept) or that came back under another id, or totals that went down.
+function trackedTurn(session, result, resumed) {
+  const models = Object.values(result.modelUsage || {})
+    .filter(model => Number.isSafeInteger(model?.inputTokens) && Number.isSafeInteger(model?.outputTokens));
+  const sessionId = result.session_id || session.claudeSessionId;
+  if (!models.length || !sessionId)
+    return null;
+
+  const total = key => models.reduce((sum, model) => sum + (model[key] || 0), 0);
+  const now = {
+    sessionId,
+    inputTokens: total('inputTokens') + total('cacheReadInputTokens') + total('cacheCreationInputTokens'),
+    cachedInputTokens: total('cacheReadInputTokens'),
+    outputTokens: total('outputTokens'),
+    costUsd: Number.isFinite(result.total_cost_usd) ? result.total_cost_usd : null,
+  };
+  const saved = session.claudeUsageBase;
+  const known = sessionId === resumed && saved?.sessionId === resumed;
+  const base = !resumed ? { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, costUsd: 0 } : known ? saved : null;
+  session.claudeUsageBase = now;
+  if (!base)
+    return null;
+
+  const turn = {
+    inputTokens: now.inputTokens - base.inputTokens,
+    cachedInputTokens: now.cachedInputTokens - base.cachedInputTokens,
+    outputTokens: now.outputTokens - base.outputTokens,
+  };
+  if (Object.values(turn).some(count => count < 0))
+    return null;
+
+  const costUsd = now.costUsd === null || base.costUsd === null ? null : Math.max(0, now.costUsd - base.costUsd);
+  return { ...turn, costUsd };
+}
 
 class Controller extends EventEmitter {
   constructor(filename, defaultWorkspace, client = new CodexClient(), smartRouter = new SmartRouter(path.join(path.dirname(filename), 'router-workspace')), options = {}) {
@@ -116,6 +164,7 @@ class Controller extends EventEmitter {
     this.busy = null;
     this.stopping = new Set();
     this.activeTurns = new Map();
+    this.background = new Map(); // session id -> { tasks, idle }: a Claude turn's live background tasks, never saved
     this.timer = null;
     this.gate = null;
     this.gateDone = Promise.resolve();
@@ -247,8 +296,11 @@ class Controller extends EventEmitter {
   snapshot() {
     // Comparisons hold which run carries the change; the chat card gets a public view instead.
     const { jobBudgets, routines, comparisons, ...visibleData } = this.data;
+    // Built once per snapshot: every bot's snapshot runs on each window update, and the plan check reads the catalog too.
+    const catalog = this.catalog();
+    const plan = this.planPreset(catalog);
     return {
-      benchmarks: this.smartRouter.benchmarks?.summary(this.catalog().filter(p => p.worker && p.enabled && this.available(p))),
+      benchmarks: this.smartRouter.benchmarks?.summary(catalog.filter(p => p.worker && p.enabled && this.available(p))),
       cursor: { ...this.cursor.status, enabled: this.data.settings.cursorEnabled !== false },
       claude: { ...this.claude.status, enabled: !!this.data.settings.claudeEnabled, quotaAccountKey: this.claude.accountKey?.() || null },
       nativeCLIs: Object.fromEntries([...this.nativeCLIs].map(([id, backend]) => [id, {
@@ -259,8 +311,8 @@ class Controller extends EventEmitter {
       coordinator: this.isCoordinator(), hubMode: this.data.hubMode || null,
       connectingProviders: [...new Set([...this.connectingProviders.keys(), ...(this.chatgptLoginPending ? ['codex'] : [])])],
       chatgptLoginPending: this.chatgptLoginPending,
-      ...visibleData, settings: { ...this.data.settings, mode: this.planPreset() ? 'auto' : this.data.settings.mode }, planRouting: this.planPreset(), connection: this.connection, error: this.error, account: this.account, busy: this.busy,
-      sessions: this.data.sessions.map(({ groupChatContext, coordinatorConversation, ...session }) => withoutImages({ ...session, tasks: (session.tasks || []).map(({ inputImages, ...task }) => task) })),
+      ...visibleData, settings: { ...this.data.settings, mode: plan ? 'auto' : this.data.settings.mode }, planRouting: plan, connection: this.connection, error: this.error, account: this.account, busy: this.busy,
+      sessions: this.data.sessions.map(({ groupChatContext, coordinatorConversation, ...session }) => withoutImages({ ...session, background: this.background.get(session.id), tasks: (session.tasks || []).map(({ inputImages, ...task }) => task) })),
       routing: this.routing, routingProvider: this.routingProvider, routerModel: this.routingProvider === 'jev' ? this.smartRouter.jev?.model || JEV_MODEL : this.routerChoices().find(p => p.id === this.data.settings.routerPreset)?.model || null,
       jev: { configured: !!this.smartRouter.jev?.configured, keySaved: !!(this.smartRouter.jev?.keyStore?.configured ?? this.smartRouter.jev?.configured), enabled: this.data.settings.jevEnabled !== false, model: this.smartRouter.jev?.model || null, requestedModel: JEV_MODEL, compare: this.jevCompare?.summary() || null, health: this.smartRouter.jev?.health || null },
       helperCapabilities: {
@@ -280,11 +332,10 @@ class Controller extends EventEmitter {
         canAllowSession: this.helperApprovals.has(request.id) ? this.approvalKeys.has(request.id)
           : /^item\/(commandExecution|fileChange|permissions)\/requestApproval$/.test(request.method),
       })),
-      providerCatalog: this.catalog().map(p => ({ ...p, available: this.available(p) })),
+      providerCatalog: catalog.map(p => ({ ...p, available: this.available(p) })),
       providers: (this.data.settings.providers || []).map(p => ({ ...p, configured: !!this.providers?.configured(p.id) })),
       nativeModels: this.models,
-      presets: this.catalog().filter(p => p.worker).map(p => {
-        const plan = this.planPreset();
+      presets: catalog.filter(p => p.worker).map(p => {
         const planMatch = plan && p.model === plan.model && p.effort === plan.effort;
         return { ...p, available: (!plan || planMatch || p.id === plan.id) && this.available(p) };
       }),
@@ -328,7 +379,8 @@ class Controller extends EventEmitter {
       const wait = 1000 - (Date.now() - (this.savedAt || 0));
       if (wait <= 0) this.flushSave();
       else this.saveTimer ||= setTimeout(() => this.flushSave(), wait);
-      this.emit('state', this.snapshot());
+      // Under Agents the fleet update builds every bot's snapshot itself; only a standalone controller's listeners get one.
+      this.emit('state', this.agents ? undefined : this.snapshot());
     }, 100);
   }
 
@@ -633,7 +685,13 @@ class Controller extends EventEmitter {
     if (!['auto', 'on', 'off'].includes(task)) throw new Error('Invalid task mode.');
     if (task === 'auto') task = 'on'; // Existing queued messages use the new default.
     if (this.blockedReason()) throw new Error(this.blockedReason());
-    if (this.connection !== 'ready') throw new Error(this.error || 'Codex is still connecting.');
+    // Codex turns, Auto routing and Hub need Codex; a turn on Claude, Cursor or another provider does not wait for it (every
+    // bot starts its own app-server, which can take tens of seconds after launch).
+    const chosenProvider = (mode || this.data.settings.mode) === 'auto' ? null : this.resolveWorker(mode || this.data.settings.mode)?.provider;
+    const withoutCodex = !this.isCoordinator() && !!chosenProvider && chosenProvider !== 'codex';
+    if (this.connection !== 'ready' && !withoutCodex)
+      throw new Error(this.error || 'Codex is still connecting.');
+
     if (!Array.isArray(images) || images.length > 4 || images.some(url => typeof url !== 'string' || !/^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(url)) || images.reduce((n, url) => n + url.length, 0) > 12 * 1024 * 1024) throw new Error('Invalid images: attach up to four PNG or JPEG images under 8 MB total.');
     if (typeof text !== 'string') throw new Error('Enter a message.');
     const attached = prepareFiles(text, files);
@@ -1035,8 +1093,27 @@ class Controller extends EventEmitter {
     const setup = this.runSetup(session, selected, session.agentReplyCancelledActive ? 'read-only' : session.access, task);
     if (api)
       session.apiSetupInstructions = setup.instructions;
-    session.routes.push({ ...selected, at: Date.now(), messageId: clientId, turnId, budget: submission.budget, setup });
+    const turnRoute = { ...selected, at: Date.now(), messageId: clientId, turnId, budget: submission.budget, setup };
+    session.routes.push(turnRoute);
     const assistantIds = new Set(); let current, lastUsage = null;
+    // Each model call's usage by message id, counted as it streams: a CLI's final usage leaves out subagent calls, and a
+    // stopped turn has none. Claude's assistant events carry the output count at the time they were sent; message_delta
+    // and the result carry the final one, but subagent calls send neither, so their output is undercounted.
+    const calls = new Map(), resumed = session[sessionKey];
+    let counted = sumUsage([]);
+    const countCalls = () => {
+      const turn = sumUsage([...calls.values()]);
+      const total = session.usage?.total || {};
+      // Only what changed since the last count is added, so usage recorded elsewhere meanwhile stays.
+      session.usage = { ...session.usage, total: {
+        inputTokens: (total.inputTokens || 0) + turn.inputTokens - counted.inputTokens,
+        cachedInputTokens: total.cachedInputTokens === null || turn.cachedInputTokens === null ? null
+          : (total.cachedInputTokens || 0) + turn.cachedInputTokens - (counted.cachedInputTokens || 0),
+        outputTokens: (total.outputTokens || 0) + turn.outputTokens - counted.outputTokens,
+      } };
+      counted = turn;
+      turnRoute.turnUsage = turn;
+    };
     const assistant = id => {
       let item = session.items.find(i => i.id === id);
       if (!item) { item = { id, turnId, type: 'agentMessage', text: '', phase: 'final_answer', routeLabel: selected.label, localOnly: true, createdAt: Date.now() }; session.items.push(item); }
@@ -1061,9 +1138,10 @@ class Controller extends EventEmitter {
         call: (name, args, signal) => this.bridgeTool(session.id, name, args, signal) } : undefined;
       const result = await runtime.run({
         provider: selected.provider, bridge,
-        ...(capabilities(selected.provider).liveQueue || capabilities(selected.provider).liveSteer ? { onInput: input => {
+        ...(capabilities(selected.provider).liveQueue || capabilities(selected.provider).liveSteer ? { onInput: (input, control) => {
           if (session.submission !== submission) return;
           this.liveInput = input;
+          this.liveControl = input && control || null;
           this.liveInputCaps = capabilities(selected.provider);
           this.liveInputMode = session.items.find(item => item.clientId === clientId)?.requestedMode;
           if (input) setImmediate(() => this.flushLiveQueue(session));
@@ -1097,14 +1175,32 @@ class Controller extends EventEmitter {
           if (session.submission !== submission || submission.state === 'completed') return;
           if (event.type === 'assistant' || (event.type === 'stream_event' && event.event?.type === 'message_start')) this.agents?.executionAccepted?.(this, session, submission);
           if (event.session_id) session[sessionKey] = event.session_id;
+          if (event.type === 'system' && event.subtype === 'background_tasks_changed' && Array.isArray(event.tasks))
+            this.trackBackground(session.id, event.tasks);
+          if (this.background.has(session.id) && (event.type === 'result' || event.type === 'assistant'))
+            this.background.get(session.id).idle = event.type === 'result';
           if (event.type === 'stream_event') {
             const e = event.event;
             if (e.type === 'message_start') current = e.message.id;
             if (e.type === 'content_block_delta' && e.delta.type === 'text_delta') assistant(current || `${turnId}-answer`).text += e.delta.text;
           }
+          // message_start already carries a call's input, so a call cut off by Stop still counts.
+          const called = event.type === 'assistant' ? event.message : event.type === 'stream_event' && event.event?.type === 'message_start' ? event.event.message : null;
+          const counts = normalizedUsage(called?.usage);
+          if (counts) {
+            lastUsage = counts;
+            const outputTokens = Math.max(counts.outputTokens, calls.get(called.id)?.outputTokens || 0);
+            calls.set(called.id, { ...counts, outputTokens, subagent: !!event.parent_tool_use_id });
+            countCalls();
+          }
+
+          const finalOutput = event.type === 'stream_event' && event.event?.type === 'message_delta' ? event.event.usage?.output_tokens : null;
+          if (Number.isSafeInteger(finalOutput) && calls.has(current)) {
+            const call = calls.get(current);
+            call.outputTokens = Math.max(call.outputTokens, finalOutput);
+            countCalls();
+          }
           if (event.type === 'assistant') {
-            const u = event.message?.usage;
-            if (u) lastUsage = { inputTokens: u.total_input_tokens ?? ((u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0)), cachedInputTokens: u.cache_read_input_tokens ?? null, outputTokens: u.output_tokens || 0 };
             const content = event.message?.content || [];
             const body = content.filter(c => c.type === 'text').map(c => c.text).join('\n');
             if (body) assistant(event.message.id || current || `${turnId}-answer`).text = body;
@@ -1128,30 +1224,45 @@ class Controller extends EventEmitter {
       });
       this.agents?.executionAccepted?.(this, session, submission);
       if (!assistantIds.size && result.result) assistant(`${turnId}-answer`).text = result.result;
-      const usage = result.usage || {};
-      const reported = result.usage && typeof result.usage === 'object' && ['input_tokens', 'output_tokens'].some(key => Number.isFinite(result.usage[key]));
-      const total = session.usage?.total || {};
+      // Claude's cost tracker gives the whole turn, subagents included (see trackedTurn). Otherwise the result counts the
+      // main conversation exactly, so it tops up streamed counts that fell short; it is the whole count for providers that
+      // report usage only there (Muse, Antigravity).
+      const tracked = backend === 'claude' ? trackedTurn(session, result, resumed) : null;
+      const reported = normalizedUsage(result.usage);
+      if (tracked) {
+        calls.clear();
+        calls.set(null, tracked);
+        countCalls();
+      } else if (reported) {
+        const streamed = sumUsage([...calls.values()].filter(call => !call.subagent));
+        const cachedMissing = reported.cachedInputTokens === null || streamed.cachedInputTokens === null ? null
+          : Math.max(0, reported.cachedInputTokens - streamed.cachedInputTokens);
+        calls.set(null, {
+          inputTokens: Math.max(0, reported.inputTokens - streamed.inputTokens),
+          cachedInputTokens: cachedMissing,
+          outputTokens: Math.max(0, reported.outputTokens - streamed.outputTokens),
+        });
+        countCalls();
+      }
+
       // The context window of the model that did the most input work (background helper models are smaller).
       const main = Object.values(result.modelUsage || {}).filter(m => Number.isFinite(m?.contextWindow))
         .sort((a, b) => ((b.inputTokens || 0) + (b.cacheReadInputTokens || 0)) - ((a.inputTokens || 0) + (a.cacheReadInputTokens || 0)))[0];
-      session.usage = reported || lastUsage ? {
-        total: {
-          inputTokens: (total.inputTokens || 0) + (usage.total_input_tokens ?? ((usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0))),
-          cachedInputTokens: total.cachedInputTokens === null || usage.cache_read_input_tokens == null ? null : (total.cachedInputTokens || 0) + usage.cache_read_input_tokens, outputTokens: (total.outputTokens || 0) + (usage.output_tokens || 0)
-        },
-        ...(lastUsage ? { last: { ...lastUsage, totalTokens: lastUsage.inputTokens + lastUsage.outputTokens } } : {}),
+      session.usage = calls.size ? {
+        total: session.usage.total,
+        ...(lastUsage ? { last: lastUsage } : {}),
         ...(main ? { modelContextWindow: main.contextWindow } : {}),
-        ...(result.usageIncomplete || session.usage?.incomplete ? { incomplete: true } : {}),
-        ...(result.cacheUsageUnknown || session.usage?.cacheUnknown ? { cacheUnknown: true } : {}),
+        ...(result.usageIncomplete || session.usage.incomplete ? { incomplete: true } : {}),
+        ...(result.cacheUsageUnknown || session.usage.cacheUnknown ? { cacheUnknown: true } : {}),
       } : { ...session.usage, incomplete: true };
-      // The whole turn (every model call in it), for the decision trace; `last` above is only its final call.
-      // A provider that reports no usage (Cursor) keeps it unknown, never zero.
+      // turnUsage holds the whole turn (every model call in it, subagents included) for the decision trace and the job
+      // budget; `last` above is only its final call. A provider that reports no usage (Cursor) keeps it unknown, never zero.
       const route = session.routes.find(item => item.messageId === clientId);
-      if (route) route.budgetFinalUsage = result.usageIncomplete ? null : result.usage ?? null;
-      if (route && Number.isFinite(result.total_cost_usd) && result.total_cost_usd >= 0)
-        route.providerEstimateUsd = result.total_cost_usd;
-      if (route && reported) route.turnUsage = { inputTokens: usage.total_input_tokens ?? ((usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0)),
-        cachedInputTokens: usage.cache_read_input_tokens ?? null, outputTokens: usage.output_tokens || 0 };
+      if (route)
+        route.budgetFinalUsage = result.usageIncomplete ? null : route.turnUsage ?? result.usage ?? null;
+      const costUsd = tracked ? tracked.costUsd : result.total_cost_usd;
+      if (route && Number.isFinite(costUsd) && costUsd >= 0)
+        route.providerEstimateUsd = costUsd;
       if (result.permission_denials?.length) outcome.error = 'Some Claude tool calls were declined or not permitted under the selected access. Review the response before changing access.';
     } catch (error) { outcome = { status: abort.signal.aborted ? 'interrupted' : 'failed', error: error.message, limit: abort.signal.aborted ? null : error.limit }; }
     finally {
@@ -1164,6 +1275,8 @@ class Controller extends EventEmitter {
       }
       else { session[lastKey] = null; session[sessionKey] = null; }
       this.cliAbort = null; this.liveInput = null; this.liveInputCaps = null; turnOver = true;
+      this.liveControl = null;
+      this.background.delete(session.id);
       // An approval still open when the CLI turn ends can no longer be used.
       for (const [id, resolve] of this.helperApprovals) if (id.startsWith('cli-')) { resolve(false); this.requests.delete(id); this.helperApprovals.delete(id); this.approvalKeys.delete(id); }
       this.finishTurn(session, submission, outcome);
@@ -1292,6 +1405,44 @@ class Controller extends EventEmitter {
     this.queuedMessage(session.id, message.id, 'live').catch(() => {});
   }
 
+  // Claude's background_tasks_changed lists every live task; ambient ones are the CLI's own watchers, not the bot's work.
+  trackBackground(sessionId, tasks) {
+    const known = new Map((this.background.get(sessionId)?.tasks || []).map(task => [task.id, task]));
+    const live = tasks.filter(task => task && !task.ambient).map(task => known.get(task.task_id) || {
+      id: task.task_id, description: task.description || '', type: task.task_type, agent: task.subagent_type || null, startedAt: Date.now(),
+    });
+    if (live.length)
+      this.background.set(sessionId, { tasks: live, idle: !!this.background.get(sessionId)?.idle });
+    else
+      this.background.delete(sessionId);
+  }
+
+  // Reads the end of a running task's output, or stops that one task while the rest of the turn goes on: a Claude
+  // background task by its task id, or a running Codex command by its process id.
+  async backgroundTask(id, taskId, action) {
+    if (!['output', 'stop'].includes(action))
+      throw new Error('Invalid background task action.');
+
+    const session = this.session(id);
+    const command = session.items.find(item => item.type === 'commandExecution' && item.status === 'inProgress' &&
+      item.processId === taskId && item.turnId === this.activeTurns.get(id));
+    if (command) {
+      const output = command.aggregatedOutput || '';
+      if (action === 'output')
+        return { output: output.slice(-8192), truncated: output.length > 8192 };
+      await this.client.call('thread/backgroundTerminals/terminate', { threadId: session.threadId, processId: taskId }, 5000);
+      return;
+    }
+
+    const task = this.background.get(id)?.tasks.find(item => item.id === taskId);
+    if (!task || this.busy !== id || !this.liveControl)
+      throw new Error('This task has already ended.');
+
+    if (action === 'output')
+      return this.liveControl({ subtype: 'get_task_output', task_id: taskId });
+    await this.liveControl({ subtype: 'stop_task', task_id: taskId });
+  }
+
   // What shaped this worker run (src/setup-fingerprint.cjs), from the values this turn actually hands the provider.
   // `kept` can override instruction hashes for a recorded setup, or is null when
   // that earlier set is unknown. Per-job context (copy paths, resume notes) is left out so identical setups match.
@@ -1361,11 +1512,16 @@ class Controller extends EventEmitter {
       let refusal = this.readyToStart(session);
       if (refusal?.then) refusal = await refusal; // awaited only when it waited, so timing is unchanged otherwise
       if (refusal) throw new Error(refusal.blocked || 'Compaction was stopped before starting.');
-      await this.claude.run({
-        cwd: this.workspace(session.workspace), model, prompt: '/compact', resume: session.claudeSessionId, access: 'read-only',
+      const resumed = session.claudeSessionId;
+      const result = await this.claude.run({
+        cwd: this.workspace(session.workspace), model, prompt: '/compact', resume: resumed, access: 'read-only',
         signal: abort.signal, instructions: this.workerInstructions(session, 'claude-cli'),
         onEvent: event => { if (event.session_id) session.claudeSessionId = event.session_id; },
       });
+      // Compaction calls count too, and move the session's running totals on so the next turn excludes them.
+      const tracked = trackedTurn(session, result || {}, resumed);
+      if (tracked)
+        session.usage = { ...session.usage, total: sumUsage([session.usage?.total || {}, tracked]) };
       session.notice = 'Context compacted. The visible chat history is retained.';
       session.lastCompactedAt = Date.now();
       if (session.usage) delete session.usage.last;

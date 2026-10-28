@@ -140,11 +140,18 @@ async function discoverCodex() {
 // Codex 0.163 has no switch for ~/.codex/AGENTS.md or the saved approvals in ~/.codex/rules.
 // shortcut: of the user's other [features] flags only memories differed from Codex's defaults (2026-10-22); pin any
 // new personal flag here if one starts to change how bots work.
+// shortcut: every bot starts its own app-server, so start-up read the skill folders once per bot; the answer for the same
+// folders is kept for 10 s, so a skill added in that window stays on in app-servers started during it.
+let recentSetup = null;
 function withoutPersonalSetup() {
   const roots = [
     path.join(os.homedir(), '.agents', 'skills'),
     path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'skills'),
   ];
+  const key = roots.join('\n');
+  if (recentSetup?.key === key && Date.now() - recentSetup.at < 10000)
+    return recentSetup.args;
+
   const skills = roots.flatMap(root => {
     let names = [];
     try {
@@ -159,6 +166,7 @@ function withoutPersonalSetup() {
     '-c', 'personality="none"'];
   if (off.length)
     args.push('-c', `skills.config=[${off.join(', ')}]`);
+  recentSetup = { key, at: Date.now(), args };
   return args;
 }
 

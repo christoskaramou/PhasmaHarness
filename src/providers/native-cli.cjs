@@ -17,7 +17,31 @@ function executableOnPath(name, env = process.env, platform = process.platform) 
   return null;
 }
 
+// shortcut: every bot has its own native backends, so start-up searched PATH (a stat per folder) once per bot and CLI.
+// The live environment's answer is kept for 10 s; a CLI installed in that window shows on the next check after it.
+const recentFinds = new Map();
 function findNativeCLI(id, env = process.env, platform = process.platform) {
+  if (env !== process.env || platform !== process.platform)
+    return searchNativeCLI(id, env, platform);
+
+  const recent = recentFinds.get(id);
+  if (recent && Date.now() - recent.at < 10000) {
+    if (recent.error)
+      throw recent.error;
+    return recent.found;
+  }
+
+  try {
+    const found = searchNativeCLI(id, env, platform);
+    recentFinds.set(id, { at: Date.now(), found });
+    return found;
+  } catch (error) {
+    recentFinds.set(id, { at: Date.now(), error });
+    throw error;
+  }
+}
+
+function searchNativeCLI(id, env, platform) {
   const home = env.USERPROFILE || env.HOME || os.homedir();
   const local = env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
   const name = { 'antigravity-cli': 'agy', 'muse-cli': 'muse', 'deepseek-cli': 'dsh' }[id];

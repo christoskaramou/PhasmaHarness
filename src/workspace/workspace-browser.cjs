@@ -67,6 +67,15 @@ async function browse(root, action, relative = '', kind = '') {
     }
     return { entries, truncated: truncated || pending.length > 0 };
   }
+  // Whether Git changes can be shown, without listing them (the window asks on every workspace switch).
+  if (action === 'repository') {
+    try {
+      await git(root, ['rev-parse', '--show-toplevel']);
+      return { available: true };
+    } catch {
+      return { available: false };
+    }
+  }
   if (action === 'changes') return changes(root);
   if (action === 'read') return preview(root, relative);
   if (action === 'list') {

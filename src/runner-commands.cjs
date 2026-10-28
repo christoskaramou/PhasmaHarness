@@ -122,6 +122,12 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
   handle('queuedMessage', (id, messageId, action) => {
     return agents.owner(id).queuedMessage(id, messageId, action);
   });
+  handle('backgroundTask', (id, taskId, action) => {
+    // Reading output is fine on a watched sub-bot chat; stopping a task changes its work.
+    if (action === 'stop' && agents.isSubBot(agents.profile(agents.owner(id).agentId)))
+      throw new Error(WATCH_ONLY);
+    return agents.owner(id).backgroundTask(id, taskId, action);
+  });
   handle('compact', id => agents.owner(id).compact(id));
   handle('replySuggestion', id => agents.owner(id).replySuggestion(id));
   handle('suggestWiki', id => agents.owner(id).suggestWiki(id));

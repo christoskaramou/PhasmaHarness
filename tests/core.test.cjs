@@ -7,6 +7,7 @@ const path = require('node:path');
 const { EventEmitter } = require('node:events');
 const { Controller } = require('../src/controller.cjs');
 const { MEASURED_REAP } = require('../src/tasks.cjs');
+const { trimFleet } = require('../ui/agent-state.js');
 
 class Fake extends EventEmitter {
   constructor() { super(); this.calls = []; this.seq = 0; this.turnIds = []; }
@@ -570,6 +571,75 @@ test('CLI late completion does not finish the turn twice', async t => {
   assert.equal(session.items.length, items);
   assert.equal(fake.turnIds.length, 1);
   assert.equal(controller.busy, session.id);
+});
+
+// 2026-10-28: a bot's background "wait until Dota closes" command held its chat for an hour with no way to see or stop it.
+test('a Claude turn lists its background tasks, reads and stops one, and drops them when the turn ends', async t => {
+  const { controller } = await setup(t);
+  const session = controller.create();
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  let request, finish;
+  controller.claude.run = value => new Promise(resolve => {
+    request = value;
+    finish = () => resolve({ result: 'done', usage: { input_tokens: 1, output_tokens: 1 } });
+  });
+  session.queue = [{ id: 'first', text: 'continue', images: [], mode: 'claude-cli:sonnet', task: 'on' }];
+  await controller.queuedMessage(session.id, 'first', 'send');
+  await flush();
+  const controls = [];
+  request.onInput(async () => {}, async value => {
+    controls.push(value);
+    return value.subtype === 'get_task_output' ? { output: 'tick\n', total_bytes: 5, truncated: false } : {};
+  });
+  // The window gets a chat again only when its mark changes (trimFleet), as the fleet update sends it (agents.cjs).
+  const sent = new Map();
+  const fleet = () => trimFleet({ agentStates: { main: { ...controller.snapshot(), stateRevision: controller.stateRevision || 0,
+    sharedRevision: controller.sharedRevision || 0, chatRevisions: Object.fromEntries(controller.chatRevisions || []) } } }, sent, false).agentStates.main;
+  fleet();
+  request.onEvent({ type: 'system', subtype: 'background_tasks_changed', tasks: [
+    { task_id: 'b1', task_type: 'local_bash', description: 'Wait until Dota 2 closes' },
+    { task_id: 'w', task_type: 'local_bash', description: 'CLI watcher', ambient: true }] });
+  request.onEvent({ type: 'result', result: 'Paused until Dota closes.' });
+
+  const relayed = fleet();
+  assert.equal(relayed.sessionsKept, undefined, 'a background change alone sends the chat to the window again');
+  const shown = relayed.sessions.find(chat => chat.id === session.id).background;
+  assert.equal(shown.idle, true, 'Claude answered; only its task is left running');
+  assert.deepEqual(shown.tasks.map(({ startedAt, ...task }) => task),
+    [{ id: 'b1', description: 'Wait until Dota 2 closes', type: 'local_bash', agent: null }], 'the CLI’s own ambient watcher is not listed');
+  assert.deepEqual(await controller.backgroundTask(session.id, 'b1', 'output'), { output: 'tick\n', total_bytes: 5, truncated: false });
+  await controller.backgroundTask(session.id, 'b1', 'stop');
+  assert.deepEqual(controls, [{ subtype: 'get_task_output', task_id: 'b1' }, { subtype: 'stop_task', task_id: 'b1' }]);
+  await assert.rejects(controller.backgroundTask(session.id, 'w', 'stop'), /already ended/);
+
+  finish();
+  await flush();
+  assert.equal(controller.snapshot().sessions.find(chat => chat.id === session.id).background, undefined);
+  await assert.rejects(controller.backgroundTask(session.id, 'b1', 'output'), /already ended/);
+});
+
+test('a running Codex command shows its output and stops on its own while the turn goes on', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  await controller.send({ id: session.id, text: 'Build it', mode: 'terra-light', task: 'off' });
+  const turnId = fake.turnIds[0];
+  // A crash can leave an earlier turn's command "inProgress"; it is not running, so it cannot be stopped by its old id.
+  session.items.push({ id: 'exec-0', turnId: 'turn-before', type: 'commandExecution', status: 'inProgress', command: 'npm run dev', processId: '7' });
+  await assert.rejects(controller.backgroundTask(session.id, '7', 'stop'), /already ended/);
+  controller.notification({ method: 'item/started', params: { threadId: session.threadId, turnId,
+    item: { id: 'exec-1', type: 'commandExecution', status: 'inProgress', command: 'ninja', processId: '4242' } } });
+  controller.notification({ method: 'item/commandExecution/outputDelta', params: { threadId: session.threadId, turnId, itemId: 'exec-1', delta: '[1/9] compile\n' } });
+
+  assert.deepEqual(await controller.backgroundTask(session.id, '4242', 'output'), { output: '[1/9] compile\n', truncated: false });
+  await controller.backgroundTask(session.id, '4242', 'stop');
+  assert.deepEqual(fake.calls.find(call => call.method === 'thread/backgroundTerminals/terminate').params, { threadId: session.threadId, processId: '4242' });
+  assert.equal(controller.busy, session.id, 'only the command stops');
+
+  controller.notification({ method: 'item/completed', params: { threadId: session.threadId, turnId,
+    item: { id: 'exec-1', type: 'commandExecution', status: 'failed', command: 'ninja', processId: '4242' } } });
+  await assert.rejects(controller.backgroundTask(session.id, '4242', 'stop'), /already ended/);
+  complete(controller, session, turnId);
 });
 
 // 2026-10-28: a queued message that started a Claude turn held queueSending for the whole turn, greying Send now.
@@ -2785,8 +2855,8 @@ test('traced worker tokens cover the whole turn, not only its last model call', 
   session.helperTools = false;
   // Claude: two model calls in one turn; the result carries the turn's total.
   controller.claude.run = async ({ onEvent }) => {
-    onEvent({ type: 'assistant', message: { id: 'm1', usage: { input_tokens: 100, output_tokens: 20 }, content: [{ type: 'tool_use', id: 't1', name: 'Read', input: {} }] } });
-    onEvent({ type: 'assistant', message: { id: 'm2', usage: { input_tokens: 150, cache_read_input_tokens: 50, output_tokens: 30 }, content: [{ type: 'text', text: 'Done.' }] } });
+    onEvent({ type: 'assistant', message: { id: 'm1', usage: { input_tokens: 100, cache_read_input_tokens: 50, output_tokens: 20 }, content: [{ type: 'tool_use', id: 't1', name: 'Read', input: {} }] } });
+    onEvent({ type: 'assistant', message: { id: 'm2', usage: { input_tokens: 100, cache_read_input_tokens: 50, output_tokens: 30 }, content: [{ type: 'text', text: 'Done.' }] } });
     return { result: 'Done.', usage: { input_tokens: 200, cache_read_input_tokens: 100, output_tokens: 50 } };
   };
   await controller.send({ id: session.id, text: 'read it', mode: 'claude-cli:sonnet', task: 'off' });
@@ -2828,6 +2898,223 @@ test('traced worker tokens cover the whole turn, not only its last model call', 
   complete(controller, codex, turn);
   await flush();
   assert.deepEqual(records.filter(r => r.event === 'turn').at(-1).worker.tokens, { input: 300, cached: 100, output: 70 });
+});
+
+test('Claude token counts include subagent calls, update while the turn runs and keep a stopped turn’s calls', async t => {
+  const { controller } = await setup(t);
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  const session = controller.create();
+  session.helperTools = false;
+  let emit, finish, reached;
+  controller.claude.run = ({ signal, onEvent }) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(new Error('Claude stopped.')), { once: true });
+    emit = onEvent;
+    finish = resolve;
+    reached();
+  });
+  const running = () => new Promise(resolve => { reached = resolve; });
+  const call = (id, input, cached, output, extra = {}) =>
+    ({ type: 'assistant', ...extra, message: { id, usage: { input_tokens: input, cache_read_input_tokens: cached, output_tokens: output }, content: [] } });
+  const callStart = (id, input, cached) =>
+    ({ type: 'stream_event', event: { type: 'message_start', message: { id, usage: { input_tokens: input, cache_read_input_tokens: cached, output_tokens: 1 } } } });
+
+  // One main call streamed three times and one subagent call: each counts once, as soon as it streams.
+  let started = running();
+  const sent = controller.send({ id: session.id, text: 'review', mode: 'claude-cli:sonnet', task: 'off' });
+  await started;
+  emit(callStart('m1', 20, 80));
+  emit(call('m1', 20, 80, 4));
+  emit(call('m1', 20, 80, 10));
+  emit(call('s1', 10, 40, 7, { parent_tool_use_id: 'toolu_agent' }));
+  const first = { inputTokens: 150, cachedInputTokens: 120, outputTokens: 17 };
+  assert.deepEqual(session.usage.total, first);
+  assert.deepEqual(session.routes.at(-1).turnUsage, first);
+  // Claude's result counts only the main conversation.
+  finish({ result: 'Done.', usage: { input_tokens: 20, cache_read_input_tokens: 80, output_tokens: 10 } });
+  await sent;
+  await until(() => !controller.busy);
+  assert.deepEqual(session.usage.total, first);
+  assert.deepEqual(session.routes.at(-1).budgetFinalUsage, first);
+
+  // A stopped turn keeps what it streamed, including a call cut off after message_start, and usage recorded elsewhere
+  // meanwhile stays.
+  started = running();
+  const stopped = controller.send({ id: session.id, text: 'again', mode: 'claude-cli:sonnet', task: 'off' });
+  await started;
+  emit(call('m2', 30, 120, 6));
+  session.usage.total.outputTokens += 1000;
+  emit(callStart('m3', 5, 150));
+  await controller.stop();
+  await stopped;
+  assert.equal(session.status, 'interrupted');
+  const total = { inputTokens: 150 + 150 + 155, cachedInputTokens: 120 + 120 + 150, outputTokens: 17 + 6 + 1000 + 1 };
+  assert.deepEqual(session.usage.total, total);
+  assert.deepEqual(readSessionData(controller.filename).sessions.find(item => item.id === session.id).usage.total, total);
+  assert.deepEqual(session.routes.at(-1).turnUsage, { inputTokens: 305, cachedInputTokens: 270, outputTokens: 7 });
+});
+
+test('a snapshot builds the model catalog a fixed number of times, not once per preset', async t => {
+  const { controller } = await setup(t);
+  // The free plan makes the plan check read the catalog; it once ran for every preset (every bot, every window update).
+  controller.account = { type: 'chatgpt', plan: 'free' };
+  const catalog = controller.catalog.bind(controller);
+  let builds = 0;
+  controller.catalog = () => { builds++; return catalog(); };
+  const snapshot = controller.snapshot();
+  assert.ok(snapshot.presets.length > 10, 'enough presets to show a per-preset cost');
+  // 7 fixed builds (router and chat-scan lists, plan check) against 83 for 19 presets when the plan was checked per preset.
+  assert.ok(builds < snapshot.presets.length, `catalog built ${builds} times for ${snapshot.presets.length} presets`);
+});
+
+test('a Claude turn does not wait for Codex to connect; Codex and Auto turns still do', async t => {
+  const { controller } = await setup(t);
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  controller.claude.run = async () => ({ result: 'Done.' });
+  const session = controller.create();
+  session.helperTools = false;
+  controller.connection = 'connecting';
+
+  await controller.send({ id: session.id, text: 'review', mode: 'claude-cli:sonnet', task: 'off' });
+  await until(() => !controller.busy);
+  assert.equal(session.status, 'completed');
+  assert.ok(session.items.some(item => item.type === 'agentMessage' && item.text === 'Done.'));
+
+  await assert.rejects(controller.send({ id: session.id, text: 'again', mode: 'terra-light', task: 'off' }), /Codex is still connecting/);
+  await assert.rejects(controller.send({ id: session.id, text: 'again', mode: 'auto', task: 'off' }), /Codex is still connecting/);
+});
+
+test('Claude output tokens come from message_delta and the result, not the partial counts on assistant events', async t => {
+  const { controller } = await setup(t);
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  const session = controller.create();
+  session.helperTools = false;
+  let emit, finish, reached;
+  const started = new Promise(resolve => { reached = resolve; });
+  controller.claude.run = ({ onEvent }) => new Promise(resolve => {
+    emit = onEvent;
+    finish = resolve;
+    reached();
+  });
+  const usage = (input, cached, output) => ({ input_tokens: input, cache_read_input_tokens: cached, output_tokens: output });
+
+  const sent = controller.send({ id: session.id, text: 'review', mode: 'claude-cli:sonnet', task: 'off' });
+  await started;
+  emit({ type: 'stream_event', event: { type: 'message_start', message: { id: 'm1', usage: usage(20, 80, 1) } } });
+  emit({ type: 'assistant', message: { id: 'm1', usage: usage(20, 80, 3), content: [] } });
+  emit({ type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 400 } } });
+  assert.equal(session.usage.total.outputTokens, 400);
+
+  // A call whose message_delta never arrived, and a subagent call (subagents send no message_delta).
+  emit({ type: 'stream_event', event: { type: 'message_start', message: { id: 'm2', usage: usage(10, 90, 1) } } });
+  emit({ type: 'assistant', message: { id: 'm2', usage: usage(10, 90, 2), content: [] } });
+  emit({ type: 'assistant', parent_tool_use_id: 'toolu_agent', message: { id: 's1', usage: usage(30, 0, 5), content: [] } });
+  assert.deepEqual(session.usage.total, { inputTokens: 230, cachedInputTokens: 170, outputTokens: 407 });
+
+  // The result counts the main conversation exactly: 400 + 500 output.
+  finish({ result: 'Done.', usage: usage(30, 170, 900) });
+  await sent;
+  await until(() => !controller.busy);
+  const total = { inputTokens: 230, cachedInputTokens: 170, outputTokens: 905 };
+  assert.deepEqual(session.usage.total, total);
+  assert.deepEqual(session.routes.at(-1).turnUsage, total);
+});
+
+// Real Claude Code results (Opus 5.5, 2026-10-28): turn A, then turn D resuming A's session, and turn B with one subagent.
+const OPUS_RESULTS = {
+  A: { session_id: 'f44ece8e', usage: { input_tokens: 20, cache_read_input_tokens: 309258, cache_creation_input_tokens: 28825, output_tokens: 8689 },
+    modelUsage: { 'claude-opus-5-5': { inputTokens: 20, cacheReadInputTokens: 309258, cacheCreationInputTokens: 28825, outputTokens: 8689, contextWindow: 1000000 } },
+    total_cost_usd: 0.46631159999999994 },
+  D: { session_id: 'f44ece8e', usage: { input_tokens: 2, cache_read_input_tokens: 16564, cache_creation_input_tokens: 34008, output_tokens: 4 },
+    modelUsage: { 'claude-opus-5-5': { inputTokens: 22, cacheReadInputTokens: 325822, cacheCreationInputTokens: 62833, outputTokens: 8693, contextWindow: 1000000 } },
+    total_cost_usd: 0.7417763999999999 },
+  B: { session_id: 'deb75872', usage: { input_tokens: 4, cache_read_input_tokens: 46159, cache_creation_input_tokens: 9285, output_tokens: 515 },
+    modelUsage: { 'claude-opus-5-5': { inputTokens: 10, cacheReadInputTokens: 89563, cacheCreationInputTokens: 33699, outputTokens: 1666, contextWindow: 1000000 } },
+    total_cost_usd: 0.24762260000000003 },
+};
+
+async function claudeChat(t) {
+  const { controller } = await setup(t);
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  const runs = [];
+  const chat = { controller, runs, reply: null };
+  controller.claude.run = async options => {
+    runs.push(options);
+    const result = chat.reply(options.onEvent);
+    options.onEvent({ type: 'system', subtype: 'init', session_id: result.session_id });
+    return { result: 'Done.', ...result };
+  };
+  chat.session = controller.create();
+  chat.session.helperTools = false;
+  chat.turn = async text => {
+    await controller.send({ id: chat.session.id, text, mode: 'claude-cli:sonnet', task: 'off' });
+    await until(() => !controller.busy);
+    return chat.session.routes.at(-1);
+  };
+  return chat;
+}
+
+test('a completed Claude turn counts the change in Claude’s cost tracker, subagent calls and resumed sessions included', async t => {
+  const chat = await claudeChat(t);
+  chat.reply = () => OPUS_RESULTS.A;
+  const a = await chat.turn('A');
+  assert.deepEqual(a.turnUsage, { inputTokens: 338103, cachedInputTokens: 309258, outputTokens: 8689 });
+  assert.equal(a.providerEstimateUsd, 0.46631159999999994);
+
+  // The tracker carries A's totals into the resumed turn; the turn is the difference.
+  chat.reply = () => OPUS_RESULTS.D;
+  const d = await chat.turn('Reply with only: OK');
+  assert.equal(chat.runs.at(-1).resume, 'f44ece8e');
+  assert.deepEqual(d.turnUsage, { inputTokens: 50574, cachedInputTokens: 16564, outputTokens: 4 });
+  assert.deepEqual(d.budgetFinalUsage, d.turnUsage);
+  assert.ok(Math.abs(d.providerEstimateUsd - 0.2754648) < 1e-9, String(d.providerEstimateUsd));
+  assert.deepEqual(chat.session.usage.total, { inputTokens: 388677, cachedInputTokens: 325822, outputTokens: 8693 });
+
+  // B: the stream holds partial output and misses the subagent's last call; the tracker has the whole turn.
+  const subagent = await claudeChat(t);
+  subagent.reply = onEvent => {
+    onEvent({ type: 'assistant', message: { id: 'm1', usage: { input_tokens: 4, cache_read_input_tokens: 46159, cache_creation_input_tokens: 9285, output_tokens: 3 }, content: [] } });
+    onEvent({ type: 'assistant', parent_tool_use_id: 'toolu_agent', message: { id: 's1', usage: { input_tokens: 6, cache_read_input_tokens: 43402, cache_creation_input_tokens: 0, output_tokens: 22 }, content: [] } });
+    assert.deepEqual(subagent.session.usage.total, { inputTokens: 98856, cachedInputTokens: 89561, outputTokens: 25 });
+    return OPUS_RESULTS.B;
+  };
+  const b = await subagent.turn('B');
+  const whole = { inputTokens: 123272, cachedInputTokens: 89563, outputTokens: 1666 };
+  assert.deepEqual(b.turnUsage, whole);
+  assert.deepEqual(b.budgetFinalUsage, whole);
+  assert.deepEqual(subagent.session.usage.total, whole);
+  assert.equal(b.providerEstimateUsd, 0.24762260000000003);
+});
+
+test('a resumed Claude session without saved totals keeps the streamed count once, then counts exactly, compaction included', async t => {
+  const chat = await claudeChat(t);
+  chat.session.claudeSessionId = 'f44ece8e'; // a chat from before Harness kept Claude's running totals
+  chat.reply = onEvent => {
+    onEvent({ type: 'assistant', message: { id: 'm1', usage: OPUS_RESULTS.D.usage, content: [] } });
+    return OPUS_RESULTS.D;
+  };
+  const d = await chat.turn('Reply with only: OK');
+  assert.equal(chat.runs.at(-1).resume, 'f44ece8e');
+  assert.deepEqual(d.turnUsage, { inputTokens: 50574, cachedInputTokens: 16564, outputTokens: 4 });
+  assert.equal(d.providerEstimateUsd, 0.7417763999999999, 'Claude’s running total, as before');
+  assert.deepEqual(chat.session.claudeUsageBase,
+    { sessionId: 'f44ece8e', inputTokens: 388677, cachedInputTokens: 325822, outputTokens: 8693, costUsd: 0.7417763999999999 });
+
+  // Compaction moves the totals on and counts in the chat, so the next turn is only its own calls.
+  const tracked = (input, read, write, output, cost) => ({ session_id: 'f44ece8e', usage: { input_tokens: 0, output_tokens: 0 }, total_cost_usd: cost,
+    modelUsage: { 'claude-opus-5-5': { inputTokens: input, cacheReadInputTokens: read, cacheCreationInputTokens: write, outputTokens: output } } });
+  chat.reply = () => tracked(30, 335822, 62833, 9693, 0.80);
+  await chat.controller.compact(chat.session.id);
+  assert.equal(chat.runs.at(-1).prompt, '/compact');
+  assert.deepEqual(chat.session.usage.total, { inputTokens: 50574 + 10008, cachedInputTokens: 16564 + 10000, outputTokens: 4 + 1000 });
+
+  chat.reply = () => tracked(31, 336822, 62933, 9700, 0.81);
+  const next = await chat.turn('Next');
+  assert.deepEqual(next.turnUsage, { inputTokens: 1101, cachedInputTokens: 1000, outputTokens: 7 });
+  assert.ok(Math.abs(next.providerEstimateUsd - 0.01) < 1e-9, String(next.providerEstimateUsd));
 });
 
 test('Codex usage windows are tracked and a full window marks the limit until its reset', async t => {

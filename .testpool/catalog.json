@@ -1129,6 +1129,46 @@
       "cost": "cheap",
       "timeoutSec": 40,
       "origin": { "problem": "Cursor edit results stored whole files twice (62% of stored chat bytes), re-encoded on every save and state push; the routing scan ran sixteen git calls one after another.", "fix": "Compact diffs at the Cursor provider and once on load with a backup; run the scan's git reads together.", "date": "2026-10-25" }
+    },
+    {
+      "id": "cli-token-counts",
+      "name": "CLI turns count every streamed model call",
+      "covers": "Harness token counter for Claude CLI, API and native CLI turns (sendCLI in src/controller.cjs): session.usage.total and routes[].turnUsage add each model call by message id as it streams, so the running turn updates live, subagent calls count (the Claude result usage leaves them out), repeated events for one call count once, a stopped turn keeps the calls it streamed including one cut off after message_start, usage recorded elsewhere meanwhile is kept, output counts come from message_delta and the result rather than the partial counts on assistant events, and the job budget gets the same whole-turn usage. Completed Claude turns take tokens and cost from the change in Claude's cost tracker (result.modelUsage, total_cost_usd: cumulative per Claude session, subagents included) since the session's previous completed run (claudeUsageBase), compaction included; a resumed session without saved totals keeps the streamed count once; several results in one process keep the last running cost. Also the trace test that a turn traces all its calls.",
+      "paths": ["src/controller.cjs", "src/job-budgets.cjs", "src/providers/claude.cjs", "src/providers/api-agent.cjs", "src/controller/turns.cjs", "tests/core.test.cjs", "tests/claude-permissions.test.cjs"],
+      "command": "node --test --test-name-pattern=\"token counts include subagent|output tokens come from message_delta|traced worker tokens|cost tracker|without saved totals|several Claude results in one process\" tests/core.test.cjs tests/claude-permissions.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 40,
+      "origin": { "problem": "Harness showed 18.2M tokens for the PhasmaEngine bot while its Claude transcripts showed 52M: cancelled turns, the running turn and a 3.6M-token subagent were never counted.", "fix": "sendCLI sums each streamed model call per message id, live, and keeps it when the turn stops.", "date": "2026-10-28" }
+    },
+    {
+      "id": "responsiveness",
+      "name": "Snapshots stay cheap and non-Codex turns skip the Codex wait",
+      "covers": "Controller.snapshot builds the model catalog a fixed number of times instead of once per preset (planPreset takes the snapshot's catalog), and a Claude turn starts while Codex is still connecting while Codex and Auto turns still wait. Also the PATH lookup (findNativeCLI) and Codex personal-setup tests that the 10 s start-up caches must not break.",
+      "paths": ["src/controller.cjs", "src/controller/providers.cjs", "src/routing/benchmarks.cjs", "src/providers/jev-key.cjs", "src/providers/native-cli.cjs", "src/providers/codex.cjs", "tests/core.test.cjs", "tests/deepseek.test.cjs", "tests/worker-defaults.test.cjs"],
+      "command": "node --test --test-name-pattern=\"catalog a fixed number|does not wait for Codex|finds|personal setup\" tests/core.test.cjs tests/deepseek.test.cjs tests/worker-defaults.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 40,
+      "origin": { "problem": "Harness froze while bots connected, started and streamed replies: every window update rebuilt the provider catalog once per preset for each of about 20 bots (83 builds per snapshot), and every send waited for that bot's own Codex connection.", "fix": "One catalog per snapshot, cached benchmark/key/PATH/skill lookups, no unused per-bot snapshot under Agents, and only Codex, Auto and Hub turns wait for Codex.", "date": "2026-10-28" }
+    },
+    {
+      "id": "claude-background-input",
+      "name": "Claude keeps live input open while its background tasks run",
+      "covers": "After a result, ClaudeCLI.run keeps stdin and live input open while background_tasks_changed lists a non-ambient task, closes it when Claude is idle and the set is empty, and never closes it mid-answer to a follow-up.",
+      "paths": ["src/providers/claude.cjs", "tests/claude-permissions.test.cjs"],
+      "command": "node --test --test-name-pattern=\"background task|follow-ups during full-access|never echoes\" tests/claude-permissions.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 30,
+      "origin": { "problem": "A bot's background 'wait until Dota closes' command kept Claude alive after its answer; Harness had closed Claude's input at the result, so the chat stayed running for an hour and Send now could not reach it.", "fix": "Input stays open until Claude is idle and no background task is live.", "date": "2026-10-28" }
+    },
+    {
+      "id": "running-tasks",
+      "name": "Running tasks are listed, readable and stoppable one at a time",
+      "covers": "A Claude turn's background tasks (not the CLI's ambient watchers) reach the snapshot, their output and Stop go to the CLI as get_task_output / stop_task matched by request id, and they leave when the turn ends; a running Codex command's output comes from its item and its Stop calls thread/backgroundTerminals/terminate without stopping the turn.",
+      "paths": ["src/controller.cjs", "src/providers/claude.cjs", "src/runner-commands.cjs", "tests/core.test.cjs", "tests/claude-permissions.test.cjs"],
+      "command": "node --test --test-name-pattern=\"lists its background tasks|Codex command shows its output|output and to stop it\" tests/core.test.cjs tests/claude-permissions.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 40,
+      "origin": { "problem": "A bot's background watcher held its chat for an hour with no way to see what it was or stop only it; Stop killed the whole turn, a running render and the Claude session.", "fix": "A list above the message box with each task's output and its own Stop, for Claude and Codex.", "date": "2026-10-28" }
     }
   ]
 }
