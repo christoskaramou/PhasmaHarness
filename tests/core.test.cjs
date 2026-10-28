@@ -572,6 +572,47 @@ test('CLI late completion does not finish the turn twice', async t => {
   assert.equal(controller.busy, session.id);
 });
 
+// 2026-10-28: a queued message that started a Claude turn held queueSending for the whole turn, greying Send now.
+test('a queued message that starts a CLI turn frees the queue while the turn runs', async t => {
+  const { controller } = await setup(t);
+  const session = controller.create();
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  const runs = [];
+  controller.claude.run = request => new Promise(resolve => {
+    runs.push({ request, finish: () => resolve({ result: 'done', usage: { input_tokens: 1, output_tokens: 1 } }) });
+  });
+  session.queue = [{ id: 'first', text: 'continue', images: [], mode: 'claude-cli:sonnet', task: 'on' },
+    { id: 'second', text: 'status?', images: [], mode: 'claude-cli:sonnet', task: 'on' }];
+  const delivery = controller.queuedMessage(session.id, 'first', 'send');
+  await flush();
+  assert.equal(runs.length, 1);
+  assert.equal(controller.busy, session.id, 'the turn is still running');
+  assert.equal(session.queueSending, false, 'Send now stays available for the rest of the queue');
+  assert.deepEqual(session.queue.map(message => message.id), ['second']);
+  await delivery;
+  runs[0].finish();
+  await flush();
+  assert.equal(runs.length, 2, 'the next queued message still sends when the turn ends');
+  assert.match(runs[1].request.prompt, /status\?/);
+  runs[1].finish();
+  await flush();
+});
+
+// 2026-10-28: a failed test-pool report saved as the chat notice never expired and reappeared on every visit.
+test('the next turn clears a test-pool notice but keeps other notices', async t => {
+  const { controller, fake } = await setup(t);
+  const session = controller.create();
+  session.notice = 'Codex rerouted gpt-a to gpt-b: capacity';
+  await controller.send({ id: session.id, text: 'first', mode: 'terra-light' });
+  assert.equal(session.notice, 'Codex rerouted gpt-a to gpt-b: capacity');
+  complete(controller, session, fake.turnIds[0]);
+  await flush();
+  Object.assign(session, { notice: 'Test pool: 11 failed, 14 passed', noticeExpiresAt: null });
+  await controller.send({ id: session.id, text: 'second', mode: 'terra-light' });
+  assert.equal(session.notice, null);
+});
+
 test('compaction finishes through thread/compacted or turn/completed for the owned turn', async t => {
   const { controller, fake } = await setup(t);
   const session = controller.create();

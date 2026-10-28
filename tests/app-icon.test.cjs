@@ -22,5 +22,5 @@ test('the app icon is a Windows icon with small and 256 px images, used by the b
     assert.ok(offset + bytes <= data.length, 'image data inside the file');
   }
   assert.match(fs.readFileSync(path.join(root, 'src', 'main.cjs'), 'utf8'), /icon: path\.join\(__dirname, '\.\.', 'ui', 'icon\.ico'\)/);
-  assert.match(fs.readFileSync(path.join(root, 'Install Phasma Harness.cmd'), 'utf8'), /IconLocation = \(Join-Path \$folder 'ui\\icon\.ico'\)/);
+  assert.match(fs.readFileSync(path.join(root, 'src', 'install.ps1'), 'utf8'), /IconLocation = \(Join-Path \$folder 'ui\\icon\.ico'\)/);
 });

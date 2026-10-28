@@ -629,7 +629,7 @@ class Controller extends EventEmitter {
     return this.snapshot();
   }
 
-  async send({ id, text, mode, images = [], files = [], fileMessage = null, contextText = '', task = 'on', wikiTaskId = null, failover = false, agentReply = false, agentReplyCancelled = false, agentResult = null, agentMail = null, routineRun = null }) {
+  async send({ id, text, mode, images = [], files = [], fileMessage = null, contextText = '', task = 'on', wikiTaskId = null, failover = false, agentReply = false, agentReplyCancelled = false, agentResult = null, agentMail = null, routineRun = null, started = null }) {
     if (!['auto', 'on', 'off'].includes(task)) throw new Error('Invalid task mode.');
     if (task === 'auto') task = 'on'; // Existing queued messages use the new default.
     if (this.blockedReason()) throw new Error(this.blockedReason());
@@ -704,6 +704,9 @@ class Controller extends EventEmitter {
     const previousState = { status: session.status, error: session.error };
     this.turnSkillDirectories?.delete(id);
     this.busy = id; session.status = 'running'; session.error = null; session.turnId = null;
+    // A test-pool report never expires by itself; this turn's own test-pool run reports whatever still fails.
+    if (session.notice?.startsWith('Test pool'))
+      session.notice = null;
     session.agentReplyActive = agentReply === true;
     if (!agentReply && !failover) { session.agentDelegations = 0; session.agentMessages = 0; }
     const clientId = randomUUID();
@@ -807,14 +810,14 @@ class Controller extends EventEmitter {
       if (!wikiTaskId) session.jobDecision = { messageId: clientId, goal: routingText, ...(originalRequest ? { originalRequestId: originalRequest.id } : {}),
         continues: (!originalRequest || session.job?.originalRequestId === originalRequest.id) && (selected.sameTask === true || (selected.sameTask === undefined && ['pending', 'needs-input'].includes(session.job?.status))) };
       const tracked = this.openTask(session, selected, text, clientId, task);
-      return await this.submitWorker(session, selected, text, images, clientId, tracked);
+      return await this.submitWorker(session, selected, text, images, clientId, tracked, started);
     } catch (error) {
       if (error.turnFailed) throw error;
       await this.failSend(session, null, clientId, error, (session.tasks || []).find(item => item.messageId === clientId && !FINAL.has(item.state)));
     }
   }
 
-  async submitWorker(session, selected, text, images, clientId, task) {
+  async submitWorker(session, selected, text, images, clientId, task, started) {
     const id = session.id;
     const contextText = session.pendingMessage?.contextText || '';
     const permissions = accessMode(session.agentReplyCancelledActive ? 'read-only' : task?.access || session.access);
@@ -829,7 +832,7 @@ class Controller extends EventEmitter {
         const admission = await this.agents.acquire(this, session, selected);
         if (admission) throw new Error(admission.blocked || 'Turn was stopped before sending.');
       }
-      if (isCLI(selected.provider)) return await this.sendCLI(session, selected, text, images, clientId, task);
+      if (isCLI(selected.provider)) return await this.sendCLI(session, selected, text, images, clientId, task, started);
       if (this.providers?.prepare) {
         const abort = new AbortController(); this.modelPreparation = abort;
         try {
@@ -1002,7 +1005,7 @@ class Controller extends EventEmitter {
       this.keptRulesText(session.workspace) + this.comparedRule(session);
   }
 
-  async sendCLI(session, selected, text, images, clientId, task) {
+  async sendCLI(session, selected, text, images, clientId, task, started) {
     const backend = selected.provider === 'cursor-cli' ? 'cursor' : selected.provider === 'claude-cli' ? 'claude' : selected.provider;
     const api = capabilities(selected.provider).api;
     // API providers run in Harness's own loop; its chat histories live beside this agent's sessions.
@@ -1040,6 +1043,7 @@ class Controller extends EventEmitter {
       assistantIds.add(id); return item;
     };
     this.save(); this.changed();
+    started?.(); // the message is now this turn's prompt (see queuedMessage)
     let outcome = { status: 'completed', error: null }, turnOver = false;
     try {
       const helpersEnabled = session.helperTools !== false;
@@ -1264,7 +1268,13 @@ class Controller extends EventEmitter {
           content: [{ type: 'text', text: message.text }, ...message.images.map(url => ({ type: 'image', url }))],
         });
         if (activeTask?.state === 'running') activeTask.amendments.push({ id: message.id, text: message.text });
-      } else await this.send({ ...message, id });
+      } else {
+        // A CLI turn runs inside send(), so the queue is released once this message has started the turn, as after a
+        // direct send; a failure before that still returns it to the queue.
+        let started;
+        const begun = new Promise(resolve => { started = resolve; });
+        await Promise.race([this.send({ ...message, id, started }), begun]);
+      }
       session.queue = session.queue.filter(m => m !== message);
     } catch (error) {
       message.error = error.message;

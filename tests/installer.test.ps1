@@ -1,6 +1,8 @@
 $ErrorActionPreference = 'Stop'
-$source = [IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\Install Phasma Harness.cmd'))
-$source = $source.Substring($source.LastIndexOf('# POWERSHELL START'))
+$source = [IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\src\install.ps1'))
+# The launcher only starts that file: a .cmd running its own text as a script is blocked by antivirus (Bitdefender 2026-10-28).
+$launcher = [IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\Install Phasma Harness.cmd'))
+if ($launcher -notmatch '-File "%~dp0src\\install\.ps1"' -or $launcher -match 'scriptblock|ReadAllText|POWERSHELL START') { throw 'The .cmd must only run src\install.ps1.' }
 $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw ($errors | Out-String) }

@@ -654,6 +654,7 @@
       "paths": [
         "Install Phasma Harness.cmd",
         "tests/installer.test.ps1",
+        "src/install.ps1",
         "src/install-preflight.ps1",
         "src/main.cjs"
       ],

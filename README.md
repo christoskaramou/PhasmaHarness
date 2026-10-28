@@ -116,7 +116,7 @@ npm start
 
 `Launch Phasma Harness.vbs` opens the app without a command window after dependencies are installed.
 
-`Install Phasma Harness.cmd` installs missing Node.js LTS and Git through winget, runs `npm ci`, fetches the bundled tools, and creates a desktop shortcut. Before replacing dependencies, it requests a normal shutdown of this folder's Harness and waits for its workers and file locks to clear. If shutdown or file release takes more than 45 seconds, installation stops before changing dependencies and identifies the blocker; it never force-closes Cursor or unrelated apps. A Harness already running an older version needs one manual tray → Quit runner. Successful installation starts Harness again. Launching Harness normally while it runs brings back the existing window. Providers are installed from the app. Keep the folder where the shortcut points.
+`Install Phasma Harness.cmd` runs `src/install.ps1`, which installs missing Node.js LTS and Git through winget, runs `npm ci`, fetches the bundled tools, and creates a desktop shortcut. Before replacing dependencies, it requests a normal shutdown of this folder's Harness and waits for its workers and file locks to clear. If shutdown or file release takes more than 45 seconds, installation stops before changing dependencies and identifies the blocker; it never force-closes Cursor or unrelated apps. A Harness already running an older version needs one manual tray → Quit runner. Successful installation starts Harness again. Launching Harness normally while it runs brings back the existing window. Providers are installed from the app. Keep the folder where the shortcut points.
 
 ### Installer build and updates
 
