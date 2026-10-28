@@ -820,6 +820,15 @@ h2 {
   text-underline-offset:3px
 }
 
+.message-body .linked-image img {
+  display:block;
+  max-width:min(100%, 640px);
+  max-height:480px;
+  margin:6px 0;
+  border:1px solid var(--border);
+  border-radius:8px
+}
+
 .message-body pre {
   padding:16px;
   background:var(--code-bg);
@@ -1603,6 +1612,14 @@ dialog {
   min-height:0;
 }
 
+/* On a phone the list sits above a full-width preview, where linked files from chat open. */
+@media(max-width:720px) {
+  .browser-layout {
+    grid-template-columns:minmax(0, 1fr);
+    grid-template-rows:minmax(0, 1fr) minmax(0, 2fr);
+  }
+}
+
 #browser-list, #browser-preview {
   overflow:auto;
   min-width:0;
@@ -1614,6 +1631,12 @@ dialog {
   font-size:calc(12px * var(--font-scale, 1));
   padding:12px;
   background:var(--code-bg);
+}
+
+#browser-preview img {
+  display:block;
+  max-width:100%;
+  height:auto;
 }
 
 .browser-file {

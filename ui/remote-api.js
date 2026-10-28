@@ -162,7 +162,7 @@
     'browseWorkspace', 'settings', 'benchmarkData', 'create', 'permissions', 'load', 'image', 'rename',
     'archive', 'deleteSession', 'preview', 'send', 'stop', 'reviseJob', 'reconcileJob', 'jobBudget',
     'stopArtifactRun', 'artifactAction', 'stopDownloads', 'appInfo', 'runnerInfo', 'updateStatus', 'queuedMessage', 'replySuggestion', 'suggestWiki', 'compact',
-    'clearConversation', 'acknowledgeTask', 'applyCopy', 'undoComparison', 'undoRule', 'dismissSkillNotice', 'proposeWiki', 'answer', 'answerConfirmation', 'renewModels', 'providerModels'])
+    'clearConversation', 'acknowledgeTask', 'applyCopy', 'undoComparison', 'undoRule', 'dismissSkillNotice', 'proposeWiki', 'answer', 'answerConfirmation', 'renewModels', 'providerModels', 'openFile', 'linkImage'])
     api[method] = (...args) => call(method, args);
   for (const method of ['benchmarkRefresh', 'benchmarkImport', 'benchmarkApply', 'benchmarkReset', 'nativeProviderAction',
     'runnerAutostart', 'quitRunner', 'exportConversation', 'cursorLogin',

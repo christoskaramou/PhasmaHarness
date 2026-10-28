@@ -190,7 +190,9 @@ async function start() {
     answer: (...args) => localConfirmation.answer(...args) };
   registerRunnerCommands(handle, { runner, ask: options => confirmation.ask(options),
     openFolder: folder => shell.openPath(folder), stopDownloads: () => browserAccess?.stopDownloads(),
-    normalizeImage: (url, signal) => runner.documents.image(url, signal) });
+    normalizeImage: (url, signal) => runner.documents.image(url, signal),
+    // A browser-access call never opens a linked file on this computer.
+    linkShell: () => browserRequest.getStore() ? null : shell });
   handle('answerConfirmation', (id, accepted) => confirmation.answer(id, accepted));
   const browserInfo = () => ({ ...(browserAccess?.info() || { running: false, port: browserSettings?.value.port || 8788,
     origin: browserSettings?.value.origin || null }), connectionURL: browserAccess?.connectionURL() || null, error: browserError });

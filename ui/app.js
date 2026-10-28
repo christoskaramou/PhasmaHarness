@@ -106,6 +106,11 @@ const api = { ...window.router,
   answer: (id, answer) => window.router.answer(id, answer, selectedAgent),
   browseWorkspace: (id, action, relative, kind) => window.router.browseWorkspace(id, action, relative, kind, selectedAgent),
   preview: (id, text, mode) => window.router.preview(id, text, mode, selectedAgent),
+  openFile: async target => {
+    const linked = await window.router.openFile(selectedId, target, selectedAgent);
+    if (linked?.path) await showLinkedFile(linked);
+  },
+  linkImage: target => window.router.linkImage(selectedId, target, selectedAgent),
 };
 function chatgptDetail(account) {
   if (!account || account.type !== 'chatgpt') return null;
@@ -555,7 +560,31 @@ marked.use({ extensions: [{
     if (match) return { type: 'equation', raw: match[0], text: match[1] ?? match[2] ?? match[3], display: match[2] === undefined };
   },
   renderer: token => `<span data-equation="${encodeURIComponent(token.text)}" data-display="${token.display}"></span>`,
-}] });
+}], renderer: {
+  // Local paths (absolute, workspace-relative or file:) carry their raw target, which the sanitizer would drop from an href.
+  link(token) {
+    if (!localLinkTarget(token.href)) return false;
+    return `<a href="#" data-path="${encodeURIComponent(token.href)}">${this.parser.parseInline(token.tokens)}</a>`;
+  },
+  image(token) {
+    if (localLinkTarget(token.href)) return `<span data-image="${encodeURIComponent(token.href)}" data-alt="${encodeURIComponent(token.text)}"></span>`;
+    // Web images stay links: loading them would tell the image host when the chat was read.
+    const label = token.text ? token.tokens : [{ type: 'text', raw: token.href, text: token.href, escaped: false }];
+    return /^https?:/i.test(token.href) ? this.link({ ...token, type: 'link', tokens: label }) : false;
+  },
+} });
+function localLinkTarget(href) {
+  return !!href && !href.startsWith('#') && (/^file:/i.test(href) || !/^[a-z][a-z0-9+-]+:/i.test(href));
+}
+// Raw HTML in a message can carry its own data-path/data-image, and a malformed one must not stop the chat rendering.
+function linkTarget(value) {
+  try { return decodeURIComponent(value || ''); } catch { return ''; }
+}
+// A `code` span that is only a path: a drive path, or a relative/POSIX path with a folder and a file extension (so
+// `api.openFile`, `/clear` and globs stay plain), with an optional :line[:col] or #L suffix.
+const BARE_PATH = /^(?:[a-z]:[\\/][^<>"|?*\r\n]*|(?:[\\/]|\.{1,2}[\\/])?(?:[\w@.+-]+[\\/])+[\w@.+-]*\.[a-z0-9]{1,8}(?::\d+(?:[:-]\d+)?|#L\d+(?:-L?\d+)?)?)$/i;
+// The image types linkImage serves (src/workspace/linked-files.cjs), previewed as pictures in Workspace files.
+const LINKED_IMAGE = /\.(?:png|jpe?g|gif|webp|bmp|avif|ico|svg)$/i;
 let state = null;
 let fleetState = null, selectedAgent = 'main';
 let selectedId = null;
@@ -1549,6 +1578,11 @@ async function showWorkspace(mode) {
   if (!$('#browser-dialog').open) $('#browser-dialog').showModal();
   await refreshBrowser();
 }
+// Browser access gets a linked workspace file back instead of opening it on the computer, and shows it here.
+async function showLinkedFile(linked) {
+  await showWorkspace('list');
+  await previewWorkspace(linked, browserVersion);
+}
 async function previewWorkspace(entry, version) {
   const ticket = ++browserPreviewVersion;
   browserFile = null; $('#browser-attach').disabled = true;
@@ -1559,6 +1593,7 @@ async function previewWorkspace(entry, version) {
     if (version !== browserVersion || ticket !== browserPreviewVersion) return;
     $('#browser-status').textContent = result.path + (result.note ? ` · ${result.note}` : '');
     const preview = $('#browser-preview'); preview.replaceChildren();
+    const picture = browserMode === 'list' && LINKED_IMAGE.test(entry.path);
     if ((browserMode === 'changes' && entry.kind !== 'untracked') || browserMode === 'session') {
       const metadata = []; let inHunk = false;
       const lines = result.text.split('\n');
@@ -1573,8 +1608,11 @@ async function previewWorkspace(entry, version) {
       $('#browser-diff-meta').hidden = !metadata.length;
       $('#browser-diff-meta').open = false;
       $('#browser-diff-meta pre').textContent = metadata.join('\n');
+    } else if (picture) {
+      const image = element('img'); image.alt = entry.path; preview.append(image);
+      api.linkImage(entry.path).then(url => { image.src = url; }, error => { if (image.isConnected) preview.textContent = error.message; });
     } else preview.textContent = result.text;
-    if (result.truncated) preview.append(document.createTextNode('\n[Preview truncated]'));
+    if (result.truncated && !picture) preview.append(document.createTextNode('\n[Preview truncated]'));
     browserFile = result.absolutePath;
     $('#browser-attach').disabled = !browserFile || entry.status === 'D';
   } catch (error) { if (version === browserVersion && ticket === browserPreviewVersion) $('#browser-preview').textContent = error.message; }
@@ -2126,7 +2164,7 @@ function renderArtifacts(records, sessionId, receiptId) {
 
 const { reportAnswer } = HarnessReports;
 
-function renderMarkdown(body, text) {
+function renderMarkdown(body, text, images = new Map()) {
   body.innerHTML = DOMPurify.sanitize(marked.parse(text, { breaks: true }), {
     FORBID_TAGS: ['img', 'style', 'iframe', 'form', 'input', 'button', 'video', 'audio', 'svg', 'math'],
     FORBID_ATTR: ['style'],
@@ -2134,6 +2172,27 @@ function renderMarkdown(body, text) {
   for (const equation of body.querySelectorAll('[data-equation]')) {
     try { katex.render(decodeURIComponent(equation.dataset.equation), equation, { displayMode: equation.dataset.display === 'true', throwOnError: false, trust: false, maxExpand: 100, maxSize: 20 }); }
     catch { equation.textContent = 'Equation could not be displayed.'; }
+  }
+  for (const code of body.querySelectorAll(':not(pre) > code')) {
+    if (code.closest('a') || !BARE_PATH.test(code.textContent)) continue;
+    const link = element('a');
+    link.href = '#'; link.dataset.path = encodeURIComponent(code.textContent);
+    code.replaceWith(link); link.append(code);
+  }
+  for (const link of body.querySelectorAll('a[data-path]')) {
+    link.title = linkTarget(link.dataset.path);
+    if (!link.title) link.removeAttribute('data-path');
+  }
+  // A streaming reply re-renders on every update; `images` keeps one read per path for the message, so the picture neither
+  // flickers nor is re-read, while a later message naming the same path still shows the file as it is then.
+  for (const holder of body.querySelectorAll('[data-image]')) {
+    const target = linkTarget(holder.dataset.image), alt = linkTarget(holder.dataset.alt);
+    if (!target) { holder.remove(); continue; }
+    const link = element('a', 'linked-image'), image = element('img');
+    link.href = '#'; link.dataset.path = holder.dataset.image; link.title = target; image.alt = alt || target;
+    link.append(image); holder.replaceWith(link);
+    if (!images.has(target)) images.set(target, api.linkImage(target));
+    images.get(target).then(url => { image.src = url; }, () => link.replaceChildren(alt || target));
   }
 }
 
@@ -2147,7 +2206,7 @@ function renderAgentResult(item, node, session) {
   const answer = reportAnswer(item);
   const report = [item.error, answer].filter(Boolean).filter((text, i, all) => all.indexOf(text) === i).join('\n\n');
   const preview = element('div', 'job-result-preview message-body');
-  renderMarkdown(preview, report);
+  renderMarkdown(preview, report, node.linkedImages ??= new Map());
   const header = element('div', 'job-result-header'); header.append(label);
   if (item.deliveryId) {
     const assignment = element('button', 'compact-action', 'View task'); assignment.type = 'button';
@@ -2532,7 +2591,7 @@ function renderMessages(session) {
         actions.append(copy);
       }
       if ((!user || item.routineRun) && !item.groupSpeaker) actions.append(label);
-      renderMarkdown(body, text);
+      renderMarkdown(body, text, node.linkedImages ??= new Map());
       if (user) {
         for (const file of attachment?.files || []) {
           const details = element('details', 'sent-file');
@@ -3858,7 +3917,11 @@ $('#job-update-form').onsubmit = async event => {
 document.querySelectorAll('[data-prompt]').forEach(button => { button.onclick = () => { $('#prompt').value = button.dataset.prompt; $('#prompt').focus(); updatePreview(); }; });
 document.addEventListener('click', event => {
   const link = event.target.closest('a');
-  if (link) { event.preventDefault(); if (/^https?:\/\//i.test(link.href)) api.openLink(link.href).catch(notify); }
+  if (!link) return;
+  event.preventDefault();
+  const target = linkTarget(link.dataset.path);
+  if (target) api.openFile(target).catch(notify);
+  else if (/^https?:\/\//i.test(link.href)) api.openLink(link.href).catch(notify);
 });
 document.addEventListener('keydown', event => {
   if (event.defaultPrevented) return;

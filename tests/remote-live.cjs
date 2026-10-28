@@ -100,6 +100,18 @@ if (wrapper) {
     assert.equal(await phone.webContents.executeJavaScript('location.hash'), '', 'the shared key leaves the visible URL immediately');
     assert.equal(await phone.webContents.executeJavaScript('document.querySelector(".remote-login").hidden'), true);
     assert.equal(await phone.webContents.executeJavaScript('window.router.remoteInfo().then(()=>false,()=>true)'), true);
+    phase = 'linked files';
+    fs.writeFileSync(path.join(root, 'linked.md'), 'notes');
+    fs.copyFileSync(path.join(__dirname, '..', 'ui', 'icon-192.png'), path.join(root, 'linked.png'));
+    const outsideImage = path.join(__dirname, '..', 'ui', 'icon-192.png');
+    const link = (view, method, target) => view.webContents.executeJavaScript(`window.router.${method}(${JSON.stringify(session.id)}, ` +
+      `${JSON.stringify(target)}, 'main').then(value => value, error => 'error: ' + error.message)`);
+    assert.deepEqual(await link(phone, 'openFile', path.join(root, 'linked.md') + ':2'), { path: 'linked.md' }, 'the phone gets the file back');
+    assert.match(await link(phone, 'linkImage', 'linked.png'), /^data:image\/png;base64,/);
+    assert.match(await link(phone, 'linkImage', outsideImage), /inside the workspace/);
+    assert.match(await link(phone, 'openFile', path.join(__dirname, '..', 'package.json')), /inside the workspace/);
+    assert.match(await link(desktop, 'linkImage', outsideImage), /^data:image\/png;base64,/, 'the desktop is not limited to the workspace');
+    assert.match(await link(desktop, 'openFile', path.join(root, 'missing.md')), /File not found/);
     phase = 'browser provider connections';
     await phone.webContents.executeJavaScript('document.querySelector("#settings").click(); document.querySelector("#tab-providers").click(); true');
     const plug = id => `document.querySelector('[data-connection-provider="${id}"] .provider-plug')`;

@@ -6,7 +6,7 @@ function assertRunnerOpen(agents, name) {
 // You watch a sub-bot's chat; its work comes from the bot that made it.
 const WATCH_ONLY = 'This bot works for the bot that made it; only that bot gives it work.';
 
-function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolder, stopDownloads }) {
+function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolder, stopDownloads, linkShell }) {
   const { controller, agents, documents, updater } = runner;
   const register = handle;
   const chatMutations = new Set(['create', 'permissions', 'rename', 'archive', 'deleteSession', 'queuedMessage', 'compact', 'clearConversation']);
@@ -57,8 +57,14 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
   handle('saveGroup', value => agents.saveGroup(value));
   handle('readDocument', value => documents.read(value));
   handle('deleteAgent', id => agents.deleteAgent(id));
+  // shortcut: chat links resolve against the selected chat's workspace, so a relative path in a worker's result shown in Hub
+  // resolves against Hub's; pass the result's agent if that turns out to matter.
+  const workspaceOf = (id, agentId) => id ? agents.owner(id).session(id).workspace : agents.controller(agentId).data.settings.workspace;
   handle('browseWorkspace', (id, action, relative, kind, agentId) => require('./workspace/workspace-browser.cjs').browse(
-    id ? agents.owner(id).session(id).workspace : agents.controller(agentId).data.settings.workspace, action, relative, kind));
+    workspaceOf(id, agentId), action, relative, kind));
+  // Without a desktop shell (browser access, headless hosts) a link returns its workspace file for the page to show.
+  handle('openFile', (id, target, agentId) => require('./workspace/linked-files.cjs').open(workspaceOf(id, agentId), target, linkShell?.() || null));
+  handle('linkImage', (id, target, agentId) => require('./workspace/linked-files.cjs').image(workspaceOf(id, agentId), target, !linkShell?.()));
   handle('settings', (values, agentId) => { const snapshot = agents.settings(values, agentId); controller.warmRouter(); return snapshot; });
   handle('benchmarkData', () => {
     const workers = controller.catalog().filter(p => p.worker && p.enabled && controller.available(p));

@@ -25,6 +25,11 @@ app.whenReady().then(async () => {
   ipcMain.handle('bootstrap', () => controller.snapshot());
   const browseCalls = [];
   ipcMain.handle('browseWorkspace', (_event, ...args) => { browseCalls.push(args); return { available: false, entries: [] }; });
+  const linkedFiles = require('../src/workspace/linked-files.cjs');
+  let browserAccessCall = false; // stands in for src/main.cjs's browserRequest check
+  ipcMain.handle('linkImage', (_event, _id, target) => linkedFiles.image(root, target, browserAccessCall));
+  ipcMain.handle('openFile', (_event, _id, target) => linkedFiles.open(root, target,
+    browserAccessCall ? null : { openPath: async () => '', showItemInFolder: () => {} }));
   let previews = 0;
   ipcMain.handle('preview', () => { previews++; return { label: 'Auto', reason: 'Smoke test' }; });
   const imageRequests = [];
@@ -741,6 +746,64 @@ app.whenReady().then(async () => {
     assert.equal(colors.fits, true);
   }
   console.log('Compact content-sized bubbles and removed model-selection rows passed');
+  const links = await window.webContents.executeJavaScript(String.raw`(async () => {
+    const saved = { openFile: api.openFile, linkImage: api.linkImage, openLink: api.openLink }, opened = [], loaded = [];
+    api.openFile = async target => { opened.push(target); };
+    api.openLink = async target => { opened.push(target); };
+    api.linkImage = async target => { loaded.push(target); return 'data:image/gif;base64,R0lGODlhAQABAAAAACw='; };
+    const text = '<a data-path="%">bad</a> <span data-image="%"></span> [main](src/main.cjs:114) [doc](<C:/a b/c.md>) ' +
+      '[web](https://example.com) ![shot](C:\\tmp\\shot.png) ![remote](https://example.com/i.png)';
+    renderMessages({ items: [{ id: 'agent-links', type: 'agentMessage', text, phase: 'final_answer' }], routes: [] });
+    renderMessages({ items: [{ id: 'agent-links', type: 'agentMessage', text: text + ' ', phase: 'final_answer' }], routes: [] });
+    await new Promise(setTimeout);
+    const body = document.querySelector('.message.assistant .message-body');
+    for (const link of body.querySelectorAll('a')) link.click();
+    Object.assign(api, saved);
+    // The preload → IPC → linked-files path (handlers above), without opening anything.
+    const real = { image: (await window.router.linkImage(null, ${JSON.stringify(path.join(__dirname, '..', 'ui', 'icon-192.png'))}, 'main')).slice(0, 22),
+      missing: await window.router.openFile(null, ${JSON.stringify(path.join(root, 'missing.md'))}, 'main').then(() => 'opened', error => /File not found/.test(error.message)) };
+    return { titles: [...body.querySelectorAll('a[data-path]')].map(link => link.title), opened, loaded,
+      image: body.querySelector('.linked-image img')?.src.slice(0, 15), images: body.querySelectorAll('img').length,
+      remote: body.querySelector('a[href="https://example.com/i.png"]')?.textContent, real };
+  })()`);
+  assert.deepEqual(links, { titles: ['src/main.cjs:114', 'C:/a b/c.md', 'C:\\tmp\\shot.png'],
+    opened: ['src/main.cjs:114', 'C:/a b/c.md', 'https://example.com/', 'C:\\tmp\\shot.png', 'https://example.com/i.png'],
+    loaded: ['C:\\tmp\\shot.png'], image: 'data:image/gif;', images: 1, remote: 'remote',
+    real: { image: 'data:image/png;base64,', missing: true } });
+  console.log('Chat file links, linked images and web image links passed');
+  const codePaths = await window.webContents.executeJavaScript(String.raw`(async () => {
+    const saved = api.openFile, opened = [];
+    api.openFile = async target => { opened.push(target); };
+    const tick = '\x60', code = value => tick + value + tick;
+    const text = [code('ui/app.js:2146'), code('C:\\a b\\c.md'), code('api.openFile'), code('/clear'), code('tests/*.test.cjs'),
+      '[' + code('src/x.js') + '](src/x.js)', '\n\n' + tick.repeat(3) + '\nsrc/main.cjs\n' + tick.repeat(3)].join(' ');
+    renderMessages({ items: [{ id: 'agent-code-paths', type: 'agentMessage', text, phase: 'final_answer' }], routes: [] });
+    const body = document.querySelector('.message.assistant .message-body');
+    for (const link of body.querySelectorAll('a')) link.click();
+    api.openFile = saved;
+    return { opened, nested: body.querySelectorAll('a a').length, plain: [...body.querySelectorAll('code')].filter(c => !c.closest('a')).map(c => c.textContent.trim()) };
+  })()`);
+  assert.deepEqual(codePaths, { opened: ['ui/app.js:2146', 'C:\\a b\\c.md', 'src/x.js'], nested: 0,
+    plain: ['api.openFile', '/clear', 'tests/*.test.cjs', 'src/main.cjs'] });
+  console.log('Bare paths in inline code open as file links passed');
+  fs.writeFileSync(path.join(root, 'linked-notes.md'), 'notes');
+  fs.copyFileSync(path.join(__dirname, '..', 'ui', 'icon-192.png'), path.join(root, 'linked-shot.png'));
+  browserAccessCall = true;
+  browseCalls.length = 0;
+  const phone = await window.webContents.executeJavaScript(String.raw`(async () => {
+    await api.openFile(${JSON.stringify(path.join(root, 'linked-notes.md') + ':3')});
+    const notes = $('#browser-dialog').open;
+    await api.openFile('linked-shot.png');
+    await new Promise(r => setTimeout(r, 200));
+    const image = $('#browser-preview img')?.src.slice(0, 22);
+    $('#browser-dialog').close();
+    const outside = await api.openFile(${JSON.stringify(path.join(__dirname, '..', 'package.json'))}).then(() => 'opened', error => error.message);
+    return { notes, image, outside: /inside the workspace/.test(outside), dialog: $('#browser-dialog').open };
+  })()`);
+  browserAccessCall = false;
+  assert.deepEqual(phone, { notes: true, image: 'data:image/png;base64,', outside: true, dialog: false });
+  assert.deepEqual(browseCalls.filter(call => call[1] === 'read').map(call => call[2]), ['linked-notes.md', 'linked-shot.png']);
+  console.log('Browser-access file links open in Workspace files, images inside the workspace only passed');
   await window.webContents.executeJavaScript(`window.fetchTest = Promise.all([loadDiscoveredModels('cursor-cli'), loadDiscoveredModels('cursor-cli')]).catch(() => null); true;`);
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#models-loading').hidden"), false);
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#provider-connection').hidden"), false);
