@@ -47,6 +47,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./tests/installer.test.ps1
+      - name: Installer script check (Linux)
+        if: runner.os == 'Linux'
+        run: bash -n install-linux.sh && bash install-linux.sh --check-only
       - name: UI smoke (Windows)
         if: runner.os == 'Windows'
         run: npx electron tests/ui-startup-smoke.cjs
@@ -108,3 +111,37 @@ jobs:
           else
             gh release create "$GITHUB_REF_NAME" dist/*.exe --title "Phasma Harness $GITHUB_REF_NAME" --generate-notes
           fi
+
+  linux-packages:
+    name: Linux packages
+    # After the Windows installer, which creates the release, so this only adds its files to it.
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    # The oldest supported image, so the packages also run on distributions with an older glibc.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      # Also puts the Linux ripgrep and RTK builds in tools/bin, which the packages carry.
+      - run: npm ci
+      - run: npm run dist:linux
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Phasma-Harness-Linux
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+          if-no-files-found: error
+      - name: Add to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "$GITHUB_REF_NAME" dist/*.AppImage dist/*.deb --clobber

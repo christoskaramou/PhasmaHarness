@@ -1,0 +1,2 @@
+# Shell scripts keep LF in Windows checkouts too, so a copied folder still runs on Linux.
+*.sh text eol=lf

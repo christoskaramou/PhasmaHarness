@@ -1199,6 +1199,27 @@
       "cost": "cheap",
       "timeoutSec": 60,
       "origin": { "problem": "Checks that still failed after one correction stopped at Needs you on the same cheap model, and nothing judged a response without checks (Copilot Fusion cascade and critique patterns, 2026-10-29).", "fix": "One repair on the strongest measured worker; the chat checker judges each response (accept, revise to the same worker, escalate to the stronger one), grounded on verbatim quotes, bounded to one revise and one escalation.", "date": "2026-10-29" }
+    },
+    {
+      "id": "linux-installer-check",
+      "name": "Linux installer script parses, finds its app files and refuses bad options",
+      "covers": "install-linux.sh: bash syntax, --check-only finds every required app file, --origin/--port/--data are refused outside --headless, unknown options fail. The full install (desktop and --headless) needs Linux and network and is checked by hand in WSL (docs/wiki/hosting.md).",
+      "paths": [
+        "install-linux.sh",
+        "package.json",
+        "tools/fetch.cjs",
+        "tools/linux-service.cjs",
+        "src/server.cjs",
+        ".gitattributes"
+      ],
+      "command": "bash -c \"bash -n install-linux.sh && bash install-linux.sh --check-only && ! bash install-linux.sh --port 1 2>/dev/null && ! bash install-linux.sh --bogus 2>/dev/null\"",
+      "cost": "cheap",
+      "timeoutSec": 30,
+      "origin": {
+        "problem": "Linux had no installer: users ran npm ci and npm start by hand, and the headless runner needed Node 24 installed first.",
+        "fix": "install-linux.sh mirrors src/install.ps1 (per-user Node, npm ci, bundled tools, Electron, menu entry) and installs the headless service with --headless.",
+        "date": "2026-10-29"
+      }
     }
   ]
 }
