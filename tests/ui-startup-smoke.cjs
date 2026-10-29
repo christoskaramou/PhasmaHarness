@@ -3567,7 +3567,8 @@ app.whenReady().then(async () => {
   })()`);
   assert.deepEqual(queueRows, [1, 0], 'Send now removes the message and its Send now button from the queue list');
   console.log('A sent queued message leaves the queue list passed');
-  phase = 'running tasks';
+  // Its two page captures pushed the stretch since 'agent controls' past 30 s on a loaded machine (2026-10-29).
+  deadline.refresh(); phase = 'running tasks';
   // Claude's background tasks and Codex commands past 5 s are listed with their own Stop; a quick command stays out.
   const taskCalls = [];
   ipcMain.removeHandler('backgroundTask');

@@ -26,6 +26,8 @@ const { trimFleet } = require('../ui/agent-state.js');
 // Workers and helpers inherit this, so bundled rtk/rg win over any system copies.
 process.env.PATH = path.join(__dirname, '..', 'tools', 'bin') + path.delimiter + process.env.PATH;
 require('./process-tree.cjs').cleanPowerShellModulePath();
+// The worker job helper starts now, so the first workers' children already join their jobs (process-tree.cjs, jobs).
+require('./process-tree.cjs').startJobs();
 // The installed app's shortcuts carry the appId (electron-builder), and Windows shows a shortcut's icon on the taskbar for
 // windows with the same ID. Only the installed app uses it; a source-folder run keeps its own window icon.
 if (process.platform === 'win32' && app.isPackaged) app.setAppUserModelId('com.phasma.harness');

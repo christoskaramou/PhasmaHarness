@@ -396,9 +396,67 @@ Gate 24 code review (2026-10-20): four read-only reviewers covered every commit 
     - when the task ends it sends `task_notification`, runs one more turn, emits a second `result`, then exits, even with stdin already closed.
   - **Fix.** `ClaudeCLI.run` (`src/providers/claude.cjs`, `closeIfIdle`) keeps input open after a result while any non-ambient task is live, so Send now and queued messages reach Claude. It closes input once Claude is idle (the last event was a result, not an echoed follow-up), no delivery is pending and the set is empty.
   - **Limit.** The chat still shows "running" and holds the bot's busy slot until the task ends. The working line then reads "… is waiting on N background tasks" (below).
+  - **Wake-up turns (fixed 2026-10-28, after v0.3.18).**
+    - **Bug.** v0.3.18 closed input the moment the background set emptied while Claude was idle. A finished task always wakes Claude for a turn of its own (`task_notification`, then `background_tasks_changed []`, then `system`/`init`), and that turn can start more tasks.
+    - **Live case.** The Dota watcher ended at 22:30:52, input closed, and the wake-up turn then started a render and a progress Monitor. "still going?" stayed queued and Send now hit the silent "Claude is finishing" path for the rest of the turn.
+    - **Fix (`ClaudeCLI.run`).**
+      - `assistant` or `system`/`init` marks Claude busy again.
+      - Once a run has had any task (`tasksSeen`), input closes only if no turn starts within `WAKE_MS` (5 s) of Claude idling with no task left (`settleInput`). That holds both when the set empties and at a result, because a task that ended mid-turn can wake Claude after its answer.
+      - A run that never had a task still closes at its result at once.
+    - **Verified.**
+      - Tests in `tests/claude-permissions.test.cjs`:
+        - "a finished task's wake-up turn can start more tasks without losing Claude's input" fails on `7b1a516`.
+        - "a task that ends mid-turn wakes Claude after its answer with input still open" fails on the first version of this fix.
+        - "a turn that never starts a task closes Claude's input at its answer, without waiting".
+      - Real CLI, task ending while Claude is idle (Haiku, `sleep 8`, then a wake-up turn starting `sleep 40`): input stayed live at 13.7 s, a follow-up was answered at 17.7 s, and input closed after "all done".
+      - Real CLI, task ending mid-turn (background `sleep 3` during a foreground `sleep 8`): the CLI folded the wake-up into the same turn, which started `sleep 40`. A follow-up was answered at 21.9 s, and input closed 5 s after "all done".
+      - **Every send path in the real app, 36/36.** `.scratch/send-e2e.cjs` (git-ignored) runs a separate Harness with the real window on a sanitized copy, using real Claude (Haiku), Codex (`gpt-5.6-terra:low`) and Cursor (Grok) turns.
+        - **Claude:** composer Send while idle, while waiting on a task, and after a wake-up turn started new work (answered in 2 s with the task running); Send now on a queued message on another model; Edit; Remove; Stop on a task (session kept), then Send; Stop on the turn with a message queued, then Send now.
+        - **Codex:** queue while busy; Send now steering into the turn; the other queued message sends itself after the turn.
+        - **Cursor:** Send; Send now replacing the running step.
+    - A stopped task (`stop_task`) gets no wake-up turn in its own run, so that run ends 5 s after the set empties. Its notification waits in the session and arrives at the next resume (below).
+  - **Resumed sessions (fixed 2026-10-29).**
+    - **Bug.** A resumed session first answers what it was left owing, such as a stopped task's `task_notification`, in a turn of its own with its own `result`, before it takes the prompt. Harness took that result as the answer and closed input, so the prompt's tool permission request failed with "Tool permission request failed: AbortError: Stream closed" (twice, then Claude gave up).
+    - **Found by** the live Browser-access test (step 6), then reproduced on the real CLI (`resume_probe`: run 1 stops a task, run 2 resumes).
+    - The old close-at-result code had the same flaw.
+    - **Fix.** The prompt carries a `uuid`, and Claude echoes it back when it takes it (`--replay-user-messages`). Until then (`promptPending`), a result only starts the `WAKE_MS` wait, and the prompt's own result then closes at once when no task ran.
+    - **Verified.**
+      - Real CLI: the leftover turn's result at 21.3 s kept input live, the prompt's permission request was answered at 22.9 s, the command ran, and input closed after the tasks ended.
+      - Test "a resumed session's leftover turn does not close input before Claude takes the prompt" fails without the tracking.
+  - **Live test of the running Harness (2026-10-29).**
+    - `.scratch/live-pair.cjs` pairs once: the user pastes the connection link from Settings → Browser access → "Copy connection link", and only the session token is saved, git-ignored.
+    - `.scratch/live-test.cjs` drives the running app through `/api/call` on 127.0.0.1, addressed with the configured origin's host (`.scratch/live-api.cjs`), on a separate "Live test" bot that is deleted afterwards.
+    - Pitfalls:
+      - `load` answers with the whole fleet's state, so read `agentStates[botId]`.
+      - A bot's `create` reuses its conversation.
+      - Count processes by name: a command-line match also finds the shell that runs the query.
+    - Run on the 00:01 build: 14/16. Both failures were the resumed-session bug above. The live whole-turn Stop with `sleep 91 & sleep 92` left no `sleep` (pids 2936 and 61704 gone).
+    - **After that fix (Harness restarted 01:03): 16/16.**
+      - A message after a wake-up turn answered in 2 s.
+      - Send now answered in 3 s.
+      - Task Stop left 0 loop processes.
+      - The resumed chat ran `sleep 91 & sleep 92` (2 running), and whole-turn Stop left 0.
+      - Send after Stop answered in 7 s.
   - **Verified.**
     - Fake-process tests "Claude takes follow-ups while a background task runs…" and "a background task that ends while Claude answers…" in `tests/claude-permissions.test.cjs` both fail on the old close-at-result logic.
     - Real CLI through `ClaudeCLI.run` (Haiku, background `sleep 25`): a follow-up sent after the first result was answered at 20 s, input closed when the set emptied at 42 s, and the run resolved after the "bg done" wake-up turn at 44 s.
+- **Stop ends everything a worker started (fixed 2026-10-28):**
+  - **Symptom.** Stopping a PhasmaEngine Claude turn ended Claude and the running PhasmaEditor, but the background render (`review_base.sh`, its Python driver) and two Monitor `tail`/`grep` pairs kept running and held the `pe-gpu-lock`.
+  - **Cause.** Git Bash runs each command through a short-lived fork, so a command's Windows parent pid names a process that already exited. The render script's parent 77136 was gone before Stop, so `stopTree` (`taskkill /T` plus the parent-pid sweep) could never reach it.
+    - Measured with a control (no job): an orphaned `sleep` survives the tree kill.
+    - Real CLI, background `sleep N & sleep N`, then Stop: 2 left.
+    - Claude's own `stop_task` (per-task Stop) also left both.
+  - **Fix, whole turn and every worker.** `spawnOwned` puts every real child process into its own job object, through one helper per app run (`src/worker-job.ps1`, using the `document-job.dll` calls, no cmdlets). `stopTree` ends the job (`TerminateJobObject`) before its sweep, and Quit ends all of them (`stopJobs` in `Controller.shutdown`).
+    - The jobs have no kill-on-close, so what a normally finished worker leaves running keeps running until Quit, as before.
+    - `main.cjs` starts the helper at launch (`startJobs`). A helper started later joins a worker only about 0.3 s after its first children (measured: job at 323 ms, orphan at 129 ms).
+  - **Fix, per-task Stop (Claude).** Every process of a background task holds its output file (`…\tasks\<id>.output`, the folder Claude names in its tool result, `Controller.taskOutputFile`). `stopFileHolders` lists them through Restart Manager (`holders <file>`, pid plus exact start time), runs Claude's `stop_task`, then kills them and their children with the verified sweep. Running workers and Harness itself are never among them.
+  - **Verified.**
+    - `tests/shutdown.test.cjs`:
+      - "Stop ends what a running worker started through a process that already exited" (an orphan whose parent exited).
+      - "stopping one task ends every process holding its output file, but never the worker".
+    - Real Claude CLI, whole-turn Stop: 2 orphaned `sleep`s left on the old code, 0 with jobs.
+    - Real Claude CLI, per-task Stop: 2 left after `stop_task` alone, 0 through `stopFileHolders`.
+  - **Not covered.** A Codex turn's Stop still uses `stopStartedSince` (parent pid within the turn's window), because the app-server's job also holds its MCP helpers. Codex on Windows runs commands in PowerShell, which does not fork.
 - **Running tasks list (added 2026-10-28):**
   - **What it shows.** Above the message box, each task the bot has running, with an Output toggle and its own Stop:
     - Claude: background commands, Monitors and background subagents.
@@ -1284,6 +1342,15 @@ Full verification after the review fixes: `npm test` passed 942 of 946 tests (4 
 Release-runner selection (2026-10-23): `.github/workflows/ci.yml` pins Windows tests and packaging to `windows-2022`. The rolling `windows-latest` resolved to `windows-2025-vs2026` image `20261021.278.1`; release run `39995466400` timed out the first PDF/DOCX read at 60 seconds on two attempts, while the independent master run and local document tests passed. The image-specific cause remains unverified. A separate current-Windows document gate now covers this path before packaging, rather than relying only on the pin. Image reference: [GitHub Windows Server 2022 runner](https://github.com/actions/runner-images/blob/main/images/windows/Windows2022-Readme.md).
 
 Document limiter startup (2026-10-23): `tools/build-document-job.cjs` compiles `src/document-job.cs` during dependency setup (`tools/fetch.cjs`), source-checkout reader startup and `npm run dist`. Source startup builds a missing or outdated DLL after a pull without reinstalling dependencies; installed apps omit the builder script and use only the shipped DLL. The packaged `tools/bin/document-job.dll` is loaded by `src/document-job.ps1`; first attachment reads no longer compile C#. The 768 MiB OS limit, 15-second parsing timeout and separate 60-second startup deadline remain. `src/documents.cjs` retains bounded startup errors and stops a stalled helper before releasing its waiting worker PID, then allows a fresh retry. Exact deterministic cases in `tests/documents.test.cjs`: "Windows limiter startup timeout reaps the helper and untouched parser", "Windows limiter startup errors retain their cause", and "document memory limiter build caches unchanged source". The local cold PDF read measured 639 ms; this does not establish the cause or performance on the newer hosted Windows image.
+
+Document limiter startup on CI (fixed 2026-10-28):
+- **Symptom.** The v0.3.18 master CI run (`40756605150`, commit `7b1a516`) failed twice on windows-2022. "Document reader memory limiter startup timed out" hit the 60 s deadline, while the tag run of the same commit passed.
+- **How slow it was.** In 13 passing runs, every test that starts a limiter took 20–27 s on Windows (35–51 s for the first), while the containment helper, launched with the same PowerShell flags but the full environment, took 2–7 s.
+- **Cause (proven on windows-2022, throwaway-branch runs `40767146899`, `40768854757`, `40769529968`):**
+  - The limiter starts Windows PowerShell with `gameEnvironment()`, which drops `PSModuleAnalysisCachePath`. GitHub's image points that variable at a prebuilt module index (`C:\PSModuleAnalysisCachePath\ModuleAnalysisCache`).
+  - `Add-Type` and `Join-Path` are cmdlets, so PowerShell indexed every installed module before running them.
+  - Stripped environment: 28.4/23.3/23.2/23.3 s. Full environment: 0.3 s each. Stripped plus only `PSModuleAnalysisCachePath`: 0.5 and 0.3 s. Full minus only that variable: 23.1 s. Real-time Defender is off on the runner.
+- **Fix.** `src/document-job.ps1` loads the DLL with `[Reflection.Assembly]::LoadFrom([IO.Path]::Combine(...))` and uses no cmdlets, so no module lookup happens in any environment. On windows-2022 with the stripped environment that start took 0.2 s in all 4 rounds. Locally all 15 `tests/documents.test.cjs` tests pass, including the decompression-bomb memory cap.
 
 
 ### Skill comparison review safeguards (2026-10-23)

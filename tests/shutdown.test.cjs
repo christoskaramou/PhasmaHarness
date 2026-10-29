@@ -130,6 +130,67 @@ test('Stop ends a turn whose worker exited while something it started still hold
   assert.equal(closed, true);
 });
 
+// 2026-10-28: a Claude turn's background render (Git Bash script, Python, PhasmaEditor) and its progress monitors kept
+// running after Stop. Git Bash runs each command through a short-lived fork, so the command's parent pid names a process
+// that already exited and no parent-pid walk reaches it; the worker's job object does.
+test('Stop ends what a running worker started through a process that already exited', { skip: process.platform !== 'win32' && 'Windows job objects', timeout: 30000 }, async t => {
+  // As at app start (main.cjs): the job helper runs before the worker starts, and has answered once.
+  processTree.startJobs();
+  const warm = spawnOwned(spawn, process.execPath, ['-e', 'setTimeout(() => {}, 3000)'], { stdio: 'ignore' });
+  t.after(() => warm.kill());
+  assert.equal(await processTree.owned.get(warm.ownerKey).job, true, 'the job helper joins a worker to its job');
+
+  // The worker starts a go-between that starts the orphan and exits at once, then stays alive itself.
+  const orphanScript = "setInterval(() => {}, 1000)";
+  const between = `const c = require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(orphanScript)}], { detached: true, stdio: 'ignore' }); console.log(c.pid); c.unref();`;
+  const worker = `const g = require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(between)}], { stdio: ['ignore', 'pipe', 'ignore'] }); g.stdout.pipe(process.stdout); setInterval(() => {}, 1000);`;
+  const child = spawnOwned(spawn, process.execPath, ['-e', worker], { stdio: ['ignore', 'pipe', 'ignore'] });
+  let orphan = 0;
+  child.stdout.on('data', data => { orphan ||= Number(String(data).trim()); });
+  const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  t.after(() => { if (orphan > 0 && alive(orphan)) process.kill(orphan); });
+  for (let i = 0; i < 200 && !orphan; i++) await sleep(25);
+  await sleep(500); // the go-between has exited by now
+  const between_ = windowsTable().find(row => row.pid === orphan);
+  assert.ok(orphan > 0 && alive(orphan), 'the orphan runs');
+  assert.ok(!windowsTable().some(row => row.pid === between_?.ppid), 'its parent pid names a process that already exited');
+
+  const remaining = await stopTree(child);
+  await sleep(300);
+  assert.equal(alive(orphan), false, 'Stop ended the orphan too');
+  assert.deepEqual(remaining, []);
+});
+
+// The same for one background task (Stop on a task in the list): Claude's own stop_task left both orphaned `sleep`s of a
+// Git Bash command running (real CLI, 2026-10-28). Every process of the task holds its output file, the worker included.
+test('stopping one task ends every process holding its output file, but never the worker', { skip: process.platform !== 'win32' && 'Windows Restart Manager', timeout: 30000 }, async t => {
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-task-output-'));
+  const file = path.join(folder, 'b1task.output');
+  t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
+  processTree.startJobs();
+  const orphanScript = "setInterval(() => {}, 1000)";
+  const between = `const c = require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(orphanScript)}], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] }); require('fs').writeSync(3, c.pid + '\\n'); c.unref();`;
+  const worker = `const fs = require('fs'); const out = fs.openSync(${JSON.stringify(file)}, 'a');
+    const g = require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(between)}], { stdio: ['ignore', out, out, 'pipe'] });
+    g.stdio[3].pipe(process.stdout); setInterval(() => {}, 1000);`;
+  const child = spawnOwned(spawn, process.execPath, ['-e', worker], { stdio: ['ignore', 'pipe', 'ignore'] });
+  let orphan = 0;
+  child.stdout.on('data', data => { orphan ||= Number(String(data).trim()); });
+  const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  t.after(() => { child.kill(); if (orphan > 0 && alive(orphan)) process.kill(orphan); });
+  for (let i = 0; i < 200 && !orphan; i++) await sleep(25);
+  await sleep(500);
+  assert.ok(orphan > 0 && alive(orphan), 'the task’s orphan runs');
+
+  let stops = 0;
+  const remaining = await processTree.stopFileHolders(file, async () => { stops++; });
+  await sleep(300);
+  assert.equal(stops, 1, 'the worker’s own stop runs once');
+  assert.equal(alive(orphan), false, 'the orphan holding the output file is stopped');
+  assert.equal(alive(child.pid), true, 'the worker holding the same file keeps running');
+  assert.deepEqual(remaining, []);
+});
+
 test('a Stop whose cleanup cannot be confirmed says so, with a record to retry', async t => {
   const { EventEmitter } = require('node:events');
   const platform = Object.getOwnPropertyDescriptor(process, 'platform');

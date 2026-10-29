@@ -1,9 +1,11 @@
 // Finds and stops every process a local check (or any worker the app started) started, including detached or
-// reparented descendants. Linux: an inherited environment tag, found in /proc/<pid>/environ. Windows: orphans keep
-// ParentProcessId, so a tree recorded while the process runs (plus a final snapshot) links detached children back to it.
+// reparented descendants. Linux: an inherited environment tag, found in /proc/<pid>/environ. Windows: each worker's own
+// job object (see jobs) plus orphans keeping ParentProcessId, so a tree recorded while the process runs (plus a final
+// snapshot) links detached children back to it.
 const fs = require('node:fs');
+const path = require('node:path');
 const { randomUUID } = require('node:crypto');
-const { spawn, spawnSync } = require('node:child_process');
+const { spawn, spawnSync, ChildProcess } = require('node:child_process');
 const { EventEmitter } = require('node:events');
 
 const TAG = 'PHASMA_HARNESS_CHECK';
@@ -186,6 +188,92 @@ const owned = new Map(); // key -> { pid, startedMs, endedMs? }
 let spawned = 0;
 
 // spawn() through `launch`, tagging the process (and so, on Linux, its descendants) and recording it.
+// Windows: every worker process gets its own job object (src/worker-job.ps1), which everything it starts joins, so
+// stopping the worker ends all of it. A parent-pid walk cannot: Git Bash runs each command through a short-lived fork, so
+// the command's parent pid names a process that already exited (2026-10-28: a Claude turn's background render script
+// and its progress monitors outlived Stop). One helper serves the app run; its replies come back in command order.
+let jobHelper = null;
+function jobs() {
+  if (jobHelper)
+    return jobHelper;
+
+  // Source checkouts rebuild the job DLL after a pull; installed apps ship it (see DocumentReader).
+  const builder = path.join(__dirname, '../tools/build-document-job.cjs');
+  if (fs.existsSync(builder)) try { require(builder).buildDocumentJob(); } catch { /* the helper then fails: no jobs, as before */ }
+  const shell = path.join(process.env.WINDIR || 'C:/Windows', 'System32', 'WindowsPowerShell', 'v1.0');
+  const helper = spawn(path.join(shell, 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+    '-File', path.join(__dirname, 'worker-job.ps1')],
+  { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'], env: { ...process.env, PSModulePath: path.join(shell, 'Modules') } });
+  const replies = [];
+  const ended = () => {
+    if (jobHelper?.helper === helper) jobHelper = null;
+    for (const reply of replies.splice(0)) reply(null);
+  };
+  let buffer = '';
+  helper.stdout.setEncoding('utf8');
+  helper.stdout.on('data', text => {
+    buffer += text;
+    let end;
+    while ((end = buffer.indexOf('\n')) >= 0) {
+      replies.shift()?.(buffer.slice(0, end).trim());
+      buffer = buffer.slice(end + 1);
+    }
+  });
+  helper.once('error', ended);
+  helper.once('close', ended);
+  helper.stdin.on('error', ended);
+  // An idle helper must not keep the app alive; it exits when the app's end of its input closes.
+  helper.unref();
+  helper.stdout.unref?.();
+  helper.stdin.unref?.();
+  replies.push(() => {}); // the "ready" line
+  const ask = line => new Promise(resolve => {
+    replies.push(resolve);
+    helper.stdin.write(line + '\n', error => { if (error) ended(); });
+  });
+  return jobHelper = { helper, ask };
+}
+
+// At app start: a helper that starts later can join a worker to its job only after its first children (about 0.3 s).
+function startJobs() {
+  if (process.platform === 'win32')
+    jobs();
+}
+
+// Ends a worker's job (resolves once done, or at once without one).
+function stopJob(key) {
+  const job = owned.get(key)?.job;
+  return job ? job.then(added => added && jobHelper?.ask(`stop ${key}`)).catch(() => {}) : Promise.resolve();
+}
+
+// Stops one task of a worker by the processes holding its output `file` open, which finds them also where a parent-pid
+// walk cannot (Windows Restart Manager, through the job helper). `stopTask` (the worker's own stop) runs between listing
+// them and killing what is left; what they started is killed and checked too. The workers themselves and this app are
+// never among them. Elsewhere only `stopTask` runs. Resolves with the pids still running ([-1]: unconfirmed).
+async function stopFileHolders(file, stopTask) {
+  if (process.platform !== 'win32') {
+    await stopTask();
+    return [];
+  }
+
+  const reply = await jobs().ask(`holders ${file}`);
+  const workers = [...owned.values()].filter(root => root.endedMs === undefined).map(root => root.pid);
+  const known = new Map(String(reply || '').replace(/^holders:/, '').split(',').filter(Boolean)
+    .map(entry => entry.split('@').map(Number))
+    .filter(([pid]) => pid !== process.pid && !workers.includes(pid))
+    .map(([pid, filetime]) => [pid, { startedMs: filetime / 10000 - FILETIME_EPOCH_MS, exact: true }]));
+  await stopTask();
+  if (!known.size)
+    return [];
+
+  return sweepTarget({ roots: () => [], tags: [], known }, Date.now() + 5000).catch(() => [-1]);
+}
+
+// Quitting: ends every worker job of this app run, so nothing a worker started outlives the app.
+function stopJobs() {
+  return jobHelper ? jobHelper.ask('stopall').catch(() => {}) : Promise.resolve();
+}
+
 function spawnOwned(launch, file, args, options = {}) {
   const key = `${RUN}/${++spawned}`;
   const startedMs = Date.now();
@@ -195,6 +283,9 @@ function spawnOwned(launch, file, args, options = {}) {
   if (Number.isInteger(child.pid)) {
     const entry = { pid: child.pid, startedMs };
     owned.set(key, entry);
+    // Only a real child of ours: a test's stand-in pid could name someone else's process.
+    if (process.platform === 'win32' && child instanceof ChildProcess)
+      entry.job = jobs().ask(`add ${key} ${child.pid}`).then(reply => reply === `added:${key}`);
     child.once('exit', () => { entry.endedMs = Date.now(); });
     // Bounded: the oldest ended entries go first.
     for (const [old, item] of owned) { if (owned.size <= 1000) break; if (item.endedMs !== undefined) owned.delete(old); }
@@ -312,7 +403,8 @@ function stopTree(child) {
   const target = workerTarget(id);
   if (running && process.platform !== 'win32') Object.assign(target, { spare: child.pid, graceUntil: Date.now() + 1000 });
   cleanup.emit('pending', id);
-  const sweep = sweepTarget(target, Date.now() + 5000).catch(() => [-1]).then(remaining => {
+  // Its job first: that reaches what the parent-pid sweep cannot (see jobs).
+  const sweep = stopJob(id).then(() => sweepTarget(target, Date.now() + 5000)).catch(() => [-1]).then(remaining => {
     sweeps.delete(id);
     cleanup.emit('done', { id, remaining, record: remaining.length ? cleanupRecord(id, target) : null });
     return remaining;
@@ -413,4 +505,5 @@ function cleanPowerShellModulePath(env = process.env) {
 }
 
 module.exports = { cleanPowerShellModulePath, TAG, OWNER, Watch, leftovers, stopLeftovers, linkDescendants, parseRows, windowsTable, scan,
-  spawnOwned, stopTree, stopStartedSince, snapshotOwned, settleOwned, stopOwned, stopRecord, sweepRecord, cleanup, owned };
+  spawnOwned, stopTree, stopStartedSince, snapshotOwned, settleOwned, stopOwned, startJobs, stopJobs, stopFileHolders, stopRecord, sweepRecord,
+  cleanup, owned };

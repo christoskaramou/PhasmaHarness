@@ -1155,10 +1155,20 @@
       "name": "Claude keeps live input open while its background tasks run",
       "covers": "After a result, ClaudeCLI.run keeps stdin and live input open while background_tasks_changed lists a non-ambient task, closes it when Claude is idle and the set is empty, and never closes it mid-answer to a follow-up.",
       "paths": ["src/providers/claude.cjs", "tests/claude-permissions.test.cjs"],
-      "command": "node --test --test-name-pattern=\"background task|follow-ups during full-access|never echoes\" tests/claude-permissions.test.cjs",
+      "command": "node --test --test-name-pattern=\"background task|wake-up turn|ends mid-turn|never starts a task|leftover turn|follow-ups during full-access|never echoes\" tests/claude-permissions.test.cjs",
       "cost": "cheap",
       "timeoutSec": 30,
       "origin": { "problem": "A bot's background 'wait until Dota closes' command kept Claude alive after its answer; Harness had closed Claude's input at the result, so the chat stayed running for an hour and Send now could not reach it.", "fix": "Input stays open until Claude is idle and no background task is live.", "date": "2026-10-28" }
+    },
+    {
+      "id": "stop-ends-orphans",
+      "name": "Stop ends what a worker started, orphans included",
+      "covers": "Windows: spawnOwned puts each worker in its own job object (worker-job.ps1), stopTree ends it, so a process whose parent already exited (Git Bash forks) is stopped too; per-task Stop ends every process holding the task's output file (Restart Manager) but never the worker.",
+      "paths": ["src/process-tree.cjs", "src/worker-job.ps1", "src/document-job.cs", "src/controller.cjs", "tests/shutdown.test.cjs"],
+      "command": "node --test --test-name-pattern=\"through a process that already exited|holding its output file\" tests/shutdown.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 60,
+      "origin": { "problem": "Stopping a Claude turn left its background render script, Python driver and two Monitor watchers running (and the GPU lock held): Git Bash's forks leave each command's parent pid pointing at an exited process, so the parent-pid tree kill missed them.", "fix": "A job object per worker, ended on Stop and Quit; per-task Stop also kills the processes holding the task's output file.", "date": "2026-10-28" }
     },
     {
       "id": "running-tasks",

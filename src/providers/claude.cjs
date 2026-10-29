@@ -7,11 +7,13 @@ const { spawnOwned, stopTree } = require('../process-tree.cjs');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { createHash } = require('node:crypto');
+const { createHash, randomUUID } = require('node:crypto');
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 // How long a live follow-up waits for Claude to echo it back before it counts as uncertain.
 const DELIVERY_MS = 30000;
+// How long input stays open after the last background task ends; the CLI starts its wake-up turn within ~0.1 s (2026-10-28).
+const WAKE_MS = 5000;
 // Ask mode keeps a small tool set (smaller prompts, no subagents); anything beyond reading inside the workspace asks.
 const ASK_TOOLS = ['Read', 'Glob', 'Grep', 'Bash', 'Edit', 'Write', 'WebFetch', 'WebSearch'];
 // Tools that only work with an interactive Claude Code user; in the Harness they would show as unanswerable prompts.
@@ -295,12 +297,28 @@ class ClaudeCLI {
       child.stdin.on('error', () => {});
       let closed = false;
       // After a result Claude keeps running while a background task of it (background Bash, Monitor) runs, and answers
-      // again when one ends. Its input stays open until then, so follow-ups reach it instead of waiting for the task.
-      let idle = false, background = 0;
+      // again when one ends, in a turn of its own that may start more tasks. Its input stays open until Claude is idle
+      // with no task left and no such turn follows, so follow-ups reach it instead of waiting for the task.
+      let idle = false, background = 0, tasksSeen = false, wake = null;
+      // A resumed session first answers what it was left owing (a stopped task's notification) in a turn of its own, with
+      // its own result; the prompt counts as taken only once Claude echoes it back (--replay-user-messages).
+      const promptId = randomUUID();
+      let promptPending = !!onInput && !schema;
       const closeIfIdle = () => {
+        clearTimeout(wake);
         if (!idle || deliveries.size || background || !child.stdin.writable || child.stdin.writableEnded) return;
         onInput?.(null);
         child.stdin.end();
+      };
+      // Once this run has had a task, a finished task's wake-up can follow Claude's answer (a task that ended mid-turn) or
+      // the last task ending, so input closes only if no turn starts in time. A run without tasks closes at once.
+      const settleInput = () => {
+        if (!tasksSeen && !promptPending)
+          return closeIfIdle();
+
+        clearTimeout(wake);
+        wake = setTimeout(closeIfIdle, WAKE_MS);
+        wake.unref?.();
       };
       // Requests Harness makes of the running CLI (stop_task, get_task_output); like follow-ups they need its input open.
       let controlCount = 0;
@@ -367,10 +385,21 @@ class ClaudeCLI {
             deliveries.delete(event.uuid);
             idle = false;
           }
+          if (event.type === 'user' && event.uuid === promptId) {
+            promptPending = false;
+            idle = false;
+          }
+          // A turn Claude starts by itself, such as a finished task's wake-up, is not idle either.
+          if (event.type === 'assistant' || (event.type === 'system' && event.subtype === 'init')) {
+            idle = false;
+            clearTimeout(wake);
+          }
           if (event.type === 'system' && event.subtype === 'background_tasks_changed' && Array.isArray(event.tasks)) {
             // Each event lists every live task; ambient ones are the CLI's own watchers, not the bot's work.
             background = event.tasks.filter(task => !task?.ambient).length;
-            closeIfIdle();
+            tasksSeen ||= background > 0;
+            if (!background && idle)
+              settleInput();
           }
           if (event.type === 'result') {
             // usage covers one result's calls; total_cost_usd and modelUsage are the session's running totals, so the
@@ -383,7 +412,7 @@ class ClaudeCLI {
             }
             result = event;
             idle = true;
-            closeIfIdle();
+            settleInput();
           }
           // Plan usage limits: the rate-limit event carries the window and its reset; a blocked reply is marked "rate_limit".
           if (event.type === 'rate_limit_event' && event.rate_limit_info) {
@@ -413,7 +442,7 @@ class ClaudeCLI {
         }
         else done(resolve, result);
       });
-      const message = JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: prompt }, ...images.map(url => imageData(url)).map(({ mime, data }) => ({ type: 'image', source: { type: 'base64', media_type: mime, data } }))] } }) + '\n';
+      const message = JSON.stringify({ type: 'user', uuid: promptId, parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'text', text: prompt }, ...images.map(url => imageData(url)).map(({ mime, data }) => ({ type: 'image', source: { type: 'base64', media_type: mime, data } }))] } }) + '\n';
       // Live input and approval answers share stdin until Claude finishes processing queued messages.
       if (ask || onInput) child.stdin.write(message); else child.stdin.end(message);
       if (onInput && !schema) onInput(({ id, text, images = [] }) => {
@@ -427,7 +456,7 @@ class ClaudeCLI {
             clearTimeout(timer);
             deliveries.delete(id);
             reject(error);
-            closeIfIdle();
+            settleInput();
           };
           const timer = setTimeout(() => drop(new Error('Claude message delivery timed out. Check the conversation before resending.')), DELIVERY_MS);
           deliveries.set(id, {

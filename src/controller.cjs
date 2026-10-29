@@ -1,4 +1,5 @@
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { SessionStore, readSessionData, atomicWrite } = require('./session-store.cjs');
 const { randomUUID, createHash } = require('node:crypto');
@@ -165,6 +166,7 @@ class Controller extends EventEmitter {
     this.stopping = new Set();
     this.activeTurns = new Map();
     this.background = new Map(); // session id -> { tasks, idle }: a Claude turn's live background tasks, never saved
+    this.taskOutputDirs = new Map(); // session id -> the folder Claude writes this turn's background task output to
     this.timer = null;
     this.gate = null;
     this.gateDone = Promise.resolve();
@@ -1177,6 +1179,14 @@ class Controller extends EventEmitter {
           if (event.session_id) session[sessionKey] = event.session_id;
           if (event.type === 'system' && event.subtype === 'background_tasks_changed' && Array.isArray(event.tasks))
             this.trackBackground(session.id, event.tasks);
+          // Claude names the folder its background tasks write their output to (see taskOutputFile).
+          if (event.type === 'user')
+            for (const output of event.message?.content || []) {
+              const text = Array.isArray(output.content) ? output.content.map(part => part.text || '').join('') : String(output.content || '');
+              const named = /Output is being written to: (.+?\.output)/.exec(text);
+              if (named)
+                this.taskOutputDirs.set(session.id, path.dirname(named[1]));
+            }
           if (this.background.has(session.id) && (event.type === 'result' || event.type === 'assistant'))
             this.background.get(session.id).idle = event.type === 'result';
           if (event.type === 'stream_event') {
@@ -1277,6 +1287,7 @@ class Controller extends EventEmitter {
       this.cliAbort = null; this.liveInput = null; this.liveInputCaps = null; turnOver = true;
       this.liveControl = null;
       this.background.delete(session.id);
+      this.taskOutputDirs.delete(session.id);
       // An approval still open when the CLI turn ends can no longer be used.
       for (const [id, resolve] of this.helperApprovals) if (id.startsWith('cli-')) { resolve(false); this.requests.delete(id); this.helperApprovals.delete(id); this.approvalKeys.delete(id); }
       this.finishTurn(session, submission, outcome);
@@ -1440,7 +1451,16 @@ class Controller extends EventEmitter {
 
     if (action === 'output')
       return this.liveControl({ subtype: 'get_task_output', task_id: taskId });
-    await this.liveControl({ subtype: 'stop_task', task_id: taskId });
+    // Claude's own stop leaves what the task started through Git Bash running on Windows (its parent pid names an exited
+    // fork); every process of the task holds its output file, so those are stopped too.
+    await processTree.stopFileHolders(this.taskOutputFile(session, taskId), () => this.liveControl({ subtype: 'stop_task', task_id: taskId }));
+  }
+
+  // Where Claude writes a background task's output: the folder it named this turn, else its usual place.
+  taskOutputFile(session, taskId) {
+    const folder = this.taskOutputDirs.get(session.id) ||
+      path.join(os.tmpdir(), 'claude', this.workspace(session.workspace).replace(/[^A-Za-z0-9]/g, '-'), session.claudeSessionId || '', 'tasks');
+    return path.join(folder, `${taskId}.output`);
   }
 
   // What shaped this worker run (src/setup-fingerprint.cjs), from the values this turn actually hands the provider.
@@ -1706,6 +1726,7 @@ class Controller extends EventEmitter {
     }
     try { this.close(); } catch (error) { this.log?.error('Close failed during shutdown', { message: error.message }); }
     await processTree.settleOwned(graceMs);
+    await processTree.stopJobs();
     const result = processTree.stopOwned({ known, deadline: Date.now() + killMs });
     // Whatever could not be confirmed stopped keeps new work blocked at the next start until it is.
     if (result.record) { this.holdCleanup(result.record, false); try { this.save(); } catch { /* logged by the caller */ } }

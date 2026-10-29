@@ -4,8 +4,9 @@ const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 const { ClaudeCLI } = require('../src/providers/claude.cjs');
 
-// Fake Claude process: records args and stdin lines, lets the test script stdout.
-function fake() {
+// Fake Claude process: records args and stdin lines, lets the test script stdout. Like the real CLI with
+// --replay-user-messages it echoes the prompt back as it takes it, unless a test plays that part (echoPrompt: false).
+function fake({ echoPrompt = true } = {}) {
   const state = { args: null, input: [], ended: false, child: null };
   const cli = new ClaudeCLI();
   cli.start = args => {
@@ -17,7 +18,14 @@ function fake() {
     child.stdin.on('data', d => {
       buffer += d;
       let end;
-      while ((end = buffer.indexOf('\n')) >= 0) { state.input.push(JSON.parse(buffer.slice(0, end))); buffer = buffer.slice(end + 1); child.emit('input'); }
+      while ((end = buffer.indexOf('\n')) >= 0) {
+        const line = JSON.parse(buffer.slice(0, end));
+        state.input.push(line);
+        buffer = buffer.slice(end + 1);
+        if (echoPrompt && state.input.length === 1 && line.type === 'user' && args.includes('--replay-user-messages'))
+          child.stdout.write(JSON.stringify({ type: 'user', uuid: line.uuid, message: line.message }) + '\n');
+        child.emit('input');
+      }
     });
     child.stdin.on('finish', () => { state.ended = true; setImmediate(() => child.emit('close', 0)); });
     state.child = child;
@@ -250,7 +258,8 @@ test('a live follow-up Claude never echoes times out without keeping a finished 
 
 // 2026-10-28: a bot's background "wait until Dota closes" command kept Claude alive after its answer; Harness had closed
 // its input at the result, so the chat stayed busy for an hour and Send now could not reach Claude.
-test('Claude takes follow-ups while a background task runs after its result and closes input when the task ends', async () => {
+test('Claude takes follow-ups while a background task runs after its result and closes input when the task ends', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const { cli, state, send } = fake();
   let input;
   const run = cli.run({ model: 'claude-opus-5-5', prompt: 'wait for it', access: 'danger-full-access',
@@ -271,12 +280,51 @@ test('Claude takes follow-ups while a background task runs after its result and 
 
   send({ type: 'system', subtype: 'background_tasks_changed', tasks: [watcher] });
   await new Promise(setImmediate);
-  assert.equal(state.ended, true, 'input closes once only ambient tasks remain');
+  assert.equal(state.ended, false, 'input waits for the wake-up turn the ended task may start');
+  t.mock.timers.tick(5000);
+  await new Promise(setImmediate);
+  assert.equal(state.ended, true, 'with no wake-up turn and only ambient tasks left, input closes');
   assert.equal(input, null);
   assert.equal((await run).result, 'still waiting');
 });
 
-test('a background task that ends while Claude answers a follow-up keeps input open until that answer', async () => {
+// 2026-10-28, live: the Dota watcher ended at 22:30:52 and Harness closed Claude's input at once; Claude's wake-up turn
+// then started a render and a Monitor, so "still going?" and Send now could not reach it for the rest of the turn.
+test('a finished task’s wake-up turn can start more tasks without losing Claude’s input', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { cli, state, send } = fake();
+  let input;
+  const run = cli.run({ model: 'claude-opus-5-5', prompt: 'wait for Dota', access: 'danger-full-access',
+    onInput: value => { input = value; } });
+  send({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'dota', task_type: 'local_bash', description: 'Wait until Dota closes' }] });
+  send({ type: 'result', result: 'Paused until Dota closes.' });
+  send({ type: 'system', subtype: 'task_notification', task_id: 'dota' });
+  send({ type: 'system', subtype: 'background_tasks_changed', tasks: [] });
+  send({ type: 'system', subtype: 'init' });
+  send({ type: 'system', subtype: 'background_tasks_changed', tasks: [
+    { task_id: 'render', task_type: 'local_bash', description: 'Render the baseline' },
+    { task_id: 'progress', task_type: 'local_bash', description: 'render progress' }] });
+  send({ type: 'assistant', message: { content: [{ type: 'text', text: 'Rendering.' }] } });
+  send({ type: 'result', result: 'Rendering.' });
+  await new Promise(setImmediate);
+  t.mock.timers.tick(60000);
+  await new Promise(setImmediate);
+  assert.equal(state.ended, false, 'the new tasks keep input open');
+  assert.equal(typeof input, 'function', 'so "still going?" and Send now still reach Claude');
+
+  const delivery = input({ id: 'still', text: 'still going?', images: [] });
+  send({ type: 'user', uuid: 'still', message: { role: 'user', content: [{ type: 'text', text: 'still going?' }] } });
+  await delivery;
+  send({ type: 'result', result: 'Page 8 of 12.' });
+  send({ type: 'system', subtype: 'background_tasks_changed', tasks: [] });
+  t.mock.timers.tick(5000);
+  await new Promise(setImmediate);
+  assert.equal(state.ended, true, 'the last task ending with no further turn closes input');
+  assert.equal((await run).result, 'Page 8 of 12.');
+});
+
+test('a background task that ends while Claude answers a follow-up keeps input open until that answer', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const { cli, state, send } = fake();
   let input;
   const run = cli.run({ model: 'claude-opus-5-5', prompt: 'wait for it', access: 'danger-full-access',
@@ -293,8 +341,73 @@ test('a background task that ends while Claude answers a follow-up keeps input o
 
   send({ type: 'result', result: 'answered' });
   await new Promise(setImmediate);
-  assert.equal(state.ended, true);
+  assert.equal(state.ended, false, 'the ended task may still wake Claude after this answer');
+  t.mock.timers.tick(5000);
+  await new Promise(setImmediate);
+  assert.equal(state.ended, true, 'no wake-up turn came, so input closes');
   assert.equal((await run).result, 'answered');
+});
+
+// A task can also end while Claude is mid-turn; its wake-up turn then comes after Claude's answer and can start more work.
+test('a task that ends mid-turn wakes Claude after its answer with input still open', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { cli, state, send } = fake();
+  let input;
+  const run = cli.run({ model: 'claude-opus-5-5', prompt: 'build, then test', access: 'danger-full-access',
+    onInput: value => { input = value; } });
+  send({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'build', task_type: 'local_bash', description: 'build' }] });
+  send({ type: 'system', subtype: 'background_tasks_changed', tasks: [] });
+  send({ type: 'result', result: 'Waiting for the build.' });
+  await new Promise(setImmediate);
+  assert.equal(state.ended, false, 'the build’s wake-up turn is still to come');
+
+  send({ type: 'system', subtype: 'init' });
+  send({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'tests', task_type: 'local_bash', description: 'tests' }] });
+  send({ type: 'result', result: 'Tests started.' });
+  t.mock.timers.tick(60000);
+  await new Promise(setImmediate);
+  assert.equal(state.ended, false);
+  assert.equal(typeof input, 'function', 'a message still reaches Claude while the tests run');
+
+  send({ type: 'system', subtype: 'background_tasks_changed', tasks: [] });
+  send({ type: 'system', subtype: 'init' });
+  send({ type: 'result', result: 'All green.' });
+  t.mock.timers.tick(5000);
+  await new Promise(setImmediate);
+  assert.equal(state.ended, true);
+  assert.equal((await run).result, 'All green.');
+});
+
+// 2026-10-29, live: a resumed session first answered the notification its stopped task had left, in a turn of its own;
+// Harness took that result as the answer and closed input, so the prompt's own tool permission failed ("Stream closed").
+test('a resumed session’s leftover turn does not close input before Claude takes the prompt', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { cli, state, send } = fake({ echoPrompt: false });
+  let input;
+  const run = cli.run({ model: 'claude-opus-5-5', prompt: 'run the sleeps', access: 'danger-full-access', resume: 'kept',
+    onInput: value => { input = value; } });
+  send({ type: 'system', subtype: 'task_notification', task_id: 'stopped-before' });
+  send({ type: 'system', subtype: 'init' });
+  send({ type: 'result', result: 'The earlier task was stopped.' });
+  await new Promise(setImmediate);
+  assert.equal(state.ended, false, 'that result answers the leftover notification, not the prompt');
+  assert.equal(typeof input, 'function');
+
+  send({ type: 'system', subtype: 'init' });
+  send({ type: 'user', uuid: state.input[0].uuid, message: state.input[0].message });
+  send({ type: 'result', result: 'waiting again' });
+  await new Promise(setImmediate);
+  assert.equal(state.ended, true, 'the prompt’s own answer, with no task, closes input at once');
+  assert.equal((await run).result, 'waiting again');
+});
+
+test('a turn that never starts a task closes Claude’s input at its answer, without waiting', async () => {
+  const { cli, state, send } = fake();
+  const run = cli.run({ model: 'claude-opus-5-5', prompt: 'hi', access: 'danger-full-access', onInput: () => {} });
+  send({ type: 'result', result: 'hello' });
+  await new Promise(setImmediate);
+  assert.equal(state.ended, true);
+  assert.equal((await run).result, 'hello');
 });
 
 test('Harness asks the running Claude for a task’s output and to stop it, matching each answer by request id', async () => {

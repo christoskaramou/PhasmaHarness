@@ -3,7 +3,9 @@ param([ValidateRange(67108864, 4294967296)][uint64]$LimitBytes)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-Add-Type -LiteralPath (Join-Path $PSScriptRoot '../tools/bin/document-job.dll')
+# .NET calls only: a cmdlet such as Add-Type makes Windows PowerShell index every installed module first, which took
+# 23-28 s per start on GitHub's windows-2022 runners without their prebuilt index (PSModuleAnalysisCachePath), 0.2 s this way.
+[void][Reflection.Assembly]::LoadFrom([IO.Path]::Combine($PSScriptRoot, '..', 'tools', 'bin', 'document-job.dll'))
 
 # One private job caps each document worker's committed memory, which includes pdf.js and canvas
 # buffers outside the V8 heap. Closing this helper's handle kills any worker still inside.
