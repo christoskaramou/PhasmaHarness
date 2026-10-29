@@ -9,7 +9,8 @@ const { pdf, docx, documentXml, memoryBombPdf } = require('./fixtures/documents.
 const files = require('../ui/attachments.js');
 
 test('PDF and DOCX read in a separate process and retain complete text or bounded XML without persisting originals', async t => {
-  const reader = new DocumentReader(); t.after(() => reader.close());
+  // The first read loads pdf.js from a cold disk: 5-8 s on windows-2022 runners, once over 15 s (2026-10-29). Timeouts have their own test.
+  const reader = new DocumentReader({ timeoutMs: 60000 }); t.after(() => reader.close());
   const started = Date.now();
   const result = await reader.read({ name: 'brief.pdf', bytes: pdf() });
   t.diagnostic(`Cold PDF read: ${Date.now() - started} ms (${process.platform}, ${process.version})`);

@@ -1352,6 +1352,7 @@ Document limiter startup on CI (fixed 2026-10-28):
   - `Add-Type` and `Join-Path` are cmdlets, so PowerShell indexed every installed module before running them.
   - Stripped environment: 28.4/23.3/23.2/23.3 s. Full environment: 0.3 s each. Stripped plus only `PSModuleAnalysisCachePath`: 0.5 and 0.3 s. Full minus only that variable: 23.1 s. Real-time Defender is off on the runner.
 - **Fix.** `src/document-job.ps1` loads the DLL with `[Reflection.Assembly]::LoadFrom([IO.Path]::Combine(...))` and uses no cmdlets, so no module lookup happens in any environment. On windows-2022 with the stripped environment that start took 0.2 s in all 4 rounds. Locally all 15 `tests/documents.test.cjs` tests pass, including the decompression-bomb memory cap.
+- **Cold first read on CI (2026-10-29).** With startup fast, a runner's first PDF read ("Cold PDF read" diagnostic) is pdf.js loading off a cold disk plus the parse: 4.7-8.3 s on windows-2022 in 5 runs, over the 15 s parse timeout once (run 40801001478). Later reads take about 0.6 s. The first test of `tests/documents.test.cjs` now reads with `timeoutMs: 60000`; timeout behaviour has its own test. The product's 15 s window also covers that cold load (unchanged).
 
 
 ### Skill comparison review safeguards (2026-10-23)
