@@ -88,7 +88,7 @@ test('Claude and Cursor workers receive defaults; classifiers remain isolated', 
   }
   await claude.run({ model: 'test', prompt: 'continue', access: 'read-only', resume: 'old-chat',
     managedInstructions: true, instructions: 'Managed instruction marker.' });
-  assert.equal(managedPrompt, 'Managed instruction marker.');
+  assert.match(managedPrompt, /^Managed instruction marker\.\nBackground work: .*end your turn/, 'the instructions, then the Claude background-work note');
   assert.equal(args[args.indexOf('--append-subagent-system-prompt-file') + 1], args[args.indexOf('--append-system-prompt-file') + 1]);
   assert.equal(args[args.indexOf('--system-prompt-snapshot') + 1], 'off');
   assert.equal(require('node:fs').existsSync(args[args.indexOf('--append-system-prompt-file') + 1]), false);

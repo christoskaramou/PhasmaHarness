@@ -153,7 +153,7 @@
     <select aria-label="Reasoning effort" hidden="" id="effort" title="Reasoning effort">
     </select>
    </label>
-   <select aria-label="Effort cap for Auto" class="effort-cap-control" hidden="" id="effort-cap">
+   <select aria-label="Effort cap" class="effort-cap-control" hidden="" id="effort-cap">
     <option value="low">Up to low effort</option>
     <option value="medium">Up to medium effort</option>
     <option value="high">Up to high effort</option>
@@ -259,8 +259,16 @@
     <label id="runner-start-row">Start at sign-in<select id="settings-runner-start" disabled><option value="off">Off</option><option value="on">On</option></select></label>
     <label>Reply suggestions<select id="settings-reply-suggestions" aria-describedby="reply-suggestions-detail"><option value="off">Off</option><option value="on">On</option></select></label>
     <p id="reply-suggestions-detail" class="hint">After each answer, the model that wrote it suggests your next message as grey text. Right arrow accepts it; on a touch screen, the button beside Send does. One extra model call per answer.</p>
-    <label>Chat checker model<span class="model-effort-field"><select id="settings-chat-scan" aria-label="Chat checker model" aria-describedby="chat-scan-detail"></select><select id="settings-chat-scan-effort" aria-label="Chat checker effort" aria-describedby="chat-scan-detail"></select></span></label>
-    <p id="chat-scan-detail" class="hint">Off by default. The model you pick reads each exchange you reply to and flags mistakes worth a project rule or note; for tasks without checks, whether you accepted or corrected the work also teaches Auto which model fits. One call per message you send. While it is unavailable, nothing is checked.</p>
+    <label>Chat checker, reviser, escalator and rule finder model<span class="model-effort-field"><select id="settings-chat-scan" aria-label="Chat checker model" aria-describedby="chat-scan-detail"></select><select id="settings-chat-scan-effort" aria-label="Chat checker effort" aria-describedby="chat-scan-detail"></select></span></label>
+    <p id="chat-scan-detail" class="hint">Off by default. The model you pick does what the four switches below turn on. While it is unavailable, nothing is checked.</p>
+    <label>Check each response<select id="settings-check-responses" aria-describedby="check-responses-detail"><option value="on">On</option><option value="off">Off</option></select></label>
+    <label>Revise: send problems back<select id="settings-checker-revise" aria-describedby="check-responses-detail"><option value="on">On</option><option value="off">Off</option></select></label>
+    <label>Escalate: hand to the escalation model<select id="settings-checker-escalate" aria-describedby="check-responses-detail"><option value="on">On</option><option value="off">Off</option></select></label>
+    <p id="check-responses-detail" class="hint">When a response's checks pass, or it has none, the checker accepts it or names its problems. Revise sends them back to the model that wrote it; Escalate hands the task to the escalation model, manual picks included. At most one of each per task, so up to three checker calls; with both off, problems are only shown.</p>
+    <label>Escalation model<span class="model-effort-field"><select id="settings-escalation-model" aria-label="Escalation model" aria-describedby="escalation-model-detail"></select><select id="settings-escalation-effort" aria-label="Escalation effort" aria-describedby="escalation-model-detail"></select></span></label>
+    <p id="escalation-model-detail" class="hint">Takes over a task when the checker escalates it or its checks still fail after one correction (Checks → Escalate failed checks), manual picks included, and writes the checker's rules and notes. Auto picks the strongest model by benchmark scores within the effort cap; a model you pick is used as set.</p>
+    <label>Find rules from your replies<select id="settings-scan-replies" aria-describedby="scan-replies-detail"><option value="on">On</option><option value="off">Off</option></select></label>
+    <p id="scan-replies-detail" class="hint">After you reply, the checker reads the exchange and flags mistakes worth a project rule or note, which the escalation model writes (at most five a day per project). For tasks without checks, whether you accepted or corrected the work also teaches Auto which model fits.</p>
     <label>Show tips<select id="settings-show-tips" aria-describedby="show-tips-detail"><option value="on">On</option><option value="off">Off</option></select></label>
     <p id="show-tips-detail" class="hint">Tips on the new-chat screen and behind the bulb next to Settings, starting with the ones that fit your setup.</p>
     </div>
@@ -282,13 +290,13 @@
     </div>
     <div id="panel-routing" class="settings-panel" role="tabpanel" aria-labelledby="tab-routing" hidden>
     <h3 class="settings-section">Routing</h3>
-    <p class="hint">Routing picks a model and effort for each message. These options only apply when a bot's model is set to Auto; a model you pick by hand is used as it is.</p>
-    <label>Routing model (Auto)<span class="model-effort-field"><select id="settings-router-preset" aria-label="Routing model (Auto)"></select><select id="settings-router-effort" aria-label="Routing model effort"></select></span></label>
-    <label>Jev quick answers<select id="settings-quick"><option value="on">On</option><option value="off">Off</option></select></label>
-    <label>Effort cap for Auto<select id="settings-effort-cap" aria-describedby="effort-cap-detail"><option value="low">Up to low effort</option><option value="medium">Up to medium effort</option><option value="high">Up to high effort (recommended)</option><option value="xhigh">Up to xhigh effort</option><option value="max">⚠ Up to max effort</option></select></label>
+    <p class="hint">Routing picks a model and effort for each message sent on Auto, and for the escalation model while it is on Auto. A model you pick by hand, here or for a bot, is used as set.</p>
+    <label>Routing model<span class="model-effort-field"><select id="settings-router-preset" aria-label="Routing model"></select><select id="settings-router-effort" aria-label="Routing model effort"></select></span></label>
+    <label>Effort cap<select id="settings-effort-cap" aria-describedby="effort-cap-detail"><option value="low">Up to low effort</option><option value="medium">Up to medium effort</option><option value="high">Up to high effort (recommended)</option><option value="xhigh">Up to xhigh effort</option><option value="max">⚠ Up to max effort</option></select></label>
     <p id="effort-cap-detail" class="hint"></p>
     <label>Model for simple messages (Auto)<span class="model-effort-field"><select id="settings-low-model" aria-label="Model for simple messages (Auto)" aria-describedby="low-model-detail"></select><select id="settings-low-effort" aria-label="Effort for simple messages" aria-describedby="low-model-detail"></select></span></label>
     <p id="low-model-detail" class="hint">Only for messages sent on Auto. Pick a cheap model at low effort, or leave it on Auto to let Harness pick from benchmark scores.</p>
+    <p class="setting-link">Escalation model<a href="#settings-chat-scan" data-setting="settings-chat-scan">General → Chat checker, reviser, escalator and rule finder model</a></p>
     <label id="jev-compare-row">Compare with Jev<select id="settings-jev-compare" aria-describedby="jev-compare-detail"><option value="off">Off</option><option value="on">Log only</option></select></label>
     <p id="jev-compare-detail" class="hint"></p>
     </div>
@@ -367,6 +375,9 @@
       <div class="workspace-actions"><button type="button" id="checks-add">Add check</button>
         <button type="button" id="checks-phasma" title="Compile the game's Lua, launch its Player and play it through gamekit after each tracked task" hidden>Add Phasma game checks</button></div>
       <p id="checks-status" class="hint" role="status"></p>
+      <label>Escalate failed checks<select id="settings-escalate-failed-checks" aria-describedby="escalate-failed-checks-detail"><option value="on">On</option><option value="off">Off</option></select></label>
+      <p class="setting-link">Escalation model<a href="#settings-chat-scan" data-setting="settings-chat-scan">General → Chat checker, reviser, escalator and rule finder model</a></p>
+      <p id="escalate-failed-checks-detail" class="hint">When a task's checks still fail after one correction, the escalation model takes it over, once, manual picks included. Off stops at Needs you. For every workspace.</p>
     </div>
     </div>
     <div class="dialog-footer"><p id="settings-save-status" class="hint" role="status"></p></div>

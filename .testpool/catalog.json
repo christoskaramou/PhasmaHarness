@@ -1161,6 +1161,16 @@
       "origin": { "problem": "A bot's background 'wait until Dota closes' command kept Claude alive after its answer; Harness had closed Claude's input at the result, so the chat stayed running for an hour and Send now could not reach it.", "fix": "Input stays open until Claude is idle and no background task is live.", "date": "2026-10-28" }
     },
     {
+      "id": "claude-send-now-waiting",
+      "name": "Claude follow-ups wait out a running step and Send now hands them over",
+      "covers": "ClaudeCLI.run counts the delivery timeout only while Claude is idle, reports when Claude holds a follow-up, and Send now sends the send-now interrupt (never a plain one); the controller shows a held message as waiting with Send now available and the queue free.",
+      "paths": ["src/providers/claude.cjs", "src/providers/capabilities.cjs", "src/controller.cjs", "ui/app.js", "tests/claude-permissions.test.cjs", "tests/core.test.cjs"],
+      "command": "node --test --test-name-pattern=\"waits out|send-now|Claude holds|Send now steers|never echoes\" tests/claude-permissions.test.cjs tests/core.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 60,
+      "origin": { "problem": "A bot waited for its background regression run in 10-minute foreground sleep loops; 'status?' was hidden for 30 s, then shown as Paused with Send now greyed out, and Claude answered it 5 minutes later.", "fix": "Bots are told not to wait in the foreground, the delivery timeout ignores a running step, a held message shows as Waiting, and Send now uses Claude's send-now interrupt.", "date": "2026-10-29" }
+    },
+    {
       "id": "stop-ends-orphans",
       "name": "Stop ends what a worker started, orphans included",
       "covers": "Windows: spawnOwned puts each worker in its own job object (worker-job.ps1), stopTree ends it, so a process whose parent already exited (Git Bash forks) is stopped too; per-task Stop ends every process holding the task's output file (Restart Manager) but never the worker.",
@@ -1179,6 +1189,16 @@
       "cost": "cheap",
       "timeoutSec": 40,
       "origin": { "problem": "A bot's background watcher held its chat for an hour with no way to see what it was or stop only it; Stop killed the whole turn, a running render and the Claude session.", "fix": "A list above the message box with each task's output and its own Stop, for Claude and Codex.", "date": "2026-10-28" }
+    },
+    {
+      "id": "cascade-and-critique",
+      "name": "Cascade repair and the chat checker judging each response",
+      "covers": "Task gate: a task whose checks still fail after one correction goes once to the strongest measured worker at its Auto difficulty's effort or a manual pick's own effort (never a comparison run or a worker on that model; off with Escalate failed checks); the repair message carries the original request; proven setups record the first preset as failed; a repair never becomes the chat's model for new work. The chat checker picked in Settings (Off by default) reads every response whose checks passed or that has none: the request, the reply and, in Git, only the task's own changes since its git stash create snapshot (plus files it created, private paths left out; a plain folder starts no Git and is judged on its reply). Accept leaves it; revise sends grounded findings (verbatim quotes of the reply or a shown file) back to the same worker; escalate hands the task (manual picks too) to the stronger worker with the findings. One revise and one escalation per task, at most three looks; a second revise escalates, an escalation that cannot run becomes the revise, leftovers are only reported. Settings switches each turn a step off: Check each response (no look, no snapshot), Revise (findings go straight to the stronger worker), Escalate (a revise, then a report), Find rules from your replies (no scan); non-booleans are refused. An ungrounded verdict, a failed call or the checker being off leave the work as it is; with it off the gate settles without an extra await. A checker revision records the setup as corrected, an escalated task without checks as failed. Settings → Escalation model (one setting, linked pickers in Routing, General and Checks): a pick is used as set, above the effort cap too, for repairs and the chat rule writer; Auto, a pick at its usage limit or an unavailable one fall back to the strongest measured model within the cap.",
+      "paths": ["src/controller/task-gate.cjs", "src/critique.cjs", "src/tasks.cjs", "src/setups.cjs", "src/controller/setups.cjs", "src/controller/chat-scan.cjs", "src/routing/smart-router.cjs", "src/controller.cjs", "tests/core.test.cjs", "tests/critique.test.cjs", "tests/setups.test.cjs", "tests/routing-calls.test.cjs", "src/agents.cjs", "ui/app.js", "ui/index.html"],
+      "command": "node --test --test-name-pattern=\"checks still failing after one correction|the cascade runs once|a repair takes the|chat checker reads a response|chat checker's escalate|chat checker looks at most|each chat checker switch|the chat checker is off until|with the checker off|delayed completion of an older turn|Harness picks the worker\" tests/core.test.cjs tests/routing-calls.test.cjs && node --test tests/critique.test.cjs tests/setups.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 60,
+      "origin": { "problem": "Checks that still failed after one correction stopped at Needs you on the same cheap model, and nothing judged a response without checks (Copilot Fusion cascade and critique patterns, 2026-10-29).", "fix": "One repair on the strongest measured worker; the chat checker judges each response (accept, revise to the same worker, escalate to the stronger one), grounded on verbatim quotes, bounded to one revise and one escalation.", "date": "2026-10-29" }
     }
   ]
 }

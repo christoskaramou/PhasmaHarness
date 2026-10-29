@@ -7,7 +7,8 @@
 const API = Object.freeze({ cli: true, api: true, steer: false, compact: false, usage: true, liveQueue: true, liveSteer: true });
 const CAPABILITIES = Object.freeze({
   codex: Object.freeze({ cli: false, steer: true, compact: true, usage: true, tasks: true }),
-  'claude-cli': Object.freeze({ cli: true, steer: false, compact: true, usage: true, liveQueue: true, tasks: true }),
+  // Claude's liveSteer is its send-now interrupt: the step the turn waits on ends, background tasks keep running.
+  'claude-cli': Object.freeze({ cli: true, steer: false, compact: true, usage: true, liveQueue: true, liveSteer: true, tasks: true }),
   'cursor-cli': Object.freeze({ cli: true, steer: false, compact: false, usage: false, liveSteer: true }),
   'native:deepseek': Object.freeze({ cli: true, steer: false, compact: false, usage: false, liveSteer: true }),
   // structured: false = refuses schema replies (worker-only), so it cannot run the Hub or routing.

@@ -19,6 +19,8 @@ const ASK_TOOLS = ['Read', 'Glob', 'Grep', 'Bash', 'Edit', 'Write', 'WebFetch', 
 // Tools that only work with an interactive Claude Code user; in the Harness they would show as unanswerable prompts.
 const INTERACTIVE_TOOLS = ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'];
 const ASK_NOTE = '\nHarness access: tool calls outside the pre-approved set wait for the user\'s approval. Prefer Read/Glob/Grep for inspection and group shell commands to keep approvals few.';
+// Claude reads the user's messages only between steps, so a foreground wait on its own background task hides them.
+const BACKGROUND_NOTE = '\nBackground work: after starting a background command or task, end your turn; its completion wakes you with a turn of its own. Never wait for it in the foreground (sleep loops, polling a file or log): the user\'s messages cannot reach you until that command ends. A subagent instead finishes its task before it reports.';
 
 // Bots get Harness's rules and skills, not the user's personal Claude Code setup: user settings (their hooks,
 // permissions, skills and subagents), the home CLAUDE.md and auto-memory stay out, and every plugin is off.
@@ -241,7 +243,8 @@ class ClaudeCLI {
       // With an approval callback, the Harness access setting applies: pre-approved tools run, anything else asks the user in the Harness.
       const ask = !schema && typeof approve === 'function' && ['read-only', 'workspace-write'].includes(access);
       const basePrompt = 'Preserve unrelated changes. Do not commit or push unless explicitly requested. Use one agent unless delegation is requested. Report permission denials clearly.';
-      const systemPrompt = (schema ? basePrompt : instructions) + (!schema && helpers?.instructions ? helpers.instructions : '') + (ask ? ASK_NOTE : '');
+      const systemPrompt = (schema ? basePrompt : instructions) + (!schema && helpers?.instructions ? helpers.instructions : '') + (ask ? ASK_NOTE : '') +
+        (schema ? '' : BACKGROUND_NOTE);
       if (managedInstructions && !schema) {
         // File flags avoid Windows' command-line limit and pass the same rules to native nested agents.
         promptDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'phasma-claude-instructions-'));
@@ -288,6 +291,7 @@ class ClaudeCLI {
         onInput?.(null);
         for (const delivery of deliveries.values()) delivery.reject(new Error('Claude closed before confirming message delivery.'));
         deliveries.clear();
+        clearTimeout(deliveryTimer);
         for (const request of controls.values()) request.reject(new Error('Claude closed before answering.'));
         fn(value);
       };
@@ -300,6 +304,24 @@ class ClaudeCLI {
       // again when one ends, in a turn of its own that may start more tasks. Its input stays open until Claude is idle
       // with no task left and no such turn follows, so follow-ups reach it instead of waiting for the task.
       let idle = false, background = 0, tasksSeen = false, wake = null;
+      // Claude takes follow-ups only between steps, so one may wait as long as a step runs. Only idle time, when Claude
+      // takes them at once, counts toward the delivery timeout.
+      let deliveryTimer = null;
+      const watchDeliveries = () => {
+        if (!idle || !deliveries.size) {
+          clearTimeout(deliveryTimer);
+          deliveryTimer = null;
+        } else if (!deliveryTimer) {
+          deliveryTimer = setTimeout(() => {
+            deliveryTimer = null;
+            for (const delivery of [...deliveries.values()])
+              delivery.reject(new Error('Claude message delivery timed out. Check the conversation before resending.'));
+          }, DELIVERY_MS);
+        }
+      };
+      // Send now: Claude's own send-now interrupt hands it a waiting message at once and ends no background task; a plain
+      // interrupt would end them, so a CLI without it keeps the message waiting for the current step.
+      let sendNow = false;
       // A resumed session first answers what it was left owing (a stopped task's notification) in a turn of its own, with
       // its own result; the prompt counts as taken only once Claude echoes it back (--replay-user-messages).
       const promptId = randomUUID();
@@ -394,6 +416,8 @@ class ClaudeCLI {
             idle = false;
             clearTimeout(wake);
           }
+          if (event.type === 'system' && event.subtype === 'init')
+            sendNow = (event.capabilities || []).includes('interrupt_send_now_v1');
           if (event.type === 'system' && event.subtype === 'background_tasks_changed' && Array.isArray(event.tasks)) {
             // Each event lists every live task; ambient ones are the CLI's own watchers, not the bot's work.
             background = event.tasks.filter(task => !task?.ambient).length;
@@ -422,6 +446,7 @@ class ClaudeCLI {
           if (event.type === 'assistant' && event.error === 'rate_limit') rateLimited = true;
           onEvent(event);
         }
+        watchDeliveries();
       });
       child.once('error', error => done(reject, error));
       child.once('close', code => {
@@ -445,27 +470,42 @@ class ClaudeCLI {
       const message = JSON.stringify({ type: 'user', uuid: promptId, parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'text', text: prompt }, ...images.map(url => imageData(url)).map(({ mime, data }) => ({ type: 'image', source: { type: 'base64', media_type: mime, data } }))] } }) + '\n';
       // Live input and approval answers share stdin until Claude finishes processing queued messages.
       if (ask || onInput) child.stdin.write(message); else child.stdin.end(message);
-      if (onInput && !schema) onInput(({ id, text, images = [] }) => {
+      // steer (Send now): Claude takes the message at once, ending the step it waits behind; written: Claude holds it now.
+      if (onInput && !schema) onInput(({ id, text, images = [] }, { steer = false, written } = {}) => {
         if (settled || closed || signal?.aborted || !child.stdin.writable || child.stdin.writableEnded)
           return Promise.reject(new Error('Claude is no longer accepting messages.'));
+
+        const hurry = () => control({ subtype: 'interrupt', send_now: true, message_uuid: id });
+        if (deliveries.has(id)) {
+          if (!steer)
+            return Promise.reject(new Error('Claude already has this message.'));
+          if (!sendNow)
+            return Promise.reject(new Error('This Claude Code version cannot take a waiting message early. It answers after its current step.'));
+
+          return hurry();
+        }
+
         const content = [{ type: 'text', text }, ...images.map(imageData).map(({ mime, data }) =>
           ({ type: 'image', source: { type: 'base64', media_type: mime, data } }))];
         return new Promise((resolve, reject) => {
           // A delivery that fails or times out is dropped, so a turn that already finished still closes Claude's input.
           const drop = error => {
-            clearTimeout(timer);
             deliveries.delete(id);
             reject(error);
+            watchDeliveries();
             settleInput();
           };
-          const timer = setTimeout(() => drop(new Error('Claude message delivery timed out. Check the conversation before resending.')), DELIVERY_MS);
-          deliveries.set(id, {
-            resolve: () => { clearTimeout(timer); resolve(); },
-            reject: drop,
-          });
+          deliveries.set(id, { resolve, reject: drop });
+          watchDeliveries();
           child.stdin.write(JSON.stringify({ type: 'user', uuid: id,
             message: { role: 'user', content }, parent_tool_use_id: null }) + '\n', error => {
-            if (error) deliveries.get(id)?.reject(new Error('Claude input disconnected before delivery was confirmed.'));
+            if (error)
+              return deliveries.get(id)?.reject(new Error('Claude input disconnected before delivery was confirmed.'));
+
+            written?.();
+            // If the interrupt fails, the message still waits for the current step; Send now on it tries again.
+            if (steer && sendNow && deliveries.has(id))
+              hurry().catch(() => {});
           });
         });
       }, control);

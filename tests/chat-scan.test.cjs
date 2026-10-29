@@ -103,7 +103,7 @@ test('how the user took a task without checks becomes its proven-setup record, f
   const root = tempRoot(t);
   const recorded = [];
   let decision;
-  const self = { agents: null, chatScanner: () => ({ id: 'checker', provider: 'codex' }), available: () => true, lessonWorkspace: workspace => workspace,
+  const self = { agents: null, data: { settings: {} }, chatScanner: () => ({ id: 'checker', provider: 'codex' }), available: () => true, lessonWorkspace: workspace => workspace,
     wikiStore: { ensure: () => ({ root }) }, learnedRules: () => '', backgroundCall: (owner, preset, request, then) => then(decision),
     recordSetup: (...args) => recorded.push(args) };
   const worker = { id: 'w', workspace: 'C:/project' };

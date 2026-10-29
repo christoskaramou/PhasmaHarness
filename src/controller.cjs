@@ -24,7 +24,7 @@ const { MODEL: JEV_MODEL } = require('./providers/jev.cjs');
 const { TOOL: CONTEXT_TOOL } = require('./workspace/context-search.cjs');
 const { INSTRUCTIONS: HELPER_INSTRUCTIONS, TOOLS: HELPER_TOOLS, ToolHelpers } = require('./tools/tool-helpers.cjs');
 const { RouterBridge } = require('./tools/router-bridge.cjs');
-const { FINAL, canProposeWiki, hasProjectWiki, restartReason, summaryLine } = require('./tasks.cjs');
+const { FINAL, canProposeWiki, hasProjectWiki, restartReason, shouldTrack, summaryLine } = require('./tasks.cjs');
 const { WORKER_INSTRUCTIONS, workerInstructions, DEFAULT_SKILLS } = require('./worker-instructions.cjs');
 const skillPackages = require('./skill-packages.cjs');
 const { setupFingerprint, textHash, skillHashes, checksHash } = require('./setup-fingerprint.cjs');
@@ -175,11 +175,14 @@ class Controller extends EventEmitter {
     this.data.settings.checks ??= {};
     let restarted = false;
     for (const session of this.data.sessions) {
-      if (session.queueSending) for (const message of session.queue || []) {
-        message.uncertain = true; message.error = 'App closed during delivery. Check the conversation before resending.';
-      }
-      for (const message of session.queue || [])
+      for (const message of session.queue || []) {
+        if (session.queueSending || message.waiting) {
+          message.uncertain = true;
+          message.error = 'App closed during delivery. Check the conversation before resending.';
+        }
         delete message.sending;
+        delete message.waiting;
+      }
       session.queueSending = false;
       session.compacting = false;
       session.submission = null;
@@ -425,10 +428,6 @@ class Controller extends EventEmitter {
     if (values.routingBias !== undefined) {
       // Legacy field ignored — the router choice is not adjusted after classification.
     }
-    if (values.jevQuickAnswers !== undefined) {
-      if (typeof values.jevQuickAnswers !== 'boolean') throw new Error('Invalid quick-answer setting.');
-      next.jevQuickAnswers = values.jevQuickAnswers;
-    }
     if (values.routerPreset !== undefined) {
       if (!this.routerChoices().some(p => p.id === values.routerPreset)) throw new Error('Unknown router preset.');
       if (values.routerPreset !== (next.routerPreset || 'luna-light') && !this.available(this.routerChoices().find(p => p.id === values.routerPreset))) throw new Error('This router preset is unavailable on your account.');
@@ -443,6 +442,15 @@ class Controller extends EventEmitter {
 
       next.chatScanModel = values.chatScanModel;
     }
+    // What the chat checker does (checkResponse, runScan) and whether failed checks escalate; each on unless turned off.
+    for (const key of ['checkResponses', 'checkerRevise', 'checkerEscalate', 'scanReplies', 'escalateFailedChecks']) {
+      if (values[key] === undefined)
+        continue;
+      if (typeof values[key] !== 'boolean')
+        throw new Error('Invalid on/off setting.');
+
+      next[key] = values[key];
+    }
     if (values.autoLowModel !== undefined) {
       const choice = this.catalog().find(p => p.worker && p.id === values.autoLowModel);
       if (values.autoLowModel !== 'auto' && !choice)
@@ -451,6 +459,15 @@ class Controller extends EventEmitter {
         throw new Error('This model for simple messages is unavailable on your account.');
 
       next.autoLowModel = values.autoLowModel;
+    }
+    if (values.escalationModel !== undefined) {
+      const choice = this.catalog().find(p => p.worker && p.id === values.escalationModel);
+      if (values.escalationModel !== 'auto' && !choice)
+        throw new Error('Unknown escalation model.');
+      if (choice && !this.available(choice))
+        throw new Error('This escalation model is unavailable on your account.');
+
+      next.escalationModel = values.escalationModel;
     }
     if (values.fontScale !== undefined) {
       if (![85, 100, 115, 130, 150].includes(values.fontScale)) throw new Error('Invalid font scale.');
@@ -784,6 +801,9 @@ class Controller extends EventEmitter {
       content: [{ type: 'text', text }, ...images.map(url => ({ type: 'image', url }))]
     };
     this.changed();
+    // The working tree before this task, so the chat checker sees only its changes (checkResponse); taken while Auto routes it.
+    const checking = this.chatScanner() && this.data.settings.checkResponses !== false;
+    const baseline = !wikiTaskId && shouldTrack(task) && checking ? this.taskBaseline(session.workspace) : null;
     try {
       if (this.agents) this.openTask(session, null, text, clientId, task);
       if (this.agents) {
@@ -806,7 +826,7 @@ class Controller extends EventEmitter {
           const unlimited = usable.filter(p => !this.limits.limited(p.provider || 'codex', p.model));
           return unlimited.length ? unlimited : usable;
         };
-        const context = { ...session, ...previousState, configuredChecks: this.data.settings.checks?.[session.workspace] || [], routingCatalog: routingCatalog(), routerChoice: router, jevQuickAnswers: session.groupChatId ? false : this.data.settings.jevQuickAnswers, attachedImageCount: images.length,
+        const context = { ...session, ...previousState, configuredChecks: this.data.settings.checks?.[session.workspace] || [], routingCatalog: routingCatalog(), routerChoice: router, attachedImageCount: images.length,
           // The presets this project's checks proved per kind of work (src/setups.cjs).
           provenSetups: this.provenSetupsFor(session.workspace), autoLowModel: this.data.settings.autoLowModel };
         // A fresh delegation is not forced onto the model of an older, possibly misinterpreted task.
@@ -845,21 +865,6 @@ class Controller extends EventEmitter {
         selected = { ...selected, effortCap: this.data.settings.effortCap };
         if (this.stopping.has(id)) throw new Error('Turn was stopped before sending.');
       }
-      if (selected.directAnswer) {
-        const tracked = (session.tasks || []).find(task => task.messageId === clientId);
-        if (tracked) {
-          tracked.state = 'not-checked'; tracked.checksSkippedByRouter = tracked.checks.length > 0;
-          tracked.checks = Object.freeze([]); tracked.summary = summaryLine(tracked);
-        }
-        if (!session.items.some(i => i.type === 'userMessage')) session.title = text.trim().replace(/\s+/g, ' ').slice(0, 65);
-        session.items.push({ ...session.pendingMessage, pending: false, localOnly: true },
-          { id: randomUUID(), type: 'agentMessage', phase: 'final_answer', text: selected.directAnswer, routeLabel: 'Jev · quick answer', localOnly: true, createdAt: Date.now() });
-        (session.directContext ||= []).push({ question: text, answer: selected.directAnswer });
-        session.routes.push({ ...selected, label: 'Jev quick answer', at: Date.now(), messageId: clientId });
-        session.pendingMessage = null; session.status = 'completed'; session.updated = Date.now(); session.activeTaskId = null; this.busy = null;
-        this.save(); this.changed(); this.settle(session);
-        return selected;
-      }
       if (!this.available(selected)) throw new Error('Selected model is disabled or not available.');
       if (images.length && selected.images === false) throw new Error('Enable image support for this model before sending images.');
       if (!failover && !this.planPreset()) this.compareWithJev(session, routingText, images, selected, previousState);
@@ -870,6 +875,9 @@ class Controller extends EventEmitter {
       if (!wikiTaskId) session.jobDecision = { messageId: clientId, goal: routingText, ...(originalRequest ? { originalRequestId: originalRequest.id } : {}),
         continues: (!originalRequest || session.job?.originalRequestId === originalRequest.id) && (selected.sameTask === true || (selected.sameTask === undefined && ['pending', 'needs-input'].includes(session.job?.status))) };
       const tracked = this.openTask(session, selected, text, clientId, task);
+      // Waited for only while a chat checker is picked, so other sends never start later.
+      if (tracked && baseline)
+        this.rememberBaseline(tracked, await baseline);
       return await this.submitWorker(session, selected, text, images, clientId, tracked, started);
     } catch (error) {
       if (error.turnFailed) throw error;
@@ -1338,6 +1346,14 @@ class Controller extends EventEmitter {
     const session = this.session(id);
     const message = session.queue?.find(m => m.id === messageId);
     if (!message || session.queueSending) throw new Error('This queued message is no longer available.');
+    if (message.waiting) {
+      // The provider already holds it and answers after its current step; Send now asks it to take the message at once.
+      if (action !== 'steer' || !this.liveInput)
+        throw new Error('Claude already has this message and answers it after its current step.');
+
+      await this.liveInput(message, { steer: true });
+      return;
+    }
     if (['send', 'steer', 'live'].includes(action) && this.agents?.groupRuns.has(id)) {
       if (message.uncertain) throw new Error('Delivery was not confirmed. Check the conversation before removing this message.');
       if (this.busy && !groupChats.directRecipients(this.agents, session, message)) throw new Error('Wait for the active turn to finish.');
@@ -1370,12 +1386,26 @@ class Controller extends EventEmitter {
     // Sending: the queue list hides it at once, though it stays queued until the provider takes it; a failure shows it again.
     message.sending = true;
     session.queueSending = true;
+    let released = false;
     try {
       this.save(); this.changed();
       if ((action === 'steer' || action === 'live') && this.liveInput && !this.isCoordinator() && !message.agentReply && !message.wikiTaskId && !message.routineRun) {
         this.lastSends.delete(session.id);
         // Send now applies within the turn where the provider can (liveSteer); otherwise it joins the provider's own queue.
-        await this.liveInput(message, { steer: action === 'steer' && !!this.liveInputCaps?.liveSteer });
+        // Once the provider holds the message (Claude takes it after its current step), it shows as waiting with Send
+        // now available, and the rest of the queue is free again.
+        const written = () => {
+          if (!session.queue.includes(message))
+            return;
+
+          released = true;
+          message.waiting = true;
+          delete message.sending;
+          session.queueSending = false;
+          this.save();
+          this.changed();
+        };
+        await this.liveInput(message, { steer: action === 'steer' && !!this.liveInputCaps?.liveSteer, written });
         this.recordLiveMessage(session, message, activeTask);
       } else if (action === 'steer' && session.activeProvider === 'claude-cli' && !this.isCoordinator()) {
         // Claude without live input is finishing its turn; a restart would drop its saved session. The message sends next.
@@ -1404,14 +1434,20 @@ class Controller extends EventEmitter {
       message.error = error.message;
       message.uncertain = /timed out|closed|disconnect/i.test(error.message);
       throw error;
-    } finally { delete message.sending; session.queueSending = false; this.save(); this.changed(); this.settle(session); this.flushLiveQueue(session); }
+    } finally {
+      delete message.sending;
+      delete message.waiting;
+      if (!released)
+        session.queueSending = false;
+      this.save(); this.changed(); this.settle(session); this.flushLiveQueue(session);
+    }
   }
 
   flushLiveQueue(session) {
     if (!this.liveInput || !this.liveInputCaps?.liveQueue || this.busy !== session.id || session.queueSending || session.queuePaused ||
         session.compacting || this.stopping.has(session.id) || session.delegation || this.isCoordinator()) return;
     const message = session.queue?.[0];
-    if (!message || message.error || message.uncertain || message.agentReply || message.routineRun || message.wikiTaskId ||
+    if (!message || message.waiting || message.error || message.uncertain || message.agentReply || message.routineRun || message.wikiTaskId ||
         (message.mode && message.mode !== this.liveInputMode)) return;
     this.queuedMessage(session.id, message.id, 'live').catch(() => {});
   }

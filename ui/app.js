@@ -94,6 +94,7 @@ function providerCaps(provider) {
 function sendNowTitle(provider) {
   const caps = providerCaps(provider);
   if (state.coordinator || (!caps.steer && !caps.liveSteer && !caps.liveQueue)) return 'Stop the current turn, then send this message with conversation context';
+  if (caps.liveSteer && caps.tasks) return 'Stop the current step and answer this now; background tasks keep running';
   if (caps.steer) return 'Send into the running turn now';
   if (caps.liveSteer && !caps.liveQueue) return 'Cancel the current step, then send this in the same session';
   if (caps.liveSteer) return 'Add this to the running turn now';
@@ -277,13 +278,17 @@ $('#local-model-unload').onclick = () => changeLocalModel('unload');
 setInterval(() => { if (!document.hidden) refreshLocalModel(); }, 10000);
 window.addEventListener('focus', () => refreshLocalModel(true));
 
-// Effort cap for Auto (next to Auto in the composer, and Settings → Routing): Smart and Jev routing only choose efforts up
-// to it. Max means no cap and is marked with a warning, since it is the slowest and most expensive level.
+// Effort cap (next to Auto in the composer, and Settings → Routing): every model Harness picks itself (Smart and Jev
+// routing, the escalation model on Auto, comparison runs) is at or below it. Max means no cap and is marked with a
+// warning, since it is the slowest and most expensive level.
 const EFFORT_CAP_TEXT = {
   low: 'Auto picks efforts up to low.', medium: 'Auto picks efforts up to medium.', high: 'Auto picks efforts up to high (recommended).',
   xhigh: 'Auto picks efforts up to xhigh.', max: '⚠ No cap: Auto may pick max effort, the slowest and most expensive level.' };
 function capHint(cap) {
-  return `${EFFORT_CAP_TEXT[cap] || ''} Smart and Jev routing only see models at or below it (a model with no level that low keeps its lowest). Your manual picks are not capped.`;
+  return `${EFFORT_CAP_TEXT[cap] || ''} The same cap holds wherever Harness picks a model itself: Smart and Jev routing, ` +
+    'the escalation model while it is on Auto, and comparison runs. They only see models at or below it (a model with ' +
+    'no level that low keeps its lowest). A model you pick by hand (for a bot, the escalation model, the chat checker or ' +
+    'routing) keeps the effort you chose.';
 }
 // Composer dropdowns are as wide as their selected text (not their longest option), like buttons.
 const measure = document.createElement('canvas').getContext('2d');
@@ -391,6 +396,7 @@ function renderModelPickers() {
     renderRoutingModels();
     renderChatScanModels();
     renderLowModels();
+    renderEscalationModels();
     renderBenchmarkWorkers();
   }
   if ($('#agent-dialog').open)
@@ -1905,8 +1911,8 @@ function render() {
   for (const message of (session?.queue || []).filter(message => !message.agentReply && !message.sending)) {
     const revise = session.delegation && !session.delegation.delivered && !session.delegation.cancelled;
     const row = element('div', 'queued-message');
-    const text = element('span', '', `${message.error ? 'Paused' : 'Queued'}: ${message.text}${message.images.length ? ` (${message.images.length} images)` : ''}`);
-    text.title = message.error || message.text;
+    const text = element('span', '', `${message.waiting ? 'Waiting' : message.error ? 'Paused' : 'Queued'}: ${message.text}${message.images.length ? ` (${message.images.length} images)` : ''}`);
+    text.title = message.waiting ? 'Claude has this message and takes it after its current step.' : message.error || message.text;
     row.append(text);
     for (const [action, label] of [[(state.busy && !session.groupTurn) || revise ? 'steer' : 'send', 'Send now'], ['edit', '✎'], ['remove', '×']]) {
       const button = element('button', 'compact-action', label);
@@ -1916,8 +1922,9 @@ function render() {
       if (action === 'edit') button.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15Z"/></svg>';
       if (action === 'remove') button.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>';
       button.setAttribute('aria-label', action === 'remove' ? 'Remove queued message' : action === 'edit' ? 'Edit queued message' : label);
-      button.disabled = (action === 'steer' && (revise && !['queued', 'running'].includes(session.delegation.state))) || !!session.queueSending || (action !== 'remove' && (message.uncertain || (action !== 'edit' && (!ready || (state.busy && (state.busy !== selectedId || (!revise && ((!session.turnId && providerCaps(session.activeProvider).steer && !state.coordinator) || session.compacting))))))));
-      button.title = action === 'edit' ? 'Move back to the composer to edit and resend'
+      button.disabled = (action === 'steer' && (revise && !['queued', 'running'].includes(session.delegation.state))) || !!session.queueSending || (action !== 'steer' && message.waiting) || (action !== 'remove' && (message.uncertain || (action !== 'edit' && (!ready || (state.busy && (state.busy !== selectedId || (!revise && ((!session.turnId && providerCaps(session.activeProvider).steer && !state.coordinator) || session.compacting))))))));
+      button.title = action !== 'steer' && message.waiting ? 'Claude already has this message'
+        : action === 'edit' ? 'Move back to the composer to edit and resend'
         : action === 'send' && session.groupTurn ? 'Stop the current group reply, then send this message'
         : action === 'steer' && !revise ? sendNowTitle(session.activeProvider)
           : button.getAttribute('aria-label');
@@ -3469,6 +3476,7 @@ const modelEffortSettings = {
   routingModel: () => [$('#settings-router-preset'), $('#settings-router-effort'), state.routerPresets],
   chatScanModel: () => [$('#settings-chat-scan'), $('#settings-chat-scan-effort'), state.chatScanPresets || []],
   autoLowModel: () => [$('#settings-low-model'), $('#settings-low-effort'), state.presets],
+  escalationModel: () => [$('#settings-escalation-model'), $('#settings-escalation-effort'), state.presets],
 };
 
 function renderRoutingModels(selected = state.settings.routing === 'jev' ? 'jev' : state.settings.routerPreset) {
@@ -3515,6 +3523,18 @@ function renderLowModels() {
 
   fillModelEffort(select, $('#settings-low-effort'), state.presets, state.settings.autoLowModel || 'auto', [new Option('Auto', 'auto')]);
 }
+
+// Auto (the default: the strongest model by benchmark scores within the effort cap) or any worker model.
+function renderEscalationModels() {
+  const select = $('#settings-escalation-model');
+  if (providersConnecting().active) {
+    showConnecting(select);
+    $('#settings-escalation-effort').disabled = true;
+    return;
+  }
+
+  fillModelEffort(select, $('#settings-escalation-effort'), state.presets, state.settings.escalationModel || 'auto', [new Option('Auto', 'auto')]);
+}
 $('#settings').onclick = async () => {
   // A browser opens from the state the runner keeps pushing to it; fetching all of it again took seconds on a phone.
   if (!api.remote) {
@@ -3526,12 +3546,14 @@ $('#settings').onclick = async () => {
   $('#settings-effort-cap').onchange();
   $('#settings-context').value = state.settings.contextRanking || 'local';
   $('#settings-tools').value = state.settings.toolSelection || 'off';
-  $('#settings-quick').value = state.settings.jevQuickAnswers === false ? 'off' : 'on';
   $('#settings-jev-compare').value = state.settings.jevCompare === true ? 'on' : 'off';
   $('#settings-reply-suggestions').value = state.settings.replySuggestions === false ? 'off' : 'on';
   $('#settings-show-tips').value = state.settings.showTips === false ? 'off' : 'on';
+  for (const [id, key] of Object.entries(ON_SWITCHES))
+    $(`#${id}`).value = state.settings[key] === false ? 'off' : 'on';
   renderChatScanModels();
   renderLowModels();
+  renderEscalationModels();
   renderRoutingDetail();
   $('#jev-key').value = '';
   $('#jev-result').textContent = '';
@@ -3834,7 +3856,7 @@ $('#jev-plug').onclick = async event => {
 };
 $('#jev-save').onclick = async () => {
   const key = $('#jev-key').value; $('#jev-key').value = '';
-  try { applyState(await withProviderAction('jev', 'Saving key…', () => api.jevSaveKey(key))); renderJevCompare(); $('#jev-result').textContent = state.jev.enabled === false ? 'Key saved. Use the plug to enable Jev.' : 'Key saved. Test the connection, then pick Jev as General → Routing model (Auto).'; }
+  try { applyState(await withProviderAction('jev', 'Saving key…', () => api.jevSaveKey(key))); renderJevCompare(); $('#jev-result').textContent = state.jev.enabled === false ? 'Key saved. Use the plug to enable Jev.' : 'Key saved. Test the connection, then pick Jev as Routing → Routing model.'; }
   catch (error) { notify(error); }
 };
 $('#jev-test').onclick = async () => {
@@ -3871,8 +3893,8 @@ async function saveSetting(control, key, value, agentId = selectedAgent) {
   } catch (error) {
     if (agentId === selectedAgent) {
       const saved = key === 'routingModel' ? (state.settings.routing === 'jev' ? 'jev' : state.settings.routerPreset) : ((key === 'workspace' || key === 'access') ? current()?.[key] ?? state.settings[key] : state.settings[key])
-        ?? { effortCap: 'high', contextRanking: 'local', toolSelection: 'off', jevQuickAnswers: true, jevCompare: false,
-          chatScanModel: 'off', autoLowModel: 'auto', showTips: true }[key];
+        ?? { effortCap: 'high', contextRanking: 'local', toolSelection: 'off', jevCompare: false,
+          chatScanModel: 'off', autoLowModel: 'auto', escalationModel: 'auto', showTips: true, ...Object.fromEntries(Object.values(ON_SWITCHES).map(name => [name, true])) }[key];
       control.value = typeof value === 'boolean' ? (saved ? 'on' : 'off') : String(saved ?? '');
       control.onchange?.();
     }
@@ -3883,23 +3905,30 @@ async function saveSetting(control, key, value, agentId = selectedAgent) {
     // A model picker that switched to "Connecting…" meanwhile stays disabled.
     control.disabled = control.dataset.signature === 'connecting';
     // Model and effort pickers hold a model and a level, not the saved preset ID; show the saved choice again.
-    ({ routingModel: renderRoutingModels, chatScanModel: renderChatScanModels, autoLowModel: renderLowModels })[key]?.();
+    ({ routingModel: renderRoutingModels, chatScanModel: renderChatScanModels, autoLowModel: renderLowModels,
+      escalationModel: renderEscalationModels })[key]?.();
     renderRoutingDetail();
   }
 }
+// The chat checker's switches (General) and failed-check escalation (Checks), each on unless turned off.
+const ON_SWITCHES = {
+  'settings-check-responses': 'checkResponses', 'settings-checker-revise': 'checkerRevise', 'settings-checker-escalate': 'checkerEscalate',
+  'settings-scan-replies': 'scanReplies', 'settings-escalate-failed-checks': 'escalateFailedChecks',
+};
 const settingsFields = {
+  ...ON_SWITCHES,
   'settings-router-preset': 'routingModel', 'settings-effort-cap': 'effortCap',
   'settings-context': 'contextRanking', 'settings-tools': 'toolSelection',
-  'settings-quick': 'jevQuickAnswers', 'settings-jev-compare': 'jevCompare',
+  'settings-jev-compare': 'jevCompare',
   'settings-reply-suggestions': 'replySuggestions', 'settings-chat-scan': 'chatScanModel', 'settings-low-model': 'autoLowModel',
   'settings-low-effort': 'autoLowModel', 'settings-show-tips': 'showTips', 'settings-router-effort': 'routingModel',
-  'settings-chat-scan-effort': 'chatScanModel',
+  'settings-chat-scan-effort': 'chatScanModel', 'settings-escalation-model': 'escalationModel', 'settings-escalation-effort': 'escalationModel',
 };
 $('#settings-form').addEventListener('input', clearSaved);
 $('#settings-form').addEventListener('change', event => {
   const control = event.target, key = settingsFields[control.id];
   if (!key) return;
-  const toggle = ['jevQuickAnswers', 'jevCompare', 'replySuggestions', 'showTips'].includes(key);
+  const toggle = ['jevCompare', 'replySuggestions', 'showTips', ...Object.values(ON_SWITCHES)].includes(key);
   const value = toggle ? control.value === 'on' : modelEffortSettings[key] ? modelEffortChoice(...modelEffortSettings[key]()) : control.value;
   saveSetting(control, key, value);
 });
@@ -4375,6 +4404,27 @@ document.querySelectorAll('.settings-tab').forEach(tab => {
       if (cursorInUse()) loadDiscoveredModels('cursor-cli').then(() => renderProviders()).catch(e => { showProviderError(e.message); });
     }
     body.scrollTop = settingsScroll[name] || 0;
+  };
+});
+
+// A link to a setting kept in another tab: opens that tab with the setting's row at the top, focuses it and outlines
+// the row briefly.
+document.querySelectorAll('#settings-dialog [data-setting]').forEach(link => {
+  link.onclick = event => {
+    event.preventDefault();
+    const control = document.getElementById(link.dataset.setting);
+    const row = control.closest('label') || control;
+    $(`#tab-${control.closest('.settings-panel').id.replace('panel-', '')}`).click();
+
+    // Removed and re-added so a second click replays the outline.
+    row.classList.remove('setting-flash');
+    void row.offsetWidth;
+    row.classList.add('setting-flash');
+    clearTimeout(row.flashTimer);
+    row.flashTimer = setTimeout(() => row.classList.remove('setting-flash'), 1600);
+
+    row.scrollIntoView({ block: 'start' });
+    control.focus({ preventScroll: true });
   };
 });
 

@@ -2,7 +2,7 @@
 
 Focused project knowledge; check the linked source before relying on implementation details.
 
-- [Local agents](local-agents.md): execution, delegation, shared MCP connectors, group chats and mentions, routines and triggers, browser access, file and voice inputs, budgets and usage, batch project copies, host evidence, persistence, artifact actions and validation.
+- [Local agents](local-agents.md): execution, delegation, shared MCP connectors, group chats and mentions, routines and triggers, browser access, file and voice inputs, budgets and usage, batch project copies, host evidence, cascade repair and the chat checker's judge, persistence, artifact actions and validation.
 - [Linux hosting](hosting.md): headless startup, service setup, authenticated access, file processing and verified restart behavior.
 - [Main Bot result handling](main-bot-completion-reviews.md): completion reviews and timeout handling.
 - [Chat copy and paste](chat-copy-paste.md)

@@ -769,25 +769,6 @@ test('a queued group message keeps its context, after earlier exchanges and befo
   complete(controller, session, fake.turnIds.at(-1));
 });
 
-test('Jev direct answers drain through settle', async t => {
-  const { controller, fake, smartRouter } = await setup(t);
-  const session = controller.create();
-  await controller.send({ id: session.id, text: 'first', mode: 'terra-light' });
-  await controller.send({ id: session.id, text: 'quick', mode: 'auto' });
-  await controller.send({ id: session.id, text: 'third', mode: 'terra-light' });
-  smartRouter.choose = async () => ({
-    id: 'terra-light', provider: 'codex', model: 'gpt-5.6-terra', effort: 'low', label: 'Terra light', images: true,
-    source: 'jev', directAnswer: 'Yes.',
-  });
-  complete(controller, session, fake.turnIds[0]);
-  await flush();
-  assert.equal(session.items.some(item => item.text === 'Yes.'), true);
-  assert.equal(fake.turnIds.length, 2);
-  assert.equal(session.queue.length, 0);
-  assert.match(fake.calls.filter(call => call.method === 'turn/start').at(-1).params.input[0].text, /Current user request:\nthird$/);
-  assert.equal(session.tasks.length, 2, 'only the worker turns are tracked');
-});
-
 test('settle waits until queue delivery finishes', async t => {
   const { controller, fake } = await setup(t);
   const session = controller.create();
@@ -1061,7 +1042,7 @@ test('task mode is stored through queue edit and send', async t => {
   assert.equal(session.tasks[0].state, 'not-checked');
 });
 
-test('default tracking ignores classification, legacy Auto tracks, and direct answers are not tasks', async t => {
+test('default tracking ignores classification and legacy Auto tracks', async t => {
   const { controller, fake, smartRouter } = await setup(t);
   const session = controller.create();
   arm(controller, fake);
@@ -1075,9 +1056,6 @@ test('default tracking ignores classification, legacy Auto tracks, and direct an
   assert.equal(session.tasks.length, 2);
   complete(controller, session, fake.turnIds[1]);
   await controller.gateDone;
-  smartRouter.choose = async () => ({ directAnswer: 'Just a definition.', provider: 'codex', model: 'gpt-5.6-terra', effort: 'low' });
-  await controller.send({ id: session.id, text: 'what is a mutex', mode: 'auto', task: 'auto' });
-  assert.equal(session.tasks.length, 2);
 });
 
 test('router controls checks independently of task kind; manual and skip overrides remain safe', async t => {
@@ -1705,6 +1683,10 @@ function chatModels(controller, { flagFirst = true, verdict = 'avoided', escalat
   if (checker)
     controller.settings({ chatScanModel: checker });
   controller.smartRouter.complete = async (request, preset) => {
+    // The same checker also reads each response as it ends; it accepts them all here.
+    if (request.schema === require('../src/critique.cjs').SCHEMA)
+      return { decision: { verdict: 'accept', findings: [] } };
+
     calls.push({ schema: request.schema, preset: preset.id, prompt: JSON.parse(request.prompt) });
     if (request.schema === chatScan.ESCALATION_SCHEMA)
       return { decision: escalation };
@@ -1837,6 +1819,322 @@ test('a preset that passes a kind of work\'s checks first time more often than a
   assert.deepEqual(contexts.at(-1), {}, 'Undo drops it');
 });
 
+// Cascade: an Auto task whose checks still fail after its one correction goes, once, to the strongest offered worker.
+async function cascadeSetup(t, failures) {
+  const { controller, fake, smartRouter } = await setup(t);
+  const { WikiStore } = require('../src/workspace/wiki-store.cjs');
+  controller.wikiStore = new WikiStore(path.join(path.dirname(controller.filename), 'wiki-store'));
+  const session = controller.create();
+  controller.permissions(session.id, 'danger-full-access');
+  arm(controller, fake);
+  addCheck(controller, session, ['unit']);
+  let failing = failures;
+  fake.onExec = () => failing-- > 0 ? { exitCode: 1, stdout: 'Error: off by one in pager.js', stderr: '' } : { exitCode: 0, stdout: 'ok', stderr: '' };
+  smartRouter.choose = async () => ({ ...controller.resolveWorker('terra-light'), source: 'model', reason: 'test', assessment: { taskKind: 'debugging', difficulty: 'medium' } });
+  // The test catalog has no measured scores; name the strongest model so the repair's target shows.
+  const big = controller.resolveWorker('codex:gpt-5.6-sol:high');
+  const asked = [];
+  controller.repairPreset = (difficulty, images) => {
+    asked.push([difficulty, images]);
+    return big;
+  };
+  const turns = () => fake.calls.filter(call => call.method === 'turn/start');
+  const settle = async count => {
+    await until(() => fake.turnIds.length === count);
+    complete(controller, session, fake.turnIds.at(-1));
+  };
+  return { controller, fake, session, big, asked, turns, settle };
+}
+
+test('checks still failing after one correction hand an Auto task once to the strongest worker, which proven setups count as the first worker failing', async t => {
+  const { controller, session, big, asked, turns, settle } = await cascadeSetup(t, 2);
+  const setups = require('../src/setups.cjs');
+
+  await controller.send({ id: session.id, text: 'Fix the off-by-one in pager.js', mode: 'auto', task: 'on' });
+  await settle(1);
+  await settle(2);
+  await settle(3);
+  await controller.gateDone;
+
+  const task = session.tasks[0];
+  assert.equal(task.state, 'checks-passed');
+  assert.deepEqual(asked, [['medium', false]]);
+  assert.deepEqual([task.repair.from, task.repair.route.id], ['terra-light', big.id]);
+  const repairTurn = turns()[2].params;
+  assert.deepEqual([repairTurn.model, repairTurn.effort], [big.model, big.effort], 'the repair runs on the strongest worker');
+  const repairText = repairTurn.input[0].text;
+  assert.match(repairText, /You are taking it over/);
+  assert.match(repairText, /Original request:\nFix the off-by-one in pager\.js/, 'the request rides along, since a Codex thread never sees CLI turns');
+  assert.match(repairText, /off by one in pager\.js/);
+  assert.equal(session.routes.at(-1).escalatedFrom, 'terra-light');
+  assert.equal(session.job.worker.id, big.id, 'a follow-up on this task continues on the model that fixed it');
+
+  const root = controller.wikiStore.ensure(session.workspace).root;
+  assert.deepEqual(setups.readSetups(root).records.map(record => [record.preset, record.outcome]), [['terra-light', 'failed']]);
+});
+
+test('the cascade runs once, a manual pick escalates at its own effort, it can be turned off, and a failed repair says who took over', async t => {
+  const auto = await cascadeSetup(t, 3);
+  await auto.controller.send({ id: auto.session.id, text: 'Fix the pager', mode: 'auto', task: 'on' });
+  await auto.settle(1);
+  await auto.settle(2);
+  await auto.settle(3);
+  await auto.controller.gateDone;
+  await flush();
+  const task = auto.session.tasks[0];
+  assert.equal(task.state, 'needs-you');
+  assert.equal(auto.turns().length, 3, 'no second repair');
+  assert.equal(task.summary, `Needs you: checks still failed after ${auto.big.label} took over`);
+
+  const manual = await cascadeSetup(t, 2);
+  const picked = manual.controller.resolveWorker('terra-light');
+  await manual.controller.send({ id: manual.session.id, text: 'Fix the pager', mode: 'terra-light', task: 'on' });
+  await manual.settle(1);
+  await manual.settle(2);
+  await manual.settle(3);
+  await manual.controller.gateDone;
+  await flush();
+  assert.equal(manual.session.tasks[0].state, 'checks-passed');
+  assert.equal(manual.turns()[2].params.model, manual.big.model, 'a manual pick escalates too');
+  assert.deepEqual(manual.asked, [[picked.effort || 'medium', false]], 'at the manual pick\'s own effort');
+
+  const off = await cascadeSetup(t, 2);
+  off.controller.settings({ escalateFailedChecks: false });
+  await off.controller.send({ id: off.session.id, text: 'Fix the pager', mode: 'auto', task: 'on' });
+  await off.settle(1);
+  await off.settle(2);
+  await off.controller.gateDone;
+  await flush();
+  assert.equal(off.session.tasks[0].state, 'needs-you');
+  assert.deepEqual([off.turns().length, off.asked], [2, []], 'Escalate failed checks off stops at Needs you');
+  assert.equal(off.session.tasks[0].summary, 'Needs you: checks failed after one correction');
+  assert.throws(() => off.controller.settings({ escalateFailedChecks: 'no' }), /Invalid on\/off setting/);
+});
+
+test('a repair takes the Escalation model as set, else the best measured model at the task\'s effort within the cap, and none without scores', async t => {
+  const { controller } = await setup(t);
+  // Settings → Escalation model: a pick is used as set and needs no scores.
+  assert.throws(() => controller.settings({ escalationModel: 'no-such-model' }), /Unknown escalation model/);
+  controller.settings({ escalationModel: 'codex:gpt-5.6-sol:high' });
+  assert.equal(controller.repairPreset('low').id, 'codex:gpt-5.6-sol:high');
+  controller.settings({ escalationModel: 'auto' });
+  assert.equal(controller.repairPreset('high'), null, 'unmeasured: nothing says which model is stronger');
+
+  const scores = { 'gpt-6-astra': 70, opus: 60 };
+  controller.smartRouter.benchmarks = { catalog: list => list.map(p => ({ ...p, benchmarks: [{ source: 'aa-index', version: '4', harness: 'aa', score: scores[p.model] || 40 }] })) };
+  const medium = controller.repairPreset('medium');
+  assert.deepEqual([medium.model, medium.effort], ['gpt-6-astra', 'medium']);
+  controller.data.settings.effortCap = 'medium';
+  const capped = controller.repairPreset('xhigh');
+  assert.deepEqual([capped.model, capped.effort], ['gpt-6-astra', 'medium'], 'the effort cap still holds');
+  assert.equal(controller.strongestPreset().model, 'gpt-6-astra', 'the chat scanner\'s pick is unchanged');
+
+  // A picked Escalation model holds above the cap too, and also writes chat rules; at a usage limit it gives way to the
+  // Auto pick.
+  controller.data.settings.escalationModel = 'codex:gpt-5.6-sol:high';
+  assert.equal(controller.repairPreset('low').id, 'codex:gpt-5.6-sol:high');
+  assert.equal(controller.strongestPreset().id, 'codex:gpt-5.6-sol:high');
+  const limits = controller.limits;
+  controller.limits = { limited: (_provider, model) => model === 'gpt-5.6-sol' };
+  assert.equal(controller.repairPreset('medium').model, 'gpt-6-astra');
+  controller.limits = limits;
+});
+
+// The chat checker: a Git workspace with one file the user had already changed before the task started (or a plain
+// folder), the checker's verdicts in order, and a stronger worker a repair can take.
+async function checkerSetup(t, { verdicts = [], checks = true, git = true } = {}) {
+  const { controller, fake, smartRouter } = await setup(t);
+  const { execFileSync } = require('node:child_process');
+  const { WikiStore } = require('../src/workspace/wiki-store.cjs');
+  controller.wikiStore = new WikiStore(path.join(path.dirname(controller.filename), 'wiki-store'));
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'phasma-checker-'));
+  t.after(() => fs.rmSync(repo, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(repo, 'pager.js'), 'function last(items) {\n  return items[items.length];\n}\n');
+  fs.writeFileSync(path.join(repo, 'notes.js'), 'const draft = 1;\n');
+  if (git) {
+    const gitRun = (...args) => execFileSync('git', args, { cwd: repo, windowsHide: true });
+    gitRun('init', '-q');
+    gitRun('config', 'core.autocrlf', 'false');
+    gitRun('config', 'user.email', 'test@example.invalid');
+    gitRun('config', 'user.name', 'Test');
+    gitRun('add', '.');
+    gitRun('commit', '-q', '-m', 'start');
+  }
+  fs.writeFileSync(path.join(repo, 'notes.js'), 'const draft = 2; // USER_EDIT_BEFORE_TASK\n');
+
+  const session = controller.create(repo);
+  controller.permissions(session.id, 'danger-full-access');
+  arm(controller, fake);
+  if (checks)
+    addCheck(controller, session, ['unit']);
+  fake.onExec = () => ({ exitCode: 0, stdout: 'ok', stderr: '' });
+  smartRouter.choose = async () => ({ ...controller.resolveWorker('terra-light'), source: 'model', reason: 'test', assessment: { taskKind: 'debugging', difficulty: 'medium' } });
+  controller.settings({ chatScanModel: controller.chatScanChoices().find(p => p.model === 'gpt-5.6-terra').id });
+  // The test catalog has no measured scores; name the stronger worker a repair takes.
+  const big = controller.resolveWorker('codex:gpt-5.6-sol:high');
+  controller.repairPreset = () => big;
+  const looks = [];
+  smartRouter.complete = async (request, choice) => {
+    looks.push({ shown: JSON.parse(request.prompt), choice });
+    return { decision: verdicts[looks.length - 1] || { verdict: 'accept', findings: [] } };
+  };
+  const turns = () => fake.calls.filter(call => call.method === 'turn/start');
+
+  // Each turn ends with a final answer, so the checker has a reply to read.
+  const settle = async count => {
+    await until(() => fake.turnIds.length === count);
+    const turn = fake.turnIds.at(-1);
+    controller.notification({ method: 'item/completed', params: { threadId: session.threadId, turnId: turn,
+      item: { id: `a-${turn}`, type: 'agentMessage', phase: 'final_answer', text: 'Fixed last() so it returns the final item.' } } });
+    complete(controller, session, turn);
+  };
+
+  // One task: the worker's first turn fixes pager.js and adds a helper file, then `count` turns settle.
+  const run = async (count, mode = 'auto') => {
+    await controller.send({ id: session.id, text: 'Fix the off-by-one in last()', mode, task: 'on' });
+    fs.writeFileSync(path.join(repo, 'pager.js'), 'function last(items) {\n  return items[items.length - 1];\n}\n');
+    fs.writeFileSync(path.join(repo, 'helper.js'), 'module.exports = items => items.length === 0;\n');
+    for (let turn = 1; turn <= count; turn++)
+      await settle(turn);
+
+    await controller.gateDone;
+    await flush();
+    return session.tasks[0];
+  };
+  return { controller, session, big, looks, turns, run };
+}
+
+const finding = (source, quote, problem = 'An empty list returns undefined instead of null.') => ({ source, quote, problem });
+
+test('the chat checker reads a response without checks, sends grounded findings back to the same worker and accepts the revision', async t => {
+  const { controller, looks, turns, run } = await checkerSetup(t, { checks: false, verdicts: [{ verdict: 'revise', findings: [
+    finding('pager.js', 'return items[items.length - 1];'),
+    finding('reply', 'returns the final item', 'The reply does not say what an empty list returns.'),
+    finding('pager.js', 'return items.at(-1) ?? null;', 'Quotes code that is not there.'),
+    finding('notes.js', 'const draft = 2; // USER_EDIT_BEFORE_TASK', 'Not part of this task.'),
+  ] }] });
+  const task = await run(2);
+
+  assert.equal(looks.length, 2, 'the draft and the revision');
+  assert.equal(looks[0].choice.id, controller.chatScanner().id, 'the chat checker picked in Settings looks');
+  const shown = looks[0].shown;
+  assert.deepEqual(shown.changes.map(change => change.file), ['pager.js', 'helper.js'], 'the task\'s own changes and the file it created');
+  assert.doesNotMatch(JSON.stringify(shown), /USER_EDIT_BEFORE_TASK/, 'a change made before the task is not shown');
+  assert.deepEqual([shown.request, shown.reply, shown.checks], ['Fix the off-by-one in last()', 'Fixed last() so it returns the final item.', 'none ran']);
+
+  const revision = turns()[1].params;
+  assert.equal(revision.model, 'gpt-5.6-terra', 'the worker that wrote the changes revises them');
+  const text = revision.input[0].text;
+  assert.match(text, /A checker model \(.+\) read your response/);
+  assert.match(text, /pager\.js: An empty list returns undefined/);
+  assert.match(text, /reply: The reply does not say/);
+  assert.doesNotMatch(text, /Quotes code that is not there|Not part of this task/, 'ungrounded findings are dropped');
+
+  assert.equal(task.state, 'not-checked');
+  assert.deepEqual([task.critique.state, task.critique.revised, task.critique.looks], ['accepted', true, 2]);
+  assert.equal(task.summary, `No checks configured · ${task.critique.model} accepted it after one revision`);
+});
+
+test('the chat checker\'s escalate hands an Auto task to a stronger worker with its findings, which proven setups count as the first worker failing', async t => {
+  const setups = require('../src/setups.cjs');
+  const flagged = { verdict: 'escalate', findings: [finding('reply', 'returns the final item', 'The request asked for an empty-list fix; the reply describes another change.')] };
+  const { controller, session, big, looks, turns, run } = await checkerSetup(t, { checks: false, verdicts: [flagged] });
+  const task = await run(2);
+
+  const repair = turns()[1].params;
+  assert.deepEqual([repair.model, repair.effort], [big.model, big.effort]);
+  assert.match(repair.input[0].text, /a checker flagged its response\. You are taking it over/);
+  assert.match(repair.input[0].text, /Original request:\nFix the off-by-one in last\(\)/);
+  assert.match(repair.input[0].text, /reply: The request asked for an empty-list fix/);
+  assert.equal(looks.length, 2, 'the stronger worker\'s response is checked too');
+  assert.equal(task.summary, `No checks configured · ${task.critique.model} accepted it after ${big.label} took over`);
+
+  const root = controller.wikiStore.ensure(session.workspace).root;
+  assert.deepEqual(setups.readSetups(root).records.map(record => [record.preset, record.outcome]), [['terra-light', 'failed']],
+    'never credited to the first worker');
+});
+
+test('the chat checker looks at most three times: a second revise escalates, an escalation that cannot run is the revise, a manual pick escalates at its own effort, and what is left is reported', async t => {
+  const revise = { verdict: 'revise', findings: [finding('pager.js', 'return items[items.length - 1];')] };
+  const escalate = { ...revise, verdict: 'escalate' };
+
+  const twice = await checkerSetup(t, { verdicts: [revise, revise, revise] });
+  const task = await twice.run(3);
+  assert.deepEqual(twice.turns().map(turn => turn.params.model), ['gpt-5.6-terra', 'gpt-5.6-terra', twice.big.model],
+    'the draft, its revision, then the stronger worker');
+  assert.equal(twice.looks.length, 3);
+  assert.equal(task.state, 'checks-passed', 'the checks still decide the state');
+  assert.equal(task.summary, `Configured checks passed · ${task.critique.model} still found 1 problem: review the result`);
+
+  const stuck = await checkerSetup(t, { verdicts: [escalate, escalate] });
+  stuck.controller.repairPreset = () => null;
+  const unscored = await stuck.run(2);
+  assert.equal(stuck.turns().length, 2, 'no stronger worker: the escalation became the one revision');
+  assert.deepEqual([stuck.looks.length, unscored.critique.state], [2, 'flagged']);
+
+  const manual = await checkerSetup(t, { verdicts: [escalate] });
+  const asked = [];
+  manual.controller.repairPreset = effort => {
+    asked.push(effort);
+    return manual.big;
+  };
+  const picked = await manual.run(2, 'terra-light');
+  assert.deepEqual(manual.turns().map(turn => turn.params.model), ['gpt-5.6-terra', manual.big.model], 'a manual pick escalates too');
+  assert.deepEqual([asked, picked.critique.state], [[manual.controller.resolveWorker('terra-light').effort || 'medium'], 'accepted'], 'at its own effort');
+});
+
+test('each chat checker switch turns its step off: no look, no revise (straight to the stronger worker), no escalation (a revise, then a report)', async t => {
+  const revise = { verdict: 'revise', findings: [finding('pager.js', 'return items[items.length - 1];')] };
+  const escalate = { ...revise, verdict: 'escalate' };
+
+  const noLook = await checkerSetup(t, { verdicts: [revise] });
+  noLook.controller.settings({ checkResponses: false });
+  const unchecked = await noLook.run(1);
+  assert.deepEqual([noLook.looks.length, noLook.controller.baselines?.size || 0, unchecked.summary], [0, 0, 'Configured checks passed · coverage not assessed']);
+
+  const noRevise = await checkerSetup(t, { verdicts: [revise] });
+  noRevise.controller.settings({ checkerRevise: false });
+  await noRevise.run(2);
+  assert.deepEqual(noRevise.turns().map(turn => turn.params.model), ['gpt-5.6-terra', noRevise.big.model], 'findings go straight to the stronger worker');
+
+  const noEscalate = await checkerSetup(t, { verdicts: [escalate, escalate] });
+  noEscalate.controller.settings({ checkerEscalate: false });
+  const reported = await noEscalate.run(2);
+  assert.deepEqual([noEscalate.turns().map(turn => turn.params.model), reported.critique.state], [['gpt-5.6-terra', 'gpt-5.6-terra'], 'flagged']);
+
+  const neither = await checkerSetup(t, { verdicts: [revise] });
+  neither.controller.settings({ checkerRevise: false, checkerEscalate: false });
+  const shown = await neither.run(1);
+  assert.deepEqual([neither.turns().length, neither.looks.length, shown.critique.state], [1, 1, 'flagged'], 'with both off, problems are only shown');
+  assert.throws(() => neither.controller.settings({ checkResponses: 'off' }), /Invalid on\/off setting/);
+});
+
+test('with the checker off, failing or quoting nothing it was shown, the work stays as it is; a plain folder is checked on its reply alone', async t => {
+  const off = await checkerSetup(t);
+  off.controller.settings({ chatScanModel: 'off' });
+  const unchecked = await off.run(1);
+  assert.deepEqual([off.looks.length, unchecked.summary], [0, 'Configured checks passed · coverage not assessed']);
+  assert.equal(off.controller.baselines?.size || 0, 0, 'no snapshot without a checker');
+
+  const failing = await checkerSetup(t);
+  failing.controller.smartRouter.complete = async () => {
+    throw new Error('provider unavailable');
+  };
+  const failed = await failing.run(1);
+  assert.deepEqual([failing.turns().length, failed.critique.state, failed.summary], [1, 'failed', 'Configured checks passed · coverage not assessed']);
+
+  const invented = await checkerSetup(t, { verdicts: [{ verdict: 'escalate', findings: [finding('pager.js', 'return items.at(-1) ?? null;')] }] });
+  const kept = await invented.run(1);
+  assert.equal(invented.turns().length, 1, 'an escalate quoting nothing it was shown is an accept');
+  assert.deepEqual([kept.critique.state, kept.critique.dropped], ['accepted', 1]);
+
+  const plain = await checkerSetup(t, { git: false, checks: false });
+  const replyOnly = await plain.run(1);
+  assert.deepEqual(plain.looks[0].shown.changes, [], 'no Git: the reply alone');
+  assert.equal(plain.looks[0].shown.reply, 'Fixed last() so it returns the final item.');
+  assert.equal(replyOnly.summary, `No checks configured · checked by ${replyOnly.critique.model}, no problems found`);
+});
+
 test('without checks, the chat checker reading your replies teaches Auto which preset gets a kind of work right first time', async t => {
   const { controller, fake, smartRouter } = await setup(t);
   const { WikiStore } = require('../src/workspace/wiki-store.cjs');
@@ -1898,6 +2196,13 @@ test('the chat checker is off until a model is picked, and Off turns it off agai
   assert.equal(controller.data.settings.autoLowModel, 'codex:gpt-5.6-sol:high', 'any worker model, picked by hand');
   controller.settings({ autoLowModel: 'auto' });
   await chatExchange(controller, fake, session, 'Thanks, that is all', 'Glad to help.');
+  await flush();
+  assert.deepEqual(calls, []);
+
+  // A picked checker with Find rules from your replies off scans nothing either.
+  controller.settings({ chatScanModel: 'codex:gpt-5.6-sol:high', scanReplies: false });
+  await chatExchange(controller, fake, session, 'Rename the loader module again', 'Renamed it.');
+  await chatExchange(controller, fake, session, 'No, keep the exported name fetchUser.', 'Restored it.');
   await flush();
   assert.deepEqual(calls, []);
 });
@@ -3352,20 +3657,20 @@ test('a message the app closed on while sending shows in the queue again after a
   assert.deepEqual([message.sending, message.uncertain], [undefined, true]);
 });
 
-test('Send now steers where the provider can, uses its own queue otherwise, and steer-only providers are never fed the queue', async t => {
+test('Send now steers where the provider can, automatic delivery uses its own queue, and steer-only providers are never fed the queue', async t => {
   const { controller } = await setup(t);
   const { capabilities } = require('../src/providers/capabilities.cjs');
-  for (const [provider, steer] of [['test-api', true], ['claude-cli', false]]) {
+  for (const [provider, action, steer] of [['test-api', 'steer', true], ['claude-cli', 'steer', true], ['claude-cli', 'live', false]]) {
     const session = controller.create();
     session.activeProvider = provider;
     controller.busy = session.id;
     controller.activeTurns.set(session.id, 'live-turn');
     session.queue = [{ id: 'now-' + provider, text: 'Use the new requirement', images: [] }];
     const calls = [];
-    controller.liveInput = async (message, options) => { calls.push(options); };
+    controller.liveInput = async (message, options) => { calls.push(options.steer); };
     controller.liveInputCaps = capabilities(provider);
-    await controller.queuedMessage(session.id, 'now-' + provider, 'steer');
-    assert.deepEqual(calls, [{ steer }], provider);
+    await controller.queuedMessage(session.id, 'now-' + provider, action);
+    assert.deepEqual(calls, [steer], `${provider} ${action}`);
     assert.equal(session.queue.length, 0);
   }
 
@@ -3458,6 +3763,46 @@ test('Claude queues are forwarded during work in order, without replaying uncert
   await controller.send({ id: session.id, text: 'different model', mode: 'different' });
   assert.equal(delivered.length, 2);
   assert.equal(session.queue.length, 1);
+});
+
+// 2026-10-29: "status?" reached Claude while it ran a 10-minute foreground wait. The queue hid it for 30 s, then showed it
+// as Paused with Send now greyed out, although Claude still held it.
+test('a message Claude holds shows as waiting, frees the queue, and Send now asks Claude for it at once', async t => {
+  const { controller } = await setup(t);
+  const session = controller.create();
+  controller.busy = session.id;
+  session.activeProvider = 'claude-cli';
+  controller.activeTurns.set(session.id, 'live-turn');
+  controller.liveInputMode = controller.data.settings.mode;
+  controller.liveInputCaps = require('../src/providers/capabilities.cjs').capabilities('claude-cli');
+  const calls = [];
+  let acknowledge;
+  controller.liveInput = (message, options) => {
+    calls.push([message.text, options.steer]);
+    if (calls.length > 1)
+      return Promise.resolve();
+
+    options.written();
+    return new Promise(resolve => { acknowledge = resolve; });
+  };
+  await controller.send({ id: session.id, text: 'status?' });
+  const [message] = session.queue;
+  assert.deepEqual([message.waiting, message.sending, session.queueSending], [true, undefined, false], 'shown, with the queue free');
+  await assert.rejects(controller.queuedMessage(session.id, message.id, 'edit'), /already has this message/);
+  await assert.rejects(controller.queuedMessage(session.id, message.id, 'remove'), /already has this message/);
+
+  await controller.queuedMessage(session.id, message.id, 'steer');
+  assert.deepEqual(calls, [['status?', false], ['status?', true]]);
+  assert.equal(session.queue[0], message, 'it stays until Claude echoes it');
+
+  controller.save();
+  const [reopened] = reopen(controller).session(session.id).queue;
+  assert.deepEqual([reopened.uncertain, reopened.waiting], [true, undefined], 'an app restart cannot know whether Claude took it');
+
+  acknowledge();
+  await new Promise(setImmediate);
+  assert.equal(session.queue.length, 0);
+  assert.equal(session.items.filter(item => item.clientId === message.id).length, 1);
 });
 
 

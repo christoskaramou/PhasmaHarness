@@ -256,6 +256,67 @@ test('a live follow-up Claude never echoes times out without keeping a finished 
   assert.equal((await run).result, 'first finished');
 });
 
+// 2026-10-29: a bot waited for its background regression run in 10-minute foreground sleep loops. "status?" reached
+// Claude's input, but after 30 s Harness marked it unconfirmed and greyed out Send now while Claude still held it.
+test('a follow-up waits out Claude’s running step, and Send now hands it over with the send-now interrupt', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { cli, state, send } = fake();
+  let input;
+  const run = cli.run({ model: 'claude-opus-5-5', prompt: 'run the regressions', access: 'danger-full-access',
+    onInput: value => { input = value; } });
+  send({ type: 'system', subtype: 'init', capabilities: ['interrupt_send_now_v1'] });
+  send({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'wait', name: 'Bash', input: { command: 'sleep loop' } }] } });
+  let written = false;
+  let given = false;
+  const delivery = input({ id: 'status', text: 'status?', images: [] }, { written: () => { written = true; } });
+  delivery.catch(() => {}).finally(() => { given = true; });
+  await new Promise(setImmediate);
+  assert.equal(written, true, 'Harness learns that Claude holds the message');
+  t.mock.timers.tick(600000);
+  await new Promise(setImmediate);
+  assert.equal(given, false, 'a long step is no reason to give the message up');
+
+  const hurried = input({ id: 'status', text: 'status?', images: [] }, { steer: true });
+  await new Promise(setImmediate);
+  const interrupt = state.input.at(-1);
+  assert.deepEqual(interrupt.request, { subtype: 'interrupt', send_now: true, message_uuid: 'status' });
+  assert.equal(state.input.filter(line => line.uuid === 'status').length, 1, 'the message is not written twice');
+  send({ type: 'control_response', response: { request_id: interrupt.request_id, subtype: 'success', response: { still_queued: ['status'], send_now: 'stopped' } } });
+  await hurried;
+  send({ type: 'result', subtype: 'error_during_execution', is_error: true });
+  send({ type: 'user', uuid: 'status', message: { role: 'user', content: [{ type: 'text', text: 'status?' }] } });
+  await delivery;
+  send({ type: 'result', result: 'Two of five gates passed.' });
+  assert.equal((await run).result, 'Two of five gates passed.');
+});
+
+test('Send now writes a new message, then asks for it at once; a CLI without send-now keeps it waiting', async () => {
+  for (const capable of [true, false]) {
+    const { cli, state, send } = fake();
+    let input;
+    const run = cli.run({ model: 'claude-opus-5-5', prompt: 'work', access: 'danger-full-access',
+      onInput: value => { input = value; } });
+    send({ type: 'system', subtype: 'init', capabilities: capable ? ['interrupt_send_now_v1'] : [] });
+    await new Promise(setImmediate);
+    const delivery = input({ id: 'now', text: 'stop and answer', images: [] }, { steer: true });
+    await new Promise(setImmediate);
+    const requests = state.input.filter(line => line.type === 'control_request');
+    if (capable) {
+      assert.deepEqual(requests.map(line => line.request), [{ subtype: 'interrupt', send_now: true, message_uuid: 'now' }]);
+      assert.ok(state.input.findIndex(line => line.uuid === 'now') < state.input.indexOf(requests[0]), 'the message is at the CLI first');
+      send({ type: 'control_response', response: { request_id: requests[0].request_id, subtype: 'success', response: {} } });
+    } else {
+      assert.deepEqual(requests, [], 'no plain interrupt, which would end background tasks');
+      await assert.rejects(input({ id: 'now', text: 'stop and answer', images: [] }, { steer: true }), /cannot take a waiting message early/);
+    }
+
+    send({ type: 'user', uuid: 'now', message: { role: 'user', content: [{ type: 'text', text: 'stop and answer' }] } });
+    await delivery;
+    send({ type: 'result', result: 'answered' });
+    assert.equal((await run).result, 'answered');
+  }
+});
+
 // 2026-10-28: a bot's background "wait until Dota closes" command kept Claude alive after its answer; Harness had closed
 // its input at the result, so the chat stayed busy for an hour and Send now could not reach Claude.
 test('Claude takes follow-ups while a background task runs after its result and closes input when the task ends', async t => {

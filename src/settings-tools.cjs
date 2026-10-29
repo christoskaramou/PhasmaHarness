@@ -3,7 +3,7 @@ const { randomUUID } = require('node:crypto');
 const GENERAL = {
   routingModel: 'jev or an ID from routerChoices',
   effortCap: ['low', 'medium', 'high', 'xhigh', 'max'],
-  jevEnabled: 'boolean', jevQuickAnswers: 'boolean', jevCompare: 'boolean',
+  jevEnabled: 'boolean', jevCompare: 'boolean',
   contextRanking: ['local', 'jev'], toolSelection: ['off', 'jev'], largeResponses: 'boolean',
 };
 const LOCAL = { workspace: 'Absolute folder path', access: ['read-only', 'workspace-write', 'danger-full-access'], mode: 'auto or a model ID' };

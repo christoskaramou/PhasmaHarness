@@ -2218,8 +2218,51 @@ dialog {
   white-space:pre-wrap
 }
 
-#panel-general label,#panel-routing label,#panel-tools label {
+#panel-general label,#panel-routing label,#panel-tools label,#panel-checks > label {
   margin:14px 0
+}
+
+/* A setting kept in another tab: its name, then a link to it, spaced like the labels around it. */
+.setting-link {
+  margin:14px 0;
+  font-size:calc(12px * var(--font-scale,1));
+  color:var(--text);
+  font-weight:600;
+  line-height:1.5
+}
+
+.setting-link a {
+  display:block;
+  margin-top:10px;
+  color:var(--accent);
+  font-weight:400
+}
+
+/* The setting such a link opened: an outline that fades out; with reduced motion it shows still until removed. */
+.setting-flash {
+  scroll-margin-top:16px;
+  border-radius:8px;
+  outline:2px solid transparent;
+  outline-offset:6px;
+  animation:setting-flash 1.6s ease-out
+}
+
+@keyframes setting-flash {
+  0%,35% {
+    outline-color:var(--accent)
+  }
+
+  100% {
+    outline-color:transparent
+  }
+
+}
+
+@media(prefers-reduced-motion:reduce) {
+  .setting-flash {
+    outline-color:var(--accent)
+  }
+
 }
 
 .settings-section {

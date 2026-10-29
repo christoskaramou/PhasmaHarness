@@ -401,7 +401,7 @@ module.exports = {
   compareWithJev(session, text, images, selected, previousState) {
     const settings = this.data.settings;
     if (settings.jevCompare !== true || settings.routing === 'jev' || !this.jevCompare || !this.smartRouter.jev?.configured || !this.smartRouter.shadowJev) return;
-    if (!selected?.id || selected.directAnswer || selected.wikiTaskId || this.jevComparing) return;
+    if (!selected?.id || selected.wikiTaskId || this.jevComparing) return;
     const usable = capCatalog(this.catalog().filter(p => p.worker && this.available(p) && (!images.length || p.images)), settings.effortCap);
     const unlimited = usable.filter(p => !this.limits.limited(p.provider || 'codex', p.model));
     // A copy of the conversation as it was before this message, like the router saw it.

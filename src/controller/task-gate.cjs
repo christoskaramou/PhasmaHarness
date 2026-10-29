@@ -7,7 +7,7 @@ const { randomUUID } = require('node:crypto');
 const { execFile, spawn, spawnSync } = require('node:child_process');
 const { TAG: PROCESS_TAG, Watch, stopLeftovers, spawnOwned, stopTree } = require('../process-tree.cjs');
 const { CHECKER: PHASMA_GAME_CHECKS, restoreMcpOptIn } = require('../phasma-game-checks.cjs');
-const { FINAL, OUTPUT_CAP, canProposeWiki, capStream, childBlocksClear, confirmTermination, correctionText, createTask, gateOutcome, hasProjectWiki, identityFromProbe, lookupState, parentExitReaps, parseChecklist, resolveCitations, shouldTrack, summaryLine, validateChecks } = require('../tasks.cjs');
+const { FINAL, OUTPUT_CAP, canProposeWiki, capStream, childBlocksClear, confirmTermination, correctionText, repairText, createTask, gateOutcome, hasProjectWiki, identityFromProbe, lookupState, parentExitReaps, parseChecklist, resolveCitations, shouldTrack, summaryLine, validateChecks } = require('../tasks.cjs');
 const { accessMode, treeEntries } = require('./shared.cjs');
 const { stripTaskStatus } = require('../routing/task-state.cjs');
 
@@ -16,16 +16,27 @@ const identityProbe = pid => ['-NoProfile', '-NonInteractive', '-Command',
   `$p = Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}' -ErrorAction Stop; if ($null -eq $p) { exit 0 }; $p.CreationDate.ToFileTimeUtc()`];
 const { lessonFromTask, recordLesson, readLessons, relevantLessons, lessonsOffer, sameLesson, diffHashes } = require('../lessons.cjs');
 const { restoreCheckFiles } = require('../comparisons.cjs');
+const critique = require('../critique.cjs');
+
+// One Git command in a workspace, off the main thread, resolving to its error and output.
+const git = (cwd, args, maxBuffer) => new Promise(resolve => execFile('git', ['--no-optional-locks', '-c', 'core.fsmonitor=false', ...args],
+  { cwd, encoding: 'utf8', timeout: 4000, windowsHide: true, maxBuffer }, (error, stdout) => resolve({ error, stdout })));
+// The part of a worker preset a task keeps as its route.
+const routeOf = p => ({ provider: p.provider || 'codex', model: p.model, effort: p.effort, label: p.label, id: p.id, images: p.images !== false });
+// Starting snapshots of the last few tasks; one lost to a restart only means a check of the reply alone.
+const BASELINES = 20;
+// The chat checker's looks at one task: the draft, after its one revision and after its one escalation.
+const LOOKS = 3;
 
 // Host verification stays on trusted bundled code; a compared worker skill must not replace its checker.
 const TEST_POOL = path.resolve(__dirname, '..', '..', 'skills', 'test-pool', 'scripts', 'testpool.cjs');
 // One test pool run per repository at a time; a turn that ends meanwhile gets one more run afterwards.
 const poolRuns = new Map();
 
-// The folder holding .testpool/catalog.json, looking up from the workspace.
-function poolRoot(workspace) {
+// The folder holding `entry` (by default .testpool/catalog.json), looking up from the workspace.
+function poolRoot(workspace, entry = path.join('.testpool', 'catalog.json')) {
   for (let dir = path.resolve(workspace || '.'); ; dir = path.dirname(dir)) {
-    if (fs.existsSync(path.join(dir, '.testpool', 'catalog.json')))
+    if (fs.existsSync(path.join(dir, entry)))
       return dir;
     if (path.dirname(dir) === dir)
       return null;
@@ -34,7 +45,7 @@ function poolRoot(workspace) {
 
 module.exports = {
   openTask(session, selected, text, clientId, taskMode) {
-    if (!shouldTrack(taskMode) || selected?.directAnswer) return null;
+    if (!shouldTrack(taskMode)) return null;
     let task = (session.tasks || []).find(task => task.messageId === clientId);
     const locked = session.delegation?.taskChecks;
     const configured = locked || this.data.settings.checks?.[session.workspace] || [];
@@ -76,10 +87,7 @@ module.exports = {
     }
     if (checksSkippedByRouter) task.checks = Object.freeze([]);
     task.checksSkippedByRouter = checksSkippedByRouter;
-    if (selected) task.route = {
-      provider: selected.provider || 'codex', model: selected.model, effort: selected.effort,
-      label: selected.label, id: selected.id, images: selected.images !== false,
-    };
+    if (selected) task.route = routeOf(selected);
     // Auto's kind of work and difficulty, and whether it continued the previous task, for proven setups
     // (src/setups.cjs); a manual pick has none.
     if (selected?.assessment?.taskKind) {
@@ -346,13 +354,32 @@ module.exports = {
       this.writeTaskFile(session, task);
       if (!this.ownsGate(gate)) return this.cancelGate(session, task);
       if (state === 'correcting') {
-        task.state = 'correcting'; task.summary = summaryLine(task); this.changed();
-        await new Promise(setImmediate);
-        if (!this.ownsGate(gate)) return this.cancelGate(session, task);
-        task.corrections += 1;
-        await this.submitCorrection(session, task);
+        await this.sendBack(session, task, gate, 'correction');
         return;
       }
+
+      const escalates = (this.agents?.primary || this).data.settings.escalateFailedChecks !== false;
+      const repair = state === 'needs-you' && workerOutcome === 'completed' && escalates && this.repairRoute(session, task);
+      if (repair) {
+        await this.escalate(session, task, gate, repair);
+        return;
+      }
+
+      // Awaited only when the checker will look, so a gate without one settles as soon as it did before.
+      const settled = ['checks-passed', 'not-checked'].includes(state) && workerOutcome === 'completed';
+      const checker = settled ? this.responseChecker(session, task) : null;
+      const next = checker ? await this.checkResponse(session, task, gate, final, checker) : null;
+      if (!this.ownsGate(gate)) return this.cancelGate(session, task);
+      if (next?.repair) {
+        await this.escalate(session, task, gate, next.repair, critique.escalationText(task.critique.model, next.findings));
+        return;
+      }
+      if (next) {
+        task.critique.revised = true;
+        await this.sendBack(session, task, gate, 'review', this.lastWorker(task), critique.revisionText(task.critique.model, next.findings));
+        return;
+      }
+
       task.state = state;
       task.wikiAvailable = canProposeWiki(task) && hasProjectWiki(session.workspace);
       task.reason = workerOutcome === 'failed' ? 'worker failed' : state === 'needs-you' ? 'checks failed after one correction' : state === 'blocked' ? (attempt.results.find(result => result.status === 'blocked' || result.status === 'unknown')?.detail || 'blocked') : null;
@@ -503,8 +530,147 @@ module.exports = {
       this.log?.warn('Test pool exited unexpectedly', { code, stderr: stderr.slice(-300) });
   },
 
-  async submitCorrection(session, task) {
-    const text = `[Router]\n${correctionText(task)}`;
+  // Cascade: checks that still fail after one correction, or the chat checker's escalate, hand a task, once, to the
+  // strongest offered worker at its Auto difficulty's effort (a manual pick's own effort), under a correction's admission
+  // plus the background usage guard. Never for a comparison run (it would change what the run measures) or a worker
+  // already on that model.
+  repairRoute(session, task) {
+    if (task.repair || !task.route?.model || this.comparisonOf(session))
+      return null;
+
+    const effort = task.difficulty || task.route.effort || 'medium';
+    const repair = this.repairPreset(effort, (task.inputImages || []).length > 0);
+    const same = repair && (repair.provider || 'codex') === (task.route.provider || 'codex') && repair.model === task.route.model;
+    if (!repair || same || this.agents?.backgroundQuota(this, session, repair))
+      return null;
+
+    return repair;
+  },
+
+  // `flagged` is the chat checker's findings; without them the repair reads the failed checks.
+  async escalate(session, task, gate, repair, flagged = null) {
+    task.repair = { from: task.route.id, route: routeOf(repair), label: repair.label || repair.model, at: Date.now() };
+    await this.sendBack(session, task, gate, 'repair', this.lastWorker(task), repairText(task, flagged), task.inputImages || []);
+  },
+
+  // The worker that wrote the task's latest changes: the repair's model once a stronger model took over.
+  lastWorker(task) {
+    return task.repair ? { ...task.repair.route, escalatedFrom: task.repair.from } : task.route;
+  },
+
+  // The gate's follow-up turns on a task, each a Router message: one correction, a stronger model's repair, or a review's
+  // findings going back to the worker.
+  async sendBack(session, task, gate, sending, ...message) {
+    task.state = 'correcting';
+    task.sending = sending;
+    task.summary = summaryLine(task);
+    this.changed();
+    await new Promise(setImmediate);
+    if (!this.ownsGate(gate))
+      return this.cancelGate(session, task);
+
+    if (sending === 'correction')
+      task.corrections += 1;
+    await this.submitCorrection(session, task, ...message);
+  },
+
+  // What the working tree held when a task started, so the chat checker sees only that task's changes: a commit of the
+  // tracked files (git stash create, which changes neither the files nor the stash list; HEAD on a clean tree) and the
+  // untracked files. Null outside Git or when Git fails; that task's reply is then checked alone.
+  async taskBaseline(workspace) {
+    // A plain folder (no .git here or above, a worktree's .git file included) starts no Git process.
+    if (!poolRoot(workspace, '.git'))
+      return null;
+
+    const [stash, untracked] = await Promise.all([
+      git(workspace, ['stash', 'create'], 64 * 1024),
+      git(workspace, ['ls-files', '--others', '--exclude-standard', '-z'], 16 * 1024 * 1024),
+    ]);
+    const head = !stash.error && !String(stash.stdout).trim() ? await git(workspace, ['rev-parse', '--verify', 'HEAD'], 64 * 1024) : null;
+    const commit = String((head || stash).stdout || '').trim();
+    if (stash.error || head?.error || untracked.error || !commit)
+      return null;
+
+    return { commit, untracked: untracked.stdout.split('\0').filter(Boolean) };
+  },
+
+  rememberBaseline(task, baseline) {
+    if (!baseline)
+      return;
+
+    (this.baselines ||= new Map()).set(task.id, baseline);
+    if (this.baselines.size > BASELINES)
+      this.baselines.delete(this.baselines.keys().next().value);
+  },
+
+  // The chat checker (Settings; Off by default) reads each response whose checks passed or that has none: accept leaves it,
+  // revise sends the findings back to the worker that wrote it, escalate hands the task to a stronger worker (repairRoute).
+  // One revise and one escalation per task, each followed by another look; a step that is turned off or cannot run gives
+  // way to the other, and problems left after both are only reported. Not for comparison runs or a task with a job budget
+  // (the call is not counted in it). A failed look leaves the work as it is.
+  responseChecker(session, task) {
+    const checker = this.chatScanner();
+    const on = (this.agents?.primary || this).data.settings.checkResponses !== false;
+    if (!checker || !on || (task.critique?.looks || 0) >= LOOKS || this.comparisonOf(session) || this.agents?.budgets.forSession(session))
+      return null;
+
+    return this.agents?.backgroundQuota(this, session, checker) ? null : checker;
+  },
+
+  async checkResponse(session, task, gate, report, checker) {
+    const looks = task.critique?.looks || 0;
+    const baseline = this.baselines?.get(task.id);
+    const changes = baseline ? await this.reviewChanges(session.workspace, baseline) : null;
+    if (!this.ownsGate(gate))
+      return null;
+
+    const input = critique.critiqueInput(task, changes || { changes: [], truncated: false }, report);
+    task.critique = { ...task.critique, model: checker.label || checker.model, state: 'running', looks: looks + 1, at: Date.now() };
+    task.summary = summaryLine(task);
+    this.changed();
+    let look;
+    try {
+      const request = { instructions: critique.INSTRUCTIONS, prompt: input.prompt, schema: critique.SCHEMA, timeoutMs: 120000, idleTimeout: true };
+      const { decision } = await (this.agents?.primary || this).smartRouter.complete(request, checker, gate.abort);
+      look = critique.checkCritique(decision, input);
+    } catch (error) {
+      if (!gate.abort.signal.aborted)
+        this.log.warn('Response check failed', { task: task.id, model: task.critique.model, error: String(error.message).slice(0, 300) });
+      task.critique.state = 'failed';
+      return null;
+    }
+
+    Object.assign(task.critique, { state: look.verdict, findings: look.findings, dropped: look.dropped });
+    if (look.verdict === 'accept') {
+      task.critique.state = 'accepted';
+      return null;
+    }
+
+    const settings = (this.agents?.primary || this).data.settings;
+    const canRevise = settings.checkerRevise !== false && !task.critique.revised;
+    const canEscalate = settings.checkerEscalate !== false && (look.verdict === 'escalate' || !canRevise);
+    const repair = canEscalate ? this.repairRoute(session, task) : null;
+    if (repair || canRevise)
+      return { repair, findings: look.findings };
+
+    task.critique.state = 'flagged';
+    return null;
+  },
+
+  // The task's own changes since its starting snapshot: tracked files diffed against it, plus the files it created.
+  async reviewChanges(workspace, baseline) {
+    const patch = await git(workspace, ['diff', '--no-ext-diff', '--no-color', '-U10', baseline.commit, '--'], 16 * 1024 * 1024);
+    const untracked = await git(workspace, ['ls-files', '--others', '--exclude-standard', '-z'], 16 * 1024 * 1024);
+    if (patch.error || untracked.error)
+      return null;
+
+    const before = new Set(baseline.untracked);
+    const created = untracked.stdout.split('\0').filter(file => file && !before.has(file));
+    return critique.taskChanges(patch.stdout, created, workspace);
+  },
+
+  async submitCorrection(session, task, route = task.route, body = correctionText(task), images = []) {
+    const text = `[Router]\n${body}`;
     const clientId = randomUUID();
     task.state = 'running';
     task.summary = summaryLine(task);
@@ -517,7 +683,7 @@ module.exports = {
     this.busy = session.id;
     this.gate = null;
     this.changed();
-    await this.submitWorker(session, task.route, text, [], clientId, task);
+    await this.submitWorker(session, route, text, images, clientId, task);
   },
 
   async runCheck(session, task, check, gate) {
@@ -744,9 +910,7 @@ module.exports = {
   // on the user's repositories (2026-10-27).
   async captureEvidence(session, task, attempt) {
     const snapshot = { turnId: attempt.turnId, at: attempt.at, goal: task.goal, amendments: [...task.amendments], checks: task.checks.map(check => ({ ...check })), limitations: [] };
-    const git = (args, maxBuffer) => new Promise(resolve => execFile('git', ['--no-optional-locks', '-c', 'core.fsmonitor=false', ...args],
-      { cwd: session.workspace, encoding: 'utf8', timeout: 4000, windowsHide: true, maxBuffer }, (error, stdout) => resolve({ error, stdout })));
-    const result = await git(['diff', '--stat'], 64 * 1024);
+    const result = await git(session.workspace, ['diff', '--stat'], 64 * 1024);
     const privatePath = /(^|[\\/])(\.env(?:\..*)?|auth\.json|credentials[^\\/]*|secrets?[^\\/]*|id_rsa|id_ed25519)([\\/]|$)|\.(pem|key|pfx|p12)$/i;
     if (result.error) snapshot.limitations.push('Diff unavailable.');
     else {
@@ -754,7 +918,7 @@ module.exports = {
       if (lines.length !== String(result.stdout || '').split(/\r?\n/).filter(Boolean).length) snapshot.limitations.push('Private paths omitted from the diff excerpt.');
       snapshot.diff = lines.join('\n').slice(0, 8000);
       // Per-file hashes of the full diff (no content kept), so a lesson can tell an edit that leaves --stat unchanged.
-      const patch = await git(['diff', '--no-ext-diff', '--no-color'], 16 * 1024 * 1024);
+      const patch = await git(session.workspace, ['diff', '--no-ext-diff', '--no-color'], 16 * 1024 * 1024);
       if (!patch.error)
         snapshot.files = diffHashes(patch.stdout, privatePath);
     }

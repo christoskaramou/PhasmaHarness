@@ -619,7 +619,6 @@ test('group mentions stream one direct member reply with shared context, no dele
   agents.createController = (...args) => {
     const controller = choose(...args), route = controller.smartRouter.choose;
     controller.smartRouter.choose = async (text, context, ...rest) => {
-      assert.equal(context.jevQuickAnswers, false, 'group replies use the member worker with its full shared context');
       const routingContext = require('../src/routing/smart-router.cjs').contextFor(text, context, {});
       assert.match(routingContext.sharedGroupContext, /GROUP_CONTEXT: the build is green/);
       assert.doesNotMatch(routingContext.sharedGroupContext, /PRIVATE_MAIN_CHAT_CONTEXT|Reply here as yourself/, 'the router hint carries messages, not the reply rules');

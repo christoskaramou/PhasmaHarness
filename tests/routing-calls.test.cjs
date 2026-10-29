@@ -110,15 +110,14 @@ test('the reusable prompt matrix records raw versus applied choices and exposes 
   assert.match(samples[3].error, /Controlled provider failure/);
 });
 
-test('the prompt matrix also supports Jev without enabling quick answers or Smart calls', async () => {
+test('the prompt matrix also supports Jev without Smart calls', async () => {
   const { evaluate } = require('./routing-decisions-live.cjs');
   const cases = require('./fixtures/routing-difficulty.json');
   const workers = cases.map(({ expected }) => ({ id: expected, model: 'arbitrary-worker', effort: expected }));
   const router = new SmartRouter(__dirname, undefined, undefined, async () => evidence);
   router.classifyCodex = async () => assert.fail('Jev evaluation must not call Smart');
   let calls = 0;
-  router.jev = { configured: true, classify: async (context, _signal, quick) => {
-    assert.equal(quick, false);
+  router.jev = { configured: true, classify: async context => {
     const task = cases[calls++];
     assert.equal(context.request, task.text);
     return { decision: { ...decision(true), difficulty: task.expected }, usage: { totalTokens: 5 } };
@@ -191,8 +190,7 @@ test('the Jev comparison follows Jev routing without touching the active routing
   const router = new SmartRouter(__dirname);
   const order = [];
   router.inspect = async () => { order.push('scan'); return evidence; };
-  router.jev = { configured: true, async classify(context, _signal, quick) {
-    assert.ok(!quick, 'no quick answers in a comparison');
+  router.jev = { configured: true, async classify(context) {
     const scanned = JSON.stringify(context).includes('"available":true');
     order.push(scanned ? 'evidence' : 'first');
     return { decision: decision(true), confidence: 0.8, estimatedCostUsd: 0.0001 };
@@ -241,7 +239,7 @@ test('task difficulty controls model and effort independently of confidence for 
     router.jev.evaluate = async () => ({ answers: Object.fromEntries(Object.entries({ difficulty,
       taskKind: selected.taskKind, risk: selected.risk, uncertainty: selected.uncertainty, workspaceRelevant: 'no', needsChecks: 'no' })
       .map(([key, choice]) => [key, { choice, confidence: difficulty === 'medium' ? 0.21 : 0.99 }])) });
-    const context = { routingCatalog: workers, routerChoice: { provider: 'codex', model: 'router' }, jevQuickAnswers: false };
+    const context = { routingCatalog: workers, routerChoice: { provider: 'codex', model: 'router' } };
     const result = await router.choose('Classify this task', context, [], provider);
     // Low confidence on medium work does not promote it to the strongest model.
     assert.equal(result.id, `${['high', 'xhigh'].includes(difficulty) ? 'second:advanced' : 'first:balanced'}:${difficulty}`);
@@ -294,7 +292,7 @@ test('both routers apply difficulty once without escalating by task kind or unre
         answers: Object.fromEntries(Object.entries(questions).map(([key, question]) => [key, { type: 'choice', choice: values[key], confidence: 1,
           probabilities: Object.fromEntries(Object.keys(question.criteria).map(option => [option, option === values[key] ? 1 : 0])) }])) }) };
     });
-    const context = { workspace: __dirname, routingCatalog: workers, routerChoice: { provider: 'codex', model: 'router' }, jevQuickAnswers: false };
+    const context = { workspace: __dirname, routingCatalog: workers, routerChoice: { provider: 'codex', model: 'router' } };
     const result = await router.choose('Review all changes across the renderer, resource ownership and job scheduling', context, [], provider);
     assert.equal(result.id, 'second:advanced:xhigh');
     assert.equal(result.assessment.difficulty, 'xhigh');
@@ -395,6 +393,8 @@ test('Harness picks the worker: unmeasured workers are not ranked, unknown cost 
   assert.equal(id({}), 'codex:cheap:low', 'the cheapest worker within 60% of the best score; weak (50) is below it');
   assert.equal(id({ routes: [{ id: 'codex:nocost:low' }] }), 'codex:nocost:low', 'the adequate current model stays');
   assert.equal(id({ routes: [{ id: 'codex:weak:low' }] }), 'codex:cheap:low', 'an inadequate current model is replaced');
+  assert.equal(id({ routes: [{ id: 'codex:nocost:low' }, { id: 'codex:best:low', escalatedFrom: 'codex:nocost:low' }] }), 'codex:nocost:low',
+    'a repair by a stronger model does not become the chat\'s model for new work');
   assert.equal(id({}, available.filter(p => p.model !== 'cheap')), 'codex:best:low', 'known cost before unknown cost');
   assert.equal(id({}, [row('unmeasured'), row('other')]), 'codex:unmeasured:low', 'nothing measured: the first offered model');
   // Settings → Routing → Model for simple messages: low work only, while offered; it beats the current model too.
@@ -440,7 +440,7 @@ test('both routers consider every provider for escalation and keep adequate mid-
     router.classifyCodex = async () => ({ decision: selected, usage: { totalTokens: 1 } });
     router.jev = new JevClient({ configured: true, read: () => 'key' });
     router.jev.evaluate = async () => ({ answers: Object.fromEntries(Object.entries({ difficulty: selected.difficulty, taskKind: selected.taskKind, risk: selected.risk, uncertainty: selected.uncertainty, workspaceRelevant: 'no', needsChecks: 'no' }).map(([k, choice]) => [k, { choice, confidence: selected.confident ? 0.95 : 0.19 }])), usage: { inputTokens: 1, outputTokens: 0, totalTokens: 1 }, durationMs: 1 });
-    const context = { routingCatalog: [middle, ...strongest], routerChoice: { provider: 'codex', model: 'router', effort: 'low' }, jevQuickAnswers: false };
+    const context = { routingCatalog: [middle, ...strongest], routerChoice: { provider: 'codex', model: 'router', effort: 'low' } };
     for (winningProvider of ['codex', 'cursor-cli', 'local-api']) {
       const result = await router.choose('Review these changes', context, [], provider);
       assert.equal(result.provider, winningProvider);
@@ -470,7 +470,7 @@ test('demanding read-only reviews use stronger reasoning with either router, whi
     router.classifyCodex = async () => ({ decision: review, usage: { totalTokens: 1 } });
     router.jev = new JevClient({ configured: true, read: () => 'key' });
     router.jev.evaluate = async () => ({ answers: Object.fromEntries(Object.entries({ difficulty: review.difficulty, taskKind: 'review', risk: review.risk, uncertainty: review.uncertainty, workspaceRelevant: 'yes', needsChecks: 'no' }).map(([k, choice]) => [k, { choice, confidence: review.confident ? 0.9 : 0.19 }])), usage: { inputTokens: 1, outputTokens: 0, totalTokens: 1 }, durationMs: 1 });
-    const context = { routingCatalog: [...catalog, xhigh], routerChoice: { provider: 'codex', model: 'small', effort: 'low' }, jevQuickAnswers: false };
+    const context = { routingCatalog: [...catalog, xhigh], routerChoice: { provider: 'codex', model: 'small', effort: 'low' } };
     const result = await router.choose('Review the repository changes without editing files', context, [], provider);
     assert.equal(result.id, xhigh.id);
     assert.match(result.reason, /^xhigh difficulty: strongest measured model/);
@@ -489,7 +489,7 @@ test('a demanding review uses Opus 5.5 xhigh, not Sonnet, with bundled evidence'
   router.jev = new JevClient({ configured: true, read: () => 'key' });
   const answers = { difficulty: 'xhigh', taskKind: 'review', workspaceRelevant: 'yes', needsChecks: 'no', risk: 'low', uncertainty: 'high' };
   router.jev.evaluate = async () => ({ answers: Object.fromEntries(Object.entries(answers).map(([k, choice]) => [k, { choice, confidence: 0.9 }])), usage: { inputTokens: 1, outputTokens: 0, totalTokens: 1 }, durationMs: 1 });
-  const result = await router.choose('Review recent PE changes without editing files', { routingCatalog: workers, jevQuickAnswers: false }, [], 'jev');
+  const result = await router.choose('Review recent PE changes without editing files', { routingCatalog: workers }, [], 'jev');
   assert.equal(result.id, 'claude-cli:claude-opus-5-5:xhigh');
 });
 
@@ -509,7 +509,7 @@ test('high-risk work between Sonnet and the 1M-context Opus: the strongest (Opus
   const router = new SmartRouter(__dirname);
   router.benchmarks = new BenchmarkStore();
   router.jev = jev;
-  const chosen = await router.choose('review the C++ scripting work and finish it', { routingCatalog: [sonnet, opus], jevQuickAnswers: false }, [], 'jev');
+  const chosen = await router.choose('review the C++ scripting work and finish it', { routingCatalog: [sonnet, opus] }, [], 'jev');
   assert.equal(chosen.id, opus.id);
 });
 
@@ -527,12 +527,12 @@ test('Jev asks whether the prompt continues the task only when there is one, and
   router.benchmarks = indexed.benchmarks;
   router.jev = jev;
   answers = { sameTask: 'yes' };
-  const kept = await router.choose('fix that', { routingCatalog: catalog, job: job(small), jevQuickAnswers: false }, [], 'jev');
+  const kept = await router.choose('fix that', { routingCatalog: catalog, job: job(small) }, [], 'jev');
   assert.ok(asked[0].includes('sameTask'));
   assert.equal(kept.id, small.id);
   asked.length = 0;
   answers = { confidence: 0.3 };
-  const fresh = await router.choose('design the renderer', { routingCatalog: catalog, jevQuickAnswers: false }, [], 'jev');
+  const fresh = await router.choose('design the renderer', { routingCatalog: catalog }, [], 'jev');
   assert.ok(!asked[0].includes('sameTask'), 'no task yet, no task question');
   assert.equal(fresh.id, bigHigh.id, 'difficult new work uses the strongest measured model at high effort');
 });
@@ -560,36 +560,3 @@ test('Jev requests the stable alias and learns its displayed version only from v
 });
 
 
-test('Jev quick answers return only confident low-risk yes/no results and otherwise select a worker from the same call', async () => {
-  const jev = new JevClient({ configured: true });
-  const router = new SmartRouter(__dirname);
-  router.jev = jev;
-  router.inspect = async () => assert.fail('these fixtures need no workspace scan');
-  for (const scenario of [
-    { answer: 'yes', expected: 'Yes.' },
-    { answer: 'no', expected: 'No.' },
-    { answer: 'yes', confidence: 0.94 },
-    { answer: 'yes', probability: 0.97 },
-    { answer: 'yes', risk: 'high' },
-    { answer: 'yes', uncertainty: 'high' },
-    { answer: 'yes', enabled: false },
-    { answer: 'yes', images: 1 },
-  ]) {
-    let calls = 0;
-    jev.evaluate = async (_context, questions) => {
-      calls++;
-      const quick = !!questions.quickAnswer;
-      const values = { ...(quick ? { direct: 'jev' } : {}), difficulty: 'low', taskKind: 'general',
-        workspaceRelevant: 'no', needsChecks: 'no', risk: scenario.risk || 'low', uncertainty: scenario.uncertainty || 'low' };
-      const answers = Object.fromEntries(Object.entries(values).map(([id, choice]) => [id, { choice, confidence: 1 }]));
-      if (quick) answers.quickAnswer = { choice: scenario.answer, confidence: scenario.confidence ?? 1,
-        probabilities: { [scenario.answer]: scenario.probability ?? 1 } };
-      return { model: 'jev-test', answers, usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, estimatedCostUsd: 0, durationMs: 1 };
-    };
-    const selected = await router.choose('Does the text mention rain? Text: Rain is expected.',
-      { ...session, jevQuickAnswers: scenario.enabled, attachedImageCount: scenario.images || 0 }, [], 'jev');
-    assert.equal(selected.directAnswer || undefined, scenario.expected);
-    if (!scenario.expected) assert.equal(selected.id, worker.id);
-    assert.equal(calls, 1, 'a rejected quick answer still carries the sizing, so no second call');
-  }
-});

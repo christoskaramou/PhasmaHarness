@@ -1,7 +1,8 @@
 'use strict';
 // The chat scanner (src/chat-scan.cjs) wired into the chat: a real user message ends the exchange before it, which the
 // chat checker (the model picked in Settings; Off by default) scans in the background; a worthy one goes to the
-// strongest model, whose rule goes on trial and whose note rides matching tasks. These are Controller methods (see
+// strongest model, whose rule goes on trial and whose note rides matching tasks. The same model checks each response as
+// it ends (checkResponse in task-gate.cjs). These are Controller methods (see
 // ../controller.cjs); `this` is the Controller.
 const fs = require('node:fs');
 const path = require('node:path');
@@ -9,7 +10,7 @@ const { projectRules } = require('../workspace/project-instructions.cjs');
 const { redact } = require('../log.cjs');
 const { capabilities } = require('../providers/capabilities.cjs');
 const { capCatalog } = require('../routing/effort-cap.cjs');
-const { strongest } = require('../routing/smart-router.cjs');
+const { strongest, atEffort } = require('../routing/smart-router.cjs');
 const chatScan = require('../chat-scan.cjs');
 const trials = require('../trials.cjs');
 
@@ -74,7 +75,7 @@ module.exports = {
   runScan(session, exchange, reaction) {
     const owner = this.agents?.primary || this;
     const scanner = this.chatScanner();
-    if (!scanner || !owner.available(scanner) || capabilities(scanner.provider || 'codex').structured === false)
+    if (!scanner || owner.data.settings.scanReplies === false || !owner.available(scanner) || capabilities(scanner.provider || 'codex').structured === false)
       return null;
     if (this.agents?.backgroundQuota(this, session, scanner))
       return null;
@@ -172,20 +173,55 @@ module.exports = {
     return picked && owner.available(picked) ? picked : null;
   },
 
-  // The strongest enabled worker that answers in a schema, within the effort cap and usage limits, at medium effort when
-  // it has one. Without measured scores (offline, models too new) the router's model writes it, so a flag is not lost.
-  strongestPreset() {
+  // Enabled workers that `fit`, within the effort cap and usage limits, with measured scores joined as the router's own
+  // catalog gets them.
+  measuredWorkers(fits) {
     const owner = this.agents?.primary || this;
-    const structured = owner.catalog().filter(p => p.worker && owner.available(p) && capabilities(p.provider || 'codex').structured !== false);
-    const capped = capCatalog(structured, owner.data.settings.effortCap).filter(p => !owner.limits?.limited(p.provider || 'codex', p.model));
-    // Measured scores join the presets here, as the router's own catalog gets them.
-    const usable = owner.smartRouter.benchmarks?.catalog(capped) || capped;
+    const workers = owner.catalog().filter(p => p.worker && owner.available(p) && fits(p));
+    const capped = capCatalog(workers, owner.data.settings.effortCap).filter(p => !owner.limits?.limited(p.provider || 'codex', p.model));
+    return owner.smartRouter.benchmarks?.catalog(capped) || capped;
+  },
+
+  // The Escalation model picked in Settings, used as set while it is enabled, below its usage limit and `fits`; null on
+  // Auto (the default) or otherwise, and the caller picks the strongest measured model instead.
+  escalationPick(fits) {
+    const owner = this.agents?.primary || this;
+    const id = owner.data.settings.escalationModel;
+    const picked = id && id !== 'auto' ? owner.catalog().find(p => p.worker && p.id === id) : null;
+    const usable = picked && owner.available(picked) && !owner.limits?.limited(picked.provider || 'codex', picked.model);
+    return usable && fits(picked) ? picked : null;
+  },
+
+  // The chat rule writer: the Escalation model when it answers in a schema, else the strongest enabled worker that does,
+  // within the effort cap and usage limits, at medium effort when it has one. Without measured scores (offline, models
+  // too new) the router's model writes it, so a flag is not lost.
+  strongestPreset() {
+    const structured = p => capabilities(p.provider || 'codex').structured !== false;
+    const picked = this.escalationPick(structured);
+    if (picked)
+      return picked;
+
+    const usable = this.measuredWorkers(structured);
     const best = strongest(usable);
     if (!best)
-      return owner.effectiveRouter();
+      return (this.agents?.primary || this).effectiveRouter();
 
     const same = usable.filter(p => p.model === best.model && (p.provider || 'codex') === (best.provider || 'codex'));
     return same.find(p => p.effort === 'medium') || best;
+  },
+
+  // The cascade's repair worker, with image support when the task had images: the Escalation model as set, else the
+  // strongest measured one at the task's difficulty's effort. None without measured scores, since then nothing says
+  // which model is stronger.
+  repairPreset(difficulty, images = false) {
+    const fits = p => !images || p.images !== false;
+    const picked = this.escalationPick(fits);
+    if (picked)
+      return picked;
+
+    const usable = this.measuredWorkers(fits);
+    const best = strongest(usable);
+    return best ? atEffort(best, difficulty, usable) : null;
   },
 
   // What the project already says: its AGENTS.md, the rules Harness kept and the rules riding matching tasks.

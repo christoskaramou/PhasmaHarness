@@ -126,7 +126,7 @@ module.exports = {
 
     const choice = await this.smartRouter.choose(text, { ...session, workspace, configuredChecks: checks, routingCatalog: catalog, routerChoice: router },
       this.models, 'smart', router.id);
-    if (!choice?.id || choice.directAnswer)
+    if (!choice?.id)
       throw new Error('Auto did not pick a worker model for this task, so name one for the comparison.');
 
     return this.agents.agentMode(choice.id);

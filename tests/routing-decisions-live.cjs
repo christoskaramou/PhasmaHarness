@@ -24,7 +24,7 @@ async function evaluate(router, choice, workers) {
       const sample = { case: task.id, expected: task.expected, router: choice.id };
       try {
         const result = await router.choose(task.text, { workspace: router.directory, routingCatalog: workers, routerChoice: choice,
-          items: [], routes: [], configuredChecks: [], jevQuickAnswers: false }, [], provider);
+          items: [], routes: [], configuredChecks: [] }, [], provider);
         Object.assign(sample, { raw: observed.decision, selected: result.id, model: result.model, provider: result.provider || 'codex', effort: result.effort || null,
           assessment: result.assessment, reason: result.reason, usage: result.router.usage, attempts: observed.timing?.attempts,
           difficultyMatch: result.assessment.difficulty === task.expected, effortMatch: result.effort === task.expected });
@@ -58,7 +58,7 @@ async function main() {
   const settings = readSessionData(path.join(home, 'sessions.json')).settings;
   const filename = path.join(directory, 'sessions.json');
   // Never load the user's conversations or change their routing preferences.
-  fs.writeFileSync(filename, JSON.stringify({ version: 1, settings: { ...settings, workspace: directory, jevEnabled: false, jevQuickAnswers: false, checks: {} }, sessions: [] }));
+  fs.writeFileSync(filename, JSON.stringify({ version: 1, settings: { ...settings, workspace: directory, jevEnabled: false, checks: {} }, sessions: [] }));
   const controller = new Controller(filename, directory);
   const routers = [];
   const report = { at: new Date().toISOString(), cases, samples: [], note: 'Prompt and catalog only, no source excerpts, history or workers. Only explicitly requested routers are called. Four independent cases per router; post-scan classification is reused because no evidence was added. Production difficulty policy and deadlines apply, including at most one format retry for Smart. Enabled catalog is frozen and capped at Xhigh for all samples. Provider caches are uncontrolled; one sample is not an accuracy guarantee.' };

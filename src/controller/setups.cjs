@@ -13,7 +13,7 @@ module.exports = {
   // Only tasks Auto routed (they carry its kind of work) whose checks ran, or that the chat checker judged (`chat`: its
   // outcome and the chat the user wrote in, which gets the notices); never comparison runs. `session` holds the task.
   recordSetup(session, task, chat = null) {
-    const outcome = chat ? chat.outcome : setups.taskOutcome(task);
+    const outcome = setups.taskOutcome(task, chat?.outcome);
     const skipped = !chat && task.checksSkippedByRouter;
     if (!outcome || !task.kind || !task.route?.id || skipped || !this.wikiStore || this.comparisonOf(session))
       return;

@@ -30,7 +30,7 @@
   const TIPS = [
     // What fits this setup.
     { id: 'checker', fits: checkerOff,
-      text: 'Turn on the chat checker so Harness learns from your corrections: when you write "no, I meant…", it saves a rule or note for next time. Settings → General → Chat checker model.' },
+      text: 'Turn on the chat checker so Harness learns from your corrections: when you write "no, I meant…", it saves a rule or note for next time. Settings → General → Chat checker, reviser, escalator and rule finder model.' },
     { id: 'checks', fits: () => !projectChecks().length,
       text: 'Add a check, a command that says whether the work is good, such as a build or the tests. Harness then verifies each task and learns which model fits each kind of work. Settings → Checks.' },
 
@@ -59,10 +59,10 @@
 
     // What Auto does.
     { id: 'auto', text: 'Auto picks a model for every message to a bot: an economical one for simple asks, the strongest for hard ones, and the same one while you continue a task.' },
-    { id: 'routing-model', text: 'Auto\'s choice is made by the routing model, Settings → Routing → Routing model (Auto). A fast, cheap model there keeps routing quick.' },
+    { id: 'routing-model', text: 'Auto\'s choice is made by the routing model, Settings → Routing → Routing model. A fast, cheap model there keeps routing quick.' },
     { id: 'jev-router', when: () => !!state.jev?.configured,
       text: 'With your Jev key you can pick Jev as the routing model. If a Jev call fails, Harness routes that message with the normal router instead.' },
-    { id: 'effort', text: 'Settings → Routing → Effort cap for Auto limits how hard Auto lets models think; a lower cap saves usage. Models you pick by hand are not capped.' },
+    { id: 'effort', text: 'Settings → Routing → Effort cap limits how hard the models Harness picks think, Auto and escalations included; a lower cap saves usage. Models you pick by hand are not capped.' },
     { id: 'auto-models', text: 'Auto only picks from the models ticked in Settings → Providers. Untick the ones you do not want it to use.' },
     { id: 'usage-limit', text: 'When a provider hits its usage limit, Harness pauses that task for you to review, and new Auto messages use another provider until the limit resets.' },
     { id: 'hub-model', text: () => `${hub()} itself runs on the one model set in its Edit dialog; picking per message is for bots.` },

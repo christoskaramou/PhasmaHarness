@@ -91,7 +91,8 @@ function pickPreset(decision, session, available) {
     .map(own)
     .filter(Number.isFinite));
   const cost = p => rows.get(p.id)?.taskCostUsd ?? Infinity;
-  const current = available.find(p => p.id === (session.routes || []).findLast(route => !route.directAnswer)?.id);
+  // A stronger model's repair of a failed task (src/controller/task-gate.cjs) does not become the chat's model for new work.
+  const current = available.find(p => p.id === (session.routes || []).findLast(route => !route.directAnswer && !route.escalatedFrom)?.id);
   const choose = (p, rule) => ({ preset: p.id, reason: clip(`${difficulty} difficulty: ${rule}. ${decision.reason}`, 240) });
 
   // Settings → Routing → Model for simple messages; while it is outside the effort cap or at a usage limit, Harness picks.
@@ -255,7 +256,7 @@ class SmartRouter {
 
   // Jev's worker choice for a message that was already routed (by this router or by hand), for the opt-in
   // comparison log. It follows Jev routing (a workspace scan and a second question only when Jev asks for the
-  // workspace), without quick answers, and never touches the active routing or starts a worker.
+  // workspace), and never touches the active routing or starts a worker.
   async shadowJev(text, session, signal) {
     if (!this.jev?.configured) throw new Error('No Jev key saved.');
     const available = this.benchmarks.catalog(session.routingCatalog || []);
@@ -682,18 +683,12 @@ class SmartRouter {
       let pending;
       if (useJev) {
         if (!this.jev?.configured) throw new Error('Add your Jev API key in Settings first.');
-        pending = await this.jev.classify(contextFor(text, session, EMPTY_WORKSPACE), abort.signal, session.jevQuickAnswers !== false && !session.attachedImageCount && JSON.stringify(session.directContext || []).length < 12000 && text.length <= 5000);
+        pending = await this.jev.classify(contextFor(text, session, EMPTY_WORKSPACE), abort.signal);
         model = pending.model; usage = pending.usage;
         // A continued task keeps its worker without a workspace scan or a second question.
-        if (!pending.directAnswer && (!pending.decision.workspaceRelevant || taskWorker(pending.decision, session, available))) {
+        if (!pending.decision.workspaceRelevant || taskWorker(pending.decision, session, available)) {
           workspace = { ...workspace, coverage: 'not-needed', limitations: [] };
           return { ...finalChoice(pending.decision, text, session, workspace, available), source: 'jev',
-            router: { ...metadata(), confidence: pending.confidence, answers: pending.answers, estimatedCostUsd: pending.estimatedCostUsd } };
-        }
-        if (!pending.decision.workspaceRelevant) {
-          workspace = { ...workspace, coverage: 'not-needed', limitations: [] };
-          // Jev answered itself; the first offered worker only fills the route's shape before Jev's identity replaces it.
-          return { ...applyPolicy({ ...pending.decision, preset: available[0].id }, text, session, workspace, available), ...(pending.directAnswer ? { id: 'jev', model: pending.model, label: 'Jev', effort: null } : {}), source: 'jev', directAnswer: pending.directAnswer,
             router: { ...metadata(), confidence: pending.confidence, answers: pending.answers, estimatedCostUsd: pending.estimatedCostUsd } };
         }
       } else {
@@ -743,4 +738,4 @@ class SmartRouter {
   }
 }
 
-module.exports = { SmartRouter, routerModel, contextFor, applyPolicy, conversationDelta, strongest, pickPreset };
+module.exports = { SmartRouter, routerModel, contextFor, applyPolicy, conversationDelta, strongest, atEffort, pickPreset };

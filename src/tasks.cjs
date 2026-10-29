@@ -122,26 +122,52 @@ function capStream(value) {
   return { text: text.slice(0, OUTPUT_CAP), truncated: true };
 }
 
+// What the chat checker made of a settled task's response (task-gate.cjs checkResponse).
+function checkerLine(task) {
+  const review = task.critique;
+  if (review?.state === 'accepted') {
+    const after = task.repair ? `after ${task.repair.label} took over` : review.revised ? 'after one revision' : null;
+    return after ? `${review.model} accepted it ${after}` : `checked by ${review.model}, no problems found`;
+  }
+  if (review?.state === 'flagged')
+    return `${review.model} still found ${review.findings.length} problem${review.findings.length === 1 ? '' : 's'}: review the result`;
+
+  return 'coverage not assessed';
+}
+
 function summaryLine(task) {
   const attempt = task.attempts?.at(-1);
   const results = attempt?.results || [];
   const workerFailed = attempt?.workerOutcome === 'failed';
   if (task.state === 'cancelled') return 'Cancelled';
-  if (task.state === 'checking') return 'Running configured checks';
-  if (task.state === 'correcting') return 'Sending one correction';
+  if (task.state === 'checking') return task.critique?.state === 'running' ? `Checking the response with ${task.critique.model}` : 'Running configured checks';
+  if (task.state === 'correcting') {
+    if (task.sending === 'repair')
+      return `Handing the task to ${task.repair.label}`;
+    if (task.sending === 'review')
+      return `Sending ${task.critique.model}'s findings back`;
+
+    return 'Sending one correction';
+  }
   if (workerFailed && task.state === 'needs-you') {
     const checks = !results.length ? (task.checksSkippedByRouter ? 'checks skipped by router' : 'no checks configured')
       : results.every(result => result.status === 'passed') ? 'configured checks passed'
         : 'checks did not all pass';
     return `Worker turn failed · ${checks}`;
   }
-  if (task.state === 'checks-passed') return 'Configured checks passed · coverage not assessed';
-  if (task.state === 'not-checked') return `${task.checksSkippedByRouter ? 'Checks skipped by router' : 'No checks configured'} · coverage not assessed`;
+  if (task.state === 'checks-passed' || task.state === 'not-checked') {
+    const checks = task.state === 'checks-passed' ? 'Configured checks passed'
+      : task.checksSkippedByRouter ? 'Checks skipped by router' : 'No checks configured';
+    return `${checks} · ${checkerLine(task)}`;
+  }
   if (task.state === 'blocked') {
     const blocked = results.find(result => result.status === 'blocked' || result.status === 'unknown');
     return `Blocked: ${blocked?.detail || task.reason || 'check did not run'}`;
   }
   if (task.state === 'needs-you') {
+    if (task.repair && results.some(result => result.status === 'failed'))
+      return `Needs you: checks still failed after ${task.repair.label} took over`;
+
     return task.corrections > 0 && results.some(result => result.status === 'failed')
       ? 'Needs you: checks failed after one correction'
       : `Needs you: ${task.reason || 'review the result'}`;
@@ -185,6 +211,17 @@ function correctionText(task) {
   });
   const amendments = (task.amendments || []).map(item => item.text).filter(Boolean);
   return `The configured checks failed. Fix these and leave the rest of the work intact.\n${lines.join('\n')}${amendments.length ? `\n\nAccepted steering:\n${amendments.join('\n')}` : ''}`;
+}
+
+// What a stronger model taking over a failed task reads: why (the chat checker's findings, else the failed checks) and the
+// request itself, since a Codex thread never sees what a CLI worker did in the same chat.
+function repairText(task, flagged = null) {
+  const goal = String(task.goal || '');
+  const request = goal.length > 12000 ? goal.slice(0, 12000) + '\n[truncated]' : goal;
+  const why = flagged ? 'a checker flagged its response' : 'its configured checks still fail after one correction';
+  return `Another model worked on this task, and ${why}. You are taking it over. ` +
+    'The working tree holds its changes: keep what is right and fix the cause.\n\n' +
+    `Original request:\n${request}\n\n${flagged || correctionText(task)}`;
 }
 
 function validateChecks(workspace, list) {
@@ -252,6 +289,6 @@ function restartReason(task, block) {
 module.exports = {
   hasProjectWiki, canProposeWiki,
   parseChecklist, resolveCitations,
-  FINAL, MEASURED_REAP, OUTPUT_CAP, PRIVATE_PATH, shouldTrack, createTask, gateOutcome, summaryLine, correctionText, failureExcerpt,
+  FINAL, MEASURED_REAP, OUTPUT_CAP, PRIVATE_PATH, shouldTrack, createTask, gateOutcome, summaryLine, correctionText, repairText, failureExcerpt,
   validateChecks, confirmTermination, restartReason, capStream, identityFromProbe, lookupState, parentExitReaps, childBlocksClear,
 };

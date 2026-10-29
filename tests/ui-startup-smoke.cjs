@@ -1202,8 +1202,8 @@ app.whenReady().then(async () => {
   await changeSetting('settings-context', 'jev');
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-context').value"), 'local', 'a rejected option returns to the saved value');
 
-  await changeSetting('settings-quick', 'off');
-  assert.equal(controller.data.settings.jevQuickAnswers, false, 'the write queue recovers after rejection');
+  await changeSetting('settings-check-responses', 'off');
+  assert.equal(controller.data.settings.checkResponses, false, 'the write queue recovers after rejection');
   assert.equal(await window.webContents.executeJavaScript(`(() => {
     const popup = document.querySelector('#saved-popup'), box = popup.getBoundingClientRect();
     const edge = document.querySelector('#settings-dialog').getBoundingClientRect();
@@ -1212,7 +1212,40 @@ app.whenReady().then(async () => {
   })()`), true, 'Saved shows at the bottom right of the Settings window');
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/mosaic/saved-popup-settings.png'), (await window.webContents.capturePage()).toPNG());
 
-  await changeSetting('settings-quick', 'on');
+  await changeSetting('settings-check-responses', 'on');
+  assert.equal(controller.data.settings.checkResponses, true);
+
+  // The Escalation model is one picker in General; Routing and Checks link to its section, the chat checker's model.
+  const pickable = await window.webContents.executeJavaScript("[...document.querySelector('#settings-escalation-model').options].find(option => !option.disabled && option.value !== 'auto')?.value || ''");
+  assert.ok(pickable, 'the escalation picker offers models');
+  await changeSetting('settings-escalation-model', pickable);
+  assert.notEqual(controller.data.settings.escalationModel || 'auto', 'auto');
+  await changeSetting('settings-escalation-model', 'auto');
+  assert.equal(controller.data.settings.escalationModel, 'auto');
+  const activeTab = await window.webContents.executeJavaScript("document.querySelector('.settings-tab[aria-selected=true]').id");
+  for (const tab of ['checks', 'routing']) {
+    const link = `document.querySelector('#panel-${tab} [data-setting="settings-chat-scan"]')`;
+    await window.webContents.executeJavaScript(`document.querySelector('#tab-${tab}').click(); ${link}.scrollIntoView({ block: 'center' }); new Promise(r => setTimeout(r, 100))`);
+    fs.writeFileSync(path.resolve(__dirname, `../.scratch/settings-escalation-${tab}-link.png`), (await window.webContents.capturePage()).toPNG());
+    const followed = await window.webContents.executeJavaScript(`(async () => {
+      const text = ${link}.textContent;
+      ${link}.click();
+      await new Promise(r => setTimeout(r, 100));
+      const row = document.querySelector('#settings-chat-scan').closest('label');
+      const body = document.querySelector('.settings-body'), offset = row.getBoundingClientRect().top - body.getBoundingClientRect().top;
+      // At the top, or as high as the end of the tab lets it go.
+      const atEnd = body.scrollTop + body.clientHeight >= body.scrollHeight - 1;
+      return [text, document.querySelector('.settings-tab[aria-selected=true]').id, document.activeElement.id,
+        row.classList.contains('setting-flash'), offset >= 0 && (offset <= 40 || atEnd),
+        getComputedStyle(row).outlineColor !== 'rgba(0, 0, 0, 0)'];
+    })()`);
+    fs.writeFileSync(path.resolve(__dirname, `../.scratch/settings-escalation-${tab}-landed.png`), (await window.webContents.capturePage()).toPNG());
+    assert.deepEqual(followed, ['General → Chat checker, reviser, escalator and rule finder model', 'tab-general', 'settings-chat-scan', true, true, true],
+      `the ${tab} link opens General with the chat checker's row at the top, focused and outlined`);
+  }
+  assert.equal(await window.webContents.executeJavaScript("new Promise(r => setTimeout(() => r(document.querySelector('.setting-flash') === null), 1700))"), true,
+    'the outline goes away');
+  await window.webContents.executeJavaScript(`document.querySelector('#${activeTab}').click(); new Promise(r => setTimeout(r, 50))`);
   await window.webContents.executeJavaScript(`(async () => {
     document.querySelector('#settings-dialog .close-dialog').click(); await new Promise(r => setTimeout(r, 20));
     document.querySelector('#settings').click(); await new Promise(r => setTimeout(r, 100));
@@ -1371,7 +1404,7 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript("document.querySelector('#settings').click(); new Promise(r => setTimeout(r, 200))");
   const settingsCap = await window.webContents.executeJavaScript("[document.querySelector('#settings-effort-cap').value, document.querySelector('#effort-cap-detail').textContent]");
   assert.equal(settingsCap[0], 'max');
-  assert.match(settingsCap[1], /^⚠ No cap: Auto may pick max effort.*Your manual picks are not capped\.$/);
+  assert.match(settingsCap[1], /^⚠ No cap: Auto may pick max effort.*the escalation model while it is on Auto.*keeps the effort you chose\.$/);
   await window.webContents.executeJavaScript("document.querySelector('#settings-effort-cap').value = 'high'; document.querySelector('#settings-effort-cap').dispatchEvent(new Event('change', { bubbles: true })); document.querySelector('#settings-dialog .close-dialog').click(); new Promise(r => setTimeout(r, 300))");
   assert.equal(controller.data.settings.effortCap, 'high');
   assert.deepEqual((await cap()).filter((_, i) => i === 1 || i === 3), ['high', false]);
@@ -1447,9 +1480,9 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-routing') === null"), true, 'only one Routing model control remains');
   assert.deepEqual(await window.webContents.executeJavaScript(`(() => {
     const label = document.querySelector('#settings-router-preset').closest('label');
-    return { title: label.firstChild.textContent, quickAnswersNext: !!label.nextElementSibling.querySelector('#settings-quick'),
+    return { title: label.firstChild.textContent, capNext: !!label.nextElementSibling.querySelector('#settings-effort-cap'),
       explanationRemoved: !document.querySelector('#router-detail') };
-  })()`), { title: 'Routing model (Auto)', quickAnswersNext: true, explanationRemoved: true });
+  })()`), { title: 'Routing model', capNext: true, explanationRemoved: true });
   assert.match(await window.webContents.executeJavaScript("document.querySelector('#settings-router-preset option[value=jev]').textContent"), /version pending/);
   controller.smartRouter.jev.model = 'jev-9.8.7';
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); true');
@@ -1595,7 +1628,7 @@ app.whenReady().then(async () => {
     ['general', 'browser', 'routing', 'tools', 'providers', 'connectors', 'benchmarks', 'checks', 'about']);
   // Browser access, Routing and Tools each have their own tab with their options, and General keeps the rest.
   for (const [tab, controls] of Object.entries({ browser: ['#remote-port', '#remote-toggle'],
-    routing: ['#settings-router-preset', '#settings-quick', '#settings-effort-cap', '#settings-low-model', '#settings-jev-compare'],
+    routing: ['#settings-router-preset', '#settings-effort-cap', '#settings-low-model', '#settings-jev-compare'],
     tools: ['#settings-context', '#settings-tools'] })) {
     const shown = await window.webContents.executeJavaScript(`(async () => {
       document.querySelector('#tab-${tab}').click();
@@ -1611,7 +1644,7 @@ app.whenReady().then(async () => {
     assert.deepEqual(shown, [false, true, true, controls.map(() => true)], `${tab} tab shows its options, with an icon`);
     assert.ok(intro.length > 20, `${tab} tab explains itself under its title`);
     if (tab === 'routing')
-      assert.match(intro, /only apply when a bot's model is set to Auto/);
+      assert.match(intro, /for each message sent on Auto, and for the escalation model while it is on Auto/);
     fs.writeFileSync(path.resolve(__dirname, `../.scratch/settings-tab-${tab}.png`), (await window.webContents.capturePage()).toPNG());
   }
   await window.webContents.executeJavaScript("document.querySelector('#tab-general').click(); document.querySelector('.settings-body').scrollTop = 0; new Promise(r => setTimeout(r, 100))");
@@ -3547,7 +3580,7 @@ app.whenReady().then(async () => {
     state.coordinator = saved;
     return titles;
   })()`);
-  assert.deepEqual(sendNowTitles, ['Send into the running turn now', 'Send to the provider’s own queue; it answers after the current step',
+  assert.deepEqual(sendNowTitles, ['Send into the running turn now', 'Stop the current step and answer this now; background tasks keep running',
     'Cancel the current step, then send this in the same session', 'Cancel the current step, then send this in the same session',
     'Add this to the running turn now', 'Add this to the running turn now', 'Stop the current turn, then send this message with conversation context']);
   console.log('Send now describes each provider’s delivery passed');

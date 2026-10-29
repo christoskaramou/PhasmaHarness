@@ -24,6 +24,14 @@ test('a task says how its checks went: first time, after a correction (of its ow
     assert.equal(setups.taskOutcome({ state, attempts: [{ results: [{ status: 'failed' }] }] }), null);
 });
 
+test('the chat checker sending findings back is a correction, and a task a stronger model took over failed, whatever the user said', () => {
+  assert.equal(setups.taskOutcome({ state: 'checks-passed', corrections: 0, critique: { revised: true } }), 'corrected');
+  assert.equal(setups.taskOutcome({ state: 'not-checked', critique: { revised: true } }, 'clean'), 'corrected');
+  assert.equal(setups.taskOutcome({ state: 'not-checked' }, 'clean'), 'clean', 'otherwise the user\'s reply decides');
+  assert.equal(setups.taskOutcome({ state: 'not-checked', repair: { from: 'terra-light' } }), 'failed');
+  assert.equal(setups.taskOutcome({ state: 'not-checked', repair: { from: 'terra-light' } }, 'clean'), 'failed');
+});
+
 test('a preference needs two presets with three runs each and a real winner; ties and undone presets never win', t => {
   const root = tempRoot(t);
   for (let i = 0; i < 3; i++)

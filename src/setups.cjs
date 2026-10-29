@@ -61,8 +61,16 @@ function updateSetups(root, change) {
 }
 
 // How a settled task's checks went: first time, after a correction, or still failing. Anything else says nothing.
-function taskOutcome(task) {
-  const corrected = (task.corrections || 0) > (task.startCorrections || 0);
+// `chat` is how the chat checker read the user's next message, for a task without checks.
+function taskOutcome(task, chat = null) {
+  // A task a stronger model had to take over failed on its own preset, whatever the repair did.
+  if (task.repair)
+    return ['checks-passed', 'not-checked', 'needs-you'].includes(task.state) ? 'failed' : null;
+
+  // Findings the chat checker sent back are a correction too, whatever the checks or the user's reply said.
+  const corrected = (task.corrections || 0) > (task.startCorrections || 0) || !!task.critique?.revised;
+  if (chat)
+    return chat === 'clean' && corrected ? 'corrected' : chat;
   if (task.state === 'checks-passed')
     return corrected ? 'corrected' : 'clean';
 
