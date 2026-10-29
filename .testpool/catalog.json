@@ -1165,7 +1165,7 @@
       "name": "Stop ends what a worker started, orphans included",
       "covers": "Windows: spawnOwned puts each worker in its own job object (worker-job.ps1), stopTree ends it, so a process whose parent already exited (Git Bash forks) is stopped too; per-task Stop ends every process holding the task's output file (Restart Manager) but never the worker.",
       "paths": ["src/process-tree.cjs", "src/worker-job.ps1", "src/document-job.cs", "src/controller.cjs", "tests/shutdown.test.cjs"],
-      "command": "node --test --test-name-pattern=\"through a process that already exited|holding its output file\" tests/shutdown.test.cjs",
+      "command": "node --test --test-name-pattern=\"through a process that already exited|holding its output file|keeps Node alive\" tests/shutdown.test.cjs",
       "cost": "cheap",
       "timeoutSec": 60,
       "origin": { "problem": "Stopping a Claude turn left its background render script, Python driver and two Monitor watchers running (and the GPU lock held): Git Bash's forks leave each command's parent pid pointing at an exited process, so the parent-pid tree kill missed them.", "fix": "A job object per worker, ended on Stop and Quit; per-task Stop also kills the processes holding the task's output file.", "date": "2026-10-28" }

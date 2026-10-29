@@ -191,6 +191,18 @@ test('stopping one task ends every process holding its output file, but never th
   assert.deepEqual(remaining, []);
 });
 
+test('waiting on the job helper keeps Node alive when nothing else does', { skip: process.platform !== 'win32' && 'Windows job objects', timeout: 30000 }, async () => {
+  const script = `const { spawn } = require('node:child_process');
+    const tree = require(${JSON.stringify(require.resolve('../src/process-tree.cjs'))});
+    const child = tree.spawnOwned(spawn, process.execPath, ['-e', ''], { stdio: 'ignore' });
+    child.once('exit', () => tree.stopTree(child).then(() => console.log('stopped')));`;
+  const run = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'inherit'] });
+  let output = '';
+  run.stdout.on('data', text => { output += text; });
+  await once(run, 'close');
+  assert.equal(output.trim(), 'stopped', 'Node waits for the helper’s reply instead of exiting mid-await');
+});
+
 test('a Stop whose cleanup cannot be confirmed says so, with a record to retry', async t => {
   const { EventEmitter } = require('node:events');
   const platform = Object.getOwnPropertyDescriptor(process, 'platform');

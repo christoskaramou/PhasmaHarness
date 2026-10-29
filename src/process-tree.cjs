@@ -227,8 +227,17 @@ function jobs() {
   helper.stdout.unref?.();
   helper.stdin.unref?.();
   replies.push(() => {}); // the "ready" line
+  // A caller awaiting a reply must keep Node alive (2026-10-29: CI's test files exited mid-await with nothing else left).
+  let waiting = 0;
   const ask = line => new Promise(resolve => {
-    replies.push(resolve);
+    if (waiting++ === 0)
+      helper.stdout.ref?.();
+
+    replies.push(reply => {
+      if (--waiting === 0)
+        helper.stdout.unref?.();
+      resolve(reply);
+    });
     helper.stdin.write(line + '\n', error => { if (error) ended(); });
   });
   return jobHelper = { helper, ask };
