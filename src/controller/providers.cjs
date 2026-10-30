@@ -181,9 +181,13 @@ module.exports = {
 
   // Enabled provider models. A Cursor model whose reasoning levels Cursor reports becomes one worker per level
   // (cursor-cli:<model>:<level>), like Codex and Claude; enabling stays per model (its saved entry).
+  // Every Cursor model counts as able to see images (user, 2026-10-31): Cursor's list does not say which models take
+  // them, so saved entries all held the default false, while the CLI advertises image prompts and the adapter refuses
+  // images when it does not (cursor.cjs).
   providerWorkers() {
-    return (this.data.settings.providerModels || []).flatMap(entry => {
-      if (entry.provider !== 'cursor-cli') return [entry];
+    return (this.data.settings.providerModels || []).flatMap(saved => {
+      if (saved.provider !== 'cursor-cli') return [saved];
+      const entry = { ...saved, images: true };
       const found = (this.cursor.models || []).find(m => m.id === entry.model);
       const base = entry.parameterized || found?.parameterized ? { ...entry, parameterized: true, parameters: entry.cursorParameters || [] } : entry;
       if (!found?.efforts?.length) return [base];
@@ -406,7 +410,7 @@ module.exports = {
     const unlimited = usable.filter(p => !this.limits.limited(p.provider || 'codex', p.model));
     // A copy of the conversation as it was before this message, like the router saw it.
     const context = { ...session, ...previousState, items: [...(session.items || [])], routes: [...(session.routes || [])], directContext: [...(session.directContext || [])],
-      configuredChecks: settings.checks?.[session.workspace] || [], routingCatalog: unlimited.length ? unlimited : usable, attachedImageCount: images.length,
+      configuredChecks: settings.checks?.[session.workspace] || [], routingCatalog: unlimited.length ? unlimited : usable, attachedImageCount: images.length, attachedImages: this.jevImageAssist() ? images : [],
       autoLowModel: settings.autoLowModel };
     const used = { id: selected.id, provider: selected.provider || 'codex', model: selected.model, effort: selected.effort || null, source: selected.source === 'manual' ? 'manual' : 'router' };
     const abort = new AbortController();

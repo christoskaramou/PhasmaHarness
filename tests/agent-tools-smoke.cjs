@@ -17,7 +17,7 @@ process.env.CODEX_HOME = path.join(root, 'codex');
 fs.mkdirSync(process.env.CODEX_HOME);
 app.setPath('userData', path.join(root, 'electron'));
 const client = new CodexClient(root);
-const router = () => ({ cancel() {}, close() {} });
+const router = () => ({ cancel() {}, close() {}, jev: { configured: true } });
 const primary = new Controller(path.join(root, 'sessions.json'), root, client, router());
 // Keep this installed-CLI smoke entirely local, with documentation defaults already removed.
 fs.writeFileSync(path.join(root, 'connectors.json'), JSON.stringify({ version: 1, defaultsVersion: 1, connectors: [] }));
@@ -35,7 +35,7 @@ const server = http.createServer(async (req, res) => {
   received = JSON.parse(Buffer.concat(chunks).toString());
   requests++;
   const item = requests === 1
-    ? { type: 'custom_tool_call', id: 'ctc_create', call_id: 'call_create', name: 'exec', namespace: 'functions', input: 'text(await tools.mcp__phasma_harness__agent_models({})); text(await tools.mcp__phasma_harness__agent_create({name:"Test211",instructions:"Wait for a task."})); const catalog = await tools.mcp__phasma_harness__connector_tools({}); text(catalog); text(await tools.mcp__phasma_harness__connector_call({id:' + JSON.stringify(connectors.records[0]?.id + '/echo') + ',arguments:{text:"Codex shared MCP"}}));' }
+    ? { type: 'custom_tool_call', id: 'ctc_create', call_id: 'call_create', name: 'exec', namespace: 'functions', input: 'text(await tools.mcp__phasma_harness__agent_models({})); text(await tools.mcp__phasma_harness__agent_create({name:"Test211",instructions:"Wait for a task."})); const catalog = await tools.mcp__phasma_harness__connector_tools({}); text(catalog); text(await tools.mcp__phasma_harness__connector_call({id:' + JSON.stringify(connectors.records[0]?.id + '/echo') + ',arguments:{text:"Codex shared MCP"}})); const shot = await tools.mcp__phasma_harness__image_read({}); image(shot.content[0]);' }
     : { type: 'message', id: 'msg_done', status: 'completed', role: 'assistant', content: [{ type: 'output_text', text: 'Tool completed.', annotations: [] }] };
   const response = { id: `resp_${requests}`, object: 'response', created_at: Math.floor(Date.now() / 1000), status: 'completed', model: 'gpt-6.1-sol', output: [item], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } };
   res.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -57,12 +57,16 @@ app.whenReady().then(async () => {
     await client.call('thread/inject_items', { threadId: old.thread.id, items: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Earlier conversation.' }] }] }, 15000);
     const session = agents.conversation(primary, true, root, 'read-only');
     session.threadId = old.thread.id;
+    // A chat image for image_read (Jev image assist withholds it from the model).
+    const shot = 'data:image/png;base64,' + require('@napi-rs/canvas').createCanvas(300, 300).encodeSync('png').toString('base64');
+    session.items.push({ id: 'shot', type: 'userMessage', createdAt: Date.now(), content: [{ type: 'text', text: 'A screenshot.' }, { type: 'image', url: shot }] });
     await primary.loadThread(session, { model: 'gpt-6.1-sol', effort: 'low' });
     ipcMain.handle('bootstrap', () => agents.snapshot());
     ipcMain.handle('preview', () => ({ label: 'Auto', reason: 'Local smoke' }));
     ipcMain.handle('appInfo', () => ({ version: '0.1.0', packaged: false }));
     ipcMain.handle('updateStatus', () => ({ status: 'idle' }));
     ipcMain.handle('load', () => session);
+    ipcMain.handle('image', () => shot);
     ipcMain.handle('browseWorkspace', () => ({ available: false, entries: [] }));
     ipcMain.handle('voiceInfo', () => ({ supported: false }));
     ipcMain.handle('setAppearance', () => {});
@@ -83,7 +87,9 @@ app.whenReady().then(async () => {
     const instructions = received.input.filter(item => item.role === 'developer').map(item => JSON.stringify(item.content)).join('\n');
     assert.match(instructions, /MUST call agent_create/);
     assert.match(instructions, /mcp__phasma_harness__agent_create/);
-    assert.deepEqual(toolCalls, ['agent_models', 'agent_create']);
+    assert.deepEqual(toolCalls, ['agent_models', 'agent_create', 'image_read']);
+    const output = received.input.find(entry => entry.type === 'custom_tool_call_output')?.output;
+    assert.ok(Array.isArray(output) && output.some(part => part.type === 'input_image' && part.image_url === shot), 'image_read reaches the Codex model as an image');
     assert.equal(connectorApprovals, 1, 'even a read-only Codex chat uses the Harness connector approval');
     assert.equal(connectorServer.state.calls.length, 1);
     assert.equal(connectorServer.state.calls[0].arguments.text, 'Codex shared MCP');
@@ -105,7 +111,7 @@ app.whenReady().then(async () => {
       }; check();
     })`);
     assert.equal(primary.requests.size, 0, 'local agent metadata tools must not require another approval');
-    console.log('PASS: resumed Codex chat -> real MCP -> persisted Test211 -> sidebar; shared connector discovery, Harness approval and remote call; local model mock only.');
+    console.log('PASS: resumed Codex chat -> real MCP -> persisted Test211 -> sidebar; shared connector discovery, Harness approval and remote call; image_read reaches the model as an image; local model mock only.');
   } finally {
     clearTimeout(deadline); agents.closing = true;
     await Promise.all(agents.initializing.values());

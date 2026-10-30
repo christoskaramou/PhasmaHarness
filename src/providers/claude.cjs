@@ -519,11 +519,16 @@ class ClaudeCLI {
   }
 }
 
-function handoff(items, maxLength = 1000000) {
+// `images` (imageNumbers, with Jev image assist) names each earlier image, so the next model can ask Jev about it.
+function handoff(items, maxLength = 1000000, images = null) {
   // Progress notes (commentary) are not history the next model needs; final answers carry the outcome.
+  const imageText = (item, part) => {
+    const number = images?.get(item.id)?.[(item.content || []).filter(c => c.type === 'image').indexOf(part)];
+    return number ? `[Image ${number} attached]` : '[Earlier image attachment]';
+  };
   const messages = items.filter(i => i.type === 'userMessage' || (i.type === 'agentMessage' && i.phase !== 'commentary')).map(i => ({
     role: i.type === 'userMessage' ? 'user' : 'assistant',
-    text: i.type === 'userMessage' ? (i.contextText || '') + (i.content || []).map(c => c.type === 'text' ? c.text : '[Earlier image attachment]').join('\n') : stripTaskStatus(i.text),
+    text: i.type === 'userMessage' ? (i.contextText || '') + (i.content || []).map(c => c.type === 'text' ? c.text : imageText(i, c)).join('\n') : stripTaskStatus(i.text),
   }));
   const text = JSON.stringify(messages);
   if (text.length > maxLength) throw new Error('Conversation is too large to transfer. Start a new chat or compact it before switching backends.');

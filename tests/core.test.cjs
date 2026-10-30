@@ -573,6 +573,56 @@ test('CLI late completion does not finish the turn twice', async t => {
   assert.equal(controller.busy, session.id);
 });
 
+// 2026-10-31: Grok 4.7 through Cursor takes images, but every saved Cursor entry held images: false (Cursor's list does not
+// say), so the Hub refused images and image_read refused Grok. The user: mark Cursor models as able to see images.
+test('every Cursor model counts as able to see images, at each of its reasoning levels', async t => {
+  const { controller } = await setup(t);
+  controller.data.settings.providerModels = [{ id: 'cursor-cli:grok-4.7:default', provider: 'cursor-cli', model: 'grok-4.7', label: 'Grok 4.7',
+    effort: null, rank: 40, enabled: true, worker: true, router: true, images: false, description: '' }];
+  controller.cursor.models = [{ id: 'grok-4.7', label: 'Grok 4.7', parameterized: true, parameters: [], efforts: ['high', 'xhigh'], effortOption: 'reasoning' }];
+  assert.deepEqual(controller.catalog().filter(p => p.provider === 'cursor-cli').map(p => [p.id, p.images]),
+    [['cursor-cli:grok-4.7:high', true], ['cursor-cli:grok-4.7:xhigh', true]]);
+  controller.cursor.models = [];
+  assert.deepEqual(controller.catalog().filter(p => p.provider === 'cursor-cli').map(p => [p.id, p.images]), [['cursor-cli:grok-4.7:default', true]]);
+  assert.equal(controller.data.settings.providerModels[0].images, false, 'the saved entry is left as it was');
+});
+
+// 2026-10-30: images sent to a model without image input failed the turn; with Jev image assist it gets their numbers instead.
+test('with Jev image assist no model is sent images, only their numbers; the chat keeps them; assist off sends them or refuses', async t => {
+  const { controller, smartRouter } = await setup(t);
+  const session = controller.create();
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  controller.claude.models = controller.claude.models.map(model => ({ ...model, images: false }));
+  smartRouter.jev = { configured: true };
+  const requests = [];
+  controller.claude.run = value => { requests.push(value); return Promise.resolve({ result: 'done', usage: { input_tokens: 1, output_tokens: 1 } }); };
+  const image = 'data:image/png;base64,iVBORw0KGgo=';
+  await controller.send({ id: session.id, text: 'What do these show?', images: [image, image], mode: 'claude-cli:sonnet', task: 'off' });
+  await flush();
+  assert.deepEqual(requests[0].images, []);
+  assert.match(requests[0].prompt, /What do these show\?\n\n\[Images 1 to 2 are attached, but you cannot see images\. Ask Jev .*image_ask/);
+  assert.deepEqual(session.items.find(item => item.type === 'userMessage').content.filter(part => part.type === 'image').map(part => part.url), [image, image]);
+  await controller.send({ id: session.id, text: 'And this?', images: [image], mode: 'claude-cli:sonnet', task: 'off' });
+  await flush();
+  assert.match(requests[1].prompt, /\[Image 3 is attached/, 'numbers continue through the chat');
+  // A model that can see images is not sent them either, to save tokens: it asks Jev and reads one only when needed.
+  controller.claude.models = controller.claude.models.map(model => ({ ...model, images: true }));
+  await controller.send({ id: session.id, text: 'Read this', images: [image], mode: 'claude-cli:sonnet', task: 'off' });
+  await flush();
+  assert.deepEqual(requests[2].images, []);
+  assert.match(requests[2].prompt, /\[Image 4 is attached but not shown, to save tokens\. Ask Jev .*image_read only when/);
+  controller.data.settings.jevImages = false;
+  await controller.send({ id: session.id, text: 'Assist off', images: [image], mode: 'claude-cli:sonnet', task: 'off' });
+  await flush();
+  assert.deepEqual(requests[3].images, [image], 'with Jev image assist off a model that can see images gets them');
+  assert.doesNotMatch(requests[3].prompt, /\[Image/);
+  controller.claude.models = controller.claude.models.map(model => ({ ...model, images: false }));
+  await controller.send({ id: session.id, text: 'One more', images: [image], mode: 'claude-cli:sonnet', task: 'off' }).catch(() => {});
+  assert.equal(requests.length, 4);
+  assert.match(session.pendingMessage?.error || '', /Enable image support for this model, or Jev image assist/);
+});
+
 // 2026-10-28: a bot's background "wait until Dota closes" command held its chat for an hour with no way to see or stop it.
 test('a Claude turn lists its background tasks, reads and stops one, and drops them when the turn ends', async t => {
   const { controller } = await setup(t);

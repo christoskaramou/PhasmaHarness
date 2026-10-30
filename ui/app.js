@@ -624,7 +624,7 @@ function renderImages() {
     remove.setAttribute('aria-label', `Remove attached image ${i + 1}`);
     remove.innerHTML = '<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1 1l8 8M9 1 1 9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
     remove.onclick = () => { imageDrafts.set(draftKey(), attachedImages().filter((_, n) => n !== i)); renderImages(); updatePreview(); };
-    card.append(image, remove); tray.append(card);
+    card.append(imageThumb(image, 'image-thumb', `View attached image ${i + 1}`), remove); tray.append(card);
   });
   files.forEach((file, i) => {
     const card = element('div', 'file-preview');
@@ -745,6 +745,33 @@ function element(tag, className, text) {
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+// Attached images show as thumbnails, in the composer and in the chat; a click opens the full image.
+function imageThumb(image, className, label) {
+  const button = element('button', className);
+  button.type = 'button'; button.setAttribute('aria-label', label); button.append(image);
+  button.onclick = () => viewImage(image);
+  return button;
+}
+
+// The viewer steps through the images sent or shown together: the composer's, one message's or one reply's.
+let viewedImages = [], viewedIndex = 0;
+function viewImage(image) {
+  const group = image.closest('.message-body, #image-previews');
+  viewedImages = group ? [...group.querySelectorAll('.image-thumb img, .linked-image img')] : [image];
+  viewedIndex = Math.max(0, viewedImages.indexOf(image));
+  stepImage(0);
+  if (!$('#image-dialog').open) $('#image-dialog').showModal();
+}
+function stepImage(step) {
+  const dialog = $('#image-dialog'), count = viewedImages.length;
+  viewedIndex = (viewedIndex + step + count) % count;
+  const image = viewedImages[viewedIndex], view = dialog.querySelector('img');
+  view.src = image.src; view.alt = image.alt;
+  dialog.querySelector('.image-count').textContent = `${viewedIndex + 1} / ${count}`;
+  for (const node of dialog.querySelectorAll('.image-step, .image-count')) node.hidden = count < 2;
+  dialog.querySelector('.image-file').hidden = !image.closest('a[data-path]');
 }
 
 // State snapshots omit inline images; each shown image is fetched once and cached.
@@ -2735,9 +2762,9 @@ function renderMessages(session) {
       if (user) {
         const images = item.content.filter(part => part.type === 'image');
         images.forEach((part, index) => {
-          const image = element('img', 'message-image');
+          const image = element('img');
           image.alt = 'Attached image';
-          body.append(image);
+          body.append(imageThumb(image, 'image-thumb message-image', `View attached image ${index + 1}`));
           showImage(image, part.url, session.id, item.id, index);
         });
       }
@@ -2783,6 +2810,8 @@ function renderMessages(session) {
       if (item.type === 'dynamicToolCall') { title = `${item.tool} · ${item.status}`; detail = JSON.stringify(item.contentItems || item.arguments, null, 2); }
       if (item.type === 'webSearch') { title = `Web search · ${item.query || item.action?.query || ''}`; detail = JSON.stringify(item.action || {}, null, 2); }
       if (item.type === 'contextCompaction') title = 'Conversation context compacted';
+      // A step of a turn (Controller.recordStep): "Jev reads image 1", opening to its question and Jev's answer.
+      if (item.type === 'toolStep') { title = item.title; detail = (item.lines || []).join('\n'); }
       details.append(element('summary', '', title), element('pre', '', detail)); node.replaceChildren(details);
     }
   }
@@ -3547,6 +3576,8 @@ $('#settings').onclick = async () => {
   $('#settings-context').value = state.settings.contextRanking || 'local';
   $('#settings-tools').value = state.settings.toolSelection || 'off';
   $('#settings-jev-compare').value = state.settings.jevCompare === true ? 'on' : 'off';
+  $('#settings-jev-images').value = state.settings.jevImages !== false && state.jev?.configured ? 'on' : 'off';
+  $('#settings-jev-images').disabled = !state.jev?.configured;
   $('#settings-reply-suggestions').value = state.settings.replySuggestions === false ? 'off' : 'on';
   $('#settings-show-tips').value = state.settings.showTips === false ? 'off' : 'on';
   for (const [id, key] of Object.entries(ON_SWITCHES))
@@ -3919,7 +3950,7 @@ const settingsFields = {
   ...ON_SWITCHES,
   'settings-router-preset': 'routingModel', 'settings-effort-cap': 'effortCap',
   'settings-context': 'contextRanking', 'settings-tools': 'toolSelection',
-  'settings-jev-compare': 'jevCompare',
+  'settings-jev-compare': 'jevCompare', 'settings-jev-images': 'jevImages',
   'settings-reply-suggestions': 'replySuggestions', 'settings-chat-scan': 'chatScanModel', 'settings-low-model': 'autoLowModel',
   'settings-low-effort': 'autoLowModel', 'settings-show-tips': 'showTips', 'settings-router-effort': 'routingModel',
   'settings-chat-scan-effort': 'chatScanModel', 'settings-escalation-model': 'escalationModel', 'settings-escalation-effort': 'escalationModel',
@@ -3928,7 +3959,7 @@ $('#settings-form').addEventListener('input', clearSaved);
 $('#settings-form').addEventListener('change', event => {
   const control = event.target, key = settingsFields[control.id];
   if (!key) return;
-  const toggle = ['jevCompare', 'replySuggestions', 'showTips', ...Object.values(ON_SWITCHES)].includes(key);
+  const toggle = ['jevCompare', 'jevImages', 'replySuggestions', 'showTips', ...Object.values(ON_SWITCHES)].includes(key);
   const value = toggle ? control.value === 'on' : modelEffortSettings[key] ? modelEffortChoice(...modelEffortSettings[key]()) : control.value;
   saveSetting(control, key, value);
 });
@@ -3996,6 +4027,16 @@ $('#request-dialog').addEventListener('cancel', event => {
     shownRequest = null;
   }
 });
+$('#image-dialog').onclick = event => { if (!event.target.closest('button')) $('#image-dialog').close(); };
+$('#image-dialog').addEventListener('keydown', event => {
+  const step = { ArrowLeft: -1, ArrowRight: 1 }[event.key];
+  if (step && viewedImages.length > 1) { event.preventDefault(); stepImage(step); }
+});
+$('#image-dialog').querySelectorAll('.image-step').forEach(button => { button.onclick = () => stepImage(Number(button.dataset.step)); });
+$('#image-dialog .image-file').onclick = () => {
+  const target = linkTarget(viewedImages[viewedIndex]?.closest('a[data-path]')?.dataset.path);
+  if (target) api.openFile(target).catch(notify);
+};
 $('#job-dialog').addEventListener('close', () => {
   if ($('#job-dialog').open) return;
   saveJobDraft();
@@ -4063,6 +4104,9 @@ document.addEventListener('click', event => {
   const link = event.target.closest('a');
   if (!link) return;
   event.preventDefault();
+  // A picture a reply shows opens in the viewer, which has Open file.
+  const picture = link.classList.contains('linked-image') && link.querySelector('img');
+  if (picture?.src) return viewImage(picture);
   const target = linkTarget(link.dataset.path);
   if (target) api.openFile(target).catch(notify);
   else if (/^https?:\/\//i.test(link.href)) api.openLink(link.href).catch(notify);

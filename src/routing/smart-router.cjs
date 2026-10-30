@@ -262,13 +262,13 @@ class SmartRouter {
     const available = this.benchmarks.catalog(session.routingCatalog || []);
     if (!available.length) throw new Error('No worker preset is available.');
     let workspace = { available: false, nativeProject: false, signals: [], files: [], coverage: 'not-needed', limitations: [] };
-    let result = await this.jev.classify(contextFor(text, session, EMPTY_WORKSPACE), signal);
+    let result = await this.jev.classify(contextFor(text, session, EMPTY_WORKSPACE), signal, session.attachedImages);
     let cost = result.estimatedCostUsd || 0;
     if (result.decision.workspaceRelevant && !taskWorker(result.decision, session, available)) {
       const scanned = await Promise.resolve().then(() => this.inspect(session.workspace, text, AbortSignal.any([signal, AbortSignal.timeout(10000)]))).catch(() => null);
       if (signal.aborted) throw Object.assign(new Error('Comparison stopped.'), { name: 'AbortError' });
       if (scanned) workspace = scanned;
-      result = await this.jev.classify(contextFor(text, session, workspace), signal);
+      result = await this.jev.classify(contextFor(text, session, workspace), signal, session.attachedImages);
       cost += result.estimatedCostUsd || 0;
     }
     const chosen = finalChoice(result.decision, text, session, workspace, available);
@@ -683,7 +683,7 @@ class SmartRouter {
       let pending;
       if (useJev) {
         if (!this.jev?.configured) throw new Error('Add your Jev API key in Settings first.');
-        pending = await this.jev.classify(contextFor(text, session, EMPTY_WORKSPACE), abort.signal);
+        pending = await this.jev.classify(contextFor(text, session, EMPTY_WORKSPACE), abort.signal, session.attachedImages);
         model = pending.model; usage = pending.usage;
         // A continued task keeps its worker without a workspace scan or a second question.
         if (!pending.decision.workspaceRelevant || taskWorker(pending.decision, session, available)) {
@@ -718,7 +718,7 @@ class SmartRouter {
       timings.workspaceMs = Date.now() - scanWait;
       if (abort.signal.aborted) throw Object.assign(new Error('Routing stopped.'), { name: 'AbortError' });
       if (scanned) workspace = scanned;
-      const result = await this.jev.classify(contextFor(text, session, workspace), abort.signal);
+      const result = await this.jev.classify(contextFor(text, session, workspace), abort.signal, session.attachedImages);
       result.usage = sumUsage(pending.usage, result.usage);
       result.estimatedCostUsd = (pending.estimatedCostUsd || 0) + (result.estimatedCostUsd || 0);
       model = result.model; usage = result.usage;

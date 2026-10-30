@@ -77,6 +77,28 @@ function imageData(url) {
   return { mime: match[1], data: match[2] };
 }
 
+// Jev takes PNG or JPEG with each side 280-1568 px and rejects anything else (docs.typesafe.ai/images.md, 2026-10-30).
+const JEV_MIN = 280, JEV_MAX = 1568;
+async function jevImage(url) {
+  const { mime, data } = imageData(url);
+  const format = mime === 'image/png' ? 'png' : 'jpeg';
+  const buffer = Buffer.from(data, 'base64');
+  const [width, height] = format === 'png' ? [buffer.readUInt32BE(16), buffer.readUInt32BE(20)] : jpegSize(buffer);
+  if (Math.min(width, height) >= JEV_MIN && Math.max(width, height) <= JEV_MAX) return { type: 'image', format, data_base64: data };
+  // This decodes outside the document worker's memory cap, so only up to the 2048 px that normalizeImage makes.
+  if (!width || !height || Math.max(width, height) > 2048) return null;
+  const { loadImage, createCanvas } = require('@napi-rs/canvas');
+  const image = await loadImage(buffer);
+  // Shrink to fit, grow a small image toward the minimum while it still fits, then pad a side that stays short.
+  const scale = Math.min(JEV_MAX / Math.max(width, height), Math.max(1, JEV_MIN / Math.min(width, height)));
+  const w = Math.min(JEV_MAX, Math.max(1, Math.round(width * scale))), h = Math.min(JEV_MAX, Math.max(1, Math.round(height * scale)));
+  const canvas = createCanvas(Math.max(JEV_MIN, w), Math.max(JEV_MIN, h)), context = canvas.getContext('2d');
+  context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, 0, 0, w, h);
+  // Jev bills by pixels, not bytes, and JPEG encodes about twice as fast as PNG here (61 vs 30 ms at 1920x1080).
+  return { type: 'image', format: 'jpeg', data_base64: (await canvas.encode('jpeg', 85)).toString('base64') };
+}
+
 // State snapshots leave inline images on the runner (null keeps counts); the UI fetches a shown image on demand.
 function withoutImages(value, key) {
   if (typeof value === 'string') return (key === 'url' || key === 'images') && value.startsWith('data:image/') ? null : value;
@@ -91,4 +113,4 @@ function withoutImages(value, key) {
   return copy || value;
 }
 
-module.exports = { normalizeImage, imageData, withoutImages };
+module.exports = { normalizeImage, imageData, jevImage, withoutImages };

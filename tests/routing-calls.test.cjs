@@ -559,4 +559,57 @@ test('Jev requests the stable alias and learns its displayed version only from v
   assert.equal(client.model, 'jev-9.8.8', 'invalid responses cannot replace the observed version');
 });
 
+test('Jev routing sees attached images fitted to its 280-1568 px limits, and judges the text alone when it refuses them', async () => {
+  const { createCanvas, loadImage } = require('@napi-rs/canvas');
+  const { jevImage } = require('../src/image-input.cjs');
+  const image = async (width, height, format = 'png') => {
+    const canvas = createCanvas(width, height);
+    canvas.getContext('2d').fillRect(0, 0, width, height);
+    return `data:image/${format};base64,${(await (format === 'png' ? canvas.encode('png') : canvas.encode('jpeg', 85))).toString('base64')}`;
+  };
+  const size = async asset => { const decoded = await loadImage(Buffer.from(asset.data_base64, 'base64')); return [decoded.width, decoded.height]; };
+  const requests = [];
+  let refuse = false;
+  const jev = new JevClient({ configured: true, read: () => 'key' }, async (_url, request) => {
+    const body = JSON.parse(request.body);
+    requests.push({ headers: request.headers, body });
+    if (refuse && body.assets) return { ok: false, status: 400 };
+    return { ok: true, text: async () => JSON.stringify({ model: 'jev-1.14.0', usage: { input_tokens: 10, output_tokens: 0 },
+      answers: Object.fromEntries(Object.entries(body.questions).map(([id, question]) => {
+        const options = Object.keys(question.criteria), choice = id === 'workspaceRelevant' ? 'no' : options[0];
+        return [id, { type: 'choice', choice, confidence: 0.9, probabilities: Object.fromEntries(options.map(o => [o, o === choice ? 1 : 0])) }];
+      })) }) };
+  });
+  const router = new SmartRouter(__dirname);
+  router.jev = jev;
+  const images = [await image(2000, 1000), await image(100, 60), await image(2000, 100), await image(1000, 600, 'jpeg')];
+  const chosen = await router.choose('what is wrong in these screenshots?', { ...session, attachedImageCount: images.length, attachedImages: images }, [], 'jev');
+  const [sent] = requests;
+  assert.equal(sent.headers['TypeSafe-Danger-Zone-Images'], 'true');
+  const refs = Object.keys(sent.body.assets);
+  assert.deepEqual(sent.body.state.attachments.images, refs, 'every asset is referenced in state');
+  assert.ok(refs.every(ref => /^[0-9a-f-]{36}$/.test(ref)));
+  assert.doesNotMatch(JSON.stringify(sent.body.state), /Images go to the worker/);
+  const assets = refs.map(ref => sent.body.assets[ref]);
+  assert.deepEqual(await Promise.all(assets.map(size)), [[1568, 784], [467, 280], [1568, 280], [1000, 600]], 'shrunk, grown, padded, kept');
+  assert.equal(assets[3].data_base64, images[3].split(',')[1], 'an image within the limits is sent as is');
+  assert.deepEqual(assets.map(a => a.format), ['jpeg', 'jpeg', 'jpeg', 'jpeg'], 'a fitted copy is JPEG');
+  assert.doesNotMatch(chosen.reason, /could not read/);
+  assert.equal(await jevImage(await image(3000, 100)), null, 'larger than normalizeImage makes: not decoded outside the document worker');
+
+  requests.length = 0;
+  await router.choose('hello', session, [], 'jev');
+  assert.equal(requests[0].headers['TypeSafe-Danger-Zone-Images'], undefined);
+  assert.equal(requests[0].body.assets, undefined);
+
+  requests.length = 0;
+  refuse = true;
+  const textOnly = await router.choose('what is wrong here?', { ...session, attachedImageCount: 1, attachedImages: [images[0]] }, [], 'jev');
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].body.assets, undefined);
+  assert.equal(requests[1].headers['TypeSafe-Danger-Zone-Images'], undefined);
+  assert.match(textOnly.reason, /could not read the attached images/);
+  assert.equal(jev.health.error, null);
+});
+
 

@@ -595,9 +595,88 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript(`current().items.push({ id: 'image-message', type: 'userMessage',
     content: [{ type: 'text', text: 'See the image.' }, { type: 'image', url: null }] }); render(); true`);
   await new Promise(resolve => setTimeout(resolve, 100));
-  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#messages img.message-image").src'), 'data:image/jpeg;base64,/9j/4AAQ');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#messages .message-image img").src'), 'data:image/jpeg;base64,/9j/4AAQ');
   assert.deepEqual(imageRequests.at(-1).slice(1), ['image-message', 0]);
   await window.webContents.executeJavaScript('current().items.pop(); render(); true');
+  // Attached images are framed thumbnails in the composer and in the chat. A click opens the viewer, which centers the image
+  // (a larger one shrinks to fit, a smaller one keeps its size) and steps only through the images sent together.
+  const thumbnails = await window.webContents.executeJavaScript(`(async () => {
+    const picture = (width, height, color, label) => {
+      const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+      const g = canvas.getContext('2d'); g.fillStyle = color; g.fillRect(0, 0, width, height);
+      g.fillStyle = '#fff'; g.font = 'bold ' + Math.round(height / 7) + 'px sans-serif'; g.fillText(label, width / 6, height / 1.8);
+      return canvas.toDataURL('image/png');
+    };
+    const pictures = window.smokePictures = { first: picture(1200, 800, '#2f8f6f', 'Image 1 of 2'), second: picture(1200, 800, '#3a5fa0', 'Image 2 of 2'), small: picture(240, 160, '#a05a2c', 'Small') };
+    current().items.push({ id: 'thumb-message', type: 'userMessage', content: [{ type: 'text', text: 'Two images.' }, { type: 'image', url: pictures.first }, { type: 'image', url: pictures.second }] },
+      { id: 'thumb-later', type: 'userMessage', content: [{ type: 'text', text: 'A later one.' }, { type: 'image', url: pictures.small }] });
+    imageDrafts.set(draftKey(), [pictures.small]); render(); renderImages();
+    const thumbs = [...document.querySelectorAll('#messages .message-image, #image-previews .image-thumb')];
+    await Promise.all(thumbs.map(thumb => thumb.querySelector('img').decode()));
+    const small = thumbs.map(thumb => { const box = thumb.querySelector('img').getBoundingClientRect(); return box.width <= 140 && box.height <= 100; });
+    const framed = thumbs.every(thumb => getComputedStyle(thumb.querySelector('img')).borderTopWidth === '1px');
+    const [first, second] = document.querySelectorAll('#messages .message-image');
+    const sideBySide = first.getBoundingClientRect().top === second.getBoundingClientRect().top;
+    return { count: thumbs.length, small, framed, sideBySide, labels: thumbs.map(thumb => thumb.getAttribute('aria-label')) };
+  })()`);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/image-thumbnails.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript(`document.querySelector('#messages .message-image img').click(); document.querySelector('#image-dialog img').decode().then(() => true)`);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/image-viewer.png'), (await window.webContents.capturePage()).toPNG());
+  thumbnails.viewer = await window.webContents.executeJavaScript(`(async () => {
+    const pictures = window.smokePictures, names = Object.fromEntries(Object.entries(pictures).map(([name, url]) => [url, name]));
+    const dialog = document.querySelector('#image-dialog'), view = dialog.querySelector('img');
+    const shown = () => ({ open: dialog.open, image: names[view.src] || 'other', count: dialog.querySelector('.image-count').hidden ? null : dialog.querySelector('.image-count').textContent,
+      arrows: [...dialog.querySelectorAll('.image-step')].every(step => !step.hidden), file: !dialog.querySelector('.image-file').hidden });
+    const centered = () => { const box = view.getBoundingClientRect(); return Math.abs(box.left + box.width / 2 - innerWidth / 2) <= 1 && Math.abs(box.top + box.height / 2 - innerHeight / 2) <= 1; };
+    const box = () => { const rect = view.getBoundingClientRect(); return [Math.round(rect.width), Math.round(rect.height)]; };
+    const steps = [shown()];
+    const large = { centered: centered(), fits: box()[0] <= innerWidth - 128 && box()[1] <= innerHeight - 96 && box()[0] < 1200 };
+    dialog.querySelector('.image-step[data-step="1"]').click(); await view.decode(); steps.push(shown());
+    dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })); await view.decode(); steps.push(shown());
+    dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true })); await view.decode(); steps.push(shown());
+    dialog.click();
+    const closed = !dialog.open;
+    document.querySelector('#image-previews .image-thumb img').click(); await view.decode();
+    const draft = shown();
+    dialog.click();
+    document.querySelectorAll('#messages .message-image img')[2].click(); await view.decode();
+    const later = { ...shown(), centered: centered(), size: box() };
+    return { steps, large, closed, later, draft };
+  })()`);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/image-viewer-small.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript(`document.querySelector('#image-dialog').close(); current().items.splice(-2); imageDrafts.delete(draftKey());
+    render(); renderImages(); delete window.smokePictures; true`);
+  const single = { open: true, image: 'small', count: null, arrows: false, file: false };
+  assert.deepEqual(thumbnails, { count: 4, small: [true, true, true, true], framed: true, sideBySide: true,
+    labels: ['View attached image 1', 'View attached image 2', 'View attached image 1', 'View attached image 1'],
+    viewer: { steps: [{ open: true, image: 'first', count: '1 / 2', arrows: true, file: false }, { open: true, image: 'second', count: '2 / 2', arrows: true, file: false },
+      { open: true, image: 'first', count: '1 / 2', arrows: true, file: false }, { open: true, image: 'second', count: '2 / 2', arrows: true, file: false }],
+    large: { centered: true, fits: true }, closed: true, later: { ...single, centered: true, size: [250, 170] }, draft: single } });
+  console.log('Framed image thumbnails open a centered viewer that steps through the images sent together passed');
+  // A turn's steps are activity rows like other calls (Controller.recordStep): "Jev reads image 1" opens to the question and
+  // Jev's answer, between the message and the reply. The user asked for this exact form on 2026-10-31.
+  const steps = await window.webContents.executeJavaScript(`(() => {
+    current().items.push({ id: 'step-question', type: 'userMessage', content: [{ type: 'text', text: 'Is there an error message in this screenshot?' }] },
+      { id: 'step-ask', type: 'toolStep', tool: 'image_ask', title: 'Jev reads image 1', lines: ['Is there an error message visible? → Jev: yes (0.99)', 'Asked by Grok 4.7 · Extra High · 264 ms'] },
+      { id: 'step-hub', type: 'toolStep', tool: 'agents_list', title: 'Grok 4.7 · Extra High · agents_list', lines: ['[]'] },
+      { id: 'step-read', type: 'toolStep', tool: 'image_read', title: 'claude-sonnet-5-5 · low reads image 1', lines: ['The original image, shown to the model · 3 ms'] },
+      { id: 'step-reply', type: 'agentMessage', text: 'Yes', phase: 'final_answer' });
+    render();
+    const rows = [...document.querySelectorAll('#messages > *')].slice(-5);
+    const order = rows.map(node => node.querySelector(':scope > details.activity') ? 'row' : node.classList.contains('user') ? 'user' : 'reply');
+    const steps = rows.filter(node => node.querySelector(':scope > details.activity')).map(node => node.querySelector('details.activity'));
+    const titles = steps.map(row => row.querySelector('summary').textContent), closed = steps.map(row => !row.open);
+    steps[0].open = true;
+    return { order, titles, closed, opened: steps[0].querySelector('pre').textContent,
+      sameAsCommands: getComputedStyle(steps[0]).font === (() => { const probe = document.createElement('details'); probe.className = 'activity'; document.querySelector('#messages').append(probe); const font = getComputedStyle(probe).font; probe.remove(); return font; })() };
+  })()`);
+  await window.webContents.executeJavaScript("document.querySelector('#messages details.activity')?.scrollIntoView({ block: 'center' }); new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/turn-steps.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript('current().items.splice(-5); render(); true');
+  assert.deepEqual(steps, { order: ['user', 'row', 'row', 'row', 'reply'],
+    titles: ['Jev reads image 1', 'Grok 4.7 · Extra High · agents_list', 'claude-sonnet-5-5 · low reads image 1'], closed: [true, true, true],
+    opened: 'Is there an error message visible? → Jev: yes (0.99)\nAsked by Grok 4.7 · Extra High · 264 ms', sameAsCommands: true });
+  console.log('Turn steps are activity rows like other calls ("Jev reads image 1" opens to Jev\'s answer) between the message and the reply passed');
   console.log('Text/code file snapshots, binary rejection, safe collapsed display, recall and failed-send preservation passed');
   deadline.refresh(); phase = 'document attachments';
   const documentFixtures = require('./fixtures/documents.cjs');
@@ -758,17 +837,20 @@ app.whenReady().then(async () => {
     await new Promise(setTimeout);
     const body = document.querySelector('.message.assistant .message-body');
     for (const link of body.querySelectorAll('a')) link.click();
+    // A reply's picture opens in the viewer; its Open file opens the file as the picture's link did.
+    const viewer = document.querySelector('#image-dialog'), viewed = viewer.open && viewer.querySelector('img').src.slice(0, 15);
+    viewer.querySelector('.image-file').click(); viewer.close();
     Object.assign(api, saved);
     // The preload → IPC → linked-files path (handlers above), without opening anything.
     const real = { image: (await window.router.linkImage(null, ${JSON.stringify(path.join(__dirname, '..', 'ui', 'icon-192.png'))}, 'main')).slice(0, 22),
       missing: await window.router.openFile(null, ${JSON.stringify(path.join(root, 'missing.md'))}, 'main').then(() => 'opened', error => /File not found/.test(error.message)) };
-    return { titles: [...body.querySelectorAll('a[data-path]')].map(link => link.title), opened, loaded,
+    return { titles: [...body.querySelectorAll('a[data-path]')].map(link => link.title), opened, loaded, viewed,
       image: body.querySelector('.linked-image img')?.src.slice(0, 15), images: body.querySelectorAll('img').length,
       remote: body.querySelector('a[href="https://example.com/i.png"]')?.textContent, real };
   })()`);
   assert.deepEqual(links, { titles: ['src/main.cjs:114', 'C:/a b/c.md', 'C:\\tmp\\shot.png'],
-    opened: ['src/main.cjs:114', 'C:/a b/c.md', 'https://example.com/', 'C:\\tmp\\shot.png', 'https://example.com/i.png'],
-    loaded: ['C:\\tmp\\shot.png'], image: 'data:image/gif;', images: 1, remote: 'remote',
+    opened: ['src/main.cjs:114', 'C:/a b/c.md', 'https://example.com/', 'https://example.com/i.png', 'C:\\tmp\\shot.png'],
+    loaded: ['C:\\tmp\\shot.png'], viewed: 'data:image/gif;', image: 'data:image/gif;', images: 1, remote: 'remote',
     real: { image: 'data:image/png;base64,', missing: true } });
   console.log('Chat file links, linked images and web image links passed');
   const codePaths = await window.webContents.executeJavaScript(String.raw`(async () => {
@@ -1438,6 +1520,8 @@ app.whenReady().then(async () => {
   const compareRow = () => window.webContents.executeJavaScript("[document.querySelector('#jev-compare-row').hidden, document.querySelector('#jev-compare-detail').textContent]");
   await window.webContents.executeJavaScript("document.querySelector('#settings').click(); new Promise(r => setTimeout(r, 200))");
   assert.equal((await compareRow())[0], true, 'hidden without a Jev key');
+  const jevImages = () => window.webContents.executeJavaScript("[document.querySelector('#settings-jev-images').value, document.querySelector('#settings-jev-images').disabled]");
+  assert.deepEqual(await jevImages(), ['off', true], 'Jev image assist is off and locked without a Jev key');
   const jevPanel = await window.webContents.executeJavaScript(`(() => {
     document.querySelector('#tab-providers').click();
     const panel = document.querySelector('#jev-provider');
@@ -1474,6 +1558,11 @@ app.whenReady().then(async () => {
   await providerAction("document.querySelector('#tab-routing').click()");
   const [hidden, detail] = await compareRow();
   assert.equal(hidden, false);
+  assert.deepEqual(await jevImages(), ['on', false], 'Jev image assist is on by default once a Jev key is saved');
+  for (const value of ['off', 'on']) {
+    await window.webContents.executeJavaScript(`(() => { const select = document.querySelector('#settings-jev-images'); select.value = '${value}'; select.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    await until(() => controller.data.settings.jevImages === (value === 'on'), `Jev image assist saves ${value}`);
+  }
   assert.match(detail, /^Log only\. When on, .*do not change\. 4 compared: same model 50% \(and effort 25%\), same provider 75%; your manual picks 50% same model · Jev cost \$0\.0004 · 1 failed\.$/);
   await window.webContents.executeJavaScript("document.querySelector('#settings-router-preset').value = 'jev'; document.querySelector('#settings-router-preset').onchange(); true");
   assert.equal((await compareRow())[0], true, 'hidden while Jev is the router');
@@ -1628,7 +1717,7 @@ app.whenReady().then(async () => {
     ['general', 'browser', 'routing', 'tools', 'providers', 'connectors', 'benchmarks', 'checks', 'about']);
   // Browser access, Routing and Tools each have their own tab with their options, and General keeps the rest.
   for (const [tab, controls] of Object.entries({ browser: ['#remote-port', '#remote-toggle'],
-    routing: ['#settings-router-preset', '#settings-effort-cap', '#settings-low-model', '#settings-jev-compare'],
+    routing: ['#settings-router-preset', '#settings-effort-cap', '#settings-low-model', '#settings-jev-compare', '#settings-jev-images'],
     tools: ['#settings-context', '#settings-tools'] })) {
     const shown = await window.webContents.executeJavaScript(`(async () => {
       document.querySelector('#tab-${tab}').click();

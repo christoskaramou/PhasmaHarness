@@ -793,6 +793,21 @@ Each bot's draft retains its own file chips. Failed sends retain unsent snapshot
 
 Image size (verified 2026-10-19): Codex replays every image in a thread's history on each turn. On 2026-10-19 a Codex thread whose history held two 1920×1026 near-uncompressed PNG screenshots (about 10.5 MB base64 each) sent a 24.5 MB request; the ChatGPT backend closed the websocket, then returned HTTP 400 for that and every later turn, including compaction. `normalizeImage` (`src/image-input.cjs`) now scales images so the long edge is at most 2048 px before re-encoding. Opaque images are then sent as JPEG q85 when that is smaller (see Tier-2 review fixes above). Regression: `tests/documents.test.cjs` ("large images are downscaled", "opaque photos are sent as JPEG").
 
+Image thumbnails and viewer (2026-10-30, at the user's request):
+- **Thumbnails.** Attached images are always framed thumbnails (at most 140×100 px), in the composer tray and in sent messages, where they sit side by side. They used to show at full width, up to 500 px tall. `imageThumb` in `ui/app.js` wraps each image in a button ("View attached image N").
+- **Viewer.** `#image-dialog` fills the window and centers the framed image. A larger image shrinks to the window less room for the arrows; a smaller one keeps its actual size.
+  - The first version set the dialog to `width:auto`, which stretched it across the window and left small images at the left edge.
+  - A click anywhere outside the buttons, or Escape, closes it.
+- **Stepping.** The arrow buttons and the Left and Right keys step through, and wrap around, only the images sent or shown together: the composer's, one message's, or one reply's (`viewImage` takes the thumbnail's `.message-body` or `#image-previews`). The counter and arrows hide for a single image.
+- **Pictures in replies.** A picture in a reply (`.linked-image`) opens in the viewer too. Its Open file button does what clicking the picture did before.
+- **Copy image (2026-10-31, at the user's request).** Right-clicking any image (one opened in the viewer, a thumbnail, a reply's picture) opens a native menu with "Copy image" (`src/text-context-menu.cjs`, `webContents.copyImageAt`). The menu cannot tell which image was clicked, so it is offered on all of them.
+  - Checked in `tests/text-context-menu-check.cjs` with a real right-click on a 60×40 image. Electron 44's clipboard is async (`clipboard.read()`; `readImage` is gone), and the copy arrives as `image/png`.
+- **Test case.** The `ui-startup-smoke.cjs` step "Framed image thumbnails open a centered viewer…" uses one message with two 1200×800 images, a later message with a 240×160 image, and the same small image in the composer. It checks:
+  - four framed thumbnails, at most 140×100 each;
+  - the viewer steps 1/2 → 2/2 → 1/2 → 2/2 (button, Right, Left);
+  - the large image is centered within 1 px and shrunk, and the small one is centered at 250×170 (240×160 plus frame), with no counter or arrows.
+  - The step saves `.scratch/image-thumbnails.png`, `image-viewer.png` and `image-viewer-small.png`. The link step checks the reply picture's viewer and Open file.
+
 ## Links in chat
 
 Added 2026-10-28. Web links (`http`/`https`, including bare URLs) open in the default browser through `openLink`. Markdown links and images whose target is a local path become clickable: absolute, workspace-relative or `file:` targets, with an optional `:line[:col]` or `#L` suffix. marked's `link`/`image` renderer overrides in `ui/app.js` put the raw target in `data-path`/`data-image`, because DOMPurify drops `C:\…` and `file:` hrefs. The document click handler sends `data-path` to `openFile`. `renderMarkdown` loads `![alt](path)` images as data URLs through `linkImage`, once per message per path, so streaming re-renders do not re-read them. Web images become links and are never fetched. An inline `code` span that is only a path (`BARE_PATH` in `ui/app.js`) gets the same link. A drive path qualifies, or a relative/POSIX path with a folder and a file extension, so identifiers such as `api.openFile`, commands such as `/clear` and globs stay plain. Spans already inside a link and fenced code blocks are skipped.
@@ -957,6 +972,75 @@ Measured 2026-10-25 (`.scratch/jev-route-probe.cjs`, real `choose()`, three mess
 - Smart router on Cursor grok-4.7 xhigh (`.scratch/route-timing-probe.cjs xhigh`, the ATH "which Python command" message, two calls): the prompts took 35.4 s and 43.6 s, and the route 96.1 s, against 103.8 s, 113.3 s and 230.5 s with the catalog. The pick, Sonnet 5.5 low, was the same.
 
 Tests: the picker test and the reworked difficulty tests in `tests/routing-calls.test.cjs`.
+
+**Jev sees attached images (2026-10-30).** Jev 1.13+ reads PNG/JPEG images. TypeSafe calls this beta ("Dreamer-ready" in docs.typesafe.ai/images.md). Each request opts in with the `TypeSafe-Danger-Zone-Images: true` header.
+- **Path.** `Controller.send` and `compareWithJev` put `attachedImages` in the routing context. `JevClient.classify(context, signal, images)` sends them as `assets`, each under a `randomUUID()` reference listed in `state.attachments.images`. The Smart router still gets only the count and its "Images go to the worker" note.
+- **Sizes.** Jev rejects any side outside 280-1568 px; it does not resize (live: "Invalid image dimensions." for 1920×1080). `jevImage` in `src/image-input.cjs` passes an image within limits through as is; otherwise it shrinks, grows toward the minimum, pads, and encodes the copy as JPEG q85. Jev bills by pixels, so JPEG costs nothing in quality terms; measured 2026-10-30 on a 1920×1080 PNG screenshot: 33 ms and 237 KB, against 61 ms and 413 KB as PNG.
+  - It decodes in the runner, outside the document worker's memory cap, so it skips any image over 2048 px (larger than `normalizeImage` makes). A skipped image stays in `imageCount`.
+  - Each message's images are fitted once: a `WeakMap` keyed on the array is shared by both routing passes and the comparison.
+- **Fallback.** A 400 or 413 on a request with images is retried once with text only. The reason then ends "Jev could not read the attached images, so it judged the text alone."
+- **Live, 2026-10-30, jev-1.14.0.** Probe: Electron, a temp copy of `Local State` and `jev-key.enc`. A 1920×1080 red screenshot with an error line, routed with "what is wrong in this screenshot?":
+  - 200 in 337 ms, 5,417 input tokens ($0.00023), against 1,805 tokens for the text alone;
+  - uncertainty low with the image, high without it;
+  - a `noul` question "The image is mostly red" scored 0.98.
+- **Tests.** "Jev routing sees attached images fitted to its 280-1568 px limits…" in `tests/routing-calls.test.cjs`; pool entry `jev-images`.
+- **Setting.** Routing sends images only while Jev image assist is on (next paragraph).
+
+**Jev image assist (2026-10-30/31, the user's design: "all images go through Jev first, model should avoid reading for token savings, unless it needs to read it (not a yes/no question)").**
+- **What it does.** While it is on, no model is sent the images of its chat. Every model, the Hub included, gets their numbers. It asks Jev yes/no questions (`image_ask`) and accepts the answers Jev is sure of. It reads an image itself (`image_read`) only when Jev is unsure or what it needs is not a yes/no answer.
+  - A model that cannot take images works the same way, without `image_read`.
+  - Before this, such a model failed with "Enable image support for this model…" (workers) or "Choose an image-capable model for Hub before sending images." (Hub; the user saw it).
+- **Setting.** `jevImages`, Settings → Routing → "Jev image assist", per bot like the other Routing settings.
+  - On unless turned off, while a Jev key is saved and Jev is enabled (`Controller.jevImageAssist`). Off and locked without a key.
+  - Off: models that can see images get them inline again, the two old errors come back, and Jev routing gets no images.
+- **Tools.** `src/tools/image-tools.cjs` defines `image_list`, `image_ask` and `image_read`, appended to `agent-tools.cjs` `TOOLS`. That one list reaches the Hub (`HUB_TOOLS`), Codex and CLIs (the `phasma_harness` MCP: `SHARED_TOOLS`, `MCP_TOOLS`, Claude's allowed list) and API workers (the bridge tools). All run through `Agents.tool`.
+  - Image N is the Nth image part of the chat's user messages, oldest first. An unavailable image keeps its number (`chatImages`).
+  - `image_ask` takes `image` (default: the latest) and 1-8 `questions`. It sends one Jev request with a `noul` question each, the image under a `randomUUID()` reference.
+    - Answers: probability ≥ 0.9 is yes, ≤ 0.1 is no, anything between is unsure, with a note to use `image_read`.
+    - Each image is fitted once by `jevImage` (cache of 16, keyed by message id and index).
+  - `image_read` returns MCP content `[image, text "Image N"]` with the original image, without Jev. It refuses when the turn's route has `images: false`.
+    - The image comes first because Codex's code mode forwards an MCP image as `image(result.content[0])`.
+- **How `image_read` reaches each model.**
+  - **MCP (Codex, Claude, Cursor, native CLIs):** `router-mcp.cjs` passes `image_read`'s content through, as it does `connector_call`'s.
+  - **API workers:** a tool message carries only text, so `ApiAgent.tool` returns the text, and `step` adds a user message with the images after the tool results.
+  - **Hub:** its tool results are JSON text, so the read image joins the images of its next planning call and the result says "Image N is attached to this request." An image tool's error is a result, not a failed Hub turn (`coordinatorTool`).
+- **The text a model gets.** `Controller.forModel(session, route, text, images)` returns the text plus a note, and no images; the chat keeps the images.
+  - A model that can see images: "[Image N is attached but not shown, to save tokens. Ask Jev yes/no questions about it with image_ask (image: N); read one with image_read only when Jev is unsure or you need more than a yes/no answer.]"
+  - A model that cannot: "[Image N is attached, but you cannot see images. Ask Jev …]".
+  - Applied at `submitWorker` (sends, corrections, delegations), at live input and Codex `turn/steer` (against the turn's route), and for the Hub (`images: []` and `context.attachedImages`; its workers get the images and apply their own assist).
+- **Visible steps (2026-10-31, the user: "show to the user what is going on exactly", reported "in the same way other calls are reported").** `Controller.recordStep` saves a `toolStep` chat item `{ title, lines }`. It shows between the message and the reply as the usual folded activity row (the same `details.activity` as "Ran · command"), and is exported as "## Step".
+  - Image steps are recorded once at `Agents.tool`, for the Hub and every bot (`imageStep`):
+    - "Jev reads image 1", opening to "Is there an error message visible…? → Jev: yes (0.99)" and "Asked by Grok 4.7 · Extra High · 238 ms".
+    - "claude-sonnet-5-5 · low reads image 1".
+    - "… lists the chat's images".
+    - "… · image_read failed", with the error.
+  - The Hub's other tool calls ("Grok 4.7 · Extra High · agents_list", opening to the result) are recorded in its planning loop. Delegations and comparisons keep their cards.
+  - A worker's MCP call also keeps its existing `mcpToolCall` row.
+- **Cursor models see images (2026-10-31, at the user's word).** Grok 4.7 takes images, and the Cursor adapter sends them when the CLI advertises `promptCapabilities.image`; otherwise it refuses with "Cursor CLI did not advertise image support."
+  - Harness enabled a discovered Cursor model with `images: value.images === true` and had no switch for it, so every saved Cursor entry held `false`. With assist on, Grok got "you cannot see images" and its `image_read` was refused; with assist off the Hub failed with "Choose an image-capable model for Hub".
+  - Cursor's model list says nothing per model, so `providerWorkers()` now gives every Cursor worker `images: true`, at each reasoning level. Saved entries are left as they were.
+  - Test: "every Cursor model counts as able to see images…" (`tests/core.test.cjs`).
+- **Hub history names models and steps (2026-10-31, from the live demo).** After the demo switched the Hub from Grok to Sonnet, Sonnet said "My earlier 'Yes' wasn't based on reading the image". The history listed Grok's reply as plain `assistant` and left out Jev's answer.
+  - `messages()` now gives each Hub reply `model` (its `routeLabel`) and includes `toolStep` entries (`role: 'step'`). The Hub instructions say the Hub may change models and must not take an earlier model's reply for its own.
+- **Hub tools are actions, not callable tools (2026-10-31, from the live demo).** Sonnet's transcript (`~/.claude/projects/…router-workspace/*.jsonl`) showed `tool_use image_read` → "No such tool available: image_read". It then gave up in its structured reply, without ever returning the action.
+  - The instructions now say every tool, `image_ask` and `image_read` included, runs only as `action={tool, arguments}`, and that an `image_read` image comes with the next request.
+- **History names earlier images.** The Hub's history (`messages(view, imageNumbers(session))`) and a CLI's cross-backend handoff (`handoff(items, max, imageNumbers(session))`) add "[Image N attached]", so a later turn can ask about an earlier image. Without assist, the handoff keeps "[Earlier image attachment]".
+- **Pitfall, found live 2026-10-31.** The Hub's reply schema is built from every tool's `inputSchema` (`SCHEMA` in `coordinator.cjs`), and `structured.cjs` throws "Unsupported structured response schema." for any word outside its list.
+  - `minItems`/`maxItems` on `image_ask` failed the user's Grok 4.7 Hub when it called `image_ask` (it sent the strict form `image: null`).
+  - The validator walks only the branches a reply uses, so a fixture without `image` never reached `questions`.
+  - Fixed by dropping both words (`imageTool` checks 1-8). The coordinator tests' fake model now runs action replies through `structuredResponse` and fails on unsupported words. Its image fixtures use the strict shape.
+  - Strict schemas send omitted optional arguments as `null`; `imageTool` treats `image: null` as the latest image.
+- **Live, 2026-10-30, jev-1.14.0.** One `image_ask` with five questions about a 1920×1080 red screenshot showing "ERROR: shader compile failed" took 488 ms including fitting. "Is there an error message?", "Is the background red?" and "Does the text mention a shader?" came back yes at 0.99; "Is the background blue?" and "Is there a cat in the picture?" came back no at 0.01.
+- **Codex, verified 2026-10-31 with the installed Codex and a local Responses mock.** Code mode lists only some MCP tools up front; `image_read` is reached through `ALL_TOOLS`. `const r = await tools.mcp__phasma_harness__image_read({}); image(r.content[0])` put the PNG in the next request's `custom_tool_call_output` as `input_image`. Now checked by `tests/agent-tools-smoke.cjs`.
+  - Claude, Cursor, DeepSeek and Muse get the same MCP image content (tested at the MCP layer). They were not run end to end with an image.
+- **Speed and cost.** No Jev call is added to a send. A question is one Jev request, about 0.3-0.5 s, plus the model's tool step. An `image_read` costs another model step and the image tokens, which a direct send would have spent anyway.
+- **Tests.**
+  - `tests/image-tools.test.cjs`: the tools, plus the real bridge and MCP child passing `image_read` as image content.
+  - "with Jev image assist no model is sent images…" (`tests/core.test.cjs`).
+  - "with Jev image assist the Hub gets image numbers…" (`tests/coordinator.test.cjs`).
+  - "an image a Harness tool returns reaches the API model…" (`tests/api-agent.test.cjs`).
+  - `tests/agent-tools-smoke.cjs` (real Codex) and the UI smoke's Jev image assist row.
+  - Pool entries `jev-image-assist` and `agent-tools-smoke`.
 
 Earlier design, kept for history: Low/Medium kept the router's model choice and matched its effort, High/Xhigh escalated to the strongest measured model with no model-family allowlist, and with no comparable scores the router's model was retained while effort still adapted. Effort selection is unchanged: the lowest offered level meeting the difficulty, or the highest offered level if capped. Models with fixed/default effort remain supported. Confidence alone neither promotes a bounded explanation nor lets a difficult task stay at Medium. Existing task continuity and Hub's separate mid-tier policy remain intact. Offline tests cover both routers, cross-provider selection, low confidence on bounded work, high confidence on hard work, caps, absent candidates, unknown benchmarks, fixed-effort models and invalid classifications. The authorized live prompt-and-catalog-only check classified the four examples Low/Medium/High/Xhigh and selected Sonnet 5.5 Low, Sonnet 5.5 Medium, Opus 5.5 High and Opus 5.5 Xhigh respectively; these are observed catalog-dependent outcomes, not routing constants. No source excerpts or tasks were executed in that live check.
 

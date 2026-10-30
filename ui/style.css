@@ -825,8 +825,11 @@ h2 {
   max-width:min(100%, 640px);
   max-height:480px;
   margin:6px 0;
-  border:1px solid var(--border);
-  border-radius:8px
+  padding:3px;
+  border:1px solid var(--border-strong);
+  border-radius:8px;
+  background:var(--panel);
+  cursor:zoom-in
 }
 
 .message-body pre {
@@ -1283,12 +1286,32 @@ dialog {
   padding:8px 8px 0
 }
 
-.image-preview img {
+.image-thumb {
+  display:block;
+  padding:0;
+  border:0;
+  background:none;
+  cursor:zoom-in
+}
+
+.image-thumb:hover {
+  background:none
+}
+
+.image-thumb img {
   display:block;
   max-width:140px;
   max-height:100px;
   object-fit:contain;
-  border-radius:6px
+  padding:3px;
+  border:1px solid var(--border-strong);
+  border-radius:8px;
+  background:var(--panel)
+}
+
+.image-thumb:focus-visible img {
+  outline:2px solid var(--border-strong);
+  outline-offset:2px
 }
 
 .image-remove {
@@ -1318,11 +1341,88 @@ dialog {
 }
 
 .message-image {
-  display:block;
-  max-width:100%;
-  max-height:500px;
+  display:inline-block;
+  vertical-align:top;
+  margin:12px 8px 0 0
+}
+
+/* The viewer fills the window and centers the image: a larger one shrinks to fit, a smaller one keeps its size. */
+dialog.image-viewer {
+  width:100vw;
+  height:100vh;
+  height:100dvh;
+  max-width:none;
+  max-height:none;
+  min-width:0;
+  min-height:0;
+  margin:0;
+  padding:0;
+  border:0;
+  border-radius:0;
+  background:none;
+  box-shadow:none;
+  resize:none;
+  overflow:hidden;
+  cursor:zoom-out
+}
+
+dialog.image-viewer[open] {
+  display:grid;
+  place-items:center
+}
+
+.image-viewer img {
+  max-width:calc(100vw - 128px);
+  max-height:calc(100dvh - 96px);
   object-fit:contain;
-  margin-top:12px
+  padding:4px;
+  border:1px solid var(--border-strong);
+  border-radius:10px;
+  background:var(--panel)
+}
+
+.image-viewer .image-step {
+  position:absolute;
+  top:50%;
+  transform:translateY(-50%);
+  display:grid;
+  place-items:center;
+  width:44px;
+  height:44px;
+  padding:0;
+  border-color:var(--border-strong);
+  border-radius:50%
+}
+
+.image-viewer .image-step[data-step="-1"] {
+  left:20px
+}
+
+.image-viewer .image-step[data-step="1"] {
+  right:20px
+}
+
+.image-viewer .image-count {
+  position:absolute;
+  bottom:20px;
+  left:50%;
+  transform:translateX(-50%);
+  padding:4px 10px;
+  border:1px solid var(--border-strong);
+  border-radius:999px;
+  background:var(--panel);
+  font-size:calc(12px * var(--font-scale,1))
+}
+
+.image-viewer .image-file {
+  position:absolute;
+  top:20px;
+  right:20px;
+  border-color:var(--border-strong)
+}
+
+.image-viewer [hidden] {
+  display:none
 }
 
 .routing-row {

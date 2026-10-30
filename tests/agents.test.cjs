@@ -1988,7 +1988,7 @@ test('new and existing Codex chats expose agent tools through a session-bound MC
   assert.equal(started.params.config['features.multi_agent'], false, 'untracked agent chats must not expose provider-native subagents');
   assert.match(started.params.developerInstructions, /MUST call agent_create and confirm its returned id/);
   const server = started.params.config['mcp_servers.phasma_harness'];
-  assert.deepEqual(server.enabled_tools, ['agent_revise', 'agent_transfer_owner', 'agents_list', 'agent_models', 'agent_create', 'agent_delegate', 'agent_read_context', 'agent_stop', 'agent_set_access', 'agent_message', 'agent_artifact', 'routine', 'routines_report', 'harness_check_update', 'read_settings', 'write_settings', 'connector_tools', 'connector_call', 'router_read_output']);
+  assert.deepEqual(server.enabled_tools, ['agent_revise', 'agent_transfer_owner', 'agents_list', 'agent_models', 'agent_create', 'agent_delegate', 'agent_read_context', 'agent_stop', 'agent_set_access', 'agent_message', 'agent_artifact', 'routine', 'routines_report', 'harness_check_update', 'read_settings', 'write_settings', 'image_list', 'image_ask', 'image_read', 'connector_tools', 'connector_call', 'router_read_output']);
   assert.ok(!MCP_TOOLS.some(tool => tool.name === 'agent_delete') && !claudeAllowedHelpers('danger-full-access').includes('mcp__phasma_harness__agent_delete'));
   assert.equal(server.env.PHASMA_SESSION_ID, source.id);
   assert.equal(server.env.ELECTRON_RUN_AS_NODE, '1');
@@ -1997,7 +1997,7 @@ test('new and existing Codex chats expose agent tools through a session-bound MC
   assert.ok(claudeAllowedHelpers('read-only').includes('mcp__phasma_harness__agent_read_context'));
   assert.ok(MCP_TOOLS.some(tool => tool.name === 'agent_read_context'));
   assert.equal(server.tools.agent_read_context.approval_mode, 'approve');
-  for (const name of ['agent_models', 'agent_stop', 'agent_set_access', 'agent_message']) {
+  for (const name of ['agent_models', 'agent_stop', 'agent_set_access', 'agent_message', 'image_list', 'image_ask', 'image_read']) {
     assert.ok(MCP_TOOLS.some(tool => tool.name === name));
     assert.ok(claudeAllowedHelpers('read-only').includes('mcp__phasma_harness__' + name));
     assert.equal(server.tools[name].approval_mode, 'approve');

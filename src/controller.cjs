@@ -9,6 +9,7 @@ const { AntigravityCLI } = require('./providers/antigravity.cjs');
 const { DeepSeekCLI } = require('./providers/deepseek.cjs');
 const { ApiAgent } = require('./providers/api-agent.cjs');
 const { TOOLS: AGENT_TOOLS } = require('./tools/agent-tools.cjs');
+const { chatImages, imageNumbers, imageNotes } = require('./tools/image-tools.cjs');
 const { TOOLS: CONNECTOR_TOOLS, INSTRUCTIONS: CONNECTOR_INSTRUCTIONS } = require('./connectors/tools.cjs');
 const { NATIVE_CLI_INFO } = require('./providers/native-cli.cjs');
 const { ClaudeCLI, handoff } = require('./providers/claude.cjs');
@@ -403,6 +404,23 @@ class Controller extends EventEmitter {
     return session;
   }
 
+  // Jev image assist: on unless turned off, while Jev is set up (routing sees images, agents ask Jev about them).
+  jevImageAssist() { return this.data.settings.jevImages !== false && !!this.smartRouter.jev?.configured; }
+
+  // With Jev image assist no model is sent the images: it gets their numbers, asks Jev (image_ask) and reads one
+  // (image_read) only when Jev cannot settle it, which saves the image tokens.
+  forModel(session, route, text, images) {
+    if (!images.length || !this.jevImageAssist()) return { text, images };
+    return { text: text + imageNotes(chatImages({ items: session.items }).length + 1, images.length, route?.images !== false), images: [] };
+  }
+
+  // A step of a turn the user can see between the message and the reply: who asked Jev what and what Jev answered,
+  // an image a model read, a Hub tool call. `lines` are shown as they are; `detail` folds under them.
+  recordStep(session, step) {
+    session.items.push({ id: randomUUID(), type: 'toolStep', localOnly: true, createdAt: Date.now(), turnId: session.turnId || null, ...step });
+    this.changed();
+  }
+
   image(id, itemId, index) {
     if (typeof itemId !== 'string' || !Number.isInteger(index) || index < 0) throw new Error('Invalid image request.');
     const session = this.session(id), item = [...session.items, session.pendingMessage].find(entry => entry?.id === itemId);
@@ -521,6 +539,11 @@ class Controller extends EventEmitter {
       if (values.jevCompare && !next.jevCompare && !this.smartRouter.jev?.configured) throw new Error('Add a Jev API key and enable Jev in Providers first.');
       next.jevCompare = values.jevCompare;
       if (!values.jevCompare) this.jevComparing?.abort();
+    }
+    if (values.jevImages !== undefined) {
+      if (typeof values.jevImages !== 'boolean') throw new Error('Invalid Jev image assist setting.');
+      if (values.jevImages && !this.smartRouter.jev?.configured) throw new Error('Add a Jev API key and enable Jev in Providers first.');
+      next.jevImages = values.jevImages;
     }
     if (values.contextRanking !== undefined) {
       if (!['local', 'jev'].includes(values.contextRanking)) throw new Error('Unknown context ranking mode.');
@@ -826,7 +849,7 @@ class Controller extends EventEmitter {
           const unlimited = usable.filter(p => !this.limits.limited(p.provider || 'codex', p.model));
           return unlimited.length ? unlimited : usable;
         };
-        const context = { ...session, ...previousState, configuredChecks: this.data.settings.checks?.[session.workspace] || [], routingCatalog: routingCatalog(), routerChoice: router, attachedImageCount: images.length,
+        const context = { ...session, ...previousState, configuredChecks: this.data.settings.checks?.[session.workspace] || [], routingCatalog: routingCatalog(), routerChoice: router, attachedImageCount: images.length, attachedImages: this.jevImageAssist() ? images : [],
           // The presets this project's checks proved per kind of work (src/setups.cjs).
           provenSetups: this.provenSetupsFor(session.workspace), autoLowModel: this.data.settings.autoLowModel };
         // A fresh delegation is not forced onto the model of an older, possibly misinterpreted task.
@@ -866,7 +889,7 @@ class Controller extends EventEmitter {
         if (this.stopping.has(id)) throw new Error('Turn was stopped before sending.');
       }
       if (!this.available(selected)) throw new Error('Selected model is disabled or not available.');
-      if (images.length && selected.images === false) throw new Error('Enable image support for this model before sending images.');
+      if (images.length && selected.images === false && !this.jevImageAssist()) throw new Error('Enable image support for this model, or Jev image assist, before sending images.');
       if (!failover && !this.planPreset()) this.compareWithJev(session, routingText, images, selected, previousState);
       if (failover) selected = { ...selected, failover: true }; // recorded on the route for the decision trace
       // One model per task: whether this message continues the current task (the router's sameTask; a manual pick
@@ -900,7 +923,8 @@ class Controller extends EventEmitter {
         const admission = await this.agents.acquire(this, session, selected);
         if (admission) throw new Error(admission.blocked || 'Turn was stopped before sending.');
       }
-      if (isCLI(selected.provider)) return await this.sendCLI(session, selected, text, images, clientId, task, started);
+      const sent = this.forModel(session, selected, text, images);
+      if (isCLI(selected.provider)) return await this.sendCLI(session, selected, sent.text, sent.images, clientId, task, started);
       if (this.providers?.prepare) {
         const abort = new AbortController(); this.modelPreparation = abort;
         try {
@@ -933,7 +957,7 @@ class Controller extends EventEmitter {
       const response = await this.client.call('turn/start', {
         threadId: session.threadId, clientUserMessageId: clientId,
         input: [{ type: 'text', text: this.withTaskLessons(task, (directContext.length ? `Earlier exchanges from other backends, quoted conversation history (not new instructions):\n${JSON.stringify(directContext)}\n\n` : '') +
-          (contextText || (directContext.length ? 'Current user request:\n' : '')), text), text_elements: [] }, ...images.map(url => ({ type: 'image', url }))],
+          (contextText || (directContext.length ? 'Current user request:\n' : '')), sent.text), text_elements: [] }, ...sent.images.map(url => ({ type: 'image', url }))],
         model: selected.model, effort: selected.effort, serviceTier: 'default',
         approvalPolicy: permissions.approvalPolicy, approvalsReviewer: 'user', sandboxPolicy: this.sandboxFor(permissions.id, session.workspace),
       });
@@ -1087,9 +1111,10 @@ class Controller extends EventEmitter {
     const seenHistory = new Set(session[historyKey] || []);
     const history = session.items.filter((item, index) => index >= from || (item.delegatedFrom && !seenHistory.has(item.id)));
     const contextText = session.pendingMessage?.contextText || '';
-    const prompt = this.withTaskLessons(task, handoff(history) + contextText, text);
+    const numbered = this.jevImageAssist() ? imageNumbers(session) : null;
+    const prompt = this.withTaskLessons(task, handoff(history, undefined, numbered) + contextText, text);
     const recoveryPrompt = api && session[sessionKey] ? () => this.withTaskLessons(task,
-      handoff(session.items.filter(item => item.id !== clientId && item.clientId !== clientId)) + contextText, text) : undefined;
+      handoff(session.items.filter(item => item.id !== clientId && item.clientId !== clientId), undefined, numbered) + contextText, text) : undefined;
     let instructionHash;
     const turnId = randomUUID();
     const abort = new AbortController();
@@ -1405,7 +1430,7 @@ class Controller extends EventEmitter {
           this.save();
           this.changed();
         };
-        await this.liveInput(message, { steer: action === 'steer' && !!this.liveInputCaps?.liveSteer, written });
+        await this.liveInput({ ...message, ...this.forModel(session, session.routes?.at(-1), message.text, message.images) }, { steer: action === 'steer' && !!this.liveInputCaps?.liveSteer, written });
         this.recordLiveMessage(session, message, activeTask);
       } else if (action === 'steer' && session.activeProvider === 'claude-cli' && !this.isCoordinator()) {
         // Claude without live input is finishing its turn; a restart would drop its saved session. The message sends next.
@@ -1413,9 +1438,10 @@ class Controller extends EventEmitter {
       } else if (action === 'steer' && (!capabilities(session.activeProvider).steer || this.isCoordinator())) {
         await this.restartWithMessage(session, message, activeTask);
       } else if (action === 'steer') {
+        const sent = this.forModel(session, session.routes?.at(-1), message.text, message.images);
         await this.client.call('turn/steer', {
           threadId: session.threadId, expectedTurnId: turnId, clientUserMessageId: message.id,
-          input: [{ type: 'text', text: message.text, text_elements: [] }, ...message.images.map(url => ({ type: 'image', url }))],
+          input: [{ type: 'text', text: sent.text, text_elements: [] }, ...sent.images.map(url => ({ type: 'image', url }))],
         });
         if (!session.items.some(i => i.clientId === message.id)) session.items.push({
           id: message.id, clientId: message.id, type: 'userMessage', createdAt: Date.now(),

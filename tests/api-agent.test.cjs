@@ -80,6 +80,22 @@ test('a missing usage report in a tool loop marks the total as incomplete', asyn
   assert.equal(result.usage.total_input_tokens, 100, 'reported tokens remain a lower bound, not a complete or zero-cost turn');
 });
 
+// 2026-10-30: image_read returns an image, which an API tool message cannot carry.
+test('an image a Harness tool returns reaches the API model as a user message after the tool results, not as base64 text', async t => {
+  const { agent, workspace, requests } = fixture(t, [
+    [call(0, 'read', 'image_read', { image: 1 })],
+    [{ choices: [{ delta: { content: 'A chart.' } }], usage: { prompt_tokens: 10, completion_tokens: 2 } }],
+  ]);
+  const bridge = { tools: [{ name: 'image_read', description: 'Show an image.', inputSchema: { type: 'object', properties: {} } }],
+    call: async () => ({ content: [{ type: 'image', data: 'iVBORw0KGgo=', mimeType: 'image/png' }, { type: 'text', text: 'Image 1' }] }) };
+  const result = await agent.run({ provider: 'local', model: 'test', cwd: workspace, prompt: 'Read image 1.', access: 'read-only', bridge,
+    signal: new AbortController().signal, approve: async () => true, onEvent: () => {} });
+  assert.equal(result.result, 'A chart.');
+  const [tool, picture] = requests[1].messages.slice(-2);
+  assert.deepEqual(tool, { role: 'tool', tool_call_id: 'read', content: 'Image 1\nThe returned image follows in the next message.' });
+  assert.deepEqual(picture, { role: 'user', content: [{ type: 'text', text: 'The images your tool calls returned:' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } }] });
+});
+
 for (const damaged of ['missing', 'corrupt']) test(`API ${damaged} history recovers before inference when Harness supplies its own transcript`, async t => {
   const { agent, workspace, requests } = fixture(t, [[{ choices: [{ delta: { content: 'Recovered.' } }], usage: { prompt_tokens: 10, completion_tokens: 2 } }]]);
   fs.mkdirSync(agent.directory, { recursive: true });

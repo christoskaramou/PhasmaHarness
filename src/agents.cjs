@@ -5,6 +5,7 @@ const { EventEmitter } = require('node:events');
 const { Controller } = require('./controller.cjs');
 const { ACCESS_MODES, PROVIDER_NAMES } = require('./controller/shared.cjs');
 const { readText } = require('./tools/tool-helpers.cjs');
+const imageTools = require('./tools/image-tools.cjs');
 const { stripTaskStatus } = require('./routing/task-state.cjs');
 const { capabilities } = require('./providers/capabilities.cjs');
 const { handoff } = require('./providers/claude.cjs');
@@ -2122,6 +2123,18 @@ class Agents extends EventEmitter {
     if (name === 'read_settings' || name === 'write_settings') {
       if (!this.settingsTools) throw new Error('The settings service is unavailable.');
       return name === 'read_settings' ? this.settingsTools.read(controller, args) : this.settingsTools.write(controller, args);
+    }
+    if (imageTools.NAMES.has(name)) {
+      if (!controller.jevImageAssist()) throw new Error('Jev image assist is off or Jev is not set up, so image questions are unavailable.');
+      // Every image step shows in the chat: who asked Jev what, Jev's answers, or the image a model read itself.
+      const by = session.routes?.at(-1)?.label || 'The model', started = Date.now();
+      return imageTools.imageTool(controller.smartRouter.jev, session, name, args).then(result => {
+        controller.recordStep(session, { tool: name, ...imageTools.imageStep(by, name, result, Date.now() - started) });
+        return result;
+      }, error => {
+        controller.recordStep(session, { tool: name, error: true, title: `${by} · ${name} failed`, lines: [error.message] });
+        throw error;
+      });
     }
     if (name === 'harness_check_update') {
       if (Object.keys(args).length) throw new Error('The update check takes no arguments; installation requires user confirmation in the app.');

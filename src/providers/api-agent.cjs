@@ -179,6 +179,10 @@ class ApiAgent {
     if (bridge?.tools.some(tool => tool.name === name)) {
       try {
         const result = await bridge.call(name, args, signal);
+        // A tool message carries only text, so a returned image follows as a user message (step).
+        const pictures = Array.isArray(result?.content) ? result.content.filter(part => part.type === 'image') : [];
+        if (pictures.length) return { error: result.isError === true, text: [...result.content.filter(part => part.type === 'text').map(part => part.text), 'The returned image follows in the next message.'].join('\n'),
+          images: pictures.map(part => `data:${part.mimeType};base64,${part.data}`) };
         return { error: result?.isError === true, text: bounded(typeof result === 'string' ? result : JSON.stringify(result)) };
       } catch (error) { return { error: true, text: error.message }; }
     }
@@ -286,11 +290,14 @@ class ApiAgent {
       ...calls.map(call => ({ type: 'tool_use', id: call.id, name: call.function.name, input: (() => { try { return JSON.parse(call.function.arguments || '{}'); } catch { return call.function.arguments; } })() })),
     ] } });
     messages.push(message);
+    const pictures = [];
     for (const call of calls) {
       const output = await this.tool(call, { cwd, access, approve, bridge, signal });
       onEvent({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: call.id, is_error: output.error, content: output.text }] } });
       messages.push({ role: 'tool', tool_call_id: call.id, content: output.text });
+      pictures.push(...(output.images || []));
     }
+    if (pictures.length) messages.push({ role: 'user', content: [{ type: 'text', text: 'The images your tool calls returned:' }, ...pictures.map(url => ({ type: 'image_url', image_url: { url } }))] });
 
     return { reported: !!stepUsage, final: calls.length ? null : message };
   }

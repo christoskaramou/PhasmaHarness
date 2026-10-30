@@ -10,6 +10,7 @@ const { execFileSync } = require('node:child_process');
 const { Controller } = require('../src/controller.cjs');
 const { Agents } = require('../src/agents.cjs');
 const { SmartRouter, conversationDelta } = require('../src/routing/smart-router.cjs');
+const { structuredResponse } = require('../src/providers/structured.cjs');
 
 const answer = reply => ({ reply, action: null });
 
@@ -253,10 +254,17 @@ async function setup(t) {
       async chooseHub(workers) { return workers.find(p => p.effort === 'low') || workers[0]; },
       async complete(request, choice, abort) {
         calls.push({ request, choice, abort });
-        return { decision: request.schema.properties.summary ? { summary: 'User intent and pending work retained.' }
+        const decision = request.schema.properties.summary ? { summary: 'User intent and pending work retained.' }
           : request.schema.properties.reflection ? { reflection: 'keep', rule: '', moment: '', reason: 'Fixture.' }
           : request.schema.properties.fulfilled ? { reply: replies[0]?.action === null ? replies.shift().reply : 'The worker completed the requested task.', ...(assessments.shift() || { fulfilled: true, evidence: 'The fixture worker completed the requested task.', gaps: [] }) }
-          : replies.shift() || answer('Hello.') };
+          : replies.shift() || answer('Hello.');
+        // 2026-10-31: a tool schema word the real validator lacks (image_ask's minItems) failed the live Hub's image_ask, and
+        // these fixtures bypassed the validator. Loose fixture values are tolerated; an unsupported schema word fails the test.
+        if (request.schema.properties.action) {
+          try { structuredResponse(decision, request.schema); }
+          catch (error) { if (error.code !== 'INVALID_STRUCTURED_RESPONSE') throw error; }
+        }
+        return { decision };
       },
     }, options);
     c.claude.refresh = async () => c.claude.status;
@@ -1519,6 +1527,70 @@ test('Hub capability bands handle ties, sparse evidence and duplicate provider/e
     };
     await router.chooseHub(workers, 'smart', { model: 'classifier' }, new AbortController());
   }
+});
+
+// 2026-10-30: a Hub on a model without image input failed with "Choose an image-capable model for Hub before sending images."
+test('with Jev image assist the Hub gets image numbers, asks Jev, reads one only when it can see; assist off still refuses', async t => {
+  const { hub, session, calls, replies } = await setup(t);
+  const { JevClient } = require('../src/providers/jev.cjs');
+  const { createCanvas } = require('@napi-rs/canvas');
+  const image = 'data:image/png;base64,' + createCanvas(400, 300).encodeSync('png').toString('base64');
+  const asked = [];
+  hub.smartRouter.jev = new JevClient({ configured: true, read: () => 'key' }, async (_url, request) => {
+    asked.push(JSON.parse(request.body));
+    return { ok: true, text: async () => JSON.stringify({ model: 'jev-1.14.0', usage: { input_tokens: 9, output_tokens: 0 }, answers: { q1: { type: 'noul', noul: 0.98 } } }) };
+  });
+  hub.coordinatorChoice = async () => ({ id: 'codex:blind:low', provider: 'codex', model: 'blind', effort: 'low', label: 'Blind · low', images: false });
+  // Strict-schema shape, as the live Hub (Grok 4.7) sent it: every argument present, an omitted one as null.
+  replies.push(action('image_ask', { image: null, questions: ['Is an error dialog open?'] }), answer('Yes, an error dialog is open.'));
+  await hub.send({ id: session.id, text: 'What is wrong here?', images: [image] });
+  await until(() => session.items.at(-1)?.text === 'Yes, an error dialog is open.');
+  const planning = calls.filter(call => call.request.schema.properties.action);
+  assert.ok(planning.every(call => call.request.images.length === 0), 'the Hub model is sent no image');
+  assert.match(JSON.parse(planning[0].request.prompt).attachedImages, /^\[Image 1 is attached, but you cannot see images/);
+  assert.equal(asked.length, 1);
+  assert.deepEqual(JSON.parse(planning[1].request.prompt).toolResults.at(-1).result.answers.map(entry => entry.answer), ['yes']);
+  // 2026-10-31, the user: show what is going on, as other calls are reported: "Jev reads image 1", opening to the question
+  // and Jev's answer, between the message and the reply.
+  const timeless = text => text.replace(/\d+ ms/g, 'N ms');
+  const shown = () => session.items.filter(item => !item.internal).map(item => item.type === 'toolStep' ? timeless([item.title, ...item.lines].join(' / ')) : item.type);
+  assert.deepEqual(shown().slice(-3), ['userMessage', 'Jev reads image 1 / Is an error dialog open? → Jev: yes (0.98) / Asked by Blind · low · N ms', 'agentMessage']);
+  // A Hub that can see images is not sent them either; image_read attaches one to its next planning call.
+  hub.coordinatorChoice = async () => ({ id: 'codex:sees:low', provider: 'codex', model: 'sees', effort: 'low', label: 'Sees · low', images: true });
+  replies.push(action('image_read', { image: null }), answer('It shows a chart.'));
+  let from = calls.length;
+  await hub.send({ id: session.id, text: 'Read the chart', images: [image] });
+  await until(() => session.items.at(-1)?.text === 'It shows a chart.');
+  const reading = calls.slice(from).filter(call => call.request.schema.properties.action);
+  assert.deepEqual(reading.map(call => call.request.images), [[], [image]]);
+  assert.match(JSON.parse(reading[0].request.prompt).attachedImages, /^\[Image 2 is attached but not shown, to save tokens/);
+  assert.deepEqual(JSON.parse(reading[0].request.prompt).conversation.filter(message => message.role === 'user').map(message => message.text),
+    ['What is wrong here? [Image 1 attached]', 'Read the chart [Image 2 attached]'], 'the Hub history names earlier images');
+  // 2026-10-31: Sonnet, taking over the Hub, took Grok's Jev-based "Yes" for its own unfounded answer. The history names
+  // each reply's model and keeps the step behind it.
+  assert.deepEqual(JSON.parse(reading[0].request.prompt).conversation.slice(-4).map(({ role, model, text }) => ({ role, model, text: timeless(text) })), [
+    { role: 'user', model: undefined, text: 'What is wrong here? [Image 1 attached]' },
+    { role: 'step', model: undefined, text: 'Jev reads image 1\nIs an error dialog open? → Jev: yes (0.98)\nAsked by Blind · low · N ms' },
+    { role: 'assistant', model: 'Blind · low', text: 'Yes, an error dialog is open.' },
+    { role: 'user', model: undefined, text: 'Read the chart [Image 2 attached]' }]);
+  assert.match(planning[0].request.instructions, /Every tool, image_ask and image_read included, runs only as that action/);
+  assert.deepEqual(JSON.parse(reading[1].request.prompt).toolResults.at(-1), { tool: 'image_read', result: { shown: 'Image 2 is attached to this request.' } });
+  assert.deepEqual(shown().slice(-3), ['userMessage', 'Sees · low reads image 2 / The original image, shown to the model · N ms', 'agentMessage']);
+  // A Hub that cannot see images gets image_read's refusal as a result, and the turn goes on.
+  hub.coordinatorChoice = async () => ({ id: 'codex:blind:low', provider: 'codex', model: 'blind', effort: 'low', label: 'Blind · low', images: false });
+  replies.push(action('image_read', { image: 1 }), answer('I could not check the image.'));
+  from = calls.length;
+  await hub.send({ id: session.id, text: 'Read the first one' });
+  await until(() => session.items.at(-1)?.text === 'I could not check the image.');
+  assert.match(JSON.parse(calls.slice(from).filter(call => call.request.schema.properties.action)[1].request.prompt).toolResults.at(-1).result.error, /cannot see images/);
+  const refused = session.items.filter(item => item.type === 'toolStep').at(-1);
+  assert.equal(refused.error, true);
+  assert.equal(refused.title, 'Blind · low · image_read failed');
+  assert.match(refused.lines[0], /^This model cannot see images/);
+  assert.match(require('../src/conversation-export.cjs').conversationMarkdown(session), /## Step\n\nJev reads image 1\nIs an error dialog open\? → Jev: yes \(0\.98\)/, 'steps are exported');
+  hub.data.settings.jevImages = false;
+  await hub.send({ id: session.id, text: 'And this one?', images: [image] }).catch(() => {});
+  await until(() => /turn on Jev image assist/.test(session.error || ''));
 });
 
 test('Hub creates Auto workers with inherited access and images, stays responsive, and receives results', async t => {

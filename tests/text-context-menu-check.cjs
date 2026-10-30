@@ -1,4 +1,4 @@
-const { Menu, clipboard, ClipboardItem } = require('electron');
+const { Menu, clipboard, ClipboardItem, nativeImage } = require('electron');
 const assert = require('node:assert/strict');
 const { configureTextContextMenu } = require('../src/text-context-menu.cjs');
 
@@ -53,7 +53,26 @@ module.exports = async window => {
     await run('getSelection().removeAllRanges(); true');
     await rightClick('#context-test');
     assert.equal(opened, null, 'blank space does not get an unrelated text menu');
-    console.log('Native context menu: report copy, composer paste and locked fields passed');
+
+    // 2026-10-31, the user: right click → Copy on opened images.
+    await run(`(() => { const canvas = document.createElement('canvas'); canvas.width = 60; canvas.height = 40;
+      const g = canvas.getContext('2d'); g.fillStyle = '#c00'; g.fillRect(0, 0, 60, 40);
+      const image = document.createElement('img'); image.id = 'context-image'; image.src = canvas.toDataURL('image/png');
+      document.querySelector('#context-test').append(image); return image.decode().then(() => true); })()`);
+    // Electron 44's clipboard is async (read/ClipboardItem); the copied image arrives as image/png.
+    const copiedSize = async () => {
+      const item = (await clipboard.read()).find(entry => entry.types.includes('image/png'));
+      if (!item) return null;
+      const data = await item.getType('image/png');
+      return nativeImage.createFromBuffer(Buffer.isBuffer(data) ? data : Buffer.from(await data.arrayBuffer())).getSize();
+    };
+    const picture = await rightClick('#context-image');
+    assert.equal(picture.mediaType, 'image');
+    assert.deepEqual(opened.menu.items.map(item => item.label), ['Copy image']);
+    opened.menu.items[0].click();
+    for (let i = 0; i < 100 && !await copiedSize(); i++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(await copiedSize(), { width: 60, height: 40 }, 'the image itself is on the clipboard');
+    console.log('Native context menu: report copy, composer paste, locked fields and Copy image passed');
   } finally {
     Menu.prototype.popup = originalPopup;
     await clipboard.write(saved);

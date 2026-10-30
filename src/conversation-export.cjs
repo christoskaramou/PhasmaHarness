@@ -34,6 +34,9 @@ function conversationMarkdown(session, batchReports = {}) {
     } else if (item.type === 'notice') {
       title = 'Harness';
       text = item.text || '';
+    } else if (item.type === 'toolStep') {
+      title = 'Step';
+      text = [item.title, ...(item.lines || [])].join('\n');
     } else if (item.type === 'agentMessage' || item.type === 'plan') {
       title = item.type === 'plan' ? 'Plan' : item.groupSpeaker?.name || (item.phase === 'commentary' ? 'Assistant · progress' : 'Assistant');
       text = stripTaskStatus(item.text || '');
