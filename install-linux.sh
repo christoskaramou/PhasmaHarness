@@ -104,13 +104,20 @@ node_ok || install_node
 cd "$folder"
 export npm_config_cache="$folder/installers/npm-cache"
 export ELECTRON_CACHE="$folder/installers/electron-cache"
+providers='Codex, Claude, Cursor or DeepSeek, or add an API provider (OpenRouter, LM Studio or any OpenAI-compatible endpoint); any one of these is enough. Muse and Antigravity work as bots but cannot run the Hub on their own. Jev is optional: its key adds Jev routing and Jev image assist.'
+# Image attachments and Jev image assist decode and resize images with this native library.
+check_images() {
+  node -e "require('@napi-rs/canvas').createCanvas(2, 2).encodeSync('png')" >/dev/null 2>&1 ||
+    fail "The image library (@napi-rs/canvas) did not load, so image attachments would fail. Check the npm output above, then rerun."
+}
 
 if [ "$mode" = headless ]; then
   echo 'Installing locked app dependencies and bundled tools (RTK, ripgrep)...'
   npm ci --omit=dev --no-audit --no-fund || fail "App dependency or bundled tool installation failed. Check the output above."
+  check_images
   echo 'Installing the runner service...'
   node tools/linux-service.cjs "${service_args[@]}" || fail "The service setup stopped. Check the message above."
-  echo 'Install and sign in to the provider CLIs you want (Codex, Claude Code, Cursor) on this machine; any one is enough.'
+  echo "From Settings > Providers (CLIs on this machine), install and sign in to $providers"
   exit 0
 fi
 
@@ -122,6 +129,7 @@ fi
 echo 'Installing locked app dependencies...'
 # Electron is a dev dependency; its download runs explicitly below instead of through npm lifecycle scripts.
 npm ci --include=dev --ignore-scripts --no-audit --no-fund || fail "App dependency installation failed."
+check_images
 echo 'Installing bundled tools (RTK, ripgrep)...'
 node tools/fetch.cjs || fail "Bundled tool download or SHA256 check failed. Check the error above, then rerun."
 node skills/large-responses/scripts/output.cjs read package.json --count 1 >/dev/null || fail "Bundled large-response helper failed its smoke check."
@@ -164,7 +172,8 @@ case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;
   *) echo "Add $HOME/.local/bin to PATH to start it as phasma-harness." ;;
 esac
-echo 'Install and sign in to Codex, Claude or Cursor from Settings > Providers; any one is enough. Keep this app folder in place.'
+echo 'Harness tools (project context, bots, connectors, images, settings) come from a local MCP server the app starts itself: Codex, Claude, Cursor and the native CLIs connect to it, and API models get the same tools inside Harness. Nothing to set up.'
+echo "From Settings > Providers, install and sign in to $providers Keep this app folder in place."
 if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
   nohup "$launcher" >/dev/null 2>&1 &
 fi

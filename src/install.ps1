@@ -36,7 +36,6 @@ try {
     }
     Ensure-Program node.exe OpenJS.NodeJS.LTS
     Ensure-Program git.exe Git.Git
-    Write-Host 'Bundled helper MCP (project_context / tool helpers) is local to the app: Claude workers get it automatically; Cursor workers receive the same helper MCP over ACP; Codex/Responses use app-server dynamic tools. No separate MCP service setup.'
     & node.exe -e "if(Number(process.versions.node.split('.')[0])<22)process.exit(1)"
     if ($LASTEXITCODE -ne 0) {
         Write-Host 'Updating Node.js to the current LTS...'
@@ -54,6 +53,9 @@ try {
     # Run its downloader explicitly instead of relying on npm lifecycle policy.
     & npm.cmd ci --include=dev --ignore-scripts --no-audit --no-fund
     if ($LASTEXITCODE -ne 0) { throw 'App dependency installation failed.' }
+    # Image attachments and Jev image assist decode and resize images with this native library.
+    & node.exe -e "require('@napi-rs/canvas').createCanvas(2, 2).encodeSync('png')" *> $null
+    if ($LASTEXITCODE -ne 0) { throw 'The image library (@napi-rs/canvas) did not load, so image attachments would fail. Check the npm output above, then rerun.' }
     Write-Host 'Installing bundled tools (RTK, ripgrep)...'
     & node.exe (Join-Path $folder 'tools\fetch.cjs')
     if ($LASTEXITCODE -ne 0) { throw 'Bundled tool download or SHA256 check failed. Check the error above, then rerun.' }
@@ -67,14 +69,17 @@ try {
     $electron = Join-Path $folder 'node_modules\electron\dist\electron.exe'
     if (-not (Test-Path -LiteralPath $electron)) { throw 'Electron was not downloaded. Check npm/network settings and rerun.' }
     $shell = New-Object -ComObject WScript.Shell
-    $desktop = [Environment]::GetFolderPath('Desktop')
-    $shortcut = $shell.CreateShortcut((Join-Path $desktop 'Phasma Harness.lnk'))
-    $shortcut.TargetPath = Join-Path $env:WINDIR 'System32\wscript.exe'
-    $shortcut.Arguments = '"' + (Join-Path $folder 'Launch Phasma Harness.vbs') + '"'
-    $shortcut.WorkingDirectory = $folder
-    $shortcut.IconLocation = (Join-Path $folder 'ui\icon.ico') + ',0'
-    $shortcut.Save()
-    Write-Host 'Setup complete. Install and sign in to Codex, Claude or Cursor from Settings > Providers; any one is enough. Jev is optional. Keep this app folder in place.'
+    # A Desktop shortcut and a Start menu entry (this user's Programs folder), both starting the app the same way.
+    foreach ($place in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {
+        $shortcut = $shell.CreateShortcut((Join-Path $place 'Phasma Harness.lnk'))
+        $shortcut.TargetPath = Join-Path $env:WINDIR 'System32\wscript.exe'
+        $shortcut.Arguments = '"' + (Join-Path $folder 'Launch Phasma Harness.vbs') + '"'
+        $shortcut.WorkingDirectory = $folder
+        $shortcut.IconLocation = (Join-Path $folder 'ui\icon.ico') + ',0'
+        $shortcut.Save()
+    }
+    Write-Host 'Harness tools (project context, bots, connectors, images, settings) come from a local MCP server the app starts itself: Codex, Claude, Cursor and the native CLIs connect to it, and API models get the same tools inside Harness. Nothing to set up.'
+    Write-Host 'Setup complete. From Settings > Providers, install and sign in to Codex, Claude, Cursor or DeepSeek, or add an API provider (OpenRouter, LM Studio or any OpenAI-compatible endpoint); any one of these is enough. Muse and Antigravity work as bots but cannot run the Hub on their own. Jev is optional: its key adds Jev routing and Jev image assist. The app is in your Start menu and on your Desktop; keep this app folder in place.'
     Start-Process -FilePath (Join-Path $env:WINDIR 'System32\wscript.exe') -ArgumentList ('"' + (Join-Path $folder 'Launch Phasma Harness.vbs') + '"') -WindowStyle Hidden
 } catch {
     Write-Host "Setup failed: $($_.Exception.Message)" -ForegroundColor Red
