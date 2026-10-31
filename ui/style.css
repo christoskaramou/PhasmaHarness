@@ -3687,13 +3687,13 @@ body:has(#settings-dialog[open]) #settings { color:var(--accent); background:var
 body:has(#settings-dialog[open]) .agent-nav[aria-pressed=true] { background:transparent; }
 main > header { min-height:76px; border-bottom:1px solid var(--border); }
 .session-heading { display:flex; align-items:center; gap:12px; min-width:0; }
+.session-names { display:flex; flex-direction:column; min-width:0; }
 #session-title { font-size:calc(18px * var(--font-scale, 1)); font-weight:600; margin:0; }
 .header-actions .compact-action { display:flex; align-items:center; gap:8px; border-color:transparent; background:transparent; }
 .header-actions .compact-action:hover { background:var(--hover); }
 .job-result-header .message-label { font-size:calc(13px * var(--font-scale, 1)); }
 @media (max-width:1050px) { .header-action-label { display:none; } }
 #session-icon { display:flex; }
-.session-workspace { display:none !important; }
 #messages { max-width:900px; }
 .welcome { max-width:740px; margin:80px auto 35px; }
 .welcome h2 { font-size:calc(27px * var(--font-scale, 1)); letter-spacing:-.6px; font-weight:500; text-align:center; margin-bottom:30px; }
