@@ -45,7 +45,7 @@ test('a long answer reaches the suggestion model with its ending and a marked om
   assert.ok(sent.length < 1600);
 });
 
-test('no suggestion when the setting is off, a turn is running, the user spoke last, or the model cannot reply in JSON', async () => {
+test('no suggestion when the setting is off, a turn is running or the user spoke last; a Muse chat gets one like any other', async () => {
   assert.equal(await chat({ enabled: false }).controller.replySuggestion('s'), null);
 
   const busy = chat();
@@ -56,8 +56,8 @@ test('no suggestion when the setting is off, a turn is running, the user spoke l
   assert.equal(await userLast.controller.replySuggestion('s'), null);
 
   const muse = chat({ route: { id: 'native:muse:m', provider: 'native:muse', model: 'm' } });
-  assert.equal(await muse.controller.replySuggestion('s'), null);
-  assert.equal(muse.calls.length, 0);
+  assert.deepEqual(await muse.controller.replySuggestion('s'), { itemId: 'a1', text: 'Now add tests for it.' });
+  assert.equal(muse.calls[0].choice.provider, 'native:muse');
 
   const empty = chat({ reply: { suggestion: '   ' } });
   assert.equal(await empty.controller.replySuggestion('s'), null, 'an empty suggestion shows nothing');

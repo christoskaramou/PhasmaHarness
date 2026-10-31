@@ -5,7 +5,6 @@ const { verificationGaps } = require('../job-reports.cjs');
 const { TOOLS } = require('../tools/agent-tools.cjs');
 const imageTools = require('../tools/image-tools.cjs');
 const { hubEffortAllowed } = require('../routing/effort-cap.cjs');
-const { capabilities } = require('../providers/capabilities.cjs');
 
 const WORK = { name: 'agent_work', description: 'Send work to an existing Auto worker (agentId), or create one (name). Include a concrete task. Omit mode and effort for Auto; set them only when the user requests a specific model/effort. To use a manually pinned existing agent explicitly requested by the user, pass its exact roster mode and omit effort. Otherwise manually pinned workers are left alone and a new Auto worker is created. Follow-ups retain a previous explicit model choice. The original request remains available through agent_read_context.',
   inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, name: { type: 'string' }, count: { type: 'integer', minimum: 1, maximum: 10, description: 'Number of new independent workers for this same task, only when explicitly requested. Defaults to one. Omit agentId for a batch.' }, task: { type: 'string' }, workspace: { type: 'string', description: 'Existing absolute repository path for this task. Use the requested project, not an unrelated Hub workspace. Different workspaces require Full access.' }, mode: { type: 'string' }, effort: { type: 'string' }, resultHandling: { type: 'string', enum: ['direct', 'review'], description: 'direct: return a simple, self-contained task result without another AI call. review: assess complex work and compose the reply together. Build/test checks run independently.' } }, required: ['task'], additionalProperties: false } };
@@ -110,15 +109,11 @@ module.exports = {
 
   async coordinatorChoice(mode, abort) {
     abort.signal.throwIfAborted();
-    // Only models that answer structured replies can run the Hub. A saved worker-only pick (Muse, Antigravity) runs as Auto,
-    // which is what the Hub's model menu shows for it.
-    const structured = p => !!p && capabilities(p.provider).structured !== false;
-    const picked = mode && mode !== 'auto' ? this.resolveWorker(mode) : null;
-    const manual = mode && mode !== 'auto' && (!picked || structured(picked));
+    const manual = mode && mode !== 'auto';
     let choice = this.resolveWorker(manual ? mode : this.data.hubMode);
     const usable = p => !!p && this.available(p) && !this.limits.limited(p.provider || 'codex', p.model);
-    if (!manual && (this.data.hubModeSource !== 'auto' || (choice && !structured(choice)) || !hubEffortAllowed(choice) || !usable(choice))) {
-      const eligible = this.catalog().filter(p => p.worker && structured(p) && hubEffortAllowed(p) && usable(p));
+    if (!manual && (this.data.hubModeSource !== 'auto' || !hubEffortAllowed(choice) || !usable(choice))) {
+      const eligible = this.catalog().filter(p => p.worker && hubEffortAllowed(p) && usable(p));
       if (!eligible.length) throw new Error('Hub Auto needs an enabled model with Low or Medium effort, or no configurable effort. Enable one in Providers, or choose a model manually for Hub.');
       const configured = this.effectiveRouter();
       const router = configured && usable(configured) ? configured : this.routerChoices().find(usable);

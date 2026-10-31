@@ -3,6 +3,7 @@ const os = require('node:os');
 const { spawnOwned, stopTree } = require('../process-tree.cjs');
 const { findNativeCLI, deadline } = require('./native-cli.cjs');
 const { imageData } = require('../image-input.cjs');
+const { invalidResponse } = require('./structured.cjs');
 
 const LABEL = 'Muse Code CLI';
 
@@ -38,7 +39,8 @@ class MuseCLI {
     const child = spawnOwned(this.launch, executable.command, [...executable.args, 'serve', '--disable-request-user-input'], {
       cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],    });
     const host = { child, sdk, session: null, held: [], opening: false, context: null, reported: new Map(), tokenEvents: new Map() };
-    host.failure = new Promise((_, reject) => { host.fail = error => reject(new Error(error.message || 'Muse protocol failed.')); });
+    // The code stays: INVALID_STRUCTURED_RESPONSE (a Hub reply that used a tool) gets the router's one retry.
+    host.failure = new Promise((_, reject) => { host.fail = error => reject(Object.assign(new Error(error.message || 'Muse protocol failed.'), error.code ? { code: error.code } : {})); });
     host.failure.catch(() => {});
     this.hosts.add(host);
     child.stdout.setEncoding('utf8');
@@ -87,7 +89,7 @@ class MuseCLI {
       const profile = catalog.profileId || null;
       this.models = (catalog.models || []).filter(model => model.modelId && model.providerId === 'meta' && (model.profileId || null) === profile)
         .map(model => ({ id: `native:muse:${model.modelId}`, model: model.modelId, profileId: profile,
-          label: model.displayLabel || model.modelId, provider: 'native:muse', rank: 35, worker: true, router: false,
+          label: model.displayLabel || model.modelId, provider: 'native:muse', rank: 35, worker: true, router: true,
           efforts: (model.reasoningEffortVariants || []).map(variant => variant.tier).filter(Boolean),
           effort: model.defaultReasoningEffort || null }));
       // Muse names the credential in effect: the signed-in account, or a stored or environment API key.
@@ -180,6 +182,8 @@ class MuseCLI {
     if (item.kind === 'agentMessage' && typeof item.text === 'string') onEvent({ type: 'assistant',
       message: { id: item.itemId, content: [{ type: 'text', text: item.text }] } });
     if (item.kind !== 'toolCall') return;
+    // A Hub or routing reply is tool-free, as for every provider: a reply that uses a tool is not accepted (cursor.cjs).
+    if (host.context.schema) return host.fail(invalidResponse());
     onEvent({ type: 'assistant', message: { content: [{ type: 'tool_use', id: item.itemId,
       name: item.tool || 'Muse tool', input: item.args || {} }] } });
     if (item.status !== 'inProgress') onEvent({ type: 'user', message: { content: [{ type: 'tool_result',
@@ -188,15 +192,17 @@ class MuseCLI {
 
   async run(options) {
     if (this.active) throw new Error('Muse Code already has an active turn.');
-    if (options.schema) throw new Error('Muse structured routing is not enabled until tool isolation is verified. Select it as a worker.');
     this.active = true;
     let host;
     try {
       host = await this.createHost(options.cwd, options.signal);
-      const session = await this.openSession(host, options);
+      // A Hub or routing reply runs read-only, as DeepSeek's does.
+      const session = await this.openSession(host, options.schema ? { ...options, access: 'read-only' } : options);
       host.context = options;
       options.onEvent?.({ type: 'system', session_id: session.sessionId });
-      const input = [{ type: 'text', text: [options.instructions, options.helpers?.instructions, options.prompt].filter(Boolean).join('\n\n') }];
+      const input = [{ type: 'text', text: [options.instructions, options.helpers?.instructions,
+        options.schema && !(options.resume && options.schemaInHistory) ? `Return only a JSON object matching this schema. No tools are available.\n${JSON.stringify(options.schema)}` : '',
+        options.prompt].filter(Boolean).join('\n\n') }];
       for (const { mime, data } of (options.images || []).map(imageData)) input.push({ type: 'image', mediaType: mime, base64Data: data });
       const submit = (parts, ifBusy) => deadline(Promise.race([session.sendUserTurn({ input: parts, ifBusy,
         ...(options.effort ? { reasoningEffort: options.effort } : {}) }), host.failure]), 30000, LABEL, options.signal);

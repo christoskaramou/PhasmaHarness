@@ -1272,6 +1272,33 @@
         "fix": "Jev image assist: image_list/image_ask tools for every bot, image-number notes for models without image input, and the jevImages setting, on by default with a Jev key.",
         "date": "2026-10-30"
       }
+    },
+    {
+      "id": "hub-on-any-model",
+      "name": "Muse and Antigravity run the Hub, routing and reply suggestions like every other model",
+      "covers": "No structured:false capability: the Hub menu, Auto, renameHub, chat scan, reflection and reply suggestions offer every enabled model. Muse and Antigravity get the schema in their prompt (once per kept conversation) and a reply that uses a tool is rejected as INVALID_STRUCTURED_RESPONSE. Muse opens a read-only session for it; Antigravity starts without --dangerously-skip-permissions and expects permission_mode request-review (live agy 2026-10-31). Offline fixtures, no paid calls.",
+      "paths": [
+        "src/providers/capabilities.cjs",
+        "src/providers/muse.cjs",
+        "src/providers/antigravity.cjs",
+        "src/controller/coordinator.cjs",
+        "src/controller/chat-scan.cjs",
+        "src/controller/reflection.cjs",
+        "src/controller/suggestions.cjs",
+        "src/agents.cjs",
+        "tests/muse.test.cjs",
+        "tests/antigravity.test.cjs",
+        "tests/coordinator.test.cjs",
+        "tests/reply-suggestions.test.cjs"
+      ],
+      "command": "node --test --test-name-pattern=\"answers a Hub or routing reply|the Hub runs on any model|a Muse chat gets one\" tests/muse.test.cjs tests/antigravity.test.cjs tests/coordinator.test.cjs tests/reply-suggestions.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 60,
+      "origin": {
+        "problem": "Harness refused Muse and Antigravity as Hub, router and suggestion models with a structured:false block nobody had tested.",
+        "fix": "Removed the block; both adapters answer structured replies tool-free (schema in prompt, tool use rejected, no auto-approve).",
+        "date": "2026-10-31"
+      }
     }
   ]
 }

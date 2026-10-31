@@ -5,6 +5,7 @@ const { randomUUID } = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { spawnOwned, stopTree } = require('../process-tree.cjs');
 const { findNativeCLI, deadline } = require('./native-cli.cjs');
+const { invalidResponse } = require('./structured.cjs');
 
 // agy signs in with the Google account the Gemini tools share; its own log confirms "authenticated successfully as"
 // the address google_accounts.json marks active (checked 2026-10-19).
@@ -148,7 +149,7 @@ class AntigravityCLI {
         const match = row.match(/^\s*([a-z][a-z0-9._/-]*-[a-z0-9._/-]+)(?:\t+| {2,})(.+?)\s*$/);
         if (!match) continue;
         models.set(match[1], { id: `native:antigravity:${match[1]}`, model: match[1], label: match[2],
-          provider: 'native:antigravity', rank: 35, worker: true, router: false, efforts: [], effort: null, images: false });
+          provider: 'native:antigravity', rank: 35, worker: true, router: true, efforts: [], effort: null, images: false });
       }
       this.models = [...models.values()];
       if (!this.models.length) throw new Error('Antigravity returned no recognized models. Update it, then reconnect.');
@@ -164,16 +165,17 @@ class AntigravityCLI {
 
   async run(options) {
     if (this.active || this.hosts.size) throw new Error('Antigravity already has an active process or pending cleanup.');
-    if (options.schema) throw new Error('Antigravity is worker-only until tool-free routing is verified.');
-    if (options.access !== 'danger-full-access') throw new Error('Antigravity currently requires Full access. Ask and Workspace permissions are not verified for its headless interface.');
+    // A Hub or routing reply is tool-free (a tool step below rejects it), so only worker turns need Full access.
+    if (!options.schema && options.access !== 'danger-full-access') throw new Error('Antigravity currently requires Full access. Ask and Workspace permissions are not verified for its headless interface.');
     if (options.images?.length) throw new Error('Antigravity headless input accepts text only. Choose another worker for images.');
     if (options.signal?.aborted) throw Object.assign(new Error('Antigravity stopped.'), { name: 'AbortError' });
     this.active = true;
     let host, agent, succeeded = false;
     try {
       agent = agentFile(options.cwd, options.helpers);
+      // A tool-free reply runs without auto-approve, so a tool agy reaches for asks (agy 2026-10-31: "request-review") instead of running.
       const args = ['--agent', agent.name, '--input-format', 'stream-json', '--output-format', 'stream-json',
-        '--disable-slash-commands', '--dangerously-skip-permissions'];
+        '--disable-slash-commands', ...(options.schema ? [] : ['--dangerously-skip-permissions'])];
       if (options.model) args.push('--model', options.model);
       if (options.resume) args.push('--conversation', options.resume);
       if (options.effort) args.push('--effort', options.effort);
@@ -193,12 +195,14 @@ class AntigravityCLI {
         const event = value => {
           if (options.signal?.aborted) throw Object.assign(new Error('Antigravity stopped.'), { name: 'AbortError' });
           if (value.event === 'init') {
-            if (initialized || value.init?.agent !== agent.name || value.init?.permission_mode !== 'always-proceed' ||
+            if (initialized || value.init?.agent !== agent.name || value.init?.permission_mode !== (options.schema ? 'request-review' : 'always-proceed') ||
                 typeof value.conversation_id !== 'string' || !value.conversation_id ||
                 (options.resume && value.conversation_id !== options.resume)) throw new Error('Antigravity did not confirm the requested worker, session and permission mode.');
             initialized = true; sessionId = value.conversation_id;
             onEvent({ type: 'system', session_id: sessionId });
-            const content = [options.instructions, options.helpers?.instructions, options.prompt].filter(Boolean).join('\n\n');
+            const content = [options.instructions, options.helpers?.instructions,
+              options.schema && !(options.resume && options.schemaInHistory) ? `Return only a JSON object matching this schema. No tools are available.\n${JSON.stringify(options.schema)}` : '',
+              options.prompt].filter(Boolean).join('\n\n');
             host.child.stdin.write(JSON.stringify({ event: 'user', message: { content } }) + '\n');
           } else if (value.event === 'step_update') {
             const step = value.step_update;
@@ -206,6 +210,8 @@ class AntigravityCLI {
             if (step.step_type === 'agent_response' && typeof step.text_delta === 'string') onEvent({ type: 'stream_event',
               event: { type: 'content_block_delta', delta: { type: 'text_delta', text: step.text_delta } } });
             if (step.step_type === 'tool' && typeof step.tool_name === 'string' && Number.isSafeInteger(step.step_index)) {
+              // A Hub or routing reply is tool-free, as for every provider: a reply that uses a tool is not accepted (cursor.cjs).
+              if (options.schema) throw invalidResponse();
               const id = sessionId + ':' + step.step_index;
               if (!tools.has(id)) {
                 tools.add(id);

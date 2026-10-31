@@ -104,7 +104,7 @@ node_ok || install_node
 cd "$folder"
 export npm_config_cache="$folder/installers/npm-cache"
 export ELECTRON_CACHE="$folder/installers/electron-cache"
-providers='Codex, Claude, Cursor or DeepSeek, or add an API provider (OpenRouter, LM Studio or any OpenAI-compatible endpoint); any one of these is enough. Muse and Antigravity work as bots but cannot run the Hub on their own. Jev is optional: its key adds Jev routing and Jev image assist.'
+providers='Codex, Claude, Cursor, DeepSeek, Muse or Antigravity, or add an API provider (OpenRouter, LM Studio or any OpenAI-compatible endpoint); any one of these is enough. Jev is optional: its key adds Jev routing and Jev image assist.'
 # Image attachments and Jev image assist decode and resize images with this native library.
 check_images() {
   node -e "require('@napi-rs/canvas').createCanvas(2, 2).encodeSync('png')" >/dev/null 2>&1 ||

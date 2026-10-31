@@ -79,7 +79,7 @@ try {
         $shortcut.Save()
     }
     Write-Host 'Harness tools (project context, bots, connectors, images, settings) come from a local MCP server the app starts itself: Codex, Claude, Cursor and the native CLIs connect to it, and API models get the same tools inside Harness. Nothing to set up.'
-    Write-Host 'Setup complete. From Settings > Providers, install and sign in to Codex, Claude, Cursor or DeepSeek, or add an API provider (OpenRouter, LM Studio or any OpenAI-compatible endpoint); any one of these is enough. Muse and Antigravity work as bots but cannot run the Hub on their own. Jev is optional: its key adds Jev routing and Jev image assist. The app is in your Start menu and on your Desktop; keep this app folder in place.'
+    Write-Host 'Setup complete. From Settings > Providers, install and sign in to Codex, Claude, Cursor, DeepSeek, Muse or Antigravity, or add an API provider (OpenRouter, LM Studio or any OpenAI-compatible endpoint); any one of these is enough. Jev is optional: its key adds Jev routing and Jev image assist. The app is in your Start menu and on your Desktop; keep this app folder in place.'
     Start-Process -FilePath (Join-Path $env:WINDIR 'System32\wscript.exe') -ArgumentList ('"' + (Join-Path $folder 'Launch Phasma Harness.vbs') + '"') -WindowStyle Hidden
 } catch {
     Write-Host "Setup failed: $($_.Exception.Message)" -ForegroundColor Red

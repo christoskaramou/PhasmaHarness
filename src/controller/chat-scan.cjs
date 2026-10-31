@@ -8,7 +8,6 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { projectRules } = require('../workspace/project-instructions.cjs');
 const { redact } = require('../log.cjs');
-const { capabilities } = require('../providers/capabilities.cjs');
 const { capCatalog } = require('../routing/effort-cap.cjs');
 const { strongest, atEffort } = require('../routing/smart-router.cjs');
 const chatScan = require('../chat-scan.cjs');
@@ -75,7 +74,7 @@ module.exports = {
   runScan(session, exchange, reaction) {
     const owner = this.agents?.primary || this;
     const scanner = this.chatScanner();
-    if (!scanner || owner.data.settings.scanReplies === false || !owner.available(scanner) || capabilities(scanner.provider || 'codex').structured === false)
+    if (!scanner || owner.data.settings.scanReplies === false || !owner.available(scanner))
       return null;
     if (this.agents?.backgroundQuota(this, session, scanner))
       return null;
@@ -160,9 +159,9 @@ module.exports = {
       .finally(() => this.reflections.delete(abort));
   },
 
-  // Every enabled model that answers in a schema can be the chat checker (Settings).
+  // Every enabled model can be the chat checker (Settings).
   chatScanChoices() {
-    return this.catalog().filter(p => (p.worker || p.router) && p.enabled !== false && capabilities(p.provider || 'codex').structured !== false);
+    return this.catalog().filter(p => (p.worker || p.router) && p.enabled !== false);
   },
 
   // The chat checker the user picked in Settings; none (Off, the default) means no scanning. Only that model checks: while
@@ -192,16 +191,15 @@ module.exports = {
     return usable && fits(picked) ? picked : null;
   },
 
-  // The chat rule writer: the Escalation model when it answers in a schema, else the strongest enabled worker that does,
-  // within the effort cap and usage limits, at medium effort when it has one. Without measured scores (offline, models
-  // too new) the router's model writes it, so a flag is not lost.
+  // The chat rule writer: the Escalation model, else the strongest enabled worker, within the effort cap and usage limits,
+  // at medium effort when it has one. Without measured scores (offline, models too new) the router's model writes it, so a
+  // flag is not lost.
   strongestPreset() {
-    const structured = p => capabilities(p.provider || 'codex').structured !== false;
-    const picked = this.escalationPick(structured);
+    const picked = this.escalationPick(() => true);
     if (picked)
       return picked;
 
-    const usable = this.measuredWorkers(structured);
+    const usable = this.measuredWorkers(() => true);
     const best = strongest(usable);
     if (!best)
       return (this.agents?.primary || this).effectiveRouter();

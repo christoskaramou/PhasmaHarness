@@ -13,13 +13,13 @@ function workspace(t) {
 
 const turn = cwd => ({ cwd, access: 'danger-full-access', model: 'gemini-fixture-high', instructions: 'Do the assignment.', prompt: 'Hello' });
 
-test('Antigravity metadata checks native setup without inference and never enables structured routing', async t => {
+test('Antigravity metadata checks native setup without inference, and its models can route', async t => {
   const f = await antigravityFixture(t);
   assert.equal((await f.backend.refresh()).loggedIn, true);
   assert.deepEqual(f.children.map(child => child.args), [['-p', '/usage', '--output-format', 'json'], ['models']]);
   assert.equal(f.backend.models.length, 1);
   assert.equal(f.backend.models[0].provider, 'native:antigravity');
-  assert.equal(f.backend.models[0].router, false);
+  assert.equal(f.backend.models[0].router, true);
   assert.equal(f.backend.models[0].images, false);
   assert.deepEqual(f.calls, []);
   assert.equal(f.backend.hosts.size, 0);
@@ -30,15 +30,29 @@ test('Antigravity metadata checks native setup without inference and never enabl
   await assert.rejects(missing.backend.login(), /Run agy in your terminal/);
 });
 
-test('unsupported permissions, images and routing fail before configuration or provider submission', async t => {
+test('unsupported permissions and images fail before configuration or provider submission', async t => {
   const cwd = workspace(t), f = await antigravityFixture(t);
   for (const access of ['read-only', 'workspace-write', undefined]) await assert.rejects(f.backend.run({ ...turn(cwd), access }), /requires Full access/);
-  await assert.rejects(f.backend.run({ ...turn(cwd), schema: {} }), /worker-only/);
   await assert.rejects(f.backend.run({ ...turn(cwd), images: ['image'] }), /text only/);
   const abort = new AbortController(); abort.abort();
   await assert.rejects(f.backend.run({ ...turn(cwd), signal: abort.signal }), { name: 'AbortError' });
   assert.equal(f.children.length, 0);
   assert.equal(fs.existsSync(path.join(cwd, '.agents')), false);
+});
+
+// 2026-10-31, the user: no blocks nobody tested. Antigravity answers Hub and routing replies as DeepSeek and Cursor do: the
+// schema in its prompt, and a reply that uses a tool is not accepted. Before, Harness refused before asking agy.
+test('Antigravity answers a Hub or routing reply with the schema in its prompt, and a tool step rejects that reply', async t => {
+  const cwd = workspace(t), json = '{"reply":"Yes","action":null}', schema = { type: 'object', properties: { reply: { type: 'string' } } };
+  const line = value => JSON.stringify(value) + '\n', session = 'agy-fixture-session';
+  const f = await antigravityFixture(t, { raw: line({ event: 'step_update', step_update: { conversation_id: session, step_index: 1, state: 'DONE', step_type: 'agent_response', text_delta: json } }) +
+    line({ event: 'result', result: { conversation_id: session, status: 'SUCCESS', response: json, num_turns: 1, usage: { input_tokens: 10, output_tokens: 3 } } }) });
+  const { access, ...hubCall } = turn(cwd); // a Hub or routing call passes no access
+  assert.equal((await f.backend.run({ ...hubCall, schema })).result, json);
+  assert.match(f.calls[0].message.content, /Return only a JSON object matching this schema\. No tools are available\.\n\{"type":"object"/);
+  assert.ok(!f.children[0].args.includes('--dangerously-skip-permissions'), 'a tool-free reply never auto-approves tools');
+  const tooled = await antigravityFixture(t); // its stream calls a tool
+  await assert.rejects(tooled.backend.run({ ...hubCall, schema }), { code: 'INVALID_STRUCTURED_RESPONSE' });
 });
 
 test('one native turn streams public text and generic helper events, keeps credentials off disk and resumes explicitly', async t => {

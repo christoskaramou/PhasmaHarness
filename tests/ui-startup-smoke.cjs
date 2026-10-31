@@ -939,18 +939,19 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript("providerCaps('claude-cli').steer"), false);
   assert.equal(await window.webContents.executeJavaScript("providerCaps(undefined).steer"), true);
   console.log('Claude per-effort model rows and provider capabilities passed');
-  // The Hub's model menu leaves out worker-only models (Muse, Antigravity); a worker's menu keeps them.
+  // Every model is offered to the Hub and to workers alike, Muse and Antigravity included (2026-10-31: no untested blocks).
   assert.deepEqual(await window.webContents.executeJavaScript(`(() => {
     const saved = [state.coordinator, state.presets];
-    state.presets = [...state.presets, { id: 'native:muse:m', provider: 'native:muse', model: 'm', label: 'm', available: true, router: false }];
+    state.presets = [...state.presets, { id: 'native:muse:m', provider: 'native:muse', model: 'm', label: 'm', available: true, router: true },
+      { id: 'native:antigravity:a', provider: 'native:antigravity', model: 'a', label: 'a', available: true, router: true }];
     const offered = coordinator => {
       state.coordinator = coordinator;
-      return presetGroups().some(group => group.provider === 'native:muse');
+      return ['native:muse', 'native:antigravity'].map(provider => presetGroups().some(group => group.provider === provider));
     };
     const result = [offered(true), offered(false)];
     [state.coordinator, state.presets] = saved;
     return result;
-  })()`), [false, true]);
+  })()`), [[true, true], [true, true]]);
   assert.deepEqual(await window.webContents.executeJavaScript(`(() => {
     const saved = [state.coordinator, state.hubMode, state.settings.mode];
     state.coordinator = true;
@@ -976,7 +977,7 @@ app.whenReady().then(async () => {
     render();
     return { main, capHidden, unselected, worker };
   })()`), { main: true, capHidden: true, unselected: true, worker: true });
-  console.log('Hub model menu excludes Auto and worker-only models; workers retain Auto');
+  console.log('Hub model menu offers every model, Muse and Antigravity included, and excludes Auto; workers retain Auto');
   // Disconnected in the Harness while the CLIs stay signed in: no models listed, detail says the CLI is still signed in.
   controller.account = null; controller.models = [];
   controller.codex = { installed: true, connected: true, signedIn: true };
@@ -3742,29 +3743,23 @@ app.whenReady().then(async () => {
   assert.equal(taskUi.hidden, true, 'the list leaves with the tasks');
   assert.equal(taskUi.open, false, 'and stops reading output');
   console.log('Running tasks list, output and Stop passed');
-  // A provider that does not report its tasks says so while it works; one that does stays quiet with no tasks.
-  const unreported = await window.webContents.executeJavaScript(`(() => {
+  // A working chat with no listed tasks shows no task area on any provider (the old "does not report" note is gone).
+  const quiet = await window.webContents.executeJavaScript(`(() => {
     const session = current();
-    window.savedTaskState = { busy: state.busy, provider: session.activeProvider };
+    const saved = { busy: state.busy, provider: session.activeProvider };
     state.busy = session.id;
-    session.activeProvider = 'cursor-cli';
+    const shown = ['cursor-cli', 'claude-cli'].map(provider => {
+      session.activeProvider = provider;
+      render();
+      return !$('#background-tasks').hidden || $('#background-tasks').childElementCount;
+    });
+    state.busy = saved.busy;
+    session.activeProvider = saved.provider;
     render();
-    return { note: $('#background-tasks .background-note')?.textContent, hidden: $('#background-tasks').hidden };
+    return shown;
   })()`);
-  fs.writeFileSync(path.resolve(__dirname, '../.scratch/unreported-tasks.png'), (await window.webContents.capturePage()).toPNG());
-  const reported = await window.webContents.executeJavaScript(`(() => {
-    const session = current();
-    session.activeProvider = 'claude-cli';
-    render();
-    const shown = !$('#background-tasks').hidden;
-    state.busy = window.savedTaskState.busy;
-    session.activeProvider = window.savedTaskState.provider;
-    render();
-    return { shown, after: !$('#background-tasks').hidden };
-  })()`);
-  assert.deepEqual(unreported, { note: 'This provider does not report its background tasks, so any it leaves running are not listed here.', hidden: false });
-  assert.deepEqual(reported, { shown: false, after: false });
-  console.log('Providers without task reports say so passed');
+  assert.deepEqual(quiet, [0, 0]);
+  console.log('No task area without tasks passed');
   phase = 'reply suggestions';
   // One call per answer; grey text while the draft matches its start; Right arrow at the end accepts; off hides it.
   const suggestionCalls = [];

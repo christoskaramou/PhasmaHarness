@@ -91,6 +91,7 @@ async function museFixture(t, options = {}) {
       if (child.exitCode !== null) return;
       const itemId = options.onPrompt || options.live ? `answer-${turnId}` : 'answer';
       notify('item/completed', { item: { itemId: 'private', turnId, kind: 'reasoning', revision: 1, status: 'completed', text: 'PRIVATE_REASONING' } });
+      if (options.toolCall) notify('item/completed', { item: { itemId: 'tool', turnId, kind: 'toolCall', revision: 1, status: 'completed', tool: 'read_file', args: {} } });
       notify('item/started', { item: { itemId, turnId, kind: 'agentMessage', revision: 1, status: 'inProgress', text: text.slice(0, 5) } });
       notify('item/delta', { itemId, field: 'text', delta: text.slice(5) });
       notify('item/completed', { item: { itemId, turnId, kind: 'agentMessage', revision: 2, status: 'completed', text } });
@@ -240,7 +241,8 @@ async function antigravityFixture(t, options = {}) {
       }
     });
     queueMicrotask(() => send({ event: 'init', conversation_id: record.sessionId,
-      init: { agent: options.wrongAgent ? 'unrelated' : name, permission_mode: options.permissionMode || 'always-proceed' } }));
+      init: { agent: options.wrongAgent ? 'unrelated' : name,
+        permission_mode: options.permissionMode || (args.includes('--dangerously-skip-permissions') ? 'always-proceed' : 'request-review') } }));
     return child;
   };
   const backend = new AntigravityCLI(launch, () => ({ command: 'agy-fixture', args: [] }));

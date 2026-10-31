@@ -1728,24 +1728,27 @@ test('Hub cannot delete agents', async t => {
   assert.equal(hub.data.agents.length, 1, 'the agent survives');
 });
 
-test('the Hub never runs on a worker-only model: a saved manual or Auto pick reroutes among structured-capable models', async t => {
-  // Live 2026-10-19: Hub set to muse-spark-1.3-contributor failed every turn ("Muse structured routing is not enabled…").
-  const { hub } = await setup(t);
-  const workerOnly = { id: 'native:muse:m', provider: 'native:muse', model: 'm', effort: null, worker: true, router: false, enabled: true };
-  const capable = { id: 'native:deepseek:d', provider: 'native:deepseek', model: 'd', effort: null, worker: true, router: true, enabled: true };
-  hub.catalog = () => [workerOnly, capable];
+// 2026-10-19 Harness itself refused Muse and Antigravity for the Hub ("Muse structured routing is not enabled…") without
+// ever asking them; 2026-10-31 the user: no untested blocks. Every model can run the Hub, picked by hand or by Auto.
+test('the Hub runs on any model, Muse and Antigravity included, picked by hand or offered to Auto', async t => {
+  const { hub, agents } = await setup(t);
+  const muse = { id: 'native:muse:m', provider: 'native:muse', model: 'm', effort: null, worker: true, router: true, enabled: true };
+  const agy = { id: 'native:antigravity:a', provider: 'native:antigravity', model: 'a', effort: null, worker: true, router: true, enabled: true };
+  hub.catalog = () => [muse, agy];
   hub.available = () => true;
   const offered = [];
   hub.smartRouter.chooseHub = async eligible => {
     offered.push(eligible.map(p => p.id));
     return eligible[0];
   };
-  assert.equal((await hub.coordinatorChoice(workerOnly.id, new AbortController())).id, capable.id);
-  assert.equal(hub.data.settings.mode, 'auto', 'the worker-only manual pick runs as Auto');
-
-  Object.assign(hub.data, { hubMode: workerOnly.id, hubModeSource: 'auto' });
-  assert.equal((await hub.coordinatorChoice('auto', new AbortController())).id, capable.id, 'a saved worker-only Auto pick is replaced');
-  assert.deepEqual(offered, [[capable.id], [capable.id]]);
+  assert.equal((await hub.coordinatorChoice(muse.id, new AbortController())).id, muse.id, 'a hand pick runs as picked');
+  Object.assign(hub.data, { hubMode: agy.id, hubModeSource: 'auto' });
+  assert.equal((await hub.coordinatorChoice('auto', new AbortController())).id, agy.id, 'a saved Auto pick stays');
+  Object.assign(hub.data, { hubMode: null, hubModeSource: 'manual' });
+  await hub.coordinatorChoice('auto', new AbortController());
+  assert.deepEqual(offered.at(-1), [muse.id, agy.id], 'Auto offers both');
+  hub.resolveWorker = id => [muse, agy].find(p => p.id === id);
+  assert.doesNotThrow(() => agents.renameHub({ name: 'Hub', mode: muse.id }), 'the Hub model menu accepts them');
 });
 
 test('a renamed Hub answers to its name and keeps that name reserved for new workers', async t => {

@@ -2,7 +2,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
-const { capabilities } = require('../providers/capabilities.cjs');
 const { EFFORT_ORDER } = require('../routing/effort-cap.cjs');
 
 const SCHEMA = { type: 'object', properties: { suggestion: { type: 'string' } }, required: ['suggestion'], additionalProperties: false };
@@ -44,7 +43,7 @@ function quickModel(controller, session) {
   // A preset without a level runs at the CLI default, which may be high; known low levels come first.
   const level = p => (EFFORT_ORDER.includes(p.effort) ? EFFORT_ORDER.indexOf(p.effort) : EFFORT_ORDER.length);
   const choice = same.sort((a, b) => level(a) - level(b))[0] || used;
-  if (!choice || !controller.available(choice) || capabilities(choice.provider || 'codex').structured === false)
+  if (!choice || !controller.available(choice))
     return null;
 
   return choice;

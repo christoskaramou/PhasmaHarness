@@ -11,9 +11,8 @@ const CAPABILITIES = Object.freeze({
   'claude-cli': Object.freeze({ cli: true, steer: false, compact: true, usage: true, liveQueue: true, liveSteer: true, tasks: true }),
   'cursor-cli': Object.freeze({ cli: true, steer: false, compact: false, usage: false, liveSteer: true }),
   'native:deepseek': Object.freeze({ cli: true, steer: false, compact: false, usage: false, liveSteer: true }),
-  // structured: false = refuses schema replies (worker-only), so it cannot run the Hub or routing.
-  'native:muse': Object.freeze({ cli: true, steer: false, compact: false, usage: true, structured: false, liveQueue: true, liveSteer: true }),
-  'native:antigravity': Object.freeze({ cli: true, steer: false, compact: false, usage: true, structured: false }),
+  'native:muse': Object.freeze({ cli: true, steer: false, compact: false, usage: true, liveQueue: true, liveSteer: true }),
+  'native:antigravity': Object.freeze({ cli: true, steer: false, compact: false, usage: true }),
 });
 
 // A native CLI Harness no longer ships (a stale saved selection) stays on the CLI path, where it is refused as unavailable.

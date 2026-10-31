@@ -4,7 +4,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { projectRules } = require('../workspace/project-instructions.cjs');
-const { capabilities } = require('../providers/capabilities.cjs');
 const { SCHEMA, INSTRUCTIONS, reflectionInput, checkReflection } = require('../reflection.cjs');
 const { readLessons, saveReflection, lessonKey, sameLesson } = require('../lessons.cjs');
 const trials = require('../trials.cjs');
@@ -15,7 +14,7 @@ module.exports = {
   reflectOnLesson(session, task, lesson, root, project) {
     const owner = this.agents?.primary || this;
     const router = owner.effectiveRouter();
-    if (!router || !owner.available(router) || capabilities(router.provider || 'codex').structured === false)
+    if (!router || !owner.available(router))
       return null;
     if (this.agents?.backgroundQuota(this, session, router))
       return null;

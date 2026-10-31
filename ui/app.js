@@ -138,10 +138,9 @@ const EFFORT_ORDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'
 const PROVIDER_ORDER = ['codex', 'claude-cli', 'cursor-cli', 'native:muse', 'native:antigravity', 'native:deepseek'];
 const PROVIDER_TITLES = { codex: 'Codex CLI / ChatGPT', 'claude-cli': 'Claude CLI', 'cursor-cli': 'Cursor CLI' };
 const providerTitle = id => PROVIDER_TITLES[id] || state?.nativeCLIs?.[id]?.label || state?.settings?.providers?.find(p => p.id === id)?.name || id;
-function presetGroups(presets = state?.presets || [], hubOnly = !!state?.coordinator) {
+function presetGroups(presets = state?.presets || []) {
   const groups = new Map();
-  // The Hub can only run on models that answer structured replies; worker-only ones (Muse, Antigravity) are not offered.
-  for (const p of presets.filter(p => p.available && !(hubOnly && providerCaps(p.provider || 'codex').structured === false))) {
+  for (const p of presets.filter(p => p.available)) {
     const provider = p.provider || 'codex';
     const key = `${provider}|${p.model}`;
     const group = groups.get(key) || { key, provider, variants: [] };
@@ -1157,7 +1156,7 @@ function renderAgentModels() {
   }
 
   const wasConnecting = select.dataset.signature === 'connecting';
-  const groups = presetGroups(state.presets, false);
+  const groups = presetGroups(state.presets);
   const options = [new Option('Auto', 'auto'), ...groupedOptions(groups)];
   const group = groups.find(g => g.variants.some(p => p.id === mode));
   if (mode && mode !== 'auto' && !group)
@@ -1169,7 +1168,7 @@ function renderAgentModels() {
 }
 
 function agentChoice() {
-  return dialogChoice($('#agent-model'), $('#agent-effort'), presetGroups(state.presets, false));
+  return dialogChoice($('#agent-model'), $('#agent-effort'), presetGroups(state.presets));
 }
 
 for (const picker of ['#agent-model', '#agent-effort']) {
@@ -1179,9 +1178,9 @@ for (const picker of ['#agent-model', '#agent-effort']) {
   };
 }
 
-// The Hub dialog's model list: only models that answer in a schema can run the Hub. Saving waits for it.
+// The Hub dialog's model list: every enabled model can run the Hub. Saving waits for it.
 function hubGroups() {
-  return presetGroups((fleetState?.agentStates?.main || state).presets, true);
+  return presetGroups((fleetState?.agentStates?.main || state).presets);
 }
 
 function renderHubModels() {
@@ -1820,12 +1819,7 @@ function renderBackgroundTasks() {
 
   const list = $('#background-tasks');
   list.replaceChildren();
-  // A provider that keeps its tasks to itself gets a note instead of an empty list, so nothing looks finished that may not be.
-  const unreported = !!session && state.busy === session.id && state.routing !== session.id && !session.groupTurn &&
-    !providerCaps(session.activeProvider).tasks;
-  list.hidden = !tasks.length && !unreported;
-  if (unreported)
-    list.append(element('p', 'background-note', 'This provider does not report its background tasks, so any it leaves running are not listed here.'));
+  list.hidden = !tasks.length;
   for (const task of tasks) {
     const row = element('div', 'queued-message');
     const shell = ['local_bash', 'command'].includes(task.type);
@@ -3477,7 +3471,7 @@ function acceptSuggestion() {
 // it. `first` holds the choices that are not a model (Jev, Off, Auto). A saved model no longer offered shows as
 // unavailable. The saved choice shows, except while its own change is being saved.
 function fillModelEffort(select, effort, presets, saved, first) {
-  const groups = presetGroups(presets, false);
+  const groups = presetGroups(presets);
   const group = groups.find(g => g.variants.some(p => p.id === saved));
   const options = [...first, ...groupedOptions(groups)];
   if (saved && !group && !first.some(option => option.value === saved)) {
@@ -3493,7 +3487,7 @@ function fillModelEffort(select, effort, presets, saved, first) {
 
 // The picked model at the effort beside it, or its lowest effort when it has no such level; any other choice as it is.
 function modelEffortChoice(select, effort, presets) {
-  const group = presetGroups(presets, false).find(g => g.key === select.value);
+  const group = presetGroups(presets).find(g => g.key === select.value);
   if (!group)
     return select.value;
 

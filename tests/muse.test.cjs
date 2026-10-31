@@ -10,7 +10,7 @@ test('Muse native discovery checks the pinned protocol without inference', async
   assert.equal((await backend.refresh()).loggedIn, true);
   assert.equal(backend.status.version, '1.4.10');
   assert.deepEqual(backend.models[0].efforts, ['high']);
-  assert.equal(backend.models[0].router, false);
+  assert.equal(backend.models[0].router, true);
   assert.equal(calls.some(([method]) => method === 'turn/start'), false);
   assert.equal(children[0].child.exitCode, 0);
 });
@@ -200,5 +200,19 @@ test('Muse incompatible schemas and missing authentication stay unavailable', as
   assert.ok(!mismatch.children.some(({ args }) => args.includes('login')), 'muse login is not started');
   const signedOut = await fixture(t, { authError: true });
   assert.equal((await signedOut.backend.refresh()).loggedIn, false);
-  await assert.rejects(signedOut.backend.run({ ...runOptions(), schema: {} }), /structured routing is not enabled/);
+});
+
+// 2026-10-31, the user: no blocks nobody tested. Muse answers Hub and routing replies as DeepSeek and Cursor do: read-only,
+// the schema in its prompt, and a reply that uses a tool is not accepted. Before, Harness refused before asking Muse.
+test('Muse answers a Hub or routing reply read-only with the schema in its prompt, and a tool call rejects that reply', async t => {
+  const json = '{"reply":"Yes","action":null}', schema = { type: 'object', properties: { reply: { type: 'string' } } };
+  const { backend, calls } = await fixture(t, { onPrompt: async () => json });
+  const { access, ...hubCall } = runOptions(); // a Hub or routing call passes no access
+  assert.equal((await backend.run({ ...hubCall, schema })).result, json);
+  assert.equal(calls.find(([method]) => method === 'session/start')[1].permissionProfile, ':read-only');
+  assert.match(calls.find(([method]) => method === 'turn/start')[1].input[0].text, /Return only a JSON object matching this schema\. No tools are available\.\n\{"type":"object"/);
+  const tooled = await fixture(t, { toolCall: true });
+  await assert.rejects(tooled.backend.run({ ...hubCall, schema }), { code: 'INVALID_STRUCTURED_RESPONSE' });
+  await tooled.backend.refresh();
+  assert.equal(tooled.backend.models[0].router, true, 'Muse models can be the routing model too');
 });

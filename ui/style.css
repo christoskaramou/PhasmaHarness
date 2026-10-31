@@ -1855,12 +1855,6 @@ dialog.image-viewer[open] {
   overflow:auto
 }
 
-.background-note {
-  margin:0 0 6px;
-  color:var(--muted);
-  font-size:12px
-}
-
 .background-output {
   max-height:160px;
   overflow:auto;

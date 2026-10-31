@@ -388,7 +388,7 @@ class Agents extends EventEmitter {
     const mode = input.mode;
     if (mode !== undefined) {
       const choice = this.primary.resolveWorker(mode);
-      if (!choice || !this.primary.available(choice) || capabilities(choice.provider).structured === false)
+      if (!choice || !this.primary.available(choice))
         throw new Error('Choose an available model supported by the main Bot.');
     }
 
