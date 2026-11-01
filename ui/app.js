@@ -3351,6 +3351,17 @@ function scrollChatToEnd() {
   requestAnimationFrame(step);
 }
 
+// Scroll to the latest message (#scroll-latest): shown while the chat is scrolled up by more than 40% of its visible
+// height (at least 160px), so a few lines above the end do not bring it up. New content or a resize updates it too.
+{
+  const chat = $('#conversation'), button = $('#scroll-latest');
+  const update = () => { button.hidden = chat.scrollHeight - chat.scrollTop - chat.clientHeight <= Math.max(160, chat.clientHeight * 0.4); };
+  chat.addEventListener('scroll', update, { passive: true });
+  const sizes = new ResizeObserver(update);
+  sizes.observe(chat); sizes.observe($('#messages'));
+  button.onclick = () => scrollChatToEnd();
+}
+
 // Brings a project copy's changes into the project it came from; the runner shows the files and asks first.
 async function applyCopy(workspace) {
   try {

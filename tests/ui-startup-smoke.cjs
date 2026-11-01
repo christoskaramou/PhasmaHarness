@@ -1840,6 +1840,24 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript(`[...document.querySelectorAll('#messages .routing-status')].map(line => line.textContent).find(text => text.startsWith('Model swap'))`),
     'Model swap: swapped Weak · medium → Strong · medium · difficulty 70/100 · gain 66 vs margin 15 · you chose Swap');
   askingChat.items.pop();
+  // Scroll to the latest message: hidden at the end and a few lines above it, shown further up; a click goes to the end.
+  const page = code => window.webContents.executeJavaScript(code);
+  await page(`(() => { const filler = document.createElement('div'); filler.id = 'scroll-filler'; filler.style.height = '4000px'; document.querySelector('#messages').append(filler); return true; })()`);
+  const latestHiddenAt = gap => page(`new Promise(resolve => { const chat = document.querySelector('#conversation');
+    chat.scrollTo({ top: chat.scrollHeight - chat.clientHeight - ${gap}, behavior: 'instant' });
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve(document.querySelector('#scroll-latest').hidden))); })`);
+  assert.equal(await latestHiddenAt(0), true, 'no button at the latest message');
+  assert.equal(await latestHiddenAt(100), true, 'no button a few lines above it');
+  assert.equal(await latestHiddenAt(2000), false, 'the button shows further up');
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/scroll-latest.png'), (await window.webContents.capturePage()).toPNG());
+  await page(`document.querySelector('#scroll-latest').click(); true`);
+  let atEnd = false;
+  for (let i = 0; i < 100 && !atEnd; i++) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+    atEnd = await page(`(() => { const chat = document.querySelector('#conversation'); return chat.scrollHeight - chat.scrollTop - chat.clientHeight < 2 && document.querySelector('#scroll-latest').hidden; })()`);
+  }
+  assert.ok(atEnd, 'the button scrolls to the latest message and goes away');
+  await page(`document.querySelector('#scroll-filler').remove(); true`);
   // A pinned bot's Edit dialog offers Return to Auto, which saves at once.
   await agents.saveAgent({ ...agents.profile(profile.id), mode: 'terra-light' });
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); editAgent(fleetState.agents.find(agent => agent.id === ' + JSON.stringify(profile.id) + ')); true');
