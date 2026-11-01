@@ -43,12 +43,13 @@ function Request-HarnessQuit($folder, $electron) {
     } finally { $env:ELECTRON_RUN_AS_NODE = $runAsNode }
 }
 
-function Wait-HarnessClosed($folder, [int]$timeoutSeconds = 45) {
+function Wait-HarnessClosed($folder, [int]$timeoutSeconds = 45, [int]$killSeconds = 10) {
     $folder = [IO.Path]::GetFullPath($folder)
     $electron = Join-Path $folder 'node_modules\electron\dist\electron.exe'
     $dependencies = Join-Path $folder 'node_modules'
     $deadline = [DateTime]::UtcNow.AddSeconds($timeoutSeconds)
     $request = $null
+    $forced = $false
     try {
         if (Get-HarnessProcesses $electron) {
             Write-Host 'Stopping Phasma Harness and its workers...'
@@ -62,8 +63,16 @@ function Wait-HarnessClosed($folder, [int]$timeoutSeconds = 45) {
             }
             if (-not $running.Count -and -not $blocked -and (-not $request -or $request.HasExited)) { return }
             if ([DateTime]::UtcNow -ge $deadline) {
+                if ($running.Count -and -not $forced) {
+                    # Only this folder's Electron processes; the runner's kernel job (runner-job.ps1) ends its workers with it.
+                    Write-Host "Phasma Harness did not quit within $timeoutSeconds seconds; ending its processes."
+                    Stop-Process -Id $running.ProcessId -Force -ErrorAction SilentlyContinue
+                    $forced = $true
+                    $deadline = [DateTime]::UtcNow.AddSeconds($killSeconds)
+                    continue
+                }
                 if ($blocked) { throw "Dependencies are still in use or inaccessible: $blocked. Close the app using this file and retry. No dependencies were changed." }
-                throw "Harness did not finish shutting down (processes: $($running.ProcessId -join ', ')). Quit runner from its tray icon and retry. Older running versions need this once. No dependencies were changed."
+                throw "Harness did not finish shutting down (processes: $($running.ProcessId -join ', ')), even after it was ended. Quit runner from its tray icon and retry. No dependencies were changed."
             }
             Start-Sleep -Milliseconds 300
         }

@@ -8,6 +8,9 @@ app.setName('Phasma Harness');
 const quitForInstall = process.argv.includes('--quit-for-install');
 // A control launch must hand off without loading dependencies or starting another runner.
 const ownsRunner = app.requestSingleInstanceLock({ quitForInstall: quitForInstall ? process.execPath : null });
+// Once the lock request is sent, a control launch moves to its own profile so its Chromium cache stays out of the running
+// app's folder (sharing it printed "Unable to move the cache: Access is denied" during Windows setup).
+if (quitForInstall) app.setPath('userData', path.join(app.getPath('userData'), 'quit-for-install'));
 if (!ownsRunner || quitForInstall) { app.quit(); return; }
 const { createRunner, RunnerWindow } = require('./runner.cjs');
 const { configureWindowZoom } = require('./window-zoom.cjs');

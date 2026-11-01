@@ -80,19 +80,30 @@ function Start-Sleep {
     $script:running--
     if ($script:releaseOnWait) { $script:held.Dispose(); $script:releaseOnWait = $false }
 }
+function Stop-Process {
+    param([int[]]$Id, [switch]$Force, $ErrorAction)
+    $script:killed += $Id
+    if ($script:killWorks) { $script:running = 0 }
+}
 function Expect-PreflightFailure($folder, $pattern) {
-    try { Wait-HarnessClosed $folder 0 }
+    try { Wait-HarnessClosed $folder 0 0 }
     catch { if ($_.Exception.Message -match $pattern) { return }; throw }
     throw 'A blocked preflight must fail before dependency installation.'
 }
-$script:scans = 0; $script:requests = 0; $script:running = 0
+$script:scans = 0; $script:requests = 0; $script:running = 0; $script:killed = @()
 Wait-HarnessClosed $harnessFolder
 if ($script:requests -ne 0) { throw 'Closed Harness or another Electron app must not be sent a shutdown request.' }
 $script:running = 3
 Wait-HarnessClosed $harnessFolder
 if ($script:requests -ne 1 -or -not $script:disposed -or $script:running -ne 0) { throw 'Request shutdown once, then wait until every matching process exits.' }
-$script:running = 1
-Expect-PreflightFailure $harnessFolder 'did not finish shutting down.*123.*Older running versions'
+if ($script:killed.Count) { throw 'A graceful shutdown within the wait must not end any process.' }
+# Past the wait, only this folder's Electron processes are ended (never the other app, pid 999), then the wait repeats.
+$script:running = 1; $script:killWorks = $true
+Wait-HarnessClosed $harnessFolder 0 0
+if ($script:running -ne 0 -or ($script:killed -join ',') -ne '123') { throw 'A timed-out shutdown must end only matching processes, then continue.' }
+$script:running = 1; $script:killWorks = $false; $script:killed = @()
+Expect-PreflightFailure $harnessFolder 'did not finish shutting down.*123.*even after it was ended'
+if (($script:killed -join ',') -ne '123') { throw 'Force-kill must be tried once before failing, and only on matching processes.' }
 $script:scanFailure = $true
 Expect-PreflightFailure $harnessFolder 'fixture scan failure'
 $script:scanFailure = $false; $script:running = 0

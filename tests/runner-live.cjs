@@ -24,6 +24,13 @@ if (wrapper) {
     if (code === 0) {
       try {
         assert.equal(fs.readFileSync(path.join(root, 'install-quit-verified'), 'utf8'), 'cleanup completed');
+        const requestPid = Number(fs.readFileSync(path.join(root, 'quit-request.pid'), 'utf8'));
+        for (let i = 0; i < 100; i++) {
+          try { process.kill(requestPid, 0); } catch { break; }
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        const requestErrors = fs.readFileSync(path.join(root, 'quit-request.log'), 'utf8');
+        assert.doesNotMatch(requestErrors, /Unable to move the cache|cache_util/, `the install quit request used the running app's profile: ${requestErrors.trim().slice(0, 300)}`);
         const { spawnSync } = require('node:child_process');
         const probe = spawnSync(require('electron'), [__filename, '--probe-client', '--quit-for-install'], {
           windowsHide: true, timeout: 15000, encoding: 'utf8', env: { ...process.env, PHASMA_RUNNER_TEST_ROOT: root },
@@ -112,9 +119,13 @@ if (!childClient) {
       console.log('Runner lifecycle passed: close/reconnect preserves work; installer request waits for worker cleanup; other installations stay open.');
       clearTimeout(watchdog);
     });
+    // Its stderr is checked after the run: the request must not touch this runner's cache (installer cache error).
+    const requestLog = fs.openSync(path.join(root, 'quit-request.log'), 'w');
     const request = spawn(process.execPath, [__filename, '--probe-client', '--quit-for-install'], {
-      windowsHide: true, stdio: 'ignore', env: { ...process.env, PHASMA_RUNNER_TEST_ROOT: root },
+      windowsHide: true, stdio: ['ignore', 'ignore', requestLog], env: { ...process.env, PHASMA_RUNNER_TEST_ROOT: root },
     });
+    fs.closeSync(requestLog);
+    fs.writeFileSync(path.join(root, 'quit-request.pid'), String(request.pid));
     request.once('error', error => { console.error(error); app.exit(1); });
   }).catch(error => { clearTimeout(watchdog); console.error(error.stack); app.exit(1); });
 }
