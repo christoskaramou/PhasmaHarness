@@ -1237,6 +1237,31 @@ class Agents extends EventEmitter {
     controller.sessionAllows.delete(session.id);
   }
 
+  // A bot's agent_delegate with its difficulty rating: a task outside an Auto worker's reach goes to a worker like it whose
+  // model fits, or to a new one the sender makes (controller/model-swaps.cjs), and the result says so.
+  async delegateRated(controller, source, { agentId, task, difficulty }) {
+    if (!['low', 'medium', 'high', 'xhigh'].includes(difficulty)) throw new Error('Rate the task low, medium, high or xhigh, or leave difficulty out.');
+    // delegate's own refusals for this target first (self, another bot's sub-bot, a circular chain, a paused budget, an
+    // isolated copy, access, capacity), so a refused task is never redirected and leaves no new worker behind.
+    const { workspace, ancestors } = this.delegate(controller, source, agentId, task, [], null, null, { dryRun: true });
+    const reach = agentId === 'main' ? null : controller.workerForReach(source, agentId, difficulty, workspace, ancestors);
+    let to = reach ? reach.to : agentId;
+    if (reach && !to) {
+      // Auto, not the sender's model, which its bots otherwise follow: the new worker routes for this task.
+      to = (await this.tool(controller, { ...source, workspace, access: reach.from.access }, 'agent_create',
+        { name: this.freeName(reach.from.base), instructions: reach.from.instructions, mode: 'auto' })).id;
+    }
+    const result = this.delegate(controller, source, to, task);
+    return reach ? { ...result, reach: { from: reach.from.name, created: !reach.to, ...reach.decision } } : result;
+  }
+
+  // `base`, or `base 2`, `base 3`… when an agent has that name.
+  freeName(base) {
+    let name = base, suffix = 2;
+    while (this.primary.data.agents.some(agent => agent.name.toLowerCase() === name.toLowerCase()) || this.reservedName(name)) name = `${base} ${suffix++}`;
+    return name;
+  }
+
   checkDelegationCapacity(controller, source, count = 1) {
     const limit = controller.isCoordinator() ? 10 : 3;
     if ((source.agentDelegations || 0) + count > limit) throw new Error(controller.isCoordinator()
@@ -1284,6 +1309,9 @@ class Agents extends EventEmitter {
     const access = ACCESS_MODES[Math.min(...[...(resuming ? [resumeTask.access] : []), source.access, visible?.access || foreground.data.settings.access,
       current?.access || foreground.data.settings.access].map(value => ACCESS_MODES.findIndex(a => a.id === value)))]?.id;
     if (!access) throw new Error('Invalid delegation permissions.');
+    // Every refusal above, and nothing else: a rated task checks its target this way before a redirect or a new worker
+    // (delegateRated, coordinator agent_work), and gets the workspace the task would run in.
+    if (options.dryRun) return { workspace, ancestors };
     const target = existing || this.execution(agentId);
     if (!resuming) this.checkDelegationCapacity(sourceController, source);
     const occupied = target.busy || target.loading.size || target.stopping.size || target.cleanupPending.size || target.requests.size || target.blockedReason() || current?.queue?.length || current?.delegationQueue?.some(job => !job.delivered) || this.pendingDelegations(current?.id) || (current?.delegation && !current.delegation.delivered);
@@ -1325,7 +1353,10 @@ class Agents extends EventEmitter {
       try { this.budgets.persist(); sourceController.save(); } catch { /* The saved count can remain conservative; no assignment was acknowledged. */ }
       throw error;
     }
-    if (!occupied && previous.access !== access) target.sessionAllows.delete(session.id);
+    // A new job starts without the last job's "allow for this session" approvals, as a queued one does (promoteAssignment);
+    // only a direct task resumed after its budget pause keeps them, at the same access. 2026-11-01: an idle worker's
+    // approvals carried over to the next sender's job whenever the access level matched.
+    if (!occupied && (!resuming || previous.access !== access)) target.sessionAllows.delete(session.id);
     target.changed();
     try { this.pump(); }
     catch (error) {
@@ -2187,7 +2218,8 @@ class Agents extends EventEmitter {
         ...(creator && !batch ? { inheritAccess: session.access === creator.access, inheritMode: !asked } : {}) };
       return this.saveAgent({ ...args, mode, workspace: session.workspace, access: session.access, createdBy, ...inheritance }, batch);
     }
-    if (name === 'agent_delegate' && Object.keys(args).every(key => ['agentId', 'task'].includes(key))) return this.delegate(controller, session, args.agentId, args.task);
+    if (name === 'agent_delegate' && Object.keys(args).every(key => ['agentId', 'task', 'difficulty'].includes(key)))
+      return args.difficulty == null ? this.delegate(controller, session, args.agentId, args.task) : this.delegateRated(controller, session, args);
     if (name === 'agent_message' && Object.keys(args).every(key => ['agentId', 'messageId', 'text', 'kind', 'replyTo', 'jobId'].includes(key))) return this.sendMessage(controller, session, args);
     if (name === 'agent_artifact' && Object.keys(args).every(key => ['artifactId', 'path', 'expectedVersion'].includes(key))) return this.publishArtifact(controller, session, args);
     if (name === 'agent_revise' && Object.keys(args).every(key => ['jobId', 'expectedRevision', 'amendmentId', 'text'].includes(key))) return this.revise(controller, session, args);

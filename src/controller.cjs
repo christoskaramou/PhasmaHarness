@@ -32,7 +32,9 @@ const { setupFingerprint, textHash, skillHashes, checksHash } = require('./setup
 const { projectRules, loadsRulesItself } = require('./workspace/project-instructions.cjs');
 const { stripTaskStatus } = require('./routing/task-state.cjs');
 const { withoutImages } = require('./image-input.cjs');
-const { EFFORT_CAPS, DEFAULT_EFFORT_CAP, capCatalog } = require('./routing/effort-cap.cjs');
+const { EFFORT_CAPS, DEFAULT_EFFORT_CAP } = require('./routing/effort-cap.cjs');
+// Below this, Jev's assessment gets the smart router's second opinion (send); providers/jev.cjs marks it low confidence.
+const JEV_UNSURE = 0.5;
 const processTree = require('./process-tree.cjs');
 const { prepare: prepareFiles } = require('../ui/attachments.js');
 const { CONTEXT_INSTRUCTIONS, ACCESS_MODES, sameEffort, DEFAULT_ROUTER, sessionAllowKey, accessMode, isMcpConfirmation } = require('./controller/shared.cjs');
@@ -186,6 +188,11 @@ class Controller extends EventEmitter {
       }
       session.queueSending = false;
       session.compacting = false;
+      // A model swap question ends with the app; its message was never sent, and says so ("Not sent: …").
+      if (session.pendingMessage?.modelSwap) {
+        delete session.pendingMessage.modelSwap;
+        session.pendingMessage.error = 'The app closed during the model question. Send it again.';
+      }
       session.submission = null;
       session.activeTaskId = null;
       session.access ??= this.data.settings.access;
@@ -229,6 +236,9 @@ class Controller extends EventEmitter {
         if (this.busy) {
           const session = this.session(this.busy);
           const submission = session.submission;
+          // A model swap question (controller/model-swaps.cjs) ends with the connection, as with Stop: its turn stops before
+          // sending, so a later answer cannot start a turn the chat no longer counts as running.
+          if (this.swapPrompts?.has(session.id)) { this.stopping.add(session.id); this.endModelSwap(session.id); }
           if (submission && submission.state !== 'completed' && submission.state !== 'unconfirmed')
             this.finishTurn(session, submission, { status: 'interrupted', error: message, reason: 'connection lost' });
           else if (!this.gate) { session.status = 'interrupted'; session.compacting = false; this.busy = null; }
@@ -791,8 +801,8 @@ class Controller extends EventEmitter {
     if (session.userTurn && !failover)
       this.scanAfterUserTurn(session, text);
     if (this.isCoordinator()) return this.sendCoordinator(session, { text, images, fileMessage, mode: chosenMode, agentReply, agentReplyCancelled, agentResult, agentMail, routineRun });
-    const originalRequest = session.delegation && this.agents?.executionText(session.delegation) === text
-      ? this.agents.requestFor(session.delegation) : null;
+    const assigned = !!session.delegation && this.agents?.executionText(session.delegation) === text;
+    const originalRequest = assigned ? this.agents.requestFor(session.delegation) : null;
     const routingText = originalRequest?.text || text;
     let selected = wikiWorker ? { ...wikiWorker, wikiTaskId, source: 'manual', reason: 'Wiki proposal using the original task worker.' }
       : this.planPreset() || (chosenMode === 'auto' ? route(routingText) : { ...this.resolveWorker(chosenMode), source: 'manual', reason: 'Your manual selection.' });
@@ -844,11 +854,7 @@ class Controller extends EventEmitter {
         this.routing = id; this.changed();
         // Only workers within the effort cap are offered, so Smart, Jev, escalation and failover all choose within it.
         // Workers of a provider at its usage limit are left out while another provider can take the message.
-        const usable = capCatalog(this.catalog().filter(p => p.worker && this.available(p) && (!images.length || p.images)), this.data.settings.effortCap);
-        const routingCatalog = () => {
-          const unlimited = usable.filter(p => !this.limits.limited(p.provider || 'codex', p.model));
-          return unlimited.length ? unlimited : usable;
-        };
+        const routingCatalog = () => this.autoCatalog(images);
         const context = { ...session, ...previousState, configuredChecks: this.data.settings.checks?.[session.workspace] || [], routingCatalog: routingCatalog(), routerChoice: router, attachedImageCount: images.length, attachedImages: this.jevImageAssist() ? images : [],
           // The presets this project's checks proved per kind of work (src/setups.cjs).
           provenSetups: this.provenSetupsFor(session.workspace), autoLowModel: this.data.settings.autoLowModel };
@@ -884,9 +890,33 @@ class Controller extends EventEmitter {
             const note = `Jev was unavailable (${String(error.message).slice(0, 160)}); the smart router chose instead.`;
             selected = { ...selected, routerFallback: note, reason: selected.reason ? `${note} ${selected.reason}` : note };
           }
+          // Jev unsure of its own assessment (its least confident answer under 0.5, Jev's own low-confidence line): the smart
+          // router assesses the message again and its choice stands; if that fails, Jev's does. Seen 2026-11-01: Jev rated
+          // security audits "lookup, low" at confidence 0.13, so the model for simple messages ran them.
+          if (selected.source === 'jev' && selected.router?.confidence < JEV_UNSURE && smartReady()) {
+            const jev = selected;
+            try {
+              selected = await smart();
+              const note = `Jev was unsure (confidence ${jev.router.confidence.toFixed(2)}, ${jev.assessment?.difficulty || 'unrated'} difficulty); the smart router assessed this message.`;
+              selected = { ...selected, jevOpinion: { confidence: jev.router.confidence, preset: jev.id, assessment: jev.assessment, router: jev.router },
+                reason: selected.reason ? `${note} ${selected.reason}` : note };
+            } catch (error) {
+              if (error.name === 'AbortError' || this.stopping.has(id)) throw error;
+              this.log.warn('Smart router second opinion failed; Jev\'s choice stands', { error: String(error.message).slice(0, 300) });
+            }
+          }
         } finally { this.routing = null; this.warmRouter(); }
         selected = { ...selected, effortCap: this.data.settings.effortCap };
         if (this.stopping.has(id)) throw new Error('Turn was stopped before sending.');
+        // An Auto bot keeps its model unless a swap is worth its conversation, and asks before one (controller/model-swaps.cjs).
+        // Delegated tasks do not ask: nobody watches this chat for them, and a rated dispatch (Hub's agent_work, a bot's
+        // agent_delegate) already sent a task outside this model's reach to another worker.
+        if (this.agents && !failover && !wikiTaskId) {
+          selected = await this.modelSwapChoice(session, selected, routingCatalog(), !agentReply && !session.groupChatId && !assigned);
+          if (this.stopping.has(id)) throw new Error('Turn was stopped before sending.');
+          // Create a sub-bot: the message goes to a new sub-bot on the suggested model, and this bot sends nothing.
+          if (selected.modelSwap?.outcome === 'delegated') return await this.handToSubBot(session, selected, text, images, clientId);
+        }
       }
       if (!this.available(selected)) throw new Error('Selected model is disabled or not available.');
       if (images.length && selected.images === false && !this.jevImageAssist()) throw new Error('Enable image support for this model, or Jev image assist, before sending images.');
@@ -1667,6 +1697,8 @@ class Controller extends EventEmitter {
     session.queuePaused = true;
     if (budgetId) session.queuePauseBudgetId = budgetId;
     else delete session.queuePauseBudgetId;
+    // A pending model swap question: nothing has started, so ending the question stops the turn before sending.
+    if (this.swapPrompts?.has(session.id)) { this.stopping.add(session.id); this.endModelSwap(session.id); this.changed(); return; }
     if (this.coordinatorAbort) { this.stopping.add(session.id); this.coordinatorAbort.abort(); return; }
     // Waiting for a worker cleanup before a turn or its checks: nothing has started, so the waiter only has to see it.
     if (this.cleanupWait === session.id) { this.stopping.add(session.id); this.changed(); return; }
@@ -1890,6 +1922,7 @@ class Controller extends EventEmitter {
     this.claude.close(); this.cursor.close();
     for (const backend of this.nativeCLIs.values()) Promise.resolve(backend.close()).catch(error => this.log.error('Native CLI close failed', { message: error.message }));
     this.cancelHelpers();
+    for (const id of [...(this.swapPrompts?.keys() || [])]) { this.stopping.add(id); this.endModelSwap(id); }
     for (const abort of this.reflections || []) abort.abort();
     this.smartRouter.cancel();
     this.smartRouter.close?.();
@@ -1923,6 +1956,7 @@ for (const methods of [
   require('./controller/trials.cjs'),
   require('./controller/chat-scan.cjs'),
   require('./controller/setups.cjs'),
+  require('./controller/model-swaps.cjs'),
 ]) {
   for (const [name, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(methods))) {
     if (Object.hasOwn(Controller.prototype, name)) throw new Error(`Controller.${name} is defined twice.`);

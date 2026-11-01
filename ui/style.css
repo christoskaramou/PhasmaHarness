@@ -1464,6 +1464,39 @@ dialog.image-viewer[open] {
   flex:none
 }
 
+/* Auto's model swap question under a waiting message (renderModelSwap in app.js). */
+.model-swap {
+  border:1px solid var(--border-strong);
+  border-radius:10px;
+  padding:10px 12px;
+  display:grid;
+  gap:6px;
+  max-width:640px
+}
+
+.model-swap-options {
+  margin:0;
+  padding-left:18px;
+  display:grid;
+  gap:4px
+}
+
+.model-swap p {
+  margin:0
+}
+
+.model-swap-actions {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:8px
+}
+
+.model-swap-actions .compact-action.primary {
+  background:var(--accent);
+  border-color:var(--accent)
+}
+
 .message-body,#prompt {
   font-size:calc(15px * var(--font-scale,1))
 }

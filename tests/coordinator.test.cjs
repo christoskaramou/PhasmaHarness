@@ -1705,7 +1705,7 @@ test('Hub creates several agents at once from one request, with an accurate coun
 
   replies.push(action('agent_create', { names, instructions: 'General helper' }));
   await send('create 10 agents with random names');
-  const strict = action('agent_create', { name: null, instructions: 'General helper', mode: null, effort: null, names });
+  const strict = { ...action('agent_create', { name: null, instructions: 'General helper', mode: null, effort: null, names }), difficulty: null };
   assert.doesNotThrow(() => require('../src/providers/structured.cjs').structuredResponse(strict, calls.at(-1).request.schema),
     'real providers validate the list against Hub\'s response schema');
   assert.deepEqual(hub.data.agents.map(agent => agent.name), names, 'the request is the approval: one action creates every agent');
@@ -1893,6 +1893,133 @@ test('Hub honors explicit worker model and effort without changing its chat mode
   assert.match(session.items.at(-1).text, /^Model unavailable\..*Nothing was sent\.$/);
   assert.equal(hub.data.agents.length, 2);
   assert.equal(session.error, null);
+
+  // 2026-11-01: an effort for an existing worker failed the whole Hub turn ("Turn failed: Use a new worker…"). Nothing was
+  // sent, so Hub now gets it back once as a tool error and answers.
+  replies.push(action('agent_work', { agentId: hub.data.agents[0].id, task: 'Review again.', effort: 'low' }), answer('Kept its model.'));
+  await send('Review again with low effort');
+  const refused = JSON.parse(calls.findLast(call => call.request.prompt?.includes('Existing worker settings are preserved')).request.prompt).toolResults.at(-1);
+  assert.match(refused.result.error, /^Use a new worker .*agent_update first\. Existing worker settings are preserved\.$/);
+  assert.equal(session.items.at(-1).text, 'Kept its model.');
+  assert.equal(session.error, null);
+  assert.equal(hub.data.agents.length, 2, 'no worker was created or sent');
+});
+
+test('Hub sends a task outside an Auto worker\'s reach to an idle worker that fits, or a new one with its role and access', async t => {
+  const { hub, session, agents, replies, send } = await setup(t);
+  const SCORES = { weak: 50, cheap: 65, strong: 100 }, COSTS = { weak: 0.1, cheap: 0.3, strong: 3 };
+  const catalog = Object.keys(SCORES).flatMap(model => ['low', 'medium', 'high'].map(effort => ({ id: `codex:${model}:${effort}`, provider: 'codex', model, effort,
+    label: `${model} · ${effort}`, worker: true, enabled: true, images: true, benchmarks: [{ source: 'aa-index', version: '4', harness: 'aa', score: SCORES[model], costUsd: COSTS[model] }] })));
+  // A read-only Auto reviewer whose background conversation, where Hub's tasks run, has a model.
+  const worker = async (name, model) => {
+    const profile = await agents.saveAgent({ name, workspace: session.workspace, access: 'read-only', mode: 'auto', instructions: 'Review code.' });
+    if (model) {
+      const execution = agents.execution(profile.id);
+      await Promise.all(agents.initializing.values());
+      execution.autoCatalog = () => catalog;
+      agents.conversation(execution, true, session.workspace, 'read-only').routes = [{ id: `codex:${model}:medium`, provider: 'codex', model, effort: 'medium' }];
+    }
+    return profile;
+  };
+  const job = id => agents.conversation(agents.executions.get(id))?.delegation;
+  const reply = () => session.items.findLast(item => item.type === 'agentMessage').text;
+
+  // Too hard for its model, and no other worker: a new Auto worker with its role and its lower access takes it.
+  const reviewer = await worker('Reviewer', 'weak');
+  replies.push(action('agent_work', { agentId: reviewer.id, task: 'Audit the session handling.', difficulty: 'high' }));
+  await send('Audit the session handling');
+  const created = hub.data.agents.find(profile => profile.name === 'Reviewer 2');
+  assert.deepEqual([created.mode, created.instructions, created.access], ['auto', 'Review code.', 'read-only']);
+  assert.equal(session.hubWorker, created.id);
+  assert.ok(job(created.id)); assert.equal(job(reviewer.id), undefined);
+  // A new worker may still be starting, so its task can be queued.
+  assert.match(reply(), /^(Sent the task to|Queued the task for) \*\*Reviewer 2\*\*\./);
+  assert.ok(reply().endsWith(' This high task (difficulty 70) is beyond weak · high: strong · high fits it better by 66, over the 15-point margin. So it went to a new Auto worker instead of **Reviewer**.'));
+
+  // More than an easy task needs: an idle worker with the same role and access and no model yet takes it. The busy new
+  // worker and Reviewer, whose weak model is below this task too, are passed over.
+  const lead = await worker('Lead', 'strong'), spare = await worker('Spare');
+  const count = hub.data.agents.length;
+  replies.push(action('agent_work', { agentId: lead.id, task: 'List the config keys.', difficulty: 'low' }));
+  await send('List the config keys');
+  assert.equal(session.hubWorker, spare.id); assert.equal(hub.data.agents.length, count, 'no worker was created');
+  assert.match(reply(), /^(Sent the task to|Queued the task for) \*\*Spare\*\*\. .* strong · low is more than this low task \(difficulty 15\) needs: cheap · low fits it better by 17, over the 15-point margin\. So it went to another Auto worker instead of \*\*Lead\*\*\.$/);
+
+  // Within reach, and without a rating, the chosen worker takes the task: a long conversation raises the margin.
+  const background = agents.executions.get(reviewer.id), work = agents.conversation(background);
+  work.items.push({ type: 'agentMessage', text: 'x'.repeat(32000) });
+  // Hub's tasks never pause on a swap question in the worker's chat: the router's stronger pick keeps the model, unasked.
+  background.available = () => true;
+  background.smartRouter.choose = async () => ({ ...catalog.find(p => p.id === 'codex:strong:high'), reason: 'Router pick.', source: 'model',
+    assessment: { difficulty: 'high', taskKind: 'review', risk: 'low', uncertainty: 'low' } });
+  replies.push(action('agent_work', { agentId: reviewer.id, task: 'Check one call site.', difficulty: 'low' }));
+  await send('Check one call site');
+  assert.equal(session.hubWorker, reviewer.id); assert.ok(job(reviewer.id));
+  assert.match(reply(), /^(Sent the task to|Queued the task for) \*\*Reviewer\*\*\. [^.]*here\.$/, 'no reach note');
+  await until(() => work.routes.at(-1)?.modelSwap);
+  assert.deepEqual([work.routes.at(-1).id, work.routes.at(-1).modelSwap.outcome], ['codex:weak:high', 'unasked']);
+  assert.equal(work.pendingMessage?.modelSwap, undefined);
+  replies.push(action('agent_work', { agentId: lead.id, task: 'List more keys.' }));
+  await send('List more keys');
+  assert.equal(session.hubWorker, lead.id); assert.equal(hub.data.agents.length, count);
+
+  // 2026-11-01 ReachLab's audit: a rated task to another bot's sub-bot was redirected to a copy of it instead of refused.
+  const helper = await agents.saveAgent({ name: 'Helper', workspace: session.workspace, access: 'read-only', mode: 'auto', instructions: 'Review code.', createdBy: lead.id });
+  const helperWork = agents.execution(helper.id);
+  await Promise.all(agents.initializing.values());
+  helperWork.autoCatalog = () => catalog;
+  agents.conversation(helperWork, true, session.workspace, 'read-only').routes = [{ id: 'codex:weak:medium', provider: 'codex', model: 'weak', effort: 'medium' }];
+  const before = hub.data.agents.length;
+  replies.push(action('agent_work', { agentId: helper.id, task: 'Audit the session handling.', difficulty: 'high' }));
+  await assert.rejects(send('Audit the session handling'), /Helper works for the bot that made it/);
+  assert.equal(hub.data.agents.length, before, 'no copy of the sub-bot was made');
+});
+
+test('Hub Auto offers a model that fits its own rating of a request for its next messages, with Swap, Keep current and cooldowns', async t => {
+  const { hub, session, replies, send } = await setup(t);
+  const SCORES = { weak: 50, cheap: 65, strong: 100 }, COSTS = { weak: 0.1, cheap: 0.3, strong: 3 };
+  const eligible = Object.keys(SCORES).flatMap(model => ['low', 'medium'].map(effort => ({ id: `codex:${model}:${effort}`, provider: 'codex', model, effort,
+    label: `${model} · ${effort}`, worker: true, enabled: true, images: true, benchmarks: [{ source: 'aa-index', version: '4', harness: 'aa', score: SCORES[model], costUsd: COSTS[model] }] })));
+  hub.hubEligible = () => eligible;
+  let current = eligible.find(p => p.id === 'codex:weak:medium');
+  // As coordinatorChoice does: Hub Auto's pick is recorded as Auto's.
+  hub.coordinatorChoice = async () => { hub.data.hubModeSource = 'auto'; return { ...current, source: 'hub-auto', reason: 'Hub chat model.' }; };
+  const last = () => session.items.findLast(item => item.type === 'agentMessage');
+
+  // A request Hub rates hard for itself, on a weak model: the question waits under the reply, and nothing waits for it.
+  replies.push({ reply: 'Here is the migration plan.', difficulty: 'high', action: null });
+  await send('Plan the database migration');
+  const hard = last().modelSwap;
+  assert.deepEqual([hard.status, hard.hub, hard.current.label, hard.suggested.label, hard.difficulty, hard.gain, hard.margin],
+    ['pending', true, 'weak · medium', 'strong · medium', 70, 66, 15]);
+  assert.equal(hub.data.hubSwapQuestion.id, hard.id); assert.equal(hub.busy, null);
+  hub.answerModelSwap(session.id, hard.id, 'swap');
+  assert.deepEqual([hard.status, hard.outcome, hard.choice, hub.data.hubMode, hub.data.hubModeSource], ['answered', 'swapped', 'you chose Swap', 'codex:strong:medium', 'auto']);
+  assert.throws(() => hub.answerModelSwap(session.id, hard.id, 'keep'), /no longer open/);
+
+  // Within the cooldown nothing is asked; after it, an easy request on the strong model asks, and the next message without
+  // an answer keeps the model.
+  current = eligible.find(p => p.id === 'codex:strong:medium');
+  replies.push({ reply: 'Glad it helps.', difficulty: 'low', action: null });
+  await send('Thanks');
+  assert.equal(last().modelSwap, undefined);
+  hub.data.modelSwapState.last.tasks = 3;
+  replies.push({ reply: 'Hello.', difficulty: 'low', action: null });
+  await send('Hello');
+  const easy = last().modelSwap;
+  assert.deepEqual([easy.status, easy.suggested.label, easy.gain], ['pending', 'cheap · low', 17]);
+  replies.push(answer('Noted.'));
+  await send('Next thing');
+  assert.deepEqual([easy.status, easy.outcome, hub.data.hubMode], ['answered', 'expired', 'codex:strong:medium']);
+  assert.equal(hub.data.hubSwapQuestion, undefined);
+  assert.equal(last().modelSwap, undefined, 'an unrated reply asks nothing');
+
+  // A model the user chose for Hub is never swapped.
+  current = eligible.find(p => p.id === 'codex:weak:medium');
+  hub.coordinatorChoice = async () => { hub.data.hubModeSource = 'manual'; return { ...current, source: 'manual', reason: 'Chosen.' }; };
+  replies.push({ reply: 'Plan.', difficulty: 'xhigh', action: null });
+  await send('Design the architecture');
+  assert.equal(last().modelSwap, undefined);
 });
 
 test('a tracked job that runs on the Hub is marked admitted before its first model call, so a crash cannot replay it', async t => {
@@ -2387,7 +2514,8 @@ test('Hub uses local structured inference for replies and never treats malformed
   await hub.refreshAccount();
   const router = new SmartRouter(root, () => assert.fail('Local structured inference must not use the Responses backend'));
   t.after(() => router.close());
-  let reply = answer('Hello from local Hub');
+  // A strict reply has every field; Hub's rating of the request is one (null: unrated).
+  let reply = { ...answer('Hello from local Hub'), difficulty: null };
   router.providers = { structured: async (choice, request, signal) => {
     assert.equal(choice.provider, 'local'); assert.equal(choice.effort, null);
     assert.ok(request.schema.properties.action.anyOf.some(s => s.properties?.tool.enum.includes('agent_work')));

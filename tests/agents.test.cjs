@@ -2409,6 +2409,27 @@ test('the Main Bot changes a bot’s name, role, model and effort at the user’
   await assert.rejects(agents.tool(worker, chat, 'agent_update', { agentId: strong.agentId, name: 'Renamed' }), /Only the Main Bot/);
 });
 
+test('each delegated job starts without the last job\'s session approvals', async t => {
+  const { agents, workspace, add, addWorker } = await setup(t);
+  agents.pump = () => {}; // jobs are only placed; each is marked done before the next
+  const worker = await addWorker('Worker', workspace, 'danger-full-access');
+  const sender = await add('Sender', workspace, 'danger-full-access'), chat = agents.conversation(sender, true);
+  const send = task => {
+    const result = agents.delegate(sender, chat, worker.agentId, task);
+    const background = agents.conversation(worker);
+    assert.equal(background.delegation.id, result.jobId, 'the job starts at once, not queued');
+    return background;
+  };
+  let background = send('Edit the files.');
+  worker.sessionAllows.set(background.id, new Set(['approved in the first job']));
+  background.delegation.delivered = true;
+  // 2026-11-01 CardTest's audit: an idle worker kept a job's "allow for this session" approvals for the next job whenever
+  // the access level matched; a queued job already started without them.
+  background = send('Edit more files.');
+  assert.equal(background.access, 'danger-full-access');
+  assert.equal(worker.sessionAllows.has(background.id), false, 'the same level does not carry the last job\'s approvals');
+});
+
 test('all provider bridges can change another agent access and stop it, but never delete it', async t => {
   const { agents, primary, workspace, add } = await setup(t);
   const source = primary.create(workspace, 'workspace-write');

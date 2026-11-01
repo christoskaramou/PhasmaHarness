@@ -198,6 +198,7 @@
     <label>Role &amp; instructions<textarea id="agent-instructions" rows="4" maxlength="8000" placeholder="e.g. Review code for bugs. Explain each finding and keep changes read-only."></textarea></label>
     <div class="workspace-field"><span>Workspace</span><label class="inherit-check"><input type="checkbox" id="agent-inherit">Inherit</label><span class="path-field" id="agent-workspace-row"><input id="agent-workspace" required aria-label="Workspace"><button id="agent-browse" type="button">Browse…</button></span></div>
     <div class="agent-form-options"><label>Model<select id="agent-model"></select></label><label>Effort<select id="agent-effort"></select></label><label>Access<select id="agent-access"></select></label></div>
+    <p id="agent-auto-row" class="hint" hidden><button id="agent-auto" class="compact-action" type="button">Return to Auto</button> This agent always uses one model. Auto picks one per task and asks before swapping.</p>
     <p class="hint">Your agent is saved immediately. Connections start in the background.</p>
     <p id="agent-error" class="turn-error" role="alert"></p><div class="dialog-footer"><button id="agent-save" class="primary" type="submit">Create agent</button></div>
   </form></dialog>

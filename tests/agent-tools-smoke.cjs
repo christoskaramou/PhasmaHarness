@@ -49,8 +49,13 @@ app.whenReady().then(async () => {
     connectorServer = await require('./fixtures/connector-server.cjs').serve();
     await connectors.save({ name: 'Fixture', transport: 'http', url: connectorServer.url });
     server.listen(0, '127.0.0.1'); await once(server, 'listening');
+    const base_url = `http://127.0.0.1:${server.address().port}/v1`;
+    // 2026-11-01: Codex 0.166 resumes a thread only on its home's default provider ("This chat uses smoke, but your current
+    // provider is openai"), even when thread/resume names the provider. Harness always uses openai, its default; here the
+    // local provider is the default.
+    fs.writeFileSync(path.join(process.env.CODEX_HOME, 'config.toml'), `model_provider = "smoke"\n\n[model_providers.smoke]\nname = "Local smoke"\nbase_url = "${base_url}"\nwire_api = "responses"\nrequires_openai_auth = false\n`);
     await primary.bridge.start(); await client.start();
-    const config = { model_provider: 'smoke', 'model_providers.smoke': { name: 'Local smoke', base_url: `http://127.0.0.1:${server.address().port}/v1`, wire_api: 'responses', requires_openai_auth: false } };
+    const config = { model_provider: 'smoke', 'model_providers.smoke': { name: 'Local smoke', base_url, wire_api: 'responses', requires_openai_auth: false } };
     primary.providers = { config: () => ({ modelProvider: 'smoke', config }) };
     primary.connection = 'ready';
     const old = await client.call('thread/start', { cwd: root, model: 'gpt-6.1-sol', modelProvider: 'smoke', config, approvalPolicy: 'never', sandbox: 'read-only', developerInstructions: 'Old conversation instructions.' }, 15000);

@@ -76,23 +76,30 @@ function atEffort(model, difficulty, available) {
 // gpt-5.6-terra low (27, $0.14) and 0.65 to Sonnet 5.5 low (36, $0.35); medium picks Sonnet 5.5 medium from 0.6 to 0.75.
 const ADEQUATE = { low: 0.6, medium: 0.75 };
 
+// Each worker's general-index score. An effort with no score of its own counts at its model's best score at a lower
+// offered effort, a lower bound, and its cost stays unknown: Grok 4.7 has AA runs at low and high but not medium.
+function scorer(available) {
+  const rows = new Map(routerCatalog(available).map(row => [row.id, row]));
+  const own = p => rows.get(p.id)?.index;
+  const score = p => own(p) ?? Math.max(...available
+    .filter(q => modelKey(q) === modelKey(p) && EFFORT_ORDER.indexOf(q.effort) < EFFORT_ORDER.indexOf(p.effort))
+    .map(own)
+    .filter(Number.isFinite));
+  return { rows, score };
+}
+
+// The chat's model for new work. A stronger model's repair of a failed task (src/controller/task-gate.cjs) does not count.
+const currentRoute = session => (session.routes || []).findLast(route => !route.directAnswer && !route.escalatedFrom);
+
 // Harness, not the router, picks the worker from the router's assessment. High and xhigh get the strongest measured
 // model. Low and medium get this chat's current model when it is adequate (switching re-reads the conversation without
 // the prompt cache), else the adequate worker with the lowest API cost per index task. Unmeasured workers are not
 // ranked; with no measurements at all the current or first offered model runs. Effort always matches difficulty.
 function pickPreset(decision, session, available) {
   const { difficulty } = decision;
-  const rows = new Map(routerCatalog(available).map(row => [row.id, row]));
-  const own = p => rows.get(p.id)?.index;
-  // An effort with no score of its own counts at its model's best score at a lower offered effort, a lower bound, and
-  // its cost stays unknown: Grok 4.7 has AA runs at low and high but not medium.
-  const score = p => own(p) ?? Math.max(...available
-    .filter(q => modelKey(q) === modelKey(p) && EFFORT_ORDER.indexOf(q.effort) < EFFORT_ORDER.indexOf(p.effort))
-    .map(own)
-    .filter(Number.isFinite));
+  const { rows, score } = scorer(available);
   const cost = p => rows.get(p.id)?.taskCostUsd ?? Infinity;
-  // A stronger model's repair of a failed task (src/controller/task-gate.cjs) does not become the chat's model for new work.
-  const current = available.find(p => p.id === (session.routes || []).findLast(route => !route.directAnswer && !route.escalatedFrom)?.id);
+  const current = available.find(p => p.id === currentRoute(session)?.id);
   const choose = (p, rule) => ({ preset: p.id, reason: clip(`${difficulty} difficulty: ${rule}. ${decision.reason}`, 240) });
 
   // Settings → Routing → Model for simple messages; while it is outside the effort cap or at a usage limit, Harness picks.
@@ -142,7 +149,7 @@ function finalChoice(assessment, text, session, workspace, available) {
   const kept = taskWorker(decision, session, available);
   if (kept) return keepTask(decision, kept, text, session, workspace, available);
   const chosen = { ...applyPolicy(decision, text, session, workspace, available), sameTask: decision.sameTask === true && !!session.job?.worker };
-  return decision.userPick ? chosen : provenChoice(chosen, decision, session, available);
+  return decision.userPick ? { ...chosen, userPick: true } : provenChoice(chosen, decision, session, available);
 }
 
 function applyPolicy(decision, text, session, workspace, available) {
@@ -738,4 +745,4 @@ class SmartRouter {
   }
 }
 
-module.exports = { SmartRouter, routerModel, contextFor, applyPolicy, conversationDelta, strongest, atEffort, pickPreset };
+module.exports = { SmartRouter, routerModel, contextFor, applyPolicy, conversationDelta, strongest, atEffort, pickPreset, scorer, currentRoute, modelKey };

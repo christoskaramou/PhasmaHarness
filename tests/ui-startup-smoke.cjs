@@ -1788,6 +1788,71 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript('selectedAgent'), profile.id);
   assert.equal(profile.access, 'read-only');
   assert.equal(profile.instructions, 'Inspect source and report evidence.');
+  // An Auto bot's model swap question (src/controller/model-swaps.cjs) shows its scores under the waiting message, and
+  // Keep current answers it through the preload.
+  const swapAnswers = [];
+  ipcMain.handle('answerModelSwap', (_event, ...args) => { swapAnswers.push(args); return { answered: args[2] }; });
+  agents.conversation(agents.controller(profile.id), true);
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); selectAgent(' + JSON.stringify(profile.id) + ').then(() => true)');
+  const asking = agents.snapshot(), askingState = asking.agentStates[profile.id];
+  const askingChat = askingState.sessions.find(chat => chat.id === askingState.conversationId);
+  askingChat.pendingMessage = { id: 'swap-message', clientId: 'swap-message', type: 'userMessage', pending: true, createdAt: Date.now(), content: [{ type: 'text', text: 'Hard task' }],
+    modelSwap: { id: 'swap-question', status: 'pending', expiresAt: Date.now() + 180000, difficulty: 72, level: 'high', required: 87,
+      current: { id: 'codex:weak:high', label: 'Weak · high', fit: 25 }, suggested: { id: 'codex:strong:high', label: 'Strong · high', fit: 94 },
+      gain: 69, margin: 16, baseMargin: 15, context: { tokens: 1200, points: 1, crossProvider: false }, cooldown: null, reason: 'Strong fits better.' } };
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(asking) + '); true');
+  assert.deepEqual(await window.webContents.executeJavaScript(`[...document.querySelectorAll('#messages .model-swap button')].map(button => button.textContent)`),
+    ['Create a sub-bot', 'Swap here', 'Keep current']);
+  // Each answer says what it does; Swap here says what it costs this conversation.
+  assert.deepEqual(await window.webContents.executeJavaScript(`[...document.querySelectorAll('#messages .model-swap li')].map(item => item.textContent)`), [
+    'Create a sub-bot: a new bot under this one runs this task on Strong · high. This bot keeps Weak · high and its whole conversation, and the sub-bot’s result comes back here.',
+    'Swap here: this bot switches to Strong · high for this task and the next ones. It keeps this conversation but loses the prompt cache: Strong · high re-reads about 1,200 tokens of this conversation in full, which costs more on the first message.',
+    'Keep current: this task runs on Weak · high. Nothing changes.']);
+  assert.match(await window.webContents.executeJavaScript(`document.querySelector('#messages .model-swap').textContent`),
+    /Difficulty 72\/100 \(high\)\. Fit for this task: Weak · high 25, Strong · high 94\. Gain 69 against a 16-point margin \(15 base \+ 1 switching cost\)\./);
+  await window.webContents.executeJavaScript(`[...document.querySelectorAll('#messages .model-swap button')].at(-1).click(); true`);
+  await until(() => swapAnswers.length === 1, 'Keep current answers the swap question');
+  assert.deepEqual(swapAnswers[0], [askingChat.id, 'swap-question', 'keep']);
+  // Across providers, Swap here loses the working context; Create a sub-bot answers through the preload too.
+  Object.assign(askingChat.pendingMessage.modelSwap, { id: 'swap-question-2', context: { tokens: 1200, points: 9, crossProvider: true } });
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(asking) + '); true');
+  assert.match(await window.webContents.executeJavaScript(`document.querySelectorAll('#messages .model-swap li')[1].textContent`),
+    /^Swap here: .*It loses its working context: Strong · high gets about 1,200 tokens of this conversation as a quoted copy, not this session/);
+  await window.webContents.executeJavaScript(`document.querySelector('#messages .model-swap button').click(); true`);
+  await until(() => swapAnswers.length === 2, 'Create a sub-bot answers the swap question');
+  assert.deepEqual(swapAnswers[1], [askingChat.id, 'swap-question-2', 'subbot']);
+  // Hub's question for its next messages sits under its reply; Swap answers it, and the outcome then shows there.
+  askingChat.pendingMessage = null;
+  const hubSwap = { id: 'hub-question', status: 'pending', hub: true, difficulty: 70, level: 'high', required: 87,
+    current: { id: 'codex:weak:medium', label: 'Weak · medium', fit: 27 }, suggested: { id: 'codex:strong:medium', label: 'Strong · medium', fit: 93 },
+    gain: 66, margin: 15, baseMargin: 15, context: { tokens: 0, points: 0, crossProvider: false }, cooldown: null, reason: 'Strong fits better.' };
+  askingChat.items.push({ id: 'hub-reply', type: 'agentMessage', phase: 'final_answer', text: 'Here is the plan.', createdAt: Date.now(), modelSwap: hubSwap });
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(asking) + '); true');
+  assert.match(await window.webContents.executeJavaScript(`document.querySelector('#messages .model-swap').textContent`),
+    /^Auto suggests Strong · medium instead of Weak · medium for Hub’s next messages\..*Swap: Hub uses Strong · medium from your next message\. Nothing is lost: Hub sends its context with every request\.Keep current: Hub stays on Weak · medium\..*Your next message without an answer keeps Weak · medium\.$/);
+  assert.deepEqual(await window.webContents.executeJavaScript(`[...document.querySelectorAll('#messages .model-swap button')].map(button => button.textContent)`),
+    ['Swap to Strong · medium', 'Keep current'], 'Hub\'s own model has no sub-bot option');
+  await window.webContents.executeJavaScript(`document.querySelector('#messages .model-swap button').click(); true`);
+  await until(() => swapAnswers.length === 3, 'Swap answers Hub\'s question');
+  assert.deepEqual(swapAnswers[2], [askingChat.id, 'hub-question', 'swap']);
+  Object.assign(hubSwap, { status: 'answered', outcome: 'swapped', choice: 'you chose Swap' });
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(asking) + '); true');
+  assert.equal(await window.webContents.executeJavaScript(`[...document.querySelectorAll('#messages .routing-status')].map(line => line.textContent).find(text => text.startsWith('Model swap'))`),
+    'Model swap: swapped Weak · medium → Strong · medium · difficulty 70/100 · gain 66 vs margin 15 · you chose Swap');
+  askingChat.items.pop();
+  // A pinned bot's Edit dialog offers Return to Auto, which saves at once.
+  await agents.saveAgent({ ...agents.profile(profile.id), mode: 'terra-light' });
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); editAgent(fleetState.agents.find(agent => agent.id === ' + JSON.stringify(profile.id) + ')); true');
+  assert.equal(await window.webContents.executeJavaScript(`document.querySelector('#agent-auto-row').hidden`), false, 'a pinned bot shows Return to Auto');
+  await window.webContents.executeJavaScript(`document.querySelector('#agent-auto').click(); true`);
+  await until(() => agents.profile(profile.id).mode === 'auto', 'Return to Auto saves the bot on Auto');
+  assert.deepEqual(await window.webContents.executeJavaScript(`[document.querySelector('#agent-auto-row').hidden, document.querySelector('#agent-model').value]`), [true, 'auto']);
+  await window.webContents.executeJavaScript('document.querySelector("#agent-dialog .close-dialog").click(); true');
+  for (let i = 0; i < 100 && await window.webContents.executeJavaScript('document.querySelector("#agent-dialog").open'); i++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#agent-dialog").open'), false);
+  // saveAgent stores a new profile object; the checks below keep using this one.
+  controller.data.agents = controller.data.agents.map(agent => agent.id === profile.id ? Object.assign(profile, agent) : agent);
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#agent-list [data-action=delete]")'), null, 'Sidebar deletion uses the context menu');
   await window.webContents.executeJavaScript('selectAgent("main")');
   const completedBatchChat = agents.conversation(agents.controller(profile.id), true);
@@ -4074,6 +4139,8 @@ app.whenReady().then(async () => {
   agents.closing = true;
   agents.budgets.close();
   for (const c of agents.allControllers()) c.close();
+  phase = 'model swap IPC round trip';
+  await require('./model-swap-ui-check.cjs')(window, root, ipcMain);
   phase = 'group IPC round trip';
   await require('./group-chat-ui-check.cjs')(window, root, ipcMain);
   window.destroy();

@@ -144,6 +144,8 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
   handle('undoComparison', (id, comparisonId, part) => agents.owner(id).undoComparison(id, comparisonId, part));
   handle('undoRule', (id, noticeId) => agents.owner(id).undoRule(id, noticeId));
   handle('dismissSkillNotice', (id, noticeId) => agents.owner(id).dismissSkillNotice(id, noticeId));
+  // Swap or Keep current for an Auto bot's pending model question; sub-bot chats answer it too, like approvals.
+  handle('answerModelSwap', (id, promptId, choice) => agents.owner(id).answerModelSwap(id, promptId, choice));
   // Brings a project copy's own changes into the project it came from, after the user reviews the file list.
   handle('applyCopy', async workspace => {
     const preview = await agents.workspaces.changes(workspace);

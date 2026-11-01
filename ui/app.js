@@ -1148,6 +1148,7 @@ function showDialogEfforts(select, effort, groups, id) {
 function renderAgentModels() {
   const select = $('#agent-model');
   const mode = $('#agent-dialog').dataset.mode;
+  $('#agent-auto-row').hidden = !mode || mode === 'auto';
   if (providersConnecting().active) {
     showConnecting(select);
     $('#agent-effort').disabled = true;
@@ -1177,6 +1178,13 @@ for (const picker of ['#agent-model', '#agent-effort']) {
     renderAgentModels();
   };
 }
+// A pinned agent goes back to Auto; an open Edit dialog saves it at once, a new agent with Create.
+$('#agent-auto').onclick = () => {
+  $('#agent-dialog').dataset.mode = 'auto';
+  renderAgentModels();
+  agentEditor.commit();
+  $('#agent-model').focus();
+};
 
 // The Hub dialog's model list: every enabled model can run the Hub. Saving waits for it.
 function hubGroups() {
@@ -2479,6 +2487,59 @@ function renderComparison(view, sessionId, opened = true) {
   return details;
 }
 
+// Auto's question before a bot swaps models (src/controller/model-swaps.cjs): the scores, the margin, and what each answer
+// does: Create a sub-bot, Swap here or Keep current. Hub's own question (under its reply) has Swap and Keep current.
+// Unanswered by expiresAt (a bot) or by the next message (Hub), the current model stays.
+function renderModelSwap(swap, session) {
+  const card = element('div', 'model-swap');
+  card.setAttribute('role', 'group'); card.setAttribute('aria-label', 'Model swap question');
+  const { current, suggested, context } = swap;
+  const tokens = `about ${context.tokens.toLocaleString()} tokens of this conversation`;
+  card.append(
+    element('p', '', `Auto suggests ${suggested.label} instead of ${current.label} ${swap.hub ? 'for Hub’s next messages' : 'for this task'}.`),
+    element('p', 'muted', `Difficulty ${swap.difficulty}/100 (${swap.level}). Fit for this task: ${current.label} ${current.fit}, ${suggested.label} ${suggested.fit}. ` +
+      `Gain ${swap.gain} against a ${swap.margin}-point margin (${swap.baseMargin} base + ${context.points} switching cost).`));
+  const option = (label, text) => { const item = element('li', '', ''); item.append(element('strong', '', `${label}: `), text); return item; };
+  const options = element('ul', 'model-swap-options');
+  if (swap.hub) options.append(
+    option('Swap', `Hub uses ${suggested.label} from your next message. Nothing is lost: Hub sends its context with every request.`),
+    option('Keep current', `Hub stays on ${current.label}.`));
+  else options.append(
+    option('Create a sub-bot', `a new bot under this one runs this task on ${suggested.label}. This bot keeps ${current.label} and its whole conversation, and the sub-bot’s result comes back here.`),
+    option('Swap here', `this bot switches to ${suggested.label} for this task and the next ones. ` + (!context.tokens ? 'This chat has no conversation yet, so nothing is lost.'
+      : context.crossProvider ? `It loses its working context: ${suggested.label} gets ${tokens} as a quoted copy, not this session, so details such as earlier tool results can be lost.`
+        : `It keeps this conversation but loses the prompt cache: ${suggested.label} re-reads ${tokens} in full, which costs more on the first message.`)),
+    option('Keep current', `this task runs on ${current.label}. Nothing changes.`));
+  card.append(options);
+  const actions = element('div', 'model-swap-actions');
+  const choices = swap.hub ? [['swap', `Swap to ${suggested.label}`], ['keep', 'Keep current']] : [['subbot', 'Create a sub-bot'], ['swap', 'Swap here'], ['keep', 'Keep current']];
+  const buttons = choices.map(([choice, text], index) => {
+    const button = element('button', index === 0 ? 'compact-action primary' : 'compact-action', text); button.type = 'button';
+    button.onclick = async () => {
+      buttons.forEach(b => { b.disabled = true; });
+      try { await api.answerModelSwap(session.id, swap.id, choice); }
+      catch (error) { buttons.forEach(b => { b.disabled = false; }); notify(error); }
+    };
+    return button;
+  });
+  actions.append(...buttons, element('span', 'muted', swap.hub ? `Your next message without an answer keeps ${current.label}.`
+    : `Keeps ${current.label} at ${new Date(swap.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} if unanswered.`));
+  card.append(actions);
+  return card;
+}
+
+const SWAP_WAIT = { swapped: 'cooldown after a swap', declined: 'cooldown after Keep current', expired: 'cooldown after an unanswered question',
+  delegated: 'cooldown after a sub-bot', similar: 'you kept it for a similar task' };
+function modelSwapLine(swap) {
+  const ran = swap.outcome === 'swapped' ? `swapped ${swap.current.label} → ${swap.suggested.label}`
+    : swap.outcome === 'delegated' ? `kept ${swap.current.label}; sub-bot ${swap.subBot?.name || ''} runs ${swap.suggested.label}`
+      : `kept ${swap.current.label}, Auto suggested ${swap.suggested.label}`;
+  // In the order of the reason Auto records (src/routing/model-swap.cjs): no score, under the margin, then a cooldown.
+  const why = swap.outcome !== 'kept' ? swap.choice : swap.gain === null ? 'no measured score' : swap.gain < swap.margin ? 'under the margin'
+    : swap.cooldown ? SWAP_WAIT[swap.cooldown.kind] : 'under the margin';
+  return `Model swap: ${ran} · difficulty ${swap.difficulty}/100 · gain ${swap.gain ?? '—'} vs margin ${swap.margin} · ${why}`;
+}
+
 // A line from Harness about the project's rules and notes (src/controller/trials.cjs, src/controller/chat-scan.cjs), with
 // Undo where something changed.
 function renderNotice(item, node, session) {
@@ -2753,6 +2814,9 @@ function renderMessages(session) {
       if (item.groupSpeaker) { label.classList.add('group-speaker'); node.prepend(label); }
       if (user && batch) node.append(renderBatchReport(batch, batchOpened));
       if (item.hubComparison) node.append(renderComparison(item.hubComparison, session.id, comparisonOpened));
+      // Hub's own model on Auto: its question under a reply, then what was chosen (src/controller/model-swaps.cjs).
+      if (!user && item.modelSwap)
+        node.append(item.modelSwap.status === 'pending' ? renderModelSwap(item.modelSwap, session) : element('p', 'routing-status', modelSwapLine(item.modelSwap)));
       if (user) {
         const images = item.content.filter(part => part.type === 'image');
         images.forEach((part, index) => {
@@ -2766,8 +2830,11 @@ function renderMessages(session) {
       if (item.pending || (selected && !['manual', 'hub-auto'].includes(selected.source))) {
         const row = element('div', 'routing-row');
         entry.routeNode = row; node.after(row);
-        if (item.pending) row.append(element('p', 'routing-status', item.error ? `Not sent: ${item.error}` : state.planRouting ? state.planRouting.reason : `Choosing a model with ${routerName(state.routerModel)}…`));
+        if (item.pending && item.modelSwap && !item.error) row.append(renderModelSwap(item.modelSwap, session));
+        else if (item.pending) row.append(element('p', 'routing-status', item.error ? `Not sent: ${item.error}` : state.planRouting ? state.planRouting.reason : `Choosing a model with ${routerName(state.routerModel)}…`));
       }
+      // Every Auto swap decision shows under its message: kept or swapped, the score, the margin and who chose.
+      if (selected?.modelSwap && entry.routeNode) entry.routeNode.append(element('p', 'routing-status', modelSwapLine(selected.modelSwap)));
       if (selected && selected.source !== 'manual' && selected.source !== 'hub-auto') {
         const details = element('details', 'activity');
         const meter = selected.router;

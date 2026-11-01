@@ -211,6 +211,11 @@ if (wrapper) {
     phone.webContents.setZoomFactor(1);
     assert.equal(await phone.webContents.executeJavaScript('document.querySelector("#prompt").value'), 'typing while work runs');
     await phone.webContents.executeJavaScript('document.querySelector("#settings-dialog").close(); true');
+    // A phone opens on the bot list (body.phone-list, ui/app.js) since c9ba3bf; until then this measured the composer of a
+    // chat that list hides. Tapping the Hub opens its chat.
+    assert.equal(await phone.webContents.executeJavaScript('document.body.classList.contains("phone-list")'), true, 'a phone opens on the bot list');
+    await phone.webContents.executeJavaScript('document.querySelector("#main-agent-list .agent-nav-hub").click(); true');
+    await until(() => phone.webContents.executeJavaScript('!document.body.classList.contains("phone-list") && !!document.querySelector("#prompt").getClientRects().length'));
     await phone.webContents.executeJavaScript('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
     fs.mkdirSync(path.resolve(__dirname, '../.scratch'), { recursive: true });
     fs.writeFileSync(path.resolve(__dirname, '../.scratch/remote-phone.png'), (await phone.webContents.capturePage()).toPNG());

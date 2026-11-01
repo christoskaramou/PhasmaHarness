@@ -343,6 +343,14 @@ module.exports = {
     return cheapRouter(this.routerChoices().filter(p => this.available(p) && !this.limits.limited(p.provider || 'codex', p.model))) || configured;
   },
 
+  // The workers Auto routes among: enabled, within the effort cap, image-capable for images, and without those of a
+  // provider at its usage limit while another provider can take the message.
+  autoCatalog(images = []) {
+    const usable = capCatalog(this.catalog().filter(p => p.worker && this.available(p) && (!images.length || p.images)), this.data.settings.effortCap);
+    const unlimited = usable.filter(p => !this.limits.limited(p.provider || 'codex', p.model));
+    return unlimited.length ? unlimited : usable;
+  },
+
   // After a worker turn: a success clears the provider's limit; a usage limit is recorded, and the same Auto message is
   // queued once more so the router picks another provider. Manual selections, repeats and non-Auto turns only report it.
   // A Stop (which pauses the queue) or a paused queue is never overridden by the retry.

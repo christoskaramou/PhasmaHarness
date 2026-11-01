@@ -107,7 +107,10 @@
         "tests/text-context-menu-check.cjs",
         "ui/mosaic.js",
         "tests/mosaic-ui-check.cjs",
-        "tests/group-chat-ui-check.cjs"
+        "tests/group-chat-ui-check.cjs",
+        "tests/model-swap-ui-check.cjs",
+        "src/controller/model-swaps.cjs",
+        "src/routing/model-swap.cjs"
       ],
       "command": "node -e \"const {spawnSync}=require('node:child_process');const check=spawnSync(process.execPath,['--check','tests/ui-startup-smoke.cjs'],{stdio:'inherit',windowsHide:true});if(check.status!==0)process.exit(check.status||1);const env={...process.env};delete env.ELECTRON_RUN_AS_NODE;const result=spawnSync(require('electron'),['tests/ui-startup-smoke.cjs'],{env,stdio:'inherit',windowsHide:true});process.exit(result.status??1)\"",
       "cost": "expensive",
@@ -1298,6 +1301,89 @@
         "problem": "Harness refused Muse and Antigravity as Hub, router and suggestion models with a structured:false block nobody had tested.",
         "fix": "Removed the block; both adapters answer structured replies tool-free (schema in prompt, tool use rejected, no auto-approve).",
         "date": "2026-10-31"
+      }
+    },
+    {
+      "id": "auto-model-swap",
+      "name": "Auto bots swap models only on a wide score margin, after a cooldown and with the user's confirmation",
+      "covers": "Auto on a bot (not Hub) keeps its current model unless the router's suggestion fits the task's difficulty score better by 15 points plus the switching cost (1 per 1,000 conversation tokens since compaction, at most 25, plus 8 across providers). Cooldown: 3 tasks or 30 min after any swap decision; Keep current suppresses the same model for similar tasks (difficulty within 15) for 10 tasks or 2 h. A supported swap pauses before the task with a pending question on pendingMessage.modelSwap; Create a sub-bot (a new sub-bot on the suggested model takes the message, this bot sends nothing and keeps its model and conversation), Swap here, Keep current, a 3-minute timeout (keeps current), Stop and a lost connection all resolve it, queued messages still queue, and a restart marks the message Not sent. A Jev assessment under 0.5 confidence gets the smart router's second opinion, whose choice stands. Group and result turns never ask. Pinned bots are never routed. Each decision is recorded on the route (modelSwap).",
+      "paths": [
+        "src/routing/model-swap.cjs",
+        "src/routing/smart-router.cjs",
+        "src/controller/model-swaps.cjs",
+        "src/controller.cjs",
+        "src/agents.cjs",
+        "tests/model-swap.test.cjs"
+      ],
+      "command": "node --test tests/model-swap.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 60,
+      "origin": {
+        "problem": "An Auto bot kept or changed its model with no visible score or confirmation; the user wanted resilient, score-based swaps they confirm.",
+        "fix": "Difficulty score, fit, margin and cooldown in src/routing/model-swap.cjs; Swap/Keep current question in src/controller/model-swaps.cjs and the chat.",
+        "date": "2026-11-01"
+      }
+    },
+    {
+      "id": "hub-task-reach",
+      "name": "Hub and bots send a rated task outside an Auto worker's reach to a worker that fits, or a new one",
+      "covers": "agent_work.difficulty (Hub's rating) and agent_delegate.difficulty (a bot's rating; a new worker is the bot's Auto sub-bot, and only workers the sender may give work to are reused) against an existing Auto worker's current model in its background conversation: outside its reach (too hard, or more than an easy task needs) when the model a new Auto worker would get fits better by 15 points plus 1 per 1,000 conversation tokens (at most 25). Then an idle Auto worker in the same workspace with the same role and access whose model reaches the task (or that has none yet) takes it, the one with the shortest conversation (tool calls included) under 20,000 tokens, else a new one named after it with its role and lower access. The Hub reply states the reason. Delegated tasks never pause on a worker's swap question.",
+      "paths": [
+        "src/routing/model-swap.cjs",
+        "src/controller/model-swaps.cjs",
+        "src/controller/coordinator.cjs",
+        "src/controller/providers.cjs",
+        "src/controller.cjs",
+        "tests/model-swap.test.cjs",
+        "tests/coordinator.test.cjs",
+        "src/agents.cjs",
+        "src/tools/agent-tools.cjs"
+      ],
+      "command": "node --test --test-name-pattern=\"outside an Auto worker|rated agent_delegate\" tests/model-swap.test.cjs tests/coordinator.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 120,
+      "origin": {
+        "problem": "A Hub task sent to an existing Auto worker ran on whatever model that worker had, and could wait 3 minutes on a swap question in a chat nobody watched.",
+        "fix": "evaluateReach in src/routing/model-swap.cjs, workerForReach in src/controller/model-swaps.cjs and the agent_work difficulty field in src/controller/coordinator.cjs.",
+        "date": "2026-11-01"
+      }
+    },
+    {
+      "id": "hub-own-model-swap",
+      "name": "Hub Auto offers a model that fits its own rating of a request, for its next messages",
+      "covers": "The Hub reply's difficulty (Hub's rating of the user request for itself) against its current model among Hub-eligible models (Low or Medium effort): a fresh pick that fits better by the 15-point base margin is offered under the reply with Swap and Keep current; nothing waits for it, and the next user message without an answer keeps the model. Cooldowns are a bot's. Manual Hub models are never swapped. The question and its outcome render under the reply.",
+      "paths": [
+        "src/routing/model-swap.cjs",
+        "src/controller/model-swaps.cjs",
+        "src/controller/coordinator.cjs",
+        "ui/app.js",
+        "tests/model-swap.test.cjs",
+        "tests/coordinator.test.cjs"
+      ],
+      "command": "node --test --test-name-pattern=\"Hub Auto offers|Hub's own model\" tests/coordinator.test.cjs tests/model-swap.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 120,
+      "origin": {
+        "problem": "Hub Auto picked its chat model once and kept it for good, whatever the requests.",
+        "fix": "evaluateHubSwap in src/routing/model-swap.cjs, hubSwapQuestion and the Hub branch of answerModelSwap in src/controller/model-swaps.cjs, the difficulty field in Hub's reply schema.",
+        "date": "2026-11-01"
+      }
+    },
+    {
+      "id": "delegation-access",
+      "name": "A delegated job starts without an earlier job's session approvals; lower access is kept",
+      "covers": "agents.delegate: every new job starts without the last job's \"allow for this session\" approvals (only a direct task resumed after its budget pause keeps them, at the same access). A conversation that ran lower-access work stays at that level for later jobs, by design: earlier lower-trust input must not drive higher-access work in the same conversation.",
+      "paths": [
+        "src/agents.cjs",
+        "tests/agents.test.cjs"
+      ],
+      "command": "node --test --test-name-pattern=\"last job's session approvals|successive delegated tasks reuse|busy recipients persist FIFO\" tests/agents.test.cjs",
+      "cost": "cheap",
+      "timeoutSec": 90,
+      "origin": {
+        "problem": "A worker kept a job's session approvals for the next sender whenever the level matched, (CardTest's audit, which also reported the kept lower access; that is deliberate).",
+        "fix": "src/agents.cjs delegate clears session approvals on every new job.",
+        "date": "2026-11-01"
       }
     }
   ]
