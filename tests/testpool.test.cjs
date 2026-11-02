@@ -55,7 +55,7 @@ function fakeJev(decide, calls = []) {
     const answers = {};
     for (const [id, q] of Object.entries(body.questions)) {
       const choice = decide(q.instructions);
-      const p = choice === 'run' ? 0.9 : choice === 'unsure' ? 0.4 : 0.05;
+      const p = typeof choice === 'number' ? choice : choice === 'run' ? 0.9 : choice === 'unsure' ? 0.4 : 0.05;
       answers[id] = { type: 'choice', choice: p >= 0.5 ? 'run' : 'skip', confidence: Math.max(p, 1 - p), probabilities: { run: p, skip: 1 - p } };
     }
     return { ok: true, status: 200, text: async () => JSON.stringify({ model: 'jev-1.13.0', answers, usage: { input_tokens: 100, output_tokens: 5 } }) };
@@ -131,27 +131,31 @@ test('selection: path rules, always, sticky failures and platforms', () => {
     testEntry('judge'),
     testEntry('smoke', { always: true, paths: ['nothing/**'] }),
     testEntry('win-only', { platforms: ['win32'], paths: ['src/**'] }),
-    testEntry('was-failing', { paths: ['elsewhere/**'] }),
+    testEntry('was-failing', { paths: ['src/render/**'] }),
+    testEntry('failing-elsewhere', { paths: ['elsewhere/**'] }),
   ] });
-  const state = { failing: { 'was-failing': { count: 0 } } };
+  const state = { failing: { 'was-failing': { count: 0 }, 'failing-elsewhere': { count: 0 } } };
   const picked = pool.select(catalog, ['src/render/pass.cpp'], state, { platform: 'linux' });
   assert.deepEqual(picked.run.map(c => [c.test.id, c.reason]), [['smoke', 'always'], ['was-failing', 'failed last check']]);
   assert.deepEqual(picked.ask.map(c => c.test.id), ['render', 'judge']);
   assert.deepEqual(picked.ask[0].hits, ['src/render/pass.cpp']);
-  assert.deepEqual(picked.skipped, [{ id: 'audio', reason: 'no matching change' }]);
+  assert.deepEqual(picked.skipped, [{ id: 'audio', reason: 'no matching change' }, { id: 'failing-elsewhere', reason: 'no matching change' }],
+    'a failing test whose paths the change misses is not rerun');
   assert.deepEqual(pool.select(catalog, [], state, { platform: 'linux' }), { run: [], ask: [], skipped: [] }, 'no changes, nothing to do');
   state.failing['was-failing'].count = 3;
   assert.ok(!pool.select(catalog, ['src/render/pass.cpp'], state, { platform: 'linux' }).run.some(c => c.test.id === 'was-failing'), 'sticky reruns are capped');
 });
 
-test('Jev decisions: run, unsure cheap runs, unsure expensive is suggested, confident skip', () => {
+test('Jev decisions: run, unsure cheap runs, unsure or lukewarm expensive is suggested, confident skip', () => {
   const settings = pool.validate({ version: 1, tests: [] }).catalog.settings;
-  const ask = ['a', 'b', 'c', 'd'].map(id => ({ test: { id, cost: id === 'c' ? 'expensive' : 'cheap' }, hits: [] }));
+  const ask = ['a', 'b', 'c', 'd', 'e', 'f'].map(id => ({ test: { id, cost: 'cef'.includes(id) ? 'expensive' : 'cheap' }, hits: [] }));
   const answer = p => ({ choice: p >= 0.5 ? 'run' : 'skip', confidence: 0.9, probabilities: { run: p, skip: 1 - p } });
-  const d = pool.jevDecisions(ask, { answers: { t0: answer(0.9), t1: answer(0.4), t2: answer(0.4), t3: answer(0.05) } }, settings);
-  assert.deepEqual(d.run.map(c => c.test.id), ['a', 'b']);
+  const answers = { t0: answer(0.6), t1: answer(0.4), t2: answer(0.4), t3: answer(0.05), t4: answer(0.8), t5: answer(0.95) };
+  const d = pool.jevDecisions(ask, { answers }, settings);
+  assert.deepEqual(d.run.map(c => [c.test.id, c.rank]), [['a', 0.6], ['b', 0.4], ['f', 0.95]]);
   assert.match(d.run[1].reason, /unsure/);
-  assert.deepEqual(d.suggested.map(s => s.id), ['c']);
+  assert.deepEqual(d.suggested.map(s => s.id), ['c', 'e'], 'an expensive test needs run >= expensiveConfidence');
+  assert.match(d.suggested[1].reason, /below 0\.9/);
   assert.deepEqual(d.skipped.map(s => s.id), ['d']);
 });
 
@@ -273,8 +277,12 @@ test('check: Jev picks among path-matched tests, a shared setup runs once, resul
   const idle = await pool.check(dir, { jevKey: 'k', fetch: fakeJev(() => 'run', calls) });
   assert.equal(calls.length, 1);
   assert.equal(idle.outcome.results.length, 0);
-  // An unrelated change reruns the failing test without asking Jev about it.
+  // An unrelated change leaves the failing test alone; a change to its paths reruns it without asking Jev about it.
   touch(dir, 'src/audio/mix.cpp', 'v2\n');
+  const unrelated = await pool.check(dir, { jevKey: 'k', fetch: fakeJev(() => 'skip', calls) });
+  assert.ok(!unrelated.outcome.results.some(r => r.id === 'render-regress'));
+  assert.ok(unrelated.state.failing['render-regress'], 'still recorded as failing');
+  touch(dir, 'src/render/pass.cpp', 'v3\n');
   const again = await pool.check(dir, { jevKey: 'k', fetch: fakeJev(() => 'skip', calls) });
   assert.ok(again.outcome.results.some(r => r.id === 'render-regress' && r.why === 'failed last check'));
 });
@@ -315,6 +323,18 @@ test('the time budget stops starting new tests', async t => {
   t.mock.method(Date, 'now', () => now);
   const r = await pool.check(dir, { jevKey: null, log: message => { if (message === 'a: pass') now += 2000; } });
   assert.deepEqual(r.outcome.results.map(x => [x.id, x.status]), [['a', 'pass'], ['b', 'not-run']]);
+});
+
+test('within a cost the likeliest-needed tests start first, so the budget cuts the least relevant', async t => {
+  const dir = repo(t, { 'src/x.cpp': '1\n' });
+  catalog(dir, { settings: { budgetSec: 1 }, tests: [testEntry('a', { paths: ['src/**'] }), testEntry('b', { paths: ['src/**'] })] });
+  baseline(dir);
+  touch(dir, 'src/x.cpp', '2\n');
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  const fetch = fakeJev(text => (/\(id a,/.test(text) ? 0.6 : 0.95));
+  const r = await pool.check(dir, { jevKey: 'k', fetch, log: message => { if (message === 'b: pass') now += 2000; } });
+  assert.deepEqual(r.outcome.results.map(x => [x.id, x.status]), [['b', 'pass'], ['a', 'not-run']]);
 });
 
 test('hook replies per agent: Claude and Codex block with exit 2, Cursor sends a follow-up, retries are capped', async t => {

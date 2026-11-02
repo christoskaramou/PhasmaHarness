@@ -9,8 +9,8 @@ Each repository keeps a pool of regression tests in `.testpool/catalog.json`. Af
 
 1. Finds the files changed since the last check.
 2. Keeps the tests whose `paths` match those files.
-3. Asks Jev, a cheap classifier, which of them the changes could affect. It gives Jev each test's `covers`, `origin` and run history.
-4. Runs the chosen tests.
+3. Asks Jev, a cheap classifier, which of them the changes reach. It gives Jev each test's `covers`, `origin` and run history. A test that failed last check reruns without asking only when the change touches its `paths`.
+4. Runs the chosen tests, cheapest first and, within a cost, the likeliest-needed first, until the time budget is used up.
 5. Sends any failures back to you as a `Test pool:` report.
 
 The runner has no memory of its own. The pool only knows what you write into the catalog, so your job is to grow it: one small test for each problem solved.
@@ -81,7 +81,7 @@ If the repository has no pool, create one with `init`. Skip this for vendored or
 | `paths` | Globs relative to the repository root, for the code whose changes could break this behavior. This means the code under test, not only the test file. `**` crosses folders; `*` does not. An empty list lets Jev judge every change, which costs a question per reply, so use it rarely. |
 | `command` | A shell command run from `cwd` (default: repository root). `commandWindows` overrides it on Windows. |
 | Placeholders | `${root}`, `${home}` and `${env:NAME}` work in `command`, `cwd`, `requires` and `env`. |
-| `cost` | `cheap` is under 10 s. `medium` is under 2 min. `expensive` is longer, or launches apps or the GPU. Expensive tests run only when Jev sees a plausible link. |
+| `cost` | `cheap` is under 10 s. `medium` is under 2 min. `expensive` is longer, or launches apps or the GPU. Expensive tests run only when Jev's run probability reaches `settings.expensiveConfidence` (default 0.9); below that they are listed as suggestions. |
 | `needs` | Setup ids, such as a build, that run once per check before the tests that need them. A failed setup is reported as the failure. |
 | `requires` | Paths that must exist. If one is missing, the test is skipped rather than failed. |
 | `always` | `true` runs the test after every change. Use it only for cheap sanity checks. |
@@ -112,7 +112,7 @@ Results are written to `.testpool/runs/`: `last.json`, `history.jsonl`, and one 
 
 ## When a `Test pool:` failure report arrives
 
-- **Your change caused it:** fix the code and finish your reply. The runner reruns the failing test.
+- **Your change caused it:** fix the code and finish your reply. The runner reruns the failing test once your fix touches its `paths`.
 - **It is unrelated or pre-existing:** say that plainly in your reply. Don't change the code under test to hide it.
 - **Never** weaken, disable or delete a failing test to make it pass. If the test itself is wrong, fix the test and explain why.
 - Automatic retries stop after `maxBlocks` for the same failures. Report what is still failing.
