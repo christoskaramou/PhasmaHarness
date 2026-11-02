@@ -5,6 +5,7 @@
   "private": true,
   "description": "A local desktop client for Codex, Claude Code, and Cursor.",
   "author": "Christos Karamoustos",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/christoskaramou/PhasmaHarness.git"
