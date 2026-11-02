@@ -2776,8 +2776,10 @@ document.addEventListener('visibilitychange', refreshMessageTimes);
 
 function renderMessages(session) {
   const container = $('#conversation');
-  const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
-  if (renderedSession !== selectedId) { $('#messages').replaceChildren(); messageNodes.clear(); renderedSession = selectedId; }
+  // A different bot's chat opens at its end, whatever the old chat's scroll position was.
+  const switched = renderedSession !== selectedId;
+  const atBottom = switched || container.scrollHeight - container.scrollTop - container.clientHeight < 100;
+  if (switched) { $('#messages').replaceChildren(); messageNodes.clear(); renderedSession = selectedId; }
   const ids = new Set();
   const chats = chatSessions(session);
   const entries = chats.flatMap(chat => {
@@ -2954,7 +2956,8 @@ function renderMessages(session) {
   }
   for (const [id, entry] of messageNodes) if (!ids.has(id)) { entry.node.remove(); entry.routeNode?.remove(); messageNodes.delete(id); }
   // During a send roll the roll follows the end itself; a smooth scroll started here would take over its frames.
-  if (atBottom && !rollingToEnd) requestAnimationFrame(() => { container.scrollTop = container.scrollHeight; });
+  // Instant: the chat's CSS smooth scrolling would animate a scrollTop assignment.
+  if (atBottom && !rollingToEnd) requestAnimationFrame(() => container.scrollTo({ top: container.scrollHeight, behavior: 'instant' }));
 }
 
 async function selectSession(id) {
