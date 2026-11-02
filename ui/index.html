@@ -47,6 +47,7 @@
       <div class="agents-heading">
         <span id="agent-roster-label">Other bots</span>
         <button id="agents-overview" type="button">Overview</button>
+        <button id="agent-sort" class="agent-sort" type="button" title="Sort and filter bots" aria-label="Sort and filter bots" aria-haspopup="menu" aria-expanded="false" popovertarget="agent-sort-menu"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5h18l-7 8v6l-4 2v-8Z"/></svg></button>
       </div>
       <div id="agent-list" aria-label="Choose an agent"></div>
     </section>
@@ -129,6 +130,15 @@
       <summary id="job-activity-summary"></summary>
       <div id="job-activity-list" aria-label="Background tasks"></div>
     </details>
+    <div id="chat-find" class="chat-find" hidden>
+      <div class="chat-find-box" role="search">
+        <input id="chat-find-input" type="search" placeholder="Find in chat…" aria-label="Find in chat" autocomplete="off" spellcheck="false">
+        <span id="chat-find-count" class="chat-find-count" aria-live="polite"></span>
+        <button id="chat-find-prev" class="icon-button" type="button" title="Previous match (Shift+Enter)" aria-label="Previous match"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg></button>
+        <button id="chat-find-next" class="icon-button" type="button" title="Next match (Enter)" aria-label="Next match"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
+        <button id="chat-find-close" class="icon-button" type="button" title="Close (Esc)" aria-label="Close find"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+      </div>
+    </div>
     <section id="conversation" aria-label="Conversation" aria-live="polite">
       <div id="welcome" class="welcome">
         <h2>What would you like to work on?</h2>
@@ -178,6 +188,7 @@
     <div id="command-content"></div><p id="command-error" class="error" role="alert"></p>
   </dialog>
   <div id="agent-menu" popover="auto" role="menu" aria-label="Agent options"></div>
+  <div id="agent-sort-menu" popover="auto" role="menu" aria-label="Sort and filter bots"></div>
   <dialog id="agents-dialog" aria-labelledby="agents-title">
     <div class="dialog-heading"><div><div class="eyebrow">LOCAL AGENT TEAM</div><h2 id="agents-title">Your agents</h2></div><button type="button" class="close-dialog icon-button" aria-label="Close agent overview"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
     <div class="agents-toolbar"><p id="agents-summary" class="muted"></p><button id="groups-add" type="button">New group</button><button id="agents-add" type="button" class="primary">＋ New agent</button></div>

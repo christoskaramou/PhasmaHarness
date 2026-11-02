@@ -157,6 +157,7 @@ app.whenReady().then(async () => {
   console.log(`Renderer ready after ${Date.now() - startedAt} ms; starting UI checks`);
   await require('./text-context-menu-check.cjs')(window);
   await require('./connector-ui-check.cjs')(window, root);
+  await require('./chat-find-ui-check.cjs')(window);
   deadline.refresh();
   const result = await window.webContents.executeJavaScript(`(() => {
     const errors = [];

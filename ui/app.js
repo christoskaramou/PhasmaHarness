@@ -1439,6 +1439,65 @@ for (const container of [$('#agent-list'), $('#main-agent-list'), $('#group-list
   });
 }
 let agentRenderKey = '';
+// Sidebar sort and filter, kept across launches. Sub-bots still show under their creator.
+const BOT_SORTS = {
+  default: { label: 'Default order' },
+  name: { label: 'Name (A–Z)', compare: (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }) },
+  recent: { label: 'Your latest message', compare: (a, b) => b.lastUserAt - a.lastUserAt || a.name.localeCompare(b.name) },
+  oldest: { label: 'Longest without a message', compare: (a, b) => a.lastUserAt - b.lastUserAt || a.name.localeCompare(b.name) },
+};
+const BOT_FILTERS = {
+  all: { label: 'All bots', test: () => true },
+  working: { label: 'Working', test: status => ['Working', 'Waiting', 'Queued', 'Starting'].includes(status) },
+  attention: { label: 'Needs attention', test: status => ['Needs input', 'Paused', 'Connection needed'].includes(status) },
+  ready: { label: 'Idle', test: status => status === 'Ready' },
+};
+let botSort = BOT_SORTS[localStorage.getItem('botSort')] ? localStorage.getItem('botSort') : 'default';
+let botFilter = BOT_FILTERS[localStorage.getItem('botFilter')] ? localStorage.getItem('botFilter') : 'all';
+const sortMenu = $('#agent-sort-menu');
+function renderSortMenu() {
+  const group = (title, options, value, kind) => [element('div', 'agent-sort-heading', title), ...Object.entries(options).map(([id, option]) => {
+    const item = element('button', 'agent-menu-item', option.label);
+    item.type = 'button'; item.tabIndex = -1; item.setAttribute('role', 'menuitemradio');
+    item.setAttribute('aria-checked', String(id === value)); item.dataset[kind] = id;
+    return item;
+  })];
+  sortMenu.replaceChildren(...group('Sort by', BOT_SORTS, botSort, 'sort'), ...group('Show', BOT_FILTERS, botFilter, 'filter'));
+}
+// popovertarget keeps the button out of light dismiss; the click opens the menu here so it can be placed first.
+$('#agent-sort').onclick = event => {
+  event.preventDefault();
+  if (sortMenu.matches(':popover-open')) return sortMenu.hidePopover();
+  renderSortMenu();
+  sortMenu.style.left = '0px'; sortMenu.style.top = '0px';
+  sortMenu.showPopover();
+  const anchor = $('#agent-sort').getBoundingClientRect();
+  sortMenu.style.left = `${Math.max(8, Math.min(anchor.left, document.documentElement.clientWidth - sortMenu.offsetWidth - 8))}px`;
+  sortMenu.style.top = `${Math.max(8, Math.min(anchor.bottom + 4, document.documentElement.clientHeight - sortMenu.offsetHeight - 8))}px`;
+  sortMenu.querySelector('[aria-checked="true"]')?.focus();
+};
+sortMenu.addEventListener('toggle', event => $('#agent-sort').setAttribute('aria-expanded', String(event.newState === 'open')));
+sortMenu.addEventListener('click', event => {
+  const item = event.target.closest('button');
+  if (!item) return;
+  if (item.dataset.sort) localStorage.setItem('botSort', botSort = item.dataset.sort);
+  if (item.dataset.filter) localStorage.setItem('botFilter', botFilter = item.dataset.filter);
+  for (const other of sortMenu.querySelectorAll(item.dataset.sort ? '[data-sort]' : '[data-filter]'))
+    other.setAttribute('aria-checked', String(other === item));
+  renderAgents();
+});
+sortMenu.addEventListener('keydown', event => {
+  const items = [...sortMenu.querySelectorAll('button')];
+  const index = items.indexOf(document.activeElement);
+  if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+    event.preventDefault();
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+    items[next]?.focus();
+  } else if (event.key === 'Escape') {
+    event.preventDefault(); event.stopPropagation(); sortMenu.hidePopover(); $('#agent-sort').focus();
+  } else if (event.key === 'Tab') sortMenu.hidePopover();
+  else if (event.key === ' ') { event.preventDefault(); document.activeElement?.click(); }
+});
 $('#agent-search').addEventListener('input', () => renderAgents());
 $('#agent-search').addEventListener('keydown', event => {
   if (event.key === 'Escape') { event.preventDefault(); event.target.value = ''; renderAgents(); }
@@ -1463,7 +1522,10 @@ function renderAgents() {
       ((item.type === 'agentMessage' && item.phase !== 'commentary') ||
        (item.type === 'agentResult' && !item.internal && !item.superseded)));
     const preview = (task?.title || latest?.text || '').slice(0, 100).replace(/\s+/g, ' ');
-    return { ...agent, status, preview, task: task?.title, waiting: task?.waitingForAgent, queued: !!queued || !!waiting,
+    let lastUserAt = 0;
+    for (const chat of worker.sessions) for (const item of chat.items)
+      if (item.type === 'userMessage' && !item.routineRun && item.createdAt > lastUserAt) lastUserAt = item.createdAt;
+    return { ...agent, status, preview, lastUserAt, task: task?.title, waiting: task?.waitingForAgent, queued: !!queued || !!waiting,
       batchIdle: !!agent.temporaryBatch && !backgroundPending && !pendingWork(worker),
       workspace: conversation?.workspace || agent.workspace || worker.settings.workspace, modeLabel: worker.presets.find(p => p.id === worker.settings.mode)?.label || 'Auto',
       accessLabel: worker.accessModes.find(a => a.id === (conversation?.access || worker.settings.access))?.label,
@@ -1471,9 +1533,11 @@ function renderAgents() {
   });
   const active = agents.filter(a => a.busy).length;
   const query = $('#agent-search').value.trim().toLocaleLowerCase();
-  const matches = new Set(rows.filter(row => row.id === 'main' || `${row.name} ${row.workspace}`.toLocaleLowerCase().includes(query)).map(row => row.id));
+  const filtering = !!query || botFilter !== 'all';
+  const matches = new Set(rows.filter(row => row.id === 'main' || (`${row.name} ${row.workspace}`.toLocaleLowerCase().includes(query) &&
+    BOT_FILTERS[botFilter].test(row.status))).map(row => row.id));
   // Keep matching children under their creators even when the creator's name doesn't match.
-  if (query) for (const row of rows.filter(row => matches.has(row.id))) {
+  if (filtering) for (const row of rows.filter(row => matches.has(row.id))) {
     const seen = new Set();
     for (let parent = row; isSubBot(parent) && !seen.has(parent.id);) {
       seen.add(parent.id); parent = rows.find(other => other.id === parent.createdBy);
@@ -1481,12 +1545,13 @@ function renderAgents() {
       matches.add(parent.id);
     }
   }
-  const visible = rows.filter(row => query ? matches.has(row.id) : !row.batchIdle || row.id === selectedAgent);
+  const visible = rows.filter(row => (!filtering || matches.has(row.id)) && (query || !row.batchIdle || row.id === selectedAgent));
+  if (botSort !== 'default') visible.sort(BOT_SORTS[botSort].compare);
   // Sub-bots show under their creator only while it or one of its sub-bots is selected; a creator shows how many bots
   // are under it.
   const byId = new Map(visible.map(row => [row.id, row]));
   const creatorOf = row => (isSubBot(row) ? byId.get(row.createdBy) : null);
-  const open = new Set(query ? visible.map(row => row.id) : []);
+  const open = new Set(filtering ? visible.map(row => row.id) : []);
   for (let row = byId.get(selectedAgent); row && !open.has(row.id); row = creatorOf(row))
     open.add(row.id);
   const sidebar = [];
@@ -1515,7 +1580,8 @@ function renderAgents() {
     place(row, 0);
   $('#agent-roster-label').textContent = `Other bots · ${visible.length - 1}`;
   $('#agents-summary').textContent = `${agents.length} agents · ${active} working`;
-  const key = JSON.stringify([rows, selectedAgent, selectedId, switching, deletingAgent, query]);
+  $('#agent-sort').classList.toggle('active', botSort !== 'default' || botFilter !== 'all');
+  const key = JSON.stringify([rows, selectedAgent, selectedId, switching, deletingAgent, query, botSort, botFilter]);
   if (key === agentRenderKey) return;
   closeAgentMenu();
   agentRenderKey = key;
@@ -1553,7 +1619,7 @@ function renderAgents() {
   };
   $('#main-agent-list').replaceChildren(...sidebar.filter(row => row.id === 'main').map(nav));
   $('#agent-list').replaceChildren(...sidebar.filter(row => row.id !== 'main').map(nav));
-  if (sidebar.length === 1) $('#agent-list').append(element('p', 'muted', query ? 'No matching bots.' : rows.length > 1
+  if (sidebar.length === 1) $('#agent-list').append(element('p', 'muted', filtering ? 'No matching bots.' : rows.length > 1
     ? 'Finished batch workers are in Overview.' : 'Create an agent for a new conversation.'));
   $('#agent-cards').replaceChildren(...rows.map(row => {
     const card = element('article', `agent-card${row.id === selectedAgent ? ' selected' : ''}`);
@@ -4190,6 +4256,73 @@ document.addEventListener('keydown', event => {
   if (event.defaultPrevented) return;
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'n' && !document.querySelector('dialog[open]')) { event.preventDefault(); editAgent(); }
   if (event.key === 'Escape' && (state?.busy === selectedId || current()?.groupTurn) && !document.querySelector('dialog[open]')) api.stop(selectedId).catch(notify);
+});
+// Ctrl+F finds text in the shown chat. Matches are painted with the CSS Highlight API, so the rendered messages are not
+// changed. ponytail: a match must sit inside one text node; words split by inline formatting are not found.
+const chatFind = { ranges: [], index: -1, frame: 0 };
+const findObserver = new MutationObserver(() => {
+  cancelAnimationFrame(chatFind.frame);
+  chatFind.frame = requestAnimationFrame(() => runChatFind(true));
+});
+function runChatFind(keep = false, scroll = !keep) {
+  const needle = $('#chat-find-input').value.toLowerCase();
+  const ranges = [];
+  if (needle) {
+    const walker = document.createTreeWalker($('#messages'), NodeFilter.SHOW_TEXT);
+    for (let node; (node = walker.nextNode());) {
+      if (node.parentElement.closest('[hidden], script, style')) continue;
+      const text = node.data.toLowerCase();
+      for (let at = text.indexOf(needle); at !== -1; at = text.indexOf(needle, at + needle.length)) {
+        const range = new Range(); range.setStart(node, at); range.setEnd(node, at + needle.length); ranges.push(range);
+      }
+    }
+  }
+  chatFind.ranges = ranges;
+  chatFind.index = !ranges.length ? -1 : keep ? Math.min(Math.max(chatFind.index, 0), ranges.length - 1) : 0;
+  showChatFindMatch(scroll);
+}
+function showChatFindMatch(scroll) {
+  const { ranges, index } = chatFind;
+  CSS.highlights.set('chat-find', new Highlight(...ranges));
+  CSS.highlights.set('chat-find-current', new Highlight(...(index >= 0 ? [ranges[index]] : [])));
+  $('#chat-find-count').textContent = !$('#chat-find-input').value ? '' : ranges.length ? `${index + 1} of ${ranges.length}` : 'No results';
+  $('#chat-find-input').classList.toggle('no-results', !!$('#chat-find-input').value && !ranges.length);
+  if (!scroll || index < 0) return;
+  const range = ranges[index];
+  for (let details = range.startContainer.parentElement.closest('details:not([open])'); details; details = details.parentElement.closest('details:not([open])'))
+    details.open = true;
+  const chat = $('#conversation'), box = range.getBoundingClientRect(), view = chat.getBoundingClientRect();
+  if (box.top < view.top + 40 || box.bottom > view.bottom - 20) chat.scrollTop += box.top - view.top - chat.clientHeight / 2;
+}
+function stepChatFind(delta) {
+  if (!chatFind.ranges.length) return;
+  chatFind.index = (chatFind.index + delta + chatFind.ranges.length) % chatFind.ranges.length;
+  showChatFindMatch(true);
+}
+function openChatFind() {
+  $('#chat-find').hidden = false;
+  findObserver.observe($('#messages'), { childList: true, subtree: true, characterData: true });
+  $('#chat-find-input').focus(); $('#chat-find-input').select();
+  runChatFind(true, true);
+}
+function closeChatFind() {
+  $('#chat-find').hidden = true;
+  findObserver.disconnect(); cancelAnimationFrame(chatFind.frame);
+  CSS.highlights.delete('chat-find'); CSS.highlights.delete('chat-find-current');
+  chatFind.ranges = []; chatFind.index = -1;
+  $('#prompt').focus();
+}
+$('#chat-find-input').addEventListener('input', () => runChatFind());
+$('#chat-find-input').addEventListener('keydown', event => {
+  if (event.key === 'Enter') { event.preventDefault(); stepChatFind(event.shiftKey ? -1 : 1); }
+  else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeChatFind(); }
+});
+$('#chat-find-next').onclick = () => stepChatFind(1);
+$('#chat-find-prev').onclick = () => stepChatFind(-1);
+$('#chat-find-close').onclick = closeChatFind;
+document.addEventListener('keydown', event => {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== 'f' || document.querySelector('dialog:modal')) return;
+  event.preventDefault(); openChatFind();
 });
 api.onState(applyState);
 api.bootstrap().then(applyState).catch(notify);

@@ -3227,7 +3227,7 @@ button,button *,[role=button],[role=button] *,input[type=button],input[type=subm
   padding:10px 14px
 }
 
-#agent-menu {
+#agent-menu,#agent-sort-menu {
   position:fixed;
   inset:auto;
   margin:0;
@@ -3243,12 +3243,12 @@ button,button *,[role=button],[role=button] *,input[type=button],input[type=subm
   user-select:none
 }
 
-#agent-menu:popover-open {
+#agent-menu:popover-open,#agent-sort-menu:popover-open {
   display:grid;
   gap:2px
 }
 
-#agent-menu .agent-menu-item {
+#agent-menu .agent-menu-item,#agent-sort-menu .agent-menu-item {
   width:100%;
   padding:9px 12px;
   border:0;
@@ -3259,7 +3259,7 @@ button,button *,[role=button],[role=button] *,input[type=button],input[type=subm
   font:inherit
 }
 
-#agent-menu .agent-menu-item:hover:not(:disabled),#agent-menu .agent-menu-item:focus-visible {
+#agent-menu .agent-menu-item:hover:not(:disabled),#agent-menu .agent-menu-item:focus-visible,#agent-sort-menu .agent-menu-item:hover,#agent-sort-menu .agent-menu-item:focus-visible {
   background:var(--hover);
   outline:2px solid var(--border-strong);
   outline-offset:-2px
@@ -4293,3 +4293,24 @@ main > header {
   display: inline-block;
   transform: scale(1.6);
 }
+
+/* Bot sort and filter menu */
+.agents-heading button#agents-overview { margin-left:auto; }
+.agents-heading button.agent-sort { margin-left:0; display:inline-flex; align-items:center; color:var(--muted); border-radius:5px; }
+.agents-heading button.agent-sort:hover,.agents-heading button.agent-sort[aria-expanded=true] { color:var(--text); background:var(--hover); }
+.agents-heading button.agent-sort.active { color:var(--accent); }
+#agent-sort-menu { width:210px; }
+#agent-sort-menu .agent-sort-heading { padding:8px 12px 3px; font-size:calc(10px * var(--font-scale,1)); letter-spacing:.8px; text-transform:uppercase; color:var(--muted); }
+#agent-sort-menu .agent-menu-item { padding:7px 12px 7px 28px; position:relative; }
+#agent-sort-menu .agent-menu-item[aria-checked=true]::before { content:'✓'; position:absolute; left:10px; color:var(--accent); }
+
+/* Find in chat (Ctrl+F) */
+.chat-find { position:relative; height:0; z-index:6; }
+.chat-find[hidden] { display:none; }
+.chat-find-box { position:absolute; top:8px; right:24px; display:flex; align-items:center; gap:2px; padding:4px 4px 4px 8px; border:1px solid var(--border); border-radius:8px; background:var(--panel); box-shadow:0 6px 20px #0005; }
+.chat-find-box input { width:200px; border:0; outline:0; background:transparent; color:var(--text); font:inherit; padding:4px 2px; }
+.chat-find-box input.no-results { color:var(--error); }
+.chat-find-count { min-width:62px; text-align:right; padding-right:4px; font-size:calc(11px * var(--font-scale,1)); color:var(--muted); white-space:nowrap; }
+.chat-find-box .icon-button { padding:4px; }
+::highlight(chat-find) { background-color:color-mix(in srgb, #f5c400 45%, transparent); color:inherit; }
+::highlight(chat-find-current) { background-color:#ff9632; color:#000; }
