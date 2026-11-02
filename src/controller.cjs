@@ -923,8 +923,8 @@ class Controller extends EventEmitter {
         if (this.agents && !failover && !wikiTaskId) {
           selected = await this.modelSwapChoice(session, selected, routingCatalog(), !agentReply && !session.groupChatId && !assigned);
           if (this.stopping.has(id)) throw new Error('Turn was stopped before sending.');
-          // Create a sub-bot: the message goes to a new sub-bot on the suggested model, and this bot sends nothing.
-          if (selected.modelSwap?.outcome === 'delegated') return await this.handToSubBot(session, selected, text, images, clientId);
+          // Create a new bot: the message goes to a new top-level bot on the suggested model, and this bot sends nothing.
+          if (selected.modelSwap?.outcome === 'delegated') return await this.handToNewBot(session, selected, text, images, clientId);
         }
       }
       if (!this.available(selected)) throw new Error('Selected model is disabled or not available.');

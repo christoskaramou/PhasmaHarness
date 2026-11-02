@@ -1,5 +1,5 @@
 // Auto's model swap question through the real renderer/preload/IPC/runner/controller path: an Auto bot on a weak model
-// gets a hard task, the card shows its three answers, and clicking Create a sub-bot hands the task to a new sub-bot on
+// gets a hard task, the card shows its three answers, and clicking Create a new bot hands the task to a new bot on
 // the suggested model, whose result comes back to the bot's chat. Only provider I/O and the router's picks are simulated.
 module.exports = async function modelSwapUiCheck(window, root, ipcMain) {
   const assert = require('node:assert/strict');
@@ -99,30 +99,31 @@ module.exports = async function modelSwapUiCheck(window, root, ipcMain) {
     await send('Audit delegate() in src/agents.cjs for permission leaks.');
     await until(() => js('!!document.querySelector("#messages .model-swap")'), 'the swap question reaches the renderer');
     assert.deepEqual(await js(`[...document.querySelectorAll('#messages .model-swap button')].map(button => button.textContent)`),
-      ['Create a sub-bot', 'Swap here', 'Keep current']);
+      ['Create a new bot', 'Swap here', 'Keep current']);
     const options = await js(`[...document.querySelectorAll('#messages .model-swap li')].map(item => item.textContent)`);
-    assert.match(options[0], /^Create a sub-bot: a new bot under this one runs this task on strong · high\. This bot keeps weak · high and its whole conversation/);
+    assert.match(options[0], /^Create a new bot: a new bot runs this task on strong · high\. This bot keeps weak · high and its whole conversation/);
     assert.match(options[1], /^Swap here: this bot switches to strong · high for this task and the next ones\. It keeps this conversation but loses the prompt cache/);
     assert.match(options[2], /^Keep current: this task runs on weak · high\./);
     assert.equal(turns(bot).length, 1, 'nothing starts while the question is open');
 
-    // Clicking Create a sub-bot goes renderer → preload → IPC → runner → controller.
+    // Clicking Create a new bot goes renderer → preload → IPC → runner → controller.
     await js(`document.querySelector('#messages .model-swap button').click(); true`);
-    await until(() => agents.primary.data.agents.some(agent => agent.name === 'CardTest helper'), 'Create a sub-bot makes a sub-bot');
+    await until(() => agents.primary.data.agents.some(agent => agent.name === 'CardTest helper'), 'Create a new bot makes a bot');
     const helper = agents.primary.data.agents.find(agent => agent.name === 'CardTest helper');
-    assert.deepEqual([helper.createdBy, helper.mode, helper.instructions], [profile.id, 'codex:strong:high', 'Review code.']);
-    await until(() => js('document.querySelector("#messages").textContent.includes("Sent this task to the new sub-bot CardTest helper, which runs strong · high.")'),
+    assert.deepEqual([helper.createdBy, helper.mode, helper.instructions], ['main', 'codex:strong:high', 'Review code.']);
+    assert.equal(agents.isSubBot(helper), false, 'the new bot is top-level, not a sub-bot');
+    await until(() => js('document.querySelector("#messages").textContent.includes("Sent this task to the new bot CardTest helper, which runs strong · high.")'),
       'the bot\'s chat says where the task went');
-    await until(() => js(`[...document.querySelectorAll('#messages .routing-status')].some(line => line.textContent.startsWith('Model swap: kept weak · high; sub-bot CardTest helper runs strong · high') && line.textContent.endsWith('you chose Create a sub-bot'))`),
+    await until(() => js(`[...document.querySelectorAll('#messages .routing-status')].some(line => line.textContent.startsWith('Model swap: kept weak · high; new bot CardTest helper runs strong · high') && line.textContent.endsWith('you chose Create a new bot'))`),
       'the decision shows in the chat');
     assert.equal(await js('!!document.querySelector("#messages .model-swap")'), false, 'the card is gone');
     assert.equal(turns(bot).length, 1, 'the bot itself sent nothing');
     const sub = agents.executions.get(helper.id) || agents.execution(helper.id);
-    await until(() => turns(sub).length === 1 && sub.busy, 'the sub-bot starts the task');
+    await until(() => turns(sub).length === 1 && sub.busy, 'the new bot starts the task');
     assert.equal(turns(sub)[0].params.model, 'strong');
     assert.match(turns(sub)[0].params.input[0].text, /Audit delegate\(\) in src\/agents\.cjs for permission leaks\./);
 
-    // The sub-bot's result comes back to the bot's chat, which continues with it on its own model, without asking.
+    // The new bot's result comes back to the bot's chat, which continues with it on its own model, without asking.
     picks.push(pick('codex:weak:medium', 'medium'));
     finish(sub, 'Audit done: no permission leaks found in delegate().');
     await until(() => turns(bot).length === 2 && bot.busy, 'the result comes back to the bot');
@@ -130,7 +131,7 @@ module.exports = async function modelSwapUiCheck(window, root, ipcMain) {
     assert.match(turns(bot)[1].params.input[0].text, /Result from agent "CardTest helper"[\s\S]*Audit done: no permission leaks found in delegate\(\)\./);
     finish(bot, 'The helper found no permission leaks.');
     await until(() => js('document.querySelector("#messages").textContent.includes("The helper found no permission leaks.")'), 'the bot\'s reply reaches the renderer');
-    console.log('Model swap card → Create a sub-bot through the real renderer, preload, IPC and runner, with the result back in the bot\'s chat, passed');
+    console.log('Model swap card → Create a new bot through the real renderer, preload, IPC and runner, with the result back in the bot\'s chat, passed');
   } finally {
     await agents.shutdown({ stopMs: 1000 });
   }

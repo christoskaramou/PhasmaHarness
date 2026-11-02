@@ -97,7 +97,7 @@ function cooldown(state, suggested, difficulty, now) {
   return null;
 }
 
-const WAITING = { swapped: 'swapped models', declined: 'was told to keep this model', expired: 'asked about a swap', delegated: 'sent a task to a sub-bot',
+const WAITING = { swapped: 'swapped models', declined: 'was told to keep this model', expired: 'asked about a swap',
   similar: 'was told to keep this model for a similar task' };
 
 // The decision for one new task, or null when there is nothing to decide: the bot's first task, its model is no longer

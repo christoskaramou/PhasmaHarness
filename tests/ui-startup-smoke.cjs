@@ -1803,10 +1803,10 @@ app.whenReady().then(async () => {
       gain: 69, margin: 16, baseMargin: 15, context: { tokens: 1200, points: 1, crossProvider: false }, cooldown: null, reason: 'Strong fits better.' } };
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(asking) + '); true');
   assert.deepEqual(await window.webContents.executeJavaScript(`[...document.querySelectorAll('#messages .model-swap button')].map(button => button.textContent)`),
-    ['Create a sub-bot', 'Swap here', 'Keep current']);
+    ['Create a new bot', 'Swap here', 'Keep current']);
   // Each answer says what it does; Swap here says what it costs this conversation.
   assert.deepEqual(await window.webContents.executeJavaScript(`[...document.querySelectorAll('#messages .model-swap li')].map(item => item.textContent)`), [
-    'Create a sub-bot: a new bot under this one runs this task on Strong · high. This bot keeps Weak · high and its whole conversation, and the sub-bot’s result comes back here.',
+    'Create a new bot: a new bot runs this task on Strong · high. This bot keeps Weak · high and its whole conversation, and the new bot’s result comes back here.',
     'Swap here: this bot switches to Strong · high for this task and the next ones. It keeps this conversation but loses the prompt cache: Strong · high re-reads about 1,200 tokens of this conversation in full, which costs more on the first message.',
     'Keep current: this task runs on Weak · high. Nothing changes.']);
   assert.match(await window.webContents.executeJavaScript(`document.querySelector('#messages .model-swap').textContent`),
@@ -1814,13 +1814,13 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript(`[...document.querySelectorAll('#messages .model-swap button')].at(-1).click(); true`);
   await until(() => swapAnswers.length === 1, 'Keep current answers the swap question');
   assert.deepEqual(swapAnswers[0], [askingChat.id, 'swap-question', 'keep']);
-  // Across providers, Swap here loses the working context; Create a sub-bot answers through the preload too.
+  // Across providers, Swap here loses the working context; Create a new bot answers through the preload too.
   Object.assign(askingChat.pendingMessage.modelSwap, { id: 'swap-question-2', context: { tokens: 1200, points: 9, crossProvider: true } });
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(asking) + '); true');
   assert.match(await window.webContents.executeJavaScript(`document.querySelectorAll('#messages .model-swap li')[1].textContent`),
     /^Swap here: .*It loses its working context: Strong · high gets about 1,200 tokens of this conversation as a quoted copy, not this session/);
   await window.webContents.executeJavaScript(`document.querySelector('#messages .model-swap button').click(); true`);
-  await until(() => swapAnswers.length === 2, 'Create a sub-bot answers the swap question');
+  await until(() => swapAnswers.length === 2, 'Create a new bot answers the swap question');
   assert.deepEqual(swapAnswers[1], [askingChat.id, 'swap-question-2', 'subbot']);
   // Hub's question for its next messages sits under its reply; Swap answers it, and the outcome then shows there.
   askingChat.pendingMessage = null;
@@ -3990,6 +3990,7 @@ app.whenReady().then(async () => {
     return true;
   })()`);
   ipcMain.removeHandler('replySuggestion');
+  ipcMain.handle('replySuggestion', () => null);
   assert.equal(suggestionCalls.length, 1, 'the same answer asks for a suggestion once');
   assert.deepEqual(suggestionUi.empty, { hidden: false, text: 'Now add tests for it.', placeholder: '', described: 'Suggested reply, Right arrow accepts: Now add tests for it.' });
   assert.deepEqual(suggestionUi.typed, { hidden: false, grey: ' tests for it.' });

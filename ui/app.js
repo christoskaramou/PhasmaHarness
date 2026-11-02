@@ -2554,7 +2554,7 @@ function renderComparison(view, sessionId, opened = true) {
 }
 
 // Auto's question before a bot swaps models (src/controller/model-swaps.cjs): the scores, the margin, and what each answer
-// does: Create a sub-bot, Swap here or Keep current. Hub's own question (under its reply) has Swap and Keep current.
+// does: Create a new bot, Swap here or Keep current. Hub's own question (under its reply) has Swap and Keep current.
 // Unanswered by expiresAt (a bot) or by the next message (Hub), the current model stays.
 function renderModelSwap(swap, session) {
   const card = element('div', 'model-swap');
@@ -2571,14 +2571,14 @@ function renderModelSwap(swap, session) {
     option('Swap', `Hub uses ${suggested.label} from your next message. Nothing is lost: Hub sends its context with every request.`),
     option('Keep current', `Hub stays on ${current.label}.`));
   else options.append(
-    option('Create a sub-bot', `a new bot under this one runs this task on ${suggested.label}. This bot keeps ${current.label} and its whole conversation, and the sub-bot’s result comes back here.`),
+    option('Create a new bot', `a new bot runs this task on ${suggested.label}. This bot keeps ${current.label} and its whole conversation, and the new bot’s result comes back here.`),
     option('Swap here', `this bot switches to ${suggested.label} for this task and the next ones. ` + (!context.tokens ? 'This chat has no conversation yet, so nothing is lost.'
       : context.crossProvider ? `It loses its working context: ${suggested.label} gets ${tokens} as a quoted copy, not this session, so details such as earlier tool results can be lost.`
         : `It keeps this conversation but loses the prompt cache: ${suggested.label} re-reads ${tokens} in full, which costs more on the first message.`)),
     option('Keep current', `this task runs on ${current.label}. Nothing changes.`));
   card.append(options);
   const actions = element('div', 'model-swap-actions');
-  const choices = swap.hub ? [['swap', `Swap to ${suggested.label}`], ['keep', 'Keep current']] : [['subbot', 'Create a sub-bot'], ['swap', 'Swap here'], ['keep', 'Keep current']];
+  const choices = swap.hub ? [['swap', `Swap to ${suggested.label}`], ['keep', 'Keep current']] : [['subbot', 'Create a new bot'], ['swap', 'Swap here'], ['keep', 'Keep current']];
   const buttons = choices.map(([choice, text], index) => {
     const button = element('button', index === 0 ? 'compact-action primary' : 'compact-action', text); button.type = 'button';
     button.onclick = async () => {
@@ -2595,10 +2595,10 @@ function renderModelSwap(swap, session) {
 }
 
 const SWAP_WAIT = { swapped: 'cooldown after a swap', declined: 'cooldown after Keep current', expired: 'cooldown after an unanswered question',
-  delegated: 'cooldown after a sub-bot', similar: 'you kept it for a similar task' };
+  similar: 'you kept it for a similar task' };
 function modelSwapLine(swap) {
   const ran = swap.outcome === 'swapped' ? `swapped ${swap.current.label} → ${swap.suggested.label}`
-    : swap.outcome === 'delegated' ? `kept ${swap.current.label}; sub-bot ${swap.subBot?.name || ''} runs ${swap.suggested.label}`
+    : swap.outcome === 'delegated' ? `kept ${swap.current.label}; new bot ${swap.subBot?.name || ''} runs ${swap.suggested.label}`
       : `kept ${swap.current.label}, Auto suggested ${swap.suggested.label}`;
   // In the order of the reason Auto records (src/routing/model-swap.cjs): no score, under the margin, then a cooldown.
   const why = swap.outcome !== 'kept' ? swap.choice : swap.gain === null ? 'no measured score' : swap.gain < swap.margin ? 'under the margin'

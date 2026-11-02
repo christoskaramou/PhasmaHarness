@@ -262,7 +262,7 @@ test('a swap the score supports waits for Swap before the task starts, without b
   picks.push(pick('codex:strong:high', 'high'));
   assert.deepEqual(await send('And then this'), { queued: true });
   assert.throws(() => bot.answerModelSwap(session.id, 'other-question', 'swap'), /no longer open/);
-  assert.throws(() => bot.answerModelSwap(session.id, question.id, 'maybe'), /Create a sub-bot, Swap here or Keep current/);
+  assert.throws(() => bot.answerModelSwap(session.id, question.id, 'maybe'), /Create a new bot, Swap here or Keep current/);
   bot.answerModelSwap(session.id, question.id, 'swap');
   await sending;
   assert.deepEqual(turns(), ['weak', 'strong']);
@@ -484,9 +484,9 @@ test('an unsure Jev assessment gets the smart router\'s second opinion, whose ch
   complete(); await until(() => !bot.busy);
 });
 
-test('Create a sub-bot sends the task to a new bot under this one on the suggested model, and this bot sends nothing', async t => {
+test('Create a new bot makes a top-level bot on the suggested model, and this bot keeps its time and asks again', async t => {
   const { agents, bot, session, picks, turns, send } = await setup(t);
-  agents.pump = () => {}; // the sub-bot's job stays queued: this checks the hand-off
+  agents.pump = () => {}; // the new bot's job stays queued: this checks the hand-off
   const resolve = agents.primary.resolveWorker.bind(agents.primary);
   agents.primary.resolveWorker = id => catalog.find(p => p.id === id) || resolve(id);
   agents.primary.available = () => true;
@@ -494,28 +494,35 @@ test('Create a sub-bot sends the task to a new bot under this one on the suggest
   const sending = send('Audit the session handling');
   await until(() => session.pendingMessage?.modelSwap);
   const question = session.pendingMessage.modelSwap.id;
+  const before = { updated: session.updated, routes: session.routes.length };
   bot.answerModelSwap(session.id, question, 'subbot');
   await sending;
 
   assert.deepEqual(turns(), ['weak'], 'this bot sent nothing');
   const helper = agents.primary.data.agents.find(profile => profile.name === 'Auto bot helper');
-  assert.deepEqual([helper.createdBy, helper.mode, helper.instructions], [bot.agentId, 'codex:strong:high', 'Role: test']);
+  assert.deepEqual([helper.createdBy, helper.mode, helper.instructions], ['main', 'codex:strong:high', 'Role: test']);
+  assert.equal(agents.isSubBot(helper), false, 'the new bot is not a sub-bot');
   const job = agents.conversation(agents.executions.get(helper.id)).delegation;
   assert.equal(job.source, session.id); assert.match(job.task, /Audit the session handling/);
   const [message, note] = session.items.slice(-2);
   assert.deepEqual([message.type, message.content[0].text, message.pending], ['userMessage', 'Audit the session handling', false]);
-  assert.equal(note.text, 'Sent this task to the new sub-bot **Auto bot helper**, which runs strong · high. This bot keeps weak · high and its conversation; the sub-bot’s result comes back here.');
-  assert.deepEqual([note.modelSwap.outcome, note.modelSwap.choice, note.modelSwap.status, note.modelSwap.subBot.name], ['delegated', 'you chose Create a sub-bot', 'answered', 'Auto bot helper']);
-  assert.deepEqual([bot.busy, session.status, session.pendingMessage, session.modelSwapState.last.kind], [null, 'completed', null, 'delegated']);
+  assert.equal(note.text, 'Sent this task to the new bot **Auto bot helper**, which runs strong · high. This bot keeps weak · high and its conversation; the new bot’s result comes back here.');
+  assert.deepEqual([note.modelSwap.outcome, note.modelSwap.choice, note.modelSwap.status, note.modelSwap.subBot.name], ['delegated', 'you chose Create a new bot', 'answered', 'Auto bot helper']);
+  assert.deepEqual([bot.busy, session.status, session.pendingMessage, session.modelSwapState], [null, 'completed', null, undefined]);
+  assert.equal(session.updated, before.updated, 'this bot\'s last-activity time is unchanged');
+  assert.equal(session.routes.length, before.routes, 'no route is added for the hand-off');
   assert.equal(session.routes.at(-1).id, 'codex:weak:medium', 'this bot\'s model for new work is unchanged');
-  assert.equal((session.tasks || []).some(task => task.messageId === message.clientId), false, 'the message is the sub-bot\'s task, not this bot\'s');
+  assert.equal((session.tasks || []).some(task => task.messageId === message.clientId), false, 'the message is the new bot\'s task, not this bot\'s');
   assert.throws(() => bot.answerModelSwap(session.id, question, 'swap'), /no longer open/);
 
-  // The next message runs here as usual, within the cooldown a sub-bot starts.
+  // The next message to this bot asks the same question again: a new bot leaves no cooldown behind.
   picks.push(pick('codex:strong:high', 'high'));
-  await send('Another hard one');
-  assert.deepEqual([turns(), session.routes.at(-1).modelSwap.cooldown.kind], [['weak', 'weak'], 'delegated']);
-  assert.match(session.routes.at(-1).modelSwap.reason, /but Auto sent a task to a sub-bot recently/);
+  const again = send('Another hard one');
+  await until(() => session.pendingMessage?.modelSwap);
+  assert.equal(session.pendingMessage.modelSwap.cooldown ?? null, null, 'no cooldown after a new bot');
+  bot.answerModelSwap(session.id, session.pendingMessage.modelSwap.id, 'keep');
+  await again;
+  assert.deepEqual(turns(), ['weak', 'weak']);
 });
 
 test('a pinned bot never routes or swaps, and a swap question does not survive a restart', async t => {

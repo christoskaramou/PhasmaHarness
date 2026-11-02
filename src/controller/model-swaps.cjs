@@ -1,6 +1,6 @@
 'use strict';
 // Auto on a bot keeps the bot's model unless a swap is worth losing its conversation (src/routing/model-swap.cjs), and a
-// swap the score supports waits for the user's answer before the task starts: Create a sub-bot (a new bot under this one
+// swap the score supports waits for the user's answer before the task starts: Create a new bot (a new top-level bot
 // runs the task on the suggested model), Swap here or Keep current. Unanswered, it keeps the current model. These are
 // Controller methods (see ../controller.cjs); `this` is the Controller.
 const { randomUUID } = require('node:crypto');
@@ -8,7 +8,7 @@ const { evaluateSwap, evaluateReach, evaluateHubSwap, countTask, recordDecision,
 const { ACCESS_MODES } = require('./shared.cjs');
 
 const OUTCOMES = { swap: 'swapped', keep: 'declined', subbot: 'delegated', timeout: 'expired' };
-const CHOSEN = { swapped: 'you chose Swap here', declined: 'you chose Keep current', delegated: 'you chose Create a sub-bot',
+const CHOSEN = { swapped: 'you chose Swap here', declined: 'you chose Keep current', delegated: 'you chose Create a new bot',
   expired: 'no answer, so the current model stays', stopped: 'stopped', kept: 'Auto kept it', unasked: 'delegated, group and result turns do not pause to ask' };
 
 module.exports = {
@@ -94,7 +94,8 @@ module.exports = {
     });
     if (session.pendingMessage?.modelSwap?.id === prompt.id) delete session.pendingMessage.modelSwap;
     const outcome = answer === 'stopped' ? 'stopped' : OUTCOMES[answer];
-    if (outcome !== 'stopped') recordDecision(session, outcome, result);
+    // A new bot leaves this bot with no cooldown: its next message asks the same question again.
+    if (outcome !== 'stopped' && outcome !== 'delegated') recordDecision(session, outcome, result);
     this.log.info('Auto model swap', { session: session.id, from: result.decision.current.id, to: result.decision.suggested.id,
       difficulty: result.decision.difficulty, gain: result.decision.gain, margin: result.decision.margin, outcome });
     this.save(); this.changed();
@@ -138,10 +139,10 @@ module.exports = {
     this.log.info('Hub model swap answered', { from: swap.current.id, to: swap.suggested.id, outcome });
   },
 
-  // The user's answer to a pending swap question: a bot's before its task (Create a sub-bot, Swap here or Keep current),
+  // The user's answer to a pending swap question: a bot's before its task (Create a new bot, Swap here or Keep current),
   // or Hub's under a reply (Swap or Keep current).
   answerModelSwap(id, promptId, choice) {
-    if (!['subbot', 'swap', 'keep'].includes(choice)) throw new Error('Choose Create a sub-bot, Swap here or Keep current.');
+    if (!['subbot', 'swap', 'keep'].includes(choice)) throw new Error('Choose Create a new bot, Swap here or Keep current.');
     const waiting = this.swapPrompts?.get(id);
     if (waiting?.id === promptId) {
       waiting.resolve(choice);
@@ -159,16 +160,16 @@ module.exports = {
     return { answered: choice };
   },
 
-  // Create a sub-bot: a new bot under this one, on the suggested model, takes the message as its task. This bot sends
-  // nothing and keeps its model and conversation; the sub-bot's result comes back to this chat (agents.deliver), where
-  // this bot continues with it. The message and what happened to it stay in this chat. Called from send in place of the
-  // worker turn; a refusal fails the send like any other ("Not sent: …"), before a sub-bot exists where it can.
-  async handToSubBot(session, route, text, images, clientId) {
+  // Create a new bot: a new top-level bot (not under this one), on the suggested model, takes the message as its task. This
+  // bot sends nothing and keeps its model, conversation and idle time (its last turn's end is not changed); the new bot's
+  // result comes back to this chat (agents.deliver). The message and what happened to it stay in this chat. Called from
+  // send in place of the worker turn; a refusal fails the send like any other ("Not sent: …"), before a bot exists where it can.
+  async handToNewBot(session, route, text, images, clientId) {
     const swap = route.modelSwap, own = this.agents.profile(this.agentId);
-    if (typeof text !== 'string' || !text.trim() || text.length > 16000) throw new Error('A sub-bot task must be under 16,000 characters.');
+    if (typeof text !== 'string' || !text.trim() || text.length > 16000) throw new Error('A new bot task must be under 16,000 characters.');
     this.agents.checkDelegationCapacity(this, session);
-    const profile = await this.agents.tool(this, session, 'agent_create', {
-      name: this.agents.freeName(`${own.name.slice(0, 44).trim()} helper`), instructions: own.instructions, mode: swap.suggested.id });
+    const profile = await this.agents.saveAgent({ name: this.agents.freeName(`${own.name.slice(0, 44).trim()} helper`), instructions: own.instructions,
+      mode: swap.suggested.id, workspace: session.workspace, access: session.access, createdBy: 'main' }, null);
     // The message was never this bot's task: its tracking record goes, so the sub-bot's job does not hang from it.
     session.tasks = (session.tasks || []).filter(task => task.messageId !== clientId);
     session.activeTaskId = null;
@@ -176,11 +177,12 @@ module.exports = {
     const pending = session.pendingMessage;
     session.items.push({ ...pending, id: clientId, clientId, pending: false, localOnly: true, createdAt: pending?.createdAt || Date.now() });
     session.items.push({ id: randomUUID(), type: 'agentMessage', phase: 'final_answer', localOnly: true, createdAt: Date.now(), routeLabel: 'Harness',
-      text: `Sent this task to the new sub-bot **${profile.name}**, which runs ${swap.suggested.label}. This bot keeps ${swap.current.label} and its conversation; the sub-bot’s result comes back here.`,
+      text: `Sent this task to the new bot **${profile.name}**, which runs ${swap.suggested.label}. This bot keeps ${swap.current.label} and its conversation; the new bot’s result comes back here.`,
       modelSwap: { ...swap, status: 'answered', subBot: { id: profile.id, name: profile.name, jobId: sent.jobId } } });
     if (!session.items.some(item => item.type === 'userMessage' && !item.agentReply && item.id !== clientId)) session.title = text.trim().replace(/\s+/g, ' ').slice(0, 65);
     session.pendingMessage = null;
-    session.status = 'completed'; session.error = null; session.updated = Date.now();
+    // The old bot's last-activity time stays as it was (cold start measures idle time from it), so `updated` is not bumped.
+    session.status = 'completed'; session.error = null;
     this.lastSends.delete(session.id);
     this.stopping.delete(session.id);
     if (this.busy === session.id) this.busy = null;
