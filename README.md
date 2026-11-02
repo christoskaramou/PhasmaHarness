@@ -58,6 +58,24 @@ An optional Linux runner works without Electron or a display. See [Linux service
 
 In desktop Settings → Browser, start the listener and copy its connection link. The listener binds only to `127.0.0.1`; the default link works on that computer. For another computer or phone, put an authenticated Harness session behind your private HTTPS proxy and set its public HTTPS origin in the same settings. The proxy must preserve the original Host and Authorization headers. Native provider setup and local microphone controls stay on the desktop.
 
+**Use it on this computer:**
+
+1. Open Settings → Browser and choose **Start browser access**. Leave the port at 8788 unless something else uses it.
+2. Choose **Copy connection link** and open it in a browser. The link holds the access key, so keep it private.
+3. To sign everyone out, choose **Disconnect browsers**. **Reset connection link** also replaces the key.
+
+**Use it from a phone with Tailscale.** [Tailscale Serve](https://tailscale.com/kb/1312/serve) gives the PC a private HTTPS address that only devices on your tailnet can reach. Harness itself still listens only on `127.0.0.1`.
+
+1. Install Tailscale on the PC and on the phone, and sign both in to the same tailnet.
+2. In the Tailscale admin console, turn on MagicDNS and HTTPS certificates.
+3. On the PC, run `tailscale serve --bg 8788`. This forwards `https://<pc-name>.<tailnet>.ts.net` to the Harness listener. Use your port if you changed it.
+4. Check with `tailscale serve status` (it should show your HTTPS address) and `tailscale funnel status` (Funnel should be off). Funnel would publish Harness to the whole internet, so do not use it.
+5. In Settings → Browser, stop browser access if it is running, enter the `https://….ts.net` address under **HTTPS address**, then start it again.
+6. Copy the connection link. It now uses the HTTPS address. Send it to the phone privately and open it in Chrome.
+7. Optional: install it as an app (see **Install on a phone** below).
+
+If the phone says it can't connect, check that Tailscale is still on there. Closing all apps from the recent apps screen can close Tailscale as well. On Android, the Always-on VPN setting, or exempting Tailscale from battery limits, keeps it running. `tailscale status` on the PC shows whether the phone is online.
+
 The browser uses the same conversations and jobs. Closing its tab does not stop accepted work. Browser sessions persist on the runner; Disconnect revokes that session, Disconnect browsers revokes all sessions, and Reset connection link also replaces the shared key. The shared key leaves the visible URL after connection. Access uses explicit authorization headers rather than cookies shared with other loopback ports. The browser keeps its session ticket on the device until Disconnect, or until the runner refuses it, so an installed app opens signed in.
 
 **Install on a phone:** open the connection link in Chrome, then use the menu → **Add to home screen** → **Install**. Harness opens from its own icon, full screen and without the address bar, using the page's manifest (`ui/manifest.webmanifest`). Disconnect browsers or Reset connection link in Settings → Browser signs the app out. Desktop and simulated phone checks pass with fake inference. A real Android phone (Chrome, through Tailscale Serve) was checked on 2026-10-26: the phone layout, staying signed in, and running as an installed app. Remote-host (Linux service) deployment remains in progress.
