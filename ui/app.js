@@ -1452,7 +1452,8 @@ const BOT_FILTERS = {
   attention: { label: 'Needs attention', test: status => ['Needs input', 'Paused', 'Connection needed'].includes(status) },
   ready: { label: 'Idle', test: status => status === 'Ready' },
 };
-let botSort = BOT_SORTS[localStorage.getItem('botSort')] ? localStorage.getItem('botSort') : 'default';
+// New users see the bot they last messaged at the top; a sort chosen in the menu is kept.
+let botSort = BOT_SORTS[localStorage.getItem('botSort')] ? localStorage.getItem('botSort') : 'recent';
 let botFilter = BOT_FILTERS[localStorage.getItem('botFilter')] ? localStorage.getItem('botFilter') : 'all';
 const sortMenu = $('#agent-sort-menu');
 function renderSortMenu() {
