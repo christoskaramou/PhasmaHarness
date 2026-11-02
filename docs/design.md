@@ -88,7 +88,7 @@ The preview contains illustrative content. Settings → Appearance switches Dark
 
 ## Execution and ownership
 
-Claude Code uses the user's own native sign-in in the unmodified published client. Follow the [verified authentication and hosting conditions](wiki/local-agents.md#claude-code-authentication); keep credentials inside that client and preserve user-selected billing.
+Claude Code uses the user's own native sign-in in the unmodified published client. Follow the verified authentication and hosting conditions; keep credentials inside that client and preserve user-selected billing.
 
 ### Provider support
 
@@ -174,4 +174,4 @@ Also test a forced runner restart, a busy recipient, a full queue, an unanswered
 
 Grok behavior reviewed 18 October 2026: [messaging and asynchronous handoffs](https://docs.x.ai/grok-bot/chat-and-collaboration), [persistent bots](https://docs.x.ai/grok-bot/bots), [shared computer](https://docs.x.ai/grok-bot/computer-and-apps), [files and results](https://docs.x.ai/grok-bot/files-and-results), and [skills and routines](https://docs.x.ai/grok-bot/skills-routines-and-automations). This design specifies Harness behavior; it does not assume Grok's internal implementation.
 
-Continue with the [implementation plan](implementation-plan.md). Current implementation knowledge remains in the [project wiki](wiki/index.md).
+Continue with the [implementation plan](implementation-plan.md). Current implementation knowledge remains in the project wiki.

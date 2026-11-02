@@ -48,15 +48,13 @@ Ask an agent to send text and a task to another agent using `agents_list` and `a
 
 Delegation never increases the source conversation's access level. Sending tasks across workspaces requires Full access. Approvals stay separate per agent. Interrupted delegated tasks are marked after restart and never automatically replayed. Profiles, conversations and queues are stored locally beside the existing session store. Models still use the configured providers; this feature does not install offline models or add a browser/desktop automation runtime. Work requires the app and computer to remain running.
 
-Architecture and validation: [local agents](docs/wiki/local-agents.md).
-
 ## Background allowance
 
 The overnight guard pauses new background turns once a reported allowance is full. It uses ChatGPT reports and available Claude Code plan reports. Claude checks use the native CLI without model calls or transcript scans. Settings shows the last report for the matching account. Unknown allowance stays unknown, and a running call can finish past it. Other providers' remaining quotas are not yet reported here. Real Max-window acceptance is still pending.
 
 ## Browser access
 
-An optional Linux runner works without Electron or a display. See [Linux service setup](docs/wiki/hosting.md) for installation, native provider sign-in and private HTTPS access. Public-host acceptance remains in progress; a desktop runner reached from an Android phone over Tailscale was checked on 2026-10-26.
+An optional Linux runner works without Electron or a display. See [Linux service setup](docs/hosting.md) for installation, native provider sign-in and private HTTPS access. Public-host acceptance remains in progress; a desktop runner reached from an Android phone over Tailscale was checked on 2026-10-26.
 
 In desktop Settings → Browser, start the listener and copy its connection link. The listener binds only to `127.0.0.1`; the default link works on that computer. For another computer or phone, put an authenticated Harness session behind your private HTTPS proxy and set its public HTTPS origin in the same settings. The proxy must preserve the original Host and Authorization headers. Native provider setup and local microphone controls stay on the desktop.
 
@@ -118,7 +116,7 @@ npm start
 
 `Install Phasma Harness.cmd` runs `src/install.ps1`, which installs missing Node.js LTS and Git through winget, runs `npm ci`, fetches the bundled tools, and creates a desktop shortcut. Before replacing dependencies, it requests a normal shutdown of this folder's Harness and waits for its workers and file locks to clear. If shutdown or file release takes more than 45 seconds, installation stops before changing dependencies and identifies the blocker; it never force-closes Cursor or unrelated apps. A Harness already running an older version needs one manual tray → Quit runner. Successful installation starts Harness again. Launching Harness normally while it runs brings back the existing window. Providers are installed from the app. Keep the folder where the shortcut points.
 
-On Linux, `./install-linux.sh` does the same from a checkout: it installs Node.js for your user when it is missing or older than 22.13 (the nodejs.org build, SHA-256 checked), runs `npm ci`, fetches the bundled tools and Electron, adds a menu entry and a `phasma-harness` command in `~/.local/bin`, and starts Harness. On distributions that block user namespaces (Ubuntu 24.04 and later) it asks sudo once to set up Electron's sandbox helper. `./install-linux.sh --headless` installs the display-less runner as a systemd user service instead (Node.js 24; `--origin`, `--port` and `--data` as in [Linux service setup](docs/wiki/hosting.md)). Releases also carry a Linux x64 `.deb` (`sudo apt install ./Phasma-Harness-<version>-amd64.deb`) and an AppImage (`chmod +x`, then run it); automatic updates stay Windows-only, so on Linux the update banner links to the release.
+On Linux, `./install-linux.sh` does the same from a checkout: it installs Node.js for your user when it is missing or older than 22.13 (the nodejs.org build, SHA-256 checked), runs `npm ci`, fetches the bundled tools and Electron, adds a menu entry and a `phasma-harness` command in `~/.local/bin`, and starts Harness. On distributions that block user namespaces (Ubuntu 24.04 and later) it asks sudo once to set up Electron's sandbox helper. `./install-linux.sh --headless` installs the display-less runner as a systemd user service instead (Node.js 24; `--origin`, `--port` and `--data` as in [Linux service setup](docs/hosting.md)). Releases also carry a Linux x64 `.deb` (`sudo apt install ./Phasma-Harness-<version>-amd64.deb`) and an AppImage (`chmod +x`, then run it); automatic updates stay Windows-only, so on Linux the update banner links to the release.
 
 ### Installer build and updates
 

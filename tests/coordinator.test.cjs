@@ -2552,7 +2552,7 @@ test('Hub hands off structured arguments with Windows paths, quotes and pasted t
 
 test('Hub rejects malformed or mismatched action arguments before any side effect', async t => {
   const { hub, replies, send } = await setup(t);
-  const malformed = String.raw`{"workspace":"C:\Users\Christos\repos\PhasmaEngine","task":"Review"}`;
+  const malformed = String.raw`{"workspace":"C:\Users\me\repos\Project","task":"Review"}`;
   for (const decision of [
     { reply: '', tool: 'agent_work', arguments: malformed },
     action('agent_work', malformed), action('agent_work', []), action('agent_work', null),

@@ -2,7 +2,7 @@
 # Phasma Harness source installer for Linux, the counterpart of "Install Phasma Harness.cmd" (src/install.ps1).
 #   ./install-linux.sh               the desktop app: dependencies, bundled tools, Electron, a menu entry and a
 #                                    phasma-harness command, then it starts
-#   ./install-linux.sh --headless    the runner as a systemd user service, no display (docs/wiki/hosting.md); --origin,
+#   ./install-linux.sh --headless    the runner as a systemd user service, no display (docs/hosting.md); --origin,
 #                                    --port and --data go to tools/linux-service.cjs
 #   ./install-linux.sh --check-only  checks the app files and exits
 # A missing or too old Node.js is installed for this user only, into installers/node (the nodejs.org build, checked
