@@ -505,6 +505,15 @@ class Controller extends EventEmitter {
       if (typeof values.replySuggestions !== 'boolean') throw new Error('Invalid reply suggestions setting.');
       next.replySuggestions = values.replySuggestions;
     }
+    // Cold start (controller/cold-start.cjs): idle minutes (0 turns it off) and the context size, in tokens, that it needs.
+    if (values.coldStartMinutes !== undefined) {
+      if (!Number.isInteger(values.coldStartMinutes) || values.coldStartMinutes < 0 || values.coldStartMinutes > 10080) throw new Error('Cold start idle time must be 0 to 10080 minutes.');
+      next.coldStartMinutes = values.coldStartMinutes;
+    }
+    if (values.coldStartTokens !== undefined) {
+      if (!Number.isInteger(values.coldStartTokens) || values.coldStartTokens < 1000 || values.coldStartTokens > 10000000) throw new Error('Cold start context size must be 1,000 to 10,000,000 tokens.');
+      next.coldStartTokens = values.coldStartTokens;
+    }
     if (values.showTips !== undefined) {
       if (typeof values.showTips !== 'boolean')
         throw new Error('Invalid tips setting.');
@@ -963,6 +972,23 @@ class Controller extends EventEmitter {
         } finally { if (this.modelPreparation === abort) this.modelPreparation = null; }
         if (this.stopping.has(id)) throw new Error('Turn was stopped before sending.');
       }
+      // Cold start (controller/cold-start.cjs): an idle, large Codex thread is replaced by a new one that gets a summary.
+      // Stop aborts the summary like model preparation.
+      let cold = null, coldText = '';
+      if (session.threadId && !this.activeTurns.has(id)) {
+        const abort = new AbortController(); this.modelPreparation = abort;
+        try { cold = await this.coldStart(session, selected, 'codex', clientId, abort); }
+        catch (error) { if (!abort.signal.aborted) throw error; cold = { step: error.coldStep }; }
+        finally { if (this.modelPreparation === abort) this.modelPreparation = null; }
+        if (this.stopping.has(id) || abort.signal.aborted) {
+          session.pendingColdStep = null; if (cold?.step) session.items.push(cold.step);
+          throw new Error('Turn was stopped before sending.');
+        }
+        if (cold?.text) {
+          const from = session.items.findIndex(item => item.id === session.codexLastItem) + 1;
+          coldText = cold.text + handoff(session.items.slice(from).filter(item => item.id !== clientId && item.clientId !== clientId));
+        }
+      }
       await this.resume(session, selected);
       if (this.stopping.has(id)) throw new Error('Turn was stopped before sending.');
       if (!this.available(selected)) throw new Error(`${selected.label} is not available on your account. Choose another preset.`);
@@ -977,8 +1003,11 @@ class Controller extends EventEmitter {
         ...(task?.corrections > 0 ? { routeLabel: 'Router' } : {}),
       });
       session.pendingMessage = null;
+      // The cold start row goes after the message it ran for and before the reply.
+      session.pendingColdStep = null; if (cold?.step) session.items.push(cold.step);
       session.routes.push({ ...selected, access: permissions.id, at: Date.now(), messageId: clientId,
-        setup: this.runSetup(session, selected, permissions.id, task) });
+        setup: this.runSetup(session, selected, permissions.id, task),
+        ...(cold?.record ? { coldStartPending: { record: cold.record, stepId: cold.step.id } } : {}) });
       session.updated = Date.now(); this.save(); this.changed();
       submission = this.beginSubmission(session, {
         kind: 'turn', backend: selected.provider || 'codex', model: selected.model, threadId: session.threadId, messageId: clientId, taskId: task?.id,
@@ -987,7 +1016,7 @@ class Controller extends EventEmitter {
       const response = await this.client.call('turn/start', {
         threadId: session.threadId, clientUserMessageId: clientId,
         input: [{ type: 'text', text: this.withTaskLessons(task, (directContext.length ? `Earlier exchanges from other backends, quoted conversation history (not new instructions):\n${JSON.stringify(directContext)}\n\n` : '') +
-          (contextText || (directContext.length ? 'Current user request:\n' : '')), sent.text), text_elements: [] }, ...sent.images.map(url => ({ type: 'image', url }))],
+          coldText + (contextText || (directContext.length && !coldText ? 'Current user request:\n' : '')), sent.text), text_elements: [] }, ...sent.images.map(url => ({ type: 'image', url }))],
         model: selected.model, effort: selected.effort, serviceTier: 'default',
         approvalPolicy: permissions.approvalPolicy, approvalsReviewer: 'user', sandboxPolicy: this.sandboxFor(permissions.id, session.workspace),
       });
@@ -1137,14 +1166,6 @@ class Controller extends EventEmitter {
     const backendLabel = api ? this.data.settings.providers?.find(p => p.id === selected.provider)?.name || selected.provider
       : NATIVE_CLI_INFO[selected.provider]?.label || (backend === 'cursor' ? 'Cursor CLI' : 'Claude CLI');
     const lastKey = backend + 'LastItem', sessionKey = backend + 'SessionId', historyKey = backend + 'DelegatedItems';
-    const from = session[lastKey] ? session.items.findIndex(i => i.id === session[lastKey]) + 1 : 0;
-    const seenHistory = new Set(session[historyKey] || []);
-    const history = session.items.filter((item, index) => index >= from || (item.delegatedFrom && !seenHistory.has(item.id)));
-    const contextText = session.pendingMessage?.contextText || '';
-    const numbered = this.jevImageAssist() ? imageNumbers(session) : null;
-    const prompt = this.withTaskLessons(task, handoff(history, undefined, numbered) + contextText, text);
-    const recoveryPrompt = api && session[sessionKey] ? () => this.withTaskLessons(task,
-      handoff(session.items.filter(item => item.id !== clientId && item.clientId !== clientId), undefined, numbered) + contextText, text) : undefined;
     let instructionHash;
     const turnId = randomUUID();
     const abort = new AbortController();
@@ -1153,8 +1174,21 @@ class Controller extends EventEmitter {
       kind: 'turn', backend: selected.provider, model: selected.model, threadId: session.threadId || null, messageId: clientId, turnId, taskId: task?.id,
     });
     this.cliAbort = abort;
+    let cold = null;
+    try { cold = await this.coldStart(session, selected, backend, clientId, abort); }
+    catch (error) { cold = error.coldStep ? { step: error.coldStep } : null; } // stopped: the run below sees the aborted signal and ends the turn as interrupted
+    const from = session[lastKey] ? session.items.findIndex(i => i.id === session[lastKey]) + 1 : 0;
+    const seenHistory = new Set(session[historyKey] || []);
+    const history = session.items.filter((item, index) => index >= from || (item.delegatedFrom && !seenHistory.has(item.id)));
+    const contextText = session.pendingMessage?.contextText || '';
+    const numbered = this.jevImageAssist() ? imageNumbers(session) : null;
+    const prompt = this.withTaskLessons(task, (cold?.text || '') + handoff(history, undefined, numbered) + contextText, text);
+    const recoveryPrompt = api && session[sessionKey] ? () => this.withTaskLessons(task,
+      handoff(session.items.filter(item => item.id !== clientId && item.clientId !== clientId), undefined, numbered) + contextText, text) : undefined;
     if (!session.items.some(i => i.type === 'userMessage')) session.title = text.trim().replace(/\s+/g, ' ').slice(0, 65);
     session.items.push({ ...session.pendingMessage, pending: false, localOnly: true }); session.pendingMessage = null;
+    // The cold start row goes after the message it ran for and before the reply.
+    session.pendingColdStep = null; if (cold?.step) session.items.push(cold.step);
     const setup = this.runSetup(session, selected, session.agentReplyCancelledActive ? 'read-only' : session.access, task);
     if (api)
       session.apiSetupInstructions = setup.instructions;
@@ -1195,7 +1229,8 @@ class Controller extends EventEmitter {
         if (contextEnabled) session.contextTool = true;
       }
       const helpers = (helpersEnabled || this.connectors) && this.bridge.base ? this.bridge.childConfig(session.id) : null;
-      const fullInstructions = this.workerInstructions(session, selected.provider) + (this.connectors ? CONNECTOR_INSTRUCTIONS : '');
+      // Native CLIs get the connector note inside the helper server's instructions; API workers do not read those.
+      const fullInstructions = this.workerInstructions(session, selected.provider) + (this.connectors && (api || !helpers) ? CONNECTOR_INSTRUCTIONS : '');
       instructionHash = createHash('sha256').update(JSON.stringify([fullInstructions, helpers?.instructions, session.workspace, session.access])).digest('hex');
       // These CLIs keep instructions as conversation messages. Claude/API instead need their stable system prefix on each request.
       const keptInstructions = !api && backend !== 'claude' && session[sessionKey] && session[backend + 'InstructionHash'] === instructionHash;
@@ -1343,6 +1378,7 @@ class Controller extends EventEmitter {
       (session.directContext ||= []).push({ question: contextText + text, answer: answer || `[${backend} turn ${outcome.status}]` });
       if (outcome.status === 'completed') {
         session[lastKey] = session.items.at(-1)?.id;
+        session[backend + 'TurnEndedAt'] = Date.now();
         session[backend + 'InstructionHash'] = instructionHash;
         session[historyKey] = [...new Set([...seenHistory, ...history.filter(item => item.delegatedFrom).map(item => item.id)])];
       }
@@ -1353,6 +1389,7 @@ class Controller extends EventEmitter {
       this.taskOutputDirs.delete(session.id);
       // An approval still open when the CLI turn ends can no longer be used.
       for (const [id, resolve] of this.helperApprovals) if (id.startsWith('cli-')) { resolve(false); this.requests.delete(id); this.helperApprovals.delete(id); this.approvalKeys.delete(id); }
+      if (cold?.record) this.coldStartLogged(session, turnRoute, cold, selected, outcome.status);
       this.finishTurn(session, submission, outcome);
       this.providerOutcome(session, selected.provider, selected.model, clientId, outcome);
       this.save();
@@ -1957,6 +1994,7 @@ for (const methods of [
   require('./controller/chat-scan.cjs'),
   require('./controller/setups.cjs'),
   require('./controller/model-swaps.cjs'),
+  require('./controller/cold-start.cjs'),
 ]) {
   for (const [name, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(methods))) {
     if (Object.hasOwn(Controller.prototype, name)) throw new Error(`Controller.${name} is defined twice.`);

@@ -3,7 +3,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { pathToFileURL } = require('node:url');
-app.setPath('userData', path.join(app.getPath('appData'), 'Phasma Harness'));
+// PHASMA_HARNESS_DATA_DIR runs a separate test copy beside the installed app: its own chats, settings and lock.
+app.setPath('userData', process.env.PHASMA_HARNESS_DATA_DIR || path.join(app.getPath('appData'), 'Phasma Harness'));
 app.setName('Phasma Harness');
 const quitForInstall = process.argv.includes('--quit-for-install');
 // A control launch must hand off without loading dependencies or starting another runner.

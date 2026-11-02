@@ -3871,3 +3871,53 @@ test('Send now cannot resume through an unconfirmed cleanup block', async t => {
   assert.equal(session.queue.length, 1);
   assert.equal(session.queueSending, false);
 });
+
+test('an idle, large Codex chat moves to a new thread with a summary and keeps its earlier chat visible', async t => {
+  const { controller, fake, smartRouter } = await setup(t);
+  const summaries = [];
+  smartRouter.complete = async request => { summaries.push(JSON.parse(request.prompt)); return { decision: { summary: 'CODEX-SUMMARY' }, usage: { inputTokens: 200, cachedInputTokens: 0, outputTokens: 20 } }; };
+  const logs = []; controller.log = { info: (message, data) => logs.push({ message, data }), warn() {}, error() {} };
+  Object.assign(controller.data.settings, { coldStartMinutes: 60, coldStartTokens: 100000 });
+  const session = controller.create();
+  for (let i = 0; i < 6; i++) {
+    await controller.send({ id: session.id, text: `Question ${i}`, mode: 'terra-light', task: 'off' });
+    session.items.push({ id: `answer-${i}`, type: 'agentMessage', phase: 'final_answer', text: `Answer ${i}` });
+    complete(controller, session, fake.turnIds.at(-1));
+  }
+  assert.equal(fake.calls.filter(call => call.method === 'thread/start').length, 1);
+  const call = fake.call.bind(fake);
+  fake.call = async (method, params, timeout) => method === 'thread/start' ? (fake.calls.push({ method, params }), { thread: { id: 'thread-2' } })
+    : method === 'thread/items/list' && params.threadId === 'thread-2' ? { data: [{ turnId: 'x', item: { id: 'new-item', type: 'agentMessage', text: 'New thread answer' } }], nextCursor: null }
+    : call(method, params, timeout);
+  session.usage = { last: { inputTokens: 150000, cachedInputTokens: 0, outputTokens: 10 }, total: { inputTokens: 1, cachedInputTokens: 0, outputTokens: 1 } };
+
+  session.codexTurnEndedAt = Date.now() - 30 * 60000;
+  await controller.send({ id: session.id, text: 'Warm', mode: 'terra-light', task: 'off' });
+  complete(controller, session, fake.turnIds.at(-1));
+  assert.equal(summaries.length, 0, 'within the idle time the thread resumes');
+  assert.equal(fake.calls.findLast(entry => entry.method === 'turn/start').params.threadId, 'thread-test');
+
+  session.usage.last.inputTokens = 150000; session.codexTurnEndedAt = Date.now() - 61 * 60000;
+  await controller.send({ id: session.id, text: 'After a long break', mode: 'terra-light', task: 'off' });
+  assert.equal(summaries.length, 1);
+  const sent = fake.calls.findLast(entry => entry.method === 'turn/start').params;
+  assert.equal(sent.threadId, 'thread-2', 'a new thread');
+  assert.match(sent.input[0].text, /CODEX-SUMMARY/);
+  assert.match(sent.input[0].text, /Answer 5/);
+  assert.doesNotMatch(sent.input[0].text, /Question 0/);
+  assert.match(sent.input[0].text, /After a long break/);
+  const step = session.items.find(item => item.coldStart);
+  assert.match(step.title, /^Cold start · .* · completed$/);
+  assert.equal(session.items[session.items.indexOf(step) - 1].clientId, sent.clientUserMessageId);
+
+  controller.notification({ method: 'thread/tokenUsage/updated', params: { threadId: 'thread-2', turnId: fake.turnIds.at(-1), tokenUsage: {
+    total: { inputTokens: 9000, cachedInputTokens: 0, outputTokens: 50 }, last: { inputTokens: 9000, cachedInputTokens: 0, outputTokens: 50 } } } });
+  complete(controller, session, fake.turnIds.at(-1));
+  const logged = logs.find(entry => entry.message === 'Cold start')?.data;
+  assert.deepEqual([logged.avoidedInputTokens, logged.avoidedEstimated, logged.freshInputTokens, logged.summaryInputTokens], [150000, false, 9000, 200]);
+  assert.match(step.lines.at(-1), /read 9,000 tokens; resuming would have re-read about 150,000/);
+
+  controller.loaded.delete(session.id); await controller.resume(session);
+  for (const text of ['Question 0', 'Answer 5', 'New thread answer'])
+    assert.ok(session.items.some(item => (item.text || item.content?.[0]?.text) === text), `${text} stays visible after reopening`);
+});

@@ -2715,7 +2715,7 @@ function renderMessages(session) {
   const chats = chatSessions(session);
   const entries = chats.flatMap(chat => {
     let at = chat.created || 0;
-    return [...chat.items, ...(chat.pendingMessage ? [chat.pendingMessage] : [])].map(item => {
+    return [...chat.items, ...(chat.pendingMessage ? [chat.pendingMessage] : []), ...(chat.pendingMessage && chat.pendingColdStep ? [chat.pendingColdStep] : [])].map(item => {
       at = Math.max(at, item.createdAt || 0);
       return { item, session: chat, at };
     });
@@ -3651,6 +3651,8 @@ $('#settings').onclick = async () => {
   $('#settings-jev-images').value = state.settings.jevImages !== false && state.jev?.configured ? 'on' : 'off';
   $('#settings-jev-images').disabled = !state.jev?.configured;
   $('#settings-reply-suggestions').value = state.settings.replySuggestions === false ? 'off' : 'on';
+  $('#settings-cold-start-minutes').value = state.settings.coldStartMinutes ?? 60;
+  $('#settings-cold-start-tokens').value = state.settings.coldStartTokens ?? 100000;
   $('#settings-show-tips').value = state.settings.showTips === false ? 'off' : 'on';
   for (const [id, key] of Object.entries(ON_SWITCHES))
     $(`#${id}`).value = state.settings[key] === false ? 'off' : 'on';
@@ -4026,13 +4028,14 @@ const settingsFields = {
   'settings-reply-suggestions': 'replySuggestions', 'settings-chat-scan': 'chatScanModel', 'settings-low-model': 'autoLowModel',
   'settings-low-effort': 'autoLowModel', 'settings-show-tips': 'showTips', 'settings-router-effort': 'routingModel',
   'settings-chat-scan-effort': 'chatScanModel', 'settings-escalation-model': 'escalationModel', 'settings-escalation-effort': 'escalationModel',
+  'settings-cold-start-minutes': 'coldStartMinutes', 'settings-cold-start-tokens': 'coldStartTokens',
 };
 $('#settings-form').addEventListener('input', clearSaved);
 $('#settings-form').addEventListener('change', event => {
   const control = event.target, key = settingsFields[control.id];
   if (!key) return;
   const toggle = ['jevCompare', 'jevImages', 'replySuggestions', 'showTips', ...Object.values(ON_SWITCHES)].includes(key);
-  const value = toggle ? control.value === 'on' : modelEffortSettings[key] ? modelEffortChoice(...modelEffortSettings[key]()) : control.value;
+  const value = toggle ? control.value === 'on' : control.type === 'number' ? Number(control.value) : modelEffortSettings[key] ? modelEffortChoice(...modelEffortSettings[key]()) : control.value;
   saveSetting(control, key, value);
 });
 $('#settings-form').onsubmit = event => event.preventDefault();

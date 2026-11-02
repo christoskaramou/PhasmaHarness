@@ -131,3 +131,86 @@ test('native structured routing selects its runtime and cannot fall back to Clau
   await assert.rejects(router.completeOnce({ prompt: 'data', instructions: '', schema: {} },
     { provider: 'native:deepseek', model: 'model-a' }, new AbortController()), /provider is unavailable/);
 });
+
+test('an idle worker with a large context starts a fresh session from a summary instead of resuming', async t => {
+  const { controller, calls, root } = await controllerFixture(t, true);
+  const summaries = [], pendingDuring = [];
+  controller.smartRouter.complete = async request => {
+    summaries.push(JSON.parse(request.prompt)); if (session.pendingColdStep) pendingDuring.push(session.pendingColdStep.title);
+    if (controller.failSummary) throw new Error('Fixture router down');
+    return { decision: { summary: `SUMMARY-${summaries.length}` }, usage: { inputTokens: 100, cachedInputTokens: 0, outputTokens: 10 } };
+  };
+  const logs = []; controller.log = { info: (message, data) => logs.push({ message, data }), warn() {}, error() {} };
+  Object.assign(controller.data.settings, { coldStartMinutes: 30, coldStartTokens: 1000 });
+  const session = controller.create(root, 'read-only');
+  const send = text => controller.send({ id: session.id, text, mode: 'native:deepseek:model-a', task: 'off' });
+  const runs = () => calls.filter(call => typeof call === 'object');
+  const idle = minutes => { session['native:deepseekTurnEndedAt'] = Date.now() - minutes * 60000; };
+  for (let i = 0; i < 6; i++) await send(`Question ${i} ` + 'x'.repeat(1000));
+  assert.ok(runs().slice(1).every(call => call.resume === 'native-session'), 'recent turns resume');
+
+  idle(20); await send('Warm follow-up');
+  assert.equal(runs().at(-1).resume, 'native-session', 'within the idle time the cache may still be warm');
+  assert.equal(summaries.length, 0);
+
+  idle(31); await send('After a long break');
+  const cold = runs().at(-1);
+  assert.equal(cold.resume, null, 'a new native session');
+  assert.notEqual(cold.instructions, '', 'the new session gets its instructions');
+  assert.match(cold.prompt, /SUMMARY-1/);
+  assert.doesNotMatch(cold.prompt, /Question 0/, 'older messages arrive only as the summary');
+  assert.match(cold.prompt, /Question 5/, 'the latest messages stay verbatim');
+  assert.match(summaries[0].messages[0].text, /Question 0/);
+  assert.equal(session.coldSummary, 'SUMMARY-1');
+  assert.equal(session.usage.total.inputTokens, 100, 'the summary call is counted');
+  const steps = () => session.items.filter(item => item.coldStart);
+  const step = steps().at(-1), stepAt = session.items.indexOf(step);
+  assert.ok(pendingDuring.some(title => /summarizing/.test(title)), 'the row is held as pending while the summary runs');
+  assert.equal(session.pendingColdStep, null);
+  assert.equal(step.title, 'Cold start · DeepSeek A · completed', 'the step names who summarized, like a tool call');
+  assert.equal(session.items[stepAt - 1].type, 'userMessage', 'the step follows the message it ran for');
+  assert.match(session.items[stepAt - 1].content[0].text, /After a long break/);
+  assert.match(step.lines.join(' '), /Why: this chat was idle 31 min \(setting: 30\).*estimated from the visible chat.*What: DeepSeek A summarizes .*latest 4 messages.*Done: 1 summary call \(100 in \/ 10 out tokens\)/);
+  assert.doesNotMatch(cold.prompt, /Cold start/, 'the step is not sent to the model');
+  const logged = logs.find(entry => entry.message === 'Cold start')?.data;
+  assert.equal(logged.avoidedEstimated, true, 'DeepSeek reports no usage, so the avoided context is estimated');
+  assert.ok(logged.avoidedInputTokens >= 1000);
+  assert.deepEqual([logged.summaryCalls, logged.summaryInputTokens, logged.summaryOutputTokens, logged.summaryModel], [1, 100, 10, 'native:deepseek:model-a']);
+  assert.equal(logged.freshInputTokens, null, 'unknown, never zero');
+  assert.equal(logged.status, 'completed'); assert.ok(logged.idleMinutes >= 31);
+  assert.deepEqual({ session: session.id, ...session.routes.at(-1).coldStart }, logged);
+
+  await send('Right after'); assert.equal(runs().at(-1).resume, 'native-session');
+  assert.equal(summaries.length, 1);
+
+  idle(31); await send('Another break');
+  assert.equal(summaries[1].summary, 'SUMMARY-1', 'a later cold start extends the summary');
+  assert.ok(!summaries[1].messages.some(message => /Question 0/.test(message.text)));
+  assert.match(runs().at(-1).prompt, /SUMMARY-2/);
+  assert.match(steps().at(-1).lines.join(' '), /extending the earlier summary/);
+
+  controller.failSummary = true; idle(31); await send('Router is down');
+  assert.equal(runs().at(-1).resume, 'native-session', 'a failed summary falls back to resuming');
+  assert.equal(steps().at(-1).title, 'Cold start · DeepSeek A · failed');
+  assert.match(steps().at(-1).lines.join(' '), /Failed: Fixture router down.*Resumed the existing DeepSeek A session/);
+  assert.equal(session.status, 'completed');
+  controller.failSummary = false;
+
+  controller.data.settings.coldStartMinutes = 0; idle(600); const before = summaries.length; await send('Turned off');
+  assert.equal(runs().at(-1).resume, 'native-session'); assert.equal(summaries.length, before);
+  controller.data.settings.coldStartMinutes = 30; controller.data.settings.coldStartTokens = 10000000; idle(600); await send('Small context');
+  assert.equal(runs().at(-1).resume, 'native-session', 'below the context size it resumes');
+  assert.throws(() => controller.settings({ coldStartMinutes: -1 }), /0 to 10080/);
+  assert.throws(() => controller.settings({ coldStartTokens: 5 }), /1,000 to 10,000,000/);
+});
+
+test('a native worker with connectors and helper tools gets the connector note once', async t => {
+  const { controller, calls, root } = await controllerFixture(t, true);
+  controller.connectors = new (require('../src/connectors.cjs').Connectors)(root); controller.bridge.base = 'http://127.0.0.1:1';
+  t.after(() => { controller.bridge.base = null; controller.connectors = null; });
+  const session = controller.create(root, 'read-only');
+  await controller.send({ id: session.id, text: 'hello', mode: 'native:deepseek:model-a', task: 'off' });
+  const run = calls.find(call => typeof call === 'object');
+  const text = run.instructions + (run.helpers?.instructions || '');
+  assert.equal(text.split('Shared services are configured in Harness Settings').length - 1, 1);
+});

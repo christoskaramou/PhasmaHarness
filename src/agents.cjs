@@ -848,7 +848,8 @@ class Agents extends EventEmitter {
     // The chat checker and its switches run between turns and the simple-messages model is read when a message is routed,
     // so changing them never waits for agents to stop.
     const local = Object.keys(values).every(key => ['workspace', 'mode', 'access', 'replySuggestions', 'chatScanModel', 'checkResponses',
-      'checkerRevise', 'checkerEscalate', 'scanReplies', 'escalateFailedChecks', 'escalationModel', 'autoLowModel', 'showTips'].includes(key));
+      'checkerRevise', 'checkerEscalate', 'scanReplies', 'escalateFailedChecks', 'escalationModel', 'autoLowModel', 'showTips',
+      'coldStartMinutes', 'coldStartTokens'].includes(key));
     if (!local && this.busy) throw new Error('Stop all agents before changing shared settings.');
     if (agentId === 'main') this.primary.settings(values);
     else {
@@ -864,7 +865,7 @@ class Agents extends EventEmitter {
       if (!c.busy) this.sync(c);
       // A busy agent keeps its turn's settings; reply suggestions and tips only affect the window, so they apply at once.
       else {
-        for (const key of ['replySuggestions', 'showTips']) {
+        for (const key of ['replySuggestions', 'showTips', 'coldStartMinutes', 'coldStartTokens']) {
           if (values[key] !== undefined)
             c.data.settings[key] = this.primary.data.settings[key];
         }

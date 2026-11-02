@@ -273,6 +273,11 @@ module.exports = {
       const outcome = { status, error: p.turn.error?.message || null, limit };
       this.finishTurn(session, submission, outcome);
       if (submission?.kind !== 'compaction') this.providerOutcome(session, provider, route?.model, messageId, outcome);
+      if (submission?.kind !== 'compaction' && status === 'completed') session.codexTurnEndedAt = Date.now();
+      // The fresh thread's first turn after a cold start: its usage has arrived by now (thread/tokenUsage/updated).
+      if (route?.coldStartPending)
+        this.coldStartLogged(session, route, { record: route.coldStartPending.record, step: session.items.find(item => item.id === route.coldStartPending.stepId) },
+          route, status);
     }
     if ((method === 'item/started' || method === 'item/completed') && this.visible(p.item)) {
       if (method === 'item/completed' && p.item.type === 'contextCompaction') {
