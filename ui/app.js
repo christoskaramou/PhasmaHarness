@@ -1960,7 +1960,8 @@ function render() {
   $('#context-meter').setAttribute('aria-disabled', String(!compactable || !ready || !session?.items.some(item => item.type === 'userMessage') || !!state.busy || submitting));
   const permission = state.accessModes.find(mode => mode.id === (session?.access || draftAccess || state.settings.access));
   if (!$('#permissions').options.length)
-    for (const mode of state.accessModes) $('#permissions').add(new Option(mode.label, mode.id));
+    // Chromium sizes the popup to the text and ignores the option's right padding, so trailing spaces keep the right edge clear.
+    for (const mode of state.accessModes) $('#permissions').add(new Option(mode.label + '   ', mode.id));
   $('#permissions').value = permission.id;
   $('#permissions').title = `${permission.label}: ${permission.description}`;
   $('#permissions').setAttribute('aria-label', `Session permissions: ${permission.label}`);
