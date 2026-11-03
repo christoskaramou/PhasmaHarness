@@ -12,6 +12,7 @@ const { capCatalog } = require('../routing/effort-cap.cjs');
 const { strongest, atEffort } = require('../routing/smart-router.cjs');
 const chatScan = require('../chat-scan.cjs');
 const trials = require('../trials.cjs');
+const { checkReflection } = require('../reflection.cjs');
 
 const sentence = text => (/[.!?]$/.test(text) ? text : `${text}.`);
 const textOf = item => (item?.content || []).filter(part => part.type === 'text').map(part => part.text).join('\n');
@@ -144,6 +145,33 @@ module.exports = {
 
     this.ruleNotice(session, { text: `Noticed: ${sentence(scan.problem)} Saved a note for similar tasks: "${note.note}"`,
       root, noteId: note.id, kind: 'noteAdded' });
+  },
+
+  // memory_note: an agent saves a fact itself. Nothing grounds it, so it only passes the reflection's safety guard, is
+  // marked as the agent's, is capped per project per day, and posts a notice with Undo; the dream may forget it later.
+  noteFromAgent(session, text, agentName = 'An agent') {
+    if (!this.wikiStore)
+      throw new Error('Notes are unavailable here.');
+    if (this.comparisonOf(session))
+      throw new Error('Comparison runs do not save notes.');
+
+    const checked = checkReflection({ reflection: 'rule', rule: text, moment: text, reason: '' }, String(text || ''));
+    if (checked.rejected)
+      throw new Error(`Note not saved: ${checked.rejected.replace(/^rule/, 'note')}.`);
+
+    const root = this.wikiStore.ensure(this.lessonWorkspace(session.workspace)).root;
+    const today = chatScan.readNotes(root).filter(note => note.source === 'agent' && note.at > Date.now() - 24 * 60 * 60 * 1000);
+    if (today.length >= chatScan.MAX_AGENT_NOTES_PER_DAY)
+      throw new Error(`Note not saved: ${chatScan.MAX_AGENT_NOTES_PER_DAY} agent notes were saved in this project today.`);
+
+    const request = [...session.items].reverse().find(item => item.type === 'userMessage');
+    const goal = redact(textOf(request)).slice(0, 1000);
+    const note = chatScan.addNote(root, { note: checked.rule, problem: `Saved by ${agentName}`, moment: '', goal, source: 'agent' });
+    if (!note)
+      return { saved: false, reason: 'The same note is already saved.' };
+
+    this.ruleNotice(session, { text: `${agentName} saved a note for similar tasks: "${note.note}"`, root, noteId: note.id, kind: 'noteAdded' });
+    return { saved: true, id: note.id };
   },
 
   // One structured call in the background, aborted on close like reflections.

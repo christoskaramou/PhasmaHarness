@@ -390,6 +390,8 @@ module.exports = {
       this.recordTrials(session, task);
       this.saveLesson(session, task);
       this.recordSetup(session, task);
+      // At most once a day per project: review its memory across chats in the background (src/controller/dream.cjs).
+      this.maybeDream(session);
       this.releaseSlot(session);
     } catch (error) {
       if ((this.gate && this.gate !== gate) || FINAL.has(task.state)) return;

@@ -2255,6 +2255,11 @@ test('the chat checker is off until a model is picked, and Off turns it off agai
   await chatExchange(controller, fake, session, 'No, keep the exported name fetchUser.', 'Restored it.');
   await flush();
   assert.deepEqual(calls, []);
+
+  // Dream (Settings > General) is an on/off switch, saved as set.
+  assert.throws(() => controller.settings({ dream: 'yes' }), /Invalid on\/off setting/);
+  controller.settings({ dream: false });
+  assert.equal(controller.data.settings.dream, false);
 });
 
 test('a failover re-send is the same message again, not a reaction, so nothing is scanned', async t => {

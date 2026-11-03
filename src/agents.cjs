@@ -848,7 +848,7 @@ class Agents extends EventEmitter {
     // The chat checker and its switches run between turns and the simple-messages model is read when a message is routed,
     // so changing them never waits for agents to stop.
     const local = Object.keys(values).every(key => ['workspace', 'mode', 'access', 'replySuggestions', 'chatScanModel', 'checkResponses',
-      'checkerRevise', 'checkerEscalate', 'scanReplies', 'escalateFailedChecks', 'escalationModel', 'autoLowModel', 'showTips',
+      'checkerRevise', 'checkerEscalate', 'scanReplies', 'escalateFailedChecks', 'dream', 'escalationModel', 'autoLowModel', 'showTips',
       'coldStartMinutes', 'coldStartTokens'].includes(key));
     if (!local && this.busy) throw new Error('Stop all agents before changing shared settings.');
     if (agentId === 'main') this.primary.settings(values);
@@ -2230,6 +2230,8 @@ class Agents extends EventEmitter {
     if (name === 'agent_set_access' && Object.keys(args).every(key => ['agentId', 'access'].includes(key))) return this.manageAgent(controller, session, name, args);
     if (name === 'agent_update' && Object.keys(args).every(key => ['agentId', 'name', 'instructions', 'mode', 'effort'].includes(key)))
       return this.updateAgent(controller, session, args);
+    if (name === 'memory_note' && Object.keys(args).every(key => key === 'note'))
+      return controller.noteFromAgent(session, args.note, this.agentName(controller.agentId || 'main'));
     if (name === 'routine')
       return this.routines.fromChat(controller, session, args);
 

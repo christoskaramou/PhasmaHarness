@@ -168,7 +168,7 @@ module.exports = {
   },
 
   undoRule(id, noticeId) {
-    const kinds = ['kept', 'rolledBack', 'trialStarted', 'noteAdded', 'setupPreferred'];
+    const kinds = ['kept', 'rolledBack', 'trialStarted', 'noteAdded', 'noteForgotten', 'setupPreferred'];
     const item = this.session(id).items.find(entry => entry.id === noticeId && kinds.includes(entry.ruleNotice?.kind));
     if (!item || item.ruleNotice.undoneAt)
       throw new Error('There is no rule change to undo here.');
@@ -180,6 +180,8 @@ module.exports = {
       this.undoKeep(item.ruleNotice);
     else if (kind === 'noteAdded')
       chatScan.removeNote(root, noteId);
+    else if (kind === 'noteForgotten')
+      chatScan.restoreNote(root, item.ruleNotice.note);
     else if (kind === 'setupPreferred')
       setups.dropPreference(root, item.ruleNotice.setupKind, item.ruleNotice.preset);
     else

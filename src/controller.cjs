@@ -471,7 +471,7 @@ class Controller extends EventEmitter {
       next.chatScanModel = values.chatScanModel;
     }
     // What the chat checker does (checkResponse, runScan) and whether failed checks escalate; each on unless turned off.
-    for (const key of ['checkResponses', 'checkerRevise', 'checkerEscalate', 'scanReplies', 'escalateFailedChecks']) {
+    for (const key of ['checkResponses', 'checkerRevise', 'checkerEscalate', 'scanReplies', 'escalateFailedChecks', 'dream']) {
       if (values[key] === undefined)
         continue;
       if (typeof values[key] !== 'boolean')
@@ -1993,6 +1993,7 @@ for (const methods of [
   require('./controller/trials.cjs'),
   require('./controller/chat-scan.cjs'),
   require('./controller/setups.cjs'),
+  require('./controller/dream.cjs'),
   require('./controller/model-swaps.cjs'),
   require('./controller/cold-start.cjs'),
 ]) {

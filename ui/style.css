@@ -4319,3 +4319,46 @@ main > header {
 .chat-find-box .icon-button { padding:4px; }
 ::highlight(chat-find) { background-color:color-mix(in srgb, #f5c400 45%, transparent); color:inherit; }
 ::highlight(chat-find-current) { background-color:#ff9632; color:#000; }
+
+/* A faint tint of a brighter amber than the warning colors, so it stands out without a heavy block. */
+.serious-setting {
+  --serious:light-dark(#c27a0e, #ffbf47);
+  margin:10px 0;
+  padding:8px 12px;
+  background:color-mix(in srgb, var(--serious) 7%, transparent);
+  border:1px solid color-mix(in srgb, var(--serious) 30%, transparent);
+  border-left:4px solid var(--serious);
+  border-radius:6px
+}
+
+.serious-setting>label {
+  color:var(--serious);
+  font-weight:600
+}
+
+.dream-now {
+  display:flex;
+  align-items:center;
+  gap:10px;
+  margin:0 0 10px
+}
+
+.dream-now button {
+  flex:none;
+  border-color:color-mix(in srgb, var(--serious) 55%, transparent);
+  color:var(--serious)
+}
+
+.dream-now button:hover:not(:disabled) {
+  background:color-mix(in srgb, var(--serious) 14%, transparent)
+}
+
+#dream-now-status {
+  color:var(--muted);
+  font-size:calc(11px * var(--font-scale,1));
+  line-height:1.5
+}
+
+#panel-general .serious-setting>label {
+  margin:2px 0 10px
+}

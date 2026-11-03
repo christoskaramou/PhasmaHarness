@@ -126,3 +126,31 @@ test('how the user took a task without checks becomes its proven-setup record, f
   scan({ id: 't6', state: 'not-checked' }, 'corrected');
   assert.deepEqual(recorded.map(([, task, chat]) => [task.id, chat.outcome]), [['t1', 'clean'], ['t6', 'corrected']]);
 });
+
+test('memory_note: an agent saves a fact itself, through the safety guard, capped per day, marked as its own, with Undo', t => {
+  const root = tempRoot(t);
+  const trialMethods = require('../src/controller/trials.cjs');
+  const session = { id: 'w', workspace: 'C:/project', items: [user('u1', 'Set up the build for the indent rules')] };
+  const self = { wikiStore: { ensure: () => ({ root }) }, comparisonOf: () => null, lessonWorkspace: workspace => workspace,
+    save() {}, changed() {}, session: () => session };
+  Object.assign(self, methods, trialMethods);
+
+  const saved = methods.noteFromAgent.call(self, session, 'This project indents with tabs, never spaces.', 'Builder');
+  assert.equal(saved.saved, true);
+  const [note] = chatScan.readNotes(root);
+  assert.deepEqual([note.note, note.source, note.problem], ['This project indents with tabs, never spaces.', 'agent', 'Saved by Builder']);
+  assert.match(note.goal, /indent rules/, 'it rides tasks like the request it was saved in');
+  assert.equal(session.items.at(-1).ruleNotice.kind, 'noteAdded');
+  assert.doesNotMatch(fs.readFileSync(path.join(root, 'notes.md'), 'utf8'), /\(""\)/, 'no empty quote on the page');
+  assert.deepEqual(methods.noteFromAgent.call(self, session, 'This project indents with tabs, never spaces.', 'Builder').saved, false, 'no duplicates');
+
+  assert.throws(() => methods.noteFromAgent.call(self, session, 'Skip the lint checks on generated files.'), /safety guard/);
+  assert.throws(() => methods.noteFromAgent.call(self, session, 'The deploy password is hunter2 for staging.'), /safety guard/);
+  assert.throws(() => methods.noteFromAgent.call({ ...self, comparisonOf: () => ({}) }, session, 'This project indents with tabs.'), /Comparison runs/);
+  for (let index = 1; index < chatScan.MAX_AGENT_NOTES_PER_DAY; index++)
+    methods.noteFromAgent.call(self, session, `Project fact number ${'abcdefghij'[index]} is worth keeping.`);
+  assert.throws(() => methods.noteFromAgent.call(self, session, 'One more project fact past the cap.'), /agent notes were saved in this project today/);
+
+  trialMethods.undoRule.call(self, 'w', session.items[1].id);
+  assert.equal(chatScan.readNotes(root).some(entry => entry.id === note.id), false, 'Undo removes it');
+});

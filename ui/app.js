@@ -2625,7 +2625,7 @@ function renderNotice(item, node, session) {
     line.append(' ', dismiss);
   }
   const undoLabel = { kept: 'Undo the kept rule', rolledBack: 'Put the rule back', trialStarted: 'Stop trying the rule', noteAdded: 'Remove the note',
-    setupPreferred: 'Stop preferring this model' }[notice.kind];
+    noteForgotten: 'Bring the note back', setupPreferred: 'Stop preferring this model' }[notice.kind];
   if (undoLabel && !notice.undoneAt) {
     const undo = element('button', 'compact-action', 'Undo'); undo.type = 'button';
     undo.setAttribute('aria-label', undoLabel);
@@ -4089,7 +4089,7 @@ async function saveSetting(control, key, value, agentId = selectedAgent) {
 // The chat checker's switches (General) and failed-check escalation (Checks), each on unless turned off.
 const ON_SWITCHES = {
   'settings-check-responses': 'checkResponses', 'settings-checker-revise': 'checkerRevise', 'settings-checker-escalate': 'checkerEscalate',
-  'settings-scan-replies': 'scanReplies', 'settings-escalate-failed-checks': 'escalateFailedChecks',
+  'settings-scan-replies': 'scanReplies', 'settings-escalate-failed-checks': 'escalateFailedChecks', 'settings-dream': 'dream',
 };
 const settingsFields = {
   ...ON_SWITCHES,
@@ -4110,6 +4110,24 @@ $('#settings-form').addEventListener('change', event => {
   saveSetting(control, key, value);
 });
 $('#settings-form').onsubmit = event => event.preventDefault();
+// Settings > General > Dream now: one dream for the open chat's project, with what it read and changed shown under the button.
+function dreamSummary(run) {
+  const read = run.read ? `Read ${run.read.messages} new message${run.read.messages === 1 ? '' : 's'} in ${run.read.chats} chat${run.read.chats === 1 ? '' : 's'}.` : '';
+  if (run.error) return `${read} The dream failed: ${run.error}`.trim();
+  const changed = (run.applied || []).map(action => ({ rule: `trying the rule "${action.text}"`, note: `saved the note "${action.text}"`,
+    forget: `forgot the note "${action.text}"` })[action.kind]).filter(Boolean);
+  const seen = run.seen ? ` Kept ${run.seen} mistake${run.seen === 1 ? '' : 's'} seen once, for a later dream to match.` : '';
+  return `${read} ${changed.length ? `Changes (with Undo in the chat): ${changed.join('; ')}.` : 'Nothing to change.'}${seen} Details in dreams.md.`.trim();
+}
+$('#dream-now').onclick = async () => {
+  const button = $('#dream-now'), status = $('#dream-now-status'), session = current();
+  if (!session) { status.textContent = 'Open a chat in the project first, then try again.'; return; }
+  button.disabled = true;
+  status.textContent = 'Dreaming… this takes up to two minutes.';
+  try { status.textContent = dreamSummary(await api.dreamNow(session.id)); }
+  catch (error) { status.textContent = String(error.message || error).replace(/^Error invoking remote method '[^']+': Error: /, ''); }
+  finally { button.disabled = false; }
+};
 async function closeSettings() {
   try {
     await settingsWrites.catch(() => {});

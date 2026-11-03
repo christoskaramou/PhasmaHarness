@@ -1024,6 +1024,27 @@ app.whenReady().then(async () => {
   })()`), [true, 'Connecting…', true]);
   await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').showModal(); document.querySelector('#tab-providers').click(); new Promise(r => setTimeout(r, 100))");
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/providers-connecting.png'), (await window.webContents.capturePage()).toPNG());
+  // Dream: on by default, in its own warning-colored block (a setting with real token cost).
+  assert.deepEqual(await window.webContents.executeJavaScript(`(() => {
+    document.querySelector('#tab-general').click();
+    const select = document.querySelector('#settings-dream');
+    const scrolled = [];
+    for (let node = select.parentElement; node; node = node.parentElement) scrolled.push([node, node.scrollTop]);
+    window.restoreDreamScroll = () => scrolled.forEach(([node, top]) => { node.scrollTop = top; });
+    select.closest('.serious-setting').scrollIntoView({ block: 'center' });
+    const box = getComputedStyle(select.closest('.serious-setting'));
+    const button = document.querySelector('#dream-now');
+    return [select.value, box.borderLeftWidth, box.backgroundColor !== getComputedStyle(document.querySelector('#panel-general')).backgroundColor,
+      button.textContent, button.disabled, !!document.querySelector('#dream-now-status').textContent];
+  })()`), ['on', '4px', true, 'Dream now', false, true]);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/dream-setting.png'), (await window.webContents.capturePage()).toPNG());
+  // The same block in dark mode, where the user reviews it.
+  await window.webContents.executeJavaScript(`(() => { window.dreamScheme = document.documentElement.style.colorScheme;
+    document.documentElement.style.colorScheme = 'dark'; return new Promise(r => setTimeout(r, 100)); })()`);
+  fs.writeFileSync(path.resolve(__dirname, '../.scratch/dream-setting-dark.png'), (await window.webContents.capturePage()).toPNG());
+  await window.webContents.executeJavaScript('document.documentElement.style.colorScheme = window.dreamScheme; delete window.dreamScheme; true');
+  await window.webContents.executeJavaScript('window.restoreDreamScroll(); delete window.restoreDreamScroll; true');
   await window.webContents.executeJavaScript("document.querySelector('#tab-general').click(); document.querySelector('#settings-dialog').close(); new Promise(r => setTimeout(r, 100))");
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/connection-indicator.png'), (await window.webContents.capturePage()).toPNG());
   holdApiModels = false;
