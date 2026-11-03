@@ -39,10 +39,13 @@ module.exports = {
     const endedAt = session[backend + 'TurnEndedAt'] ?? session.routes?.findLast(route => (route.provider || 'codex') === (selected.provider || 'codex'))?.at;
     if (!minutes || !session[sessionKey] || !endedAt || Date.now() - endedAt < minutes * 60000) return null;
     const history = chatMessages(session.items.filter(item => item.id !== clientId && item.clientId !== clientId));
-    // The last call's input is the native context size. Cursor and DeepSeek report none, so the visible chat at about
-    // four characters a token stands in: a lower bound, since the native session also holds tool output.
+    // The last call's input is the native context size. Cursor and DeepSeek report none, so what the native session was
+    // given stands in at about four characters a token: after a cold start the summary plus the messages after it,
+    // otherwise the visible chat. A lower bound, since the native session also holds tool output.
     const measured = session.usage?.last?.inputTokens;
-    const size = measured ?? Math.ceil(JSON.stringify(history).length / 4);
+    const covered = session.coldSummaryThrough ? history.findIndex(message => message.id === session.coldSummaryThrough) : -1;
+    const size = measured ?? Math.ceil(covered < 0 ? JSON.stringify(history).length / 4
+      : ((session.coldSummary || '').length + JSON.stringify(history.slice(covered + 1)).length) / 4);
     if (size < tokens || history.length <= KEEP) return null;
     const router = this.effectiveRouter();
     if (!router || !this.available(router)) return null;
@@ -56,11 +59,11 @@ module.exports = {
     // progress and the outcome instead of an unexplained wait before the reply.
     const by = router.label || router.id, worker = selected.label || 'model', idleMinutes = Math.round((Date.now() - endedAt) / 60000);
     const number = value => value.toLocaleString('en-US');
-    const parts = Math.max(1, history.slice(start, end).reduce((sum, message) => sum + Math.ceil(message.text.length / 16000), 0));
+    const parts = Math.max(1, this.summaryCalls(history, start, end, router));
     // Held as pendingColdStep until the message is committed: the chat draws it after the pending message, then moves it
     // into the items after that message, so the row never sits above the message the user sent.
     const step = { id: randomUUID(), type: 'toolStep', localOnly: true, createdAt: Date.now(), turnId: null, tool: 'cold_start', coldStart: true, title: `Cold start · ${by} · summarizing`, lines: [
-      `Why: this chat was idle ${idleMinutes} min (setting: ${minutes}) and its context is ${number(size)} tokens${measured === undefined ? ', estimated from the visible chat' : ''} (setting: ${number(tokens)}). The provider's prompt cache has likely expired, so resuming would re-read all of it at the full price.`,
+      `Why: this chat was idle ${idleMinutes} min (setting: ${minutes}) and its context is ${number(size)} tokens${measured === undefined ? covered < 0 ? ', estimated from the visible chat' : ', estimated from the earlier summary and the messages after it' : ''} (setting: ${number(tokens)}). The provider's prompt cache has likely expired, so resuming would re-read all of it at the full price.`,
       `What: ${by} summarizes the older chat in about ${parts} call${parts === 1 ? '' : 's'}${start ? ', extending the earlier summary' : ''}. Then a fresh ${worker} session gets that summary and the latest ${KEEP} messages. Your visible chat stays as it is.`,
     ] };
     session.pendingColdStep = step; this.changed();

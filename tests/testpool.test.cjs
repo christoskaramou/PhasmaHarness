@@ -198,6 +198,15 @@ test('steps: pass, failure tail, 77 skip, missing requirement, test env without 
   assert.deepEqual([missing.status, missing.reason], ['skip', `missing ${dir.replace(/\\/g, '/')}/build/Player.exe`]);
 });
 
+test('${env:X} in a command reads the run environment, so TESTPOOL_RUN_DIR is the real run directory', async t => {
+  const dir = repo(t);
+  const runDir = path.join(dir, 'out');
+  fs.mkdirSync(runDir);
+  const check = `${NODE} -e "process.exit(process.argv[1] === process.env.TESTPOOL_RUN_DIR + '/x' ? 0 : 6)" "\${env:TESTPOOL_RUN_DIR}/x"`;
+  const r = await pool.runStep('e', { command: check }, dir, runDir, { TESTPOOL_ROOT: dir, TESTPOOL_RUN_DIR: runDir });
+  assert.equal(r.status, 'pass', JSON.stringify(r));
+});
+
 test('a timed-out step is killed with the processes it started', async t => {
   const dir = repo(t);
   const pidFile = path.join(dir, 'pids');

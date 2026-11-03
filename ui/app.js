@@ -1104,6 +1104,22 @@ $('#group-mention').onchange = () => {
   if (previous) text = text.slice(previous.name.length + 1).trimStart();
   prompt.value = '@' + bot.name + ' ' + text; select.value = ''; prompt.focus(); updatePreview();
 };
+// Read-only: routines change only by asking in chat. Hub's list holds every bot's routines, so it names the owner.
+async function showRoutines(section, agentId, withAgent) {
+  section.hidden = true; section.dataset.agentId = agentId || '';
+  const routines = agentId ? await api.routineList(agentId).catch(() => []) : [];
+  if (section.dataset.agentId !== (agentId || '')) return; // the dialog reopened for another bot meanwhile
+  section.querySelector('ul').replaceChildren(...routines.map(routine => {
+    const item = element('li');
+    item.append(element('strong', '', routine.name));
+    const next = routine.nextRun ? 'next ' + new Date(routine.nextRun).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '';
+    item.append(element('span', 'hint', [withAgent && routine.agent, routine.trigger, routine.state, next].filter(Boolean).join(' · ')));
+    item.title = routine.text;
+    return item;
+  }));
+  section.hidden = !routines.length;
+}
+
 function editAgent(profile) {
   const worker = profile && fleetState?.agentStates?.[profile.id];
   const conversation = worker?.sessions.find(s => s.id === worker.conversationId);
@@ -1125,6 +1141,7 @@ function editAgent(profile) {
   $('#agent-access').replaceChildren(...state.accessModes.map(p => new Option(p.label, p.id)));
   $('#agent-access').value = conversation?.access || profile?.access || 'read-only';
   agentEditor.start(!!profile);
+  showRoutines($('#agent-routines'), profile?.id, false);
   $('#agent-error').textContent = ''; dialog.showModal(); $('#agent-name').focus();
 }
 // The Edit dialogs pick a model like the composer: models grouped by provider, a model's efforts in a picker beside it.
@@ -1234,6 +1251,7 @@ function editHub(profile) {
   $('#hub-model').replaceChildren();
   renderHubModels();
   hubEditor.start(true);
+  showRoutines($('#hub-routines'), 'main', true);
   $('#hub-error').textContent = '';
   $('#hub-dialog').showModal();
   $('#hub-name').select();
@@ -1321,6 +1339,7 @@ async function agentAction(event) {
   const button = event.target.closest('button[data-agent]');
   if (!button || button.disabled) return;
   const id = button.dataset.agent, profile = state.agents.find(a => a.id === id);
+  if (event.target.closest('.agent-bell') || button.dataset.action === 'alerts') return openBotAlerts(id, button);
   try {
     if (button.dataset.action === 'edit') return id === 'main' ? editHub(profile) : editAgent(profile);
     if (button.dataset.action === 'delete') {
@@ -1385,7 +1404,7 @@ function agentContextMenu(event) {
       .map(button => ({ action: button.dataset.action, disabled: button.disabled }));
   closeAgentMenu();
   agentMenuOpener = entry.matches('button') ? entry : entry.querySelector('button[data-agent]');
-  const labels = { open: 'Open', rename: 'Rename', edit: 'Edit', stop: 'Stop', delete: 'Delete' };
+  const labels = { open: 'Open', alerts: 'Notifications', rename: 'Rename', edit: 'Edit', stop: 'Stop', delete: 'Delete' };
   agentMenu.replaceChildren(...actions.map(({ action, disabled }) => {
     const item = element('button', 'agent-menu-item', labels[action]);
     item.type = 'button'; item.tabIndex = -1; item.setAttribute('role', 'menuitem');
@@ -1439,6 +1458,166 @@ for (const container of [$('#agent-list'), $('#main-agent-list'), $('#group-list
   });
 }
 let agentRenderKey = '';
+// Each bot's bell: messages, notices and Harness steps (grey), warnings (orange), failed tool calls and other failures (red).
+// Each entry stays unread (a dot) until hovered. Read keys are kept per bot in localStorage; botAlertsSeen is the
+// older per-bot time below which everything counts as read. A key carries the level, so a step that later fails is new again.
+const BELL_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>';
+const ALERT_LEVELS = ['info', 'warning', 'error'];
+const ALERT_FAILED = /fail|error/i;
+const ALERT_TOOLS = new Set(['commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall', 'webSearch']);
+const storedAlerts = name => { try { return JSON.parse(localStorage.getItem(name)) || {}; } catch { return {}; } };
+const botAlerts = { popover: $('#bot-alerts'), id: null, seen: storedAlerts('botAlertsSeen'), read: storedAlerts('botAlertsRead'),
+  cleared: storedAlerts('botAlertsCleared') };
+const alertId = entry => entry.key + ':' + entry.level;
+// Clear hides every entry the bell lists now; later entries, and a cleared condition that comes back, show again.
+// ponytail: cleared keys are kept per entry (pruned to the bot's current history); switch to a time mark if a bot's history grows huge.
+function clearAlerts(id) {
+  botAlerts.cleared[id] = allAlertEntries(id).map(alertId);
+  localStorage.setItem('botAlertsCleared', JSON.stringify(botAlerts.cleared));
+  saveAlertsRead(id, []);
+  fillBotAlerts();
+}
+const alertRead = (id, entry) => (!entry.current && entry.at <= (botAlerts.seen[id] || 0)) || !!botAlerts.read[id]?.includes(entry.key + ':' + entry.level);
+function saveAlertsRead(id, keys) {
+  botAlerts.read[id] = keys;
+  localStorage.setItem('botAlertsRead', JSON.stringify(botAlerts.read));
+  agentRenderKey = '';
+  renderAgents();
+}
+function markAllAlertsRead(id) {
+  saveAlertsRead(id, botAlertEntries(id).map(entry => entry.key + ':' + entry.level));
+  fillBotAlerts();
+}
+function markAlertRead(id, entry, row) {
+  if (alertRead(id, entry)) return;
+  // Keys of entries that are gone are dropped, so a cleared condition (needs input) is new when it comes back.
+  const live = new Set(botAlertEntries(id).map(other => other.key + ':' + other.level));
+  row.classList.remove('unread');
+  saveAlertsRead(id, [...(botAlerts.read[id] || []).filter(key => live.has(key)), entry.key + ':' + entry.level]);
+}
+const alertMenu = element('div', 'bot-alert-menu');
+alertMenu.setAttribute('role', 'menu'); alertMenu.hidden = true;
+const alertCopy = element('button', 'agent-menu-item', 'Copy');
+alertCopy.type = 'button'; alertCopy.setAttribute('role', 'menuitem');
+alertMenu.append(alertCopy);
+alertCopy.onclick = async () => {
+  alertMenu.hidden = true;
+  try { await api.copyText(alertMenu.dataset.text); } catch (error) { notify(error); }
+};
+botAlerts.popover.addEventListener('contextmenu', event => {
+  const row = event.target.closest('.bot-alert');
+  if (!row) return;
+  event.preventDefault();
+  alertMenu.dataset.text = row.dataset.copy;
+  alertMenu.hidden = false;
+  alertMenu.style.left = `${Math.min(event.clientX, document.documentElement.clientWidth - alertMenu.offsetWidth - 8)}px`;
+  alertMenu.style.top = `${Math.min(event.clientY, document.documentElement.clientHeight - alertMenu.offsetHeight - 8)}px`;
+  alertCopy.focus();
+});
+botAlerts.popover.addEventListener('click', event => { if (!alertMenu.contains(event.target)) alertMenu.hidden = true; });
+botAlerts.popover.addEventListener('scroll', () => { alertMenu.hidden = true; });
+botAlerts.popover.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !alertMenu.hidden) { event.preventDefault(); event.stopPropagation(); alertMenu.hidden = true; }
+});
+botAlerts.popover.addEventListener('toggle', event => { if (event.newState === 'closed') alertMenu.hidden = true; });
+// "Bash · Run the tests" rather than "Claude CLI · Bash · completed": what the call worked on, from its input.
+// Colour shows success; the status is spelled out only when the call did not succeed.
+function toolAlertTitle(item, level) {
+  const input = item.arguments && typeof item.arguments === 'object' ? item.arguments : {};
+  const subject = ['description', 'command', 'file_path', 'path', 'pattern', 'url', 'query', 'prompt']
+    .map(name => input[name]).find(value => typeof value === 'string' && value.trim());
+  const status = level === 'info' ? '' : ` · ${item.status === 'declined' ? 'declined' : 'failed'}`;
+  return `${item.tool}${subject ? ' · ' + subject.replace(/\s+/g, ' ').trim().slice(0, 200) : ''}${status}`;
+}
+function alertOf(item) {
+  const failed = ALERT_FAILED.test(item.status || '') || !!item.error;
+  const level = failed ? 'error' : item.status === 'declined' ? 'warning' : 'info';
+  switch (item.type) {
+    case 'commandExecution': return { level: item.exitCode ? 'error' : level, title: `${item.status === 'inProgress' ? 'Running' : item.exitCode || failed ? 'Failed' : 'Ran'} · ${item.command}` };
+    case 'fileChange': return { level, title: `${item.status === 'inProgress' ? 'Editing' : 'Changed'} ${item.changes?.length || 0} file${item.changes?.length === 1 ? '' : 's'}` };
+    case 'mcpToolCall': case 'dynamicToolCall': return { level, title: toolAlertTitle(item, level) };
+    case 'webSearch': return { level, title: `Web search · ${item.query || item.action?.query || ''}` };
+    case 'toolStep': return { level, title: item.title };
+    case 'contextCompaction': return { level: 'info', title: 'Conversation context compacted' };
+    case 'agentMail': return { level: 'info', title: `${item.kind === 'answer' ? 'Answer' : item.kind === 'question' ? 'Question' : 'Message'} from ${item.fromName}` };
+    case 'notice': return { level: item.groupFailure ? 'error' : item.skillStoreWarning || item.comparisonWarning ? 'warning' : 'info', title: item.text };
+    case 'userMessage': return item.error ? { level: 'error', title: `Not sent: ${item.error}` } : null;
+    default: return null;
+  }
+}
+function botAlertEntries(id) {
+  const cleared = new Set(botAlerts.cleared[id] || []);
+  return allAlertEntries(id).filter(entry => !cleared.has(alertId(entry)));
+}
+function allAlertEntries(id) {
+  const worker = fleetState?.agentStates?.[id] || state;
+  const chats = new Map();
+  for (const context of [worker, fleetState?.executionStates?.[id]].filter(Boolean))
+    for (const chat of context.sessions) chats.set(chat.id, chat);
+  const entries = [];
+  for (const chat of chats.values()) {
+    let at = chat.created || 0;
+    for (const item of chat.items) {
+      at = Math.max(at, item.createdAt || 0);
+      const alert = !item.internal && alertOf(item);
+      // Tool calls show only when they fail or are declined; messages, notices and Harness's own steps show in grey.
+      if (alert?.title && !(ALERT_TOOLS.has(item.type) && alert.level === 'info')) entries.push({ ...alert, key: item.id, at, chat: chat.title });
+    }
+    if (chat.error) entries.push({ level: 'error', title: `Turn failed: ${chat.error}`, key: chat.id + ':error', at, chat: chat.title });
+  }
+  entries.sort((a, b) => b.at - a.at);
+  const current = [];
+  if (worker.requests?.length) current.push({ level: 'warning', title: 'Needs input', key: id + ':requests', current: true });
+  if (!['ready', 'connecting'].includes(worker.connection) && worker.error) current.push({ level: 'error', title: worker.error, key: id + ':connection', current: true });
+  return [...current, ...entries];
+}
+function alertBadge(id) {
+  const unseen = botAlertEntries(id).filter(entry => !alertRead(id, entry));
+  return { count: unseen.length, level: ALERT_LEVELS[Math.max(0, ...unseen.map(entry => ALERT_LEVELS.indexOf(entry.level)))] };
+}
+function fillBotAlerts() {
+  const id = botAlerts.id, entries = botAlertEntries(id);
+  const name = state.agents?.find(agent => agent.id === id)?.name || 'Bot';
+  const list = element('ol', 'bot-alerts-list');
+  // ponytail: newest 200 only; add paging if a bot's history needs more.
+  for (const entry of entries.slice(0, 200)) {
+    const row = element('li', `bot-alert ${entry.level}${alertRead(id, entry) ? '' : ' unread'}`);
+    row.append(element('span', 'bot-alert-title', entry.title));
+    const meta = [entry.current ? 'Now' : entry.at ? new Date(entry.at).toLocaleString() : '', entry.chat].filter(Boolean).join(' · ');
+    if (meta) row.append(element('small', 'muted', meta));
+    row.title = entry.title;
+    row.dataset.copy = meta ? `${entry.title}
+${meta}` : entry.title;
+    row.onmouseenter = () => markAlertRead(id, entry, row);
+    list.append(row);
+  }
+  const scroll = botAlerts.popover.scrollTop;
+  const head = element('div', 'bot-alerts-head'), markAll = element('button', 'compact-action', 'Mark all as read');
+  markAll.type = 'button'; markAll.disabled = entries.every(entry => alertRead(id, entry));
+  markAll.onclick = () => markAllAlertsRead(id);
+  const clear = element('button', 'compact-action', 'Clear');
+  clear.type = 'button'; clear.disabled = !entries.length;
+  clear.onclick = () => clearAlerts(id);
+  const actions = element('div', 'bot-alerts-actions');
+  actions.append(markAll, clear);
+  head.append(element('h3', '', `${name} · Notifications`), actions);
+  botAlerts.popover.replaceChildren(head, entries.length ? list : element('p', 'muted', 'Nothing yet.'), alertMenu);
+  botAlerts.popover.scrollTop = scroll;
+}
+function openBotAlerts(id, anchor) {
+  closeAgentMenu();
+  botAlerts.id = id;
+  // From Overview or the row menu the anchor may be hidden; fall back to the bot's sidebar row.
+  if (!anchor.getClientRects().length) anchor = [...document.querySelectorAll('.agent-nav[data-agent]')].find(node => node.dataset.agent === id) || anchor;
+  (anchor.closest('dialog[open]') || document.body).append(botAlerts.popover);
+  fillBotAlerts();
+  const popover = botAlerts.popover, rect = anchor.getBoundingClientRect();
+  popover.style.left = '0px'; popover.style.top = '0px';
+  popover.showPopover();
+  const width = document.documentElement.clientWidth, height = document.documentElement.clientHeight;
+  popover.style.left = `${Math.max(8, Math.min(rect.width ? rect.right + 6 : (width - popover.offsetWidth) / 2, width - popover.offsetWidth - 8))}px`;
+  popover.style.top = `${Math.max(8, Math.min(rect.height ? rect.top : 80, height - popover.offsetHeight - 8))}px`;
+}
 // Sidebar sort and filter, kept across launches. Sub-bots still show under their creator.
 const BOT_SORTS = {
   default: { label: 'Default order' },
@@ -1526,7 +1705,7 @@ function renderAgents() {
     let lastUserAt = 0;
     for (const chat of worker.sessions) for (const item of chat.items)
       if (item.type === 'userMessage' && !item.routineRun && item.createdAt > lastUserAt) lastUserAt = item.createdAt;
-    return { ...agent, status, preview, lastUserAt, task: task?.title, waiting: task?.waitingForAgent, queued: !!queued || !!waiting,
+    return { ...agent, status, preview, lastUserAt, alerts: alertBadge(agent.id), task: task?.title, waiting: task?.waitingForAgent, queued: !!queued || !!waiting,
       batchIdle: !!agent.temporaryBatch && !backgroundPending && !pendingWork(worker),
       workspace: conversation?.workspace || agent.workspace || worker.settings.workspace, modeLabel: worker.presets.find(p => p.id === worker.settings.mode)?.label || 'Auto',
       accessLabel: worker.accessModes.find(a => a.id === (conversation?.access || worker.settings.access))?.label,
@@ -1582,6 +1761,7 @@ function renderAgents() {
   $('#agent-roster-label').textContent = `Other bots · ${visible.length - 1}`;
   $('#agents-summary').textContent = `${agents.length} agents · ${active} working`;
   $('#agent-sort').classList.toggle('active', botSort !== 'default' || botFilter !== 'all');
+  if (botAlerts.popover.matches(':popover-open')) fillBotAlerts();
   const key = JSON.stringify([rows, selectedAgent, selectedId, switching, deletingAgent, query, botSort, botFilter]);
   if (key === agentRenderKey) return;
   closeAgentMenu();
@@ -1606,15 +1786,22 @@ function renderAgents() {
     node.setAttribute('aria-haspopup', 'menu');
     const label = element('span', 'agent-nav-label');
     label.append(element('strong', '', row.name));
-    label.append(element('small', 'agent-nav-preview', row.preview || row.status));
     if (row.status === 'Ready') node.classList.add('agent-idle');
+    // Working: the avatar breathes in grey and the preview shimmers, instead of a green dot.
+    if (row.status === 'Working') node.classList.add('agent-working');
     node.append(avatar(row), label);
     if (row.subBots) {
       const count = element('span', 'agent-subbots', String(row.subBots));
       count.title = `${row.subBots} ${row.subBots === 1 ? 'bot' : 'bots'} under it`;
       node.append(count);
     }
-    node.append(element('span', `agent-indicator ${row.status === 'Ready' ? 'ready' : row.status === 'Working' ? 'working' : ''}`));
+    // Not a nested button (invalid inside the row's button); keyboard users reach it from the row's menu.
+    // A plain grey bell, fully shown while something is new; no count or severity colour on the icon (the user found them
+    // aggressive, 2026-11-03). The list it opens keeps its colours.
+    const bell = element('span', `agent-bell${row.alerts.count ? ' unseen' : ''}`);
+    bell.innerHTML = BELL_ICON;
+    bell.title = row.alerts.count ? `${row.alerts.count} new notification${row.alerts.count === 1 ? '' : 's'}` : 'Notifications';
+    node.append(bell);
     node.title = `${row.name} · ${row.status}\n${row.error || row.waiting || row.preview || row.workspace}`;
     return node;
   };
@@ -1633,7 +1820,7 @@ function renderAgents() {
       (row.batchIdle ? 'Batch worker · Edit and save to keep this bot.' : row.status === 'Starting' ? 'Connecting providers in the background…' : 'Ready for a new task'));
     activity.title = activity.textContent;
     const actions = element('div', 'agent-card-actions');
-    actions.append(button('Open', row, 'open', switching));
+    actions.append(button('Open', row, 'open', switching), button('Notifications', row, 'alerts'));
     if (row.id === 'main')
       actions.append(button('Edit', row, 'edit'));
     else if (isSubBot(row))
@@ -3014,7 +3201,7 @@ async function updatePreview() {
   try {
     const selected = await api.preview(selectedId, prompt, currentMode());
     if (version !== routeVersion) return;
-    $('#route-preview').replaceChildren(element('span', 'route-dot'), element('strong', '', selected.provisional ? 'Smart Auto' : selected.label), element('span', '', selected.reason));
+    $('#route-preview').replaceChildren(element('span', 'route-dot'), element('strong', '', selected.provisional ? 'Auto' : selected.label), element('span', '', selected.reason));
   } catch (error) { notify(error); }
 }
 
@@ -3127,6 +3314,15 @@ const COMMANDS = {
     notify(`Conversation saved to ${file}`);
   } },
   status: { description: 'Show the current task, queued work and child agents.', run: () => openCommandPanel('status') },
+  suggestion: { description: 'Suggest your next message from the last answer, even when Reply suggestions is off.', run: async () => {
+    if (!selectedId) throw new Error('Open a chat first.');
+    const result = await api.suggestNext(selectedId);
+    if (!result) { notify('No suggestion yet: wait for the bot to finish its answer, and check that its model is available.'); return false; }
+    forcedSuggestionItem = result.itemId;
+    suggestion = result;
+    showSuggestion();
+    $('#prompt').focus();
+  } },
   // Not awaited: the suggestion call can take a while, and a waiting command keeps the composer locked.
   wiki: { description: 'Suggest wiki updates from this chat; nothing is written until you click Apply.', run: () => {
     if (!selectedId) throw new Error('Open a chat first.');
@@ -3501,6 +3697,8 @@ $('#prompt').addEventListener('keydown', event => {
       fileDrafts.set(draftKey(), entry?.attachment?.files || []); renderImages();
       prompt.setSelectionRange(prompt.value.length, prompt.value.length);
       updatePreview();
+      // Recall sets the value without an input event, so the grey suggestion is laid out again here.
+      showSuggestion();
       return;
     }
   }
@@ -3547,10 +3745,13 @@ function lastMessage(session) {
 }
 // The answer a suggestion may follow: the chat's last message, from the AI, while nothing is running or waiting and you
 // can write (never in a sub-bot's chat, nor while a bot works on another bot's task).
+// /suggestion asks for one answer's suggestion even when Reply suggestions is off; it applies to that answer only.
+let forcedSuggestionItem = null;
 function suggestionTarget(session) {
   const last = lastMessage(session);
   const idle = session && state.busy !== session.id && !session.pendingMessage && !session.queue?.length && !session.compacting;
-  return state.settings.replySuggestions !== false && idle && !readOnlyNote() && last?.type === 'agentMessage' ? last : null;
+  const enabled = state.settings.replySuggestions !== false || forcedSuggestionItem === last?.id;
+  return enabled && idle && !readOnlyNote() && last?.type === 'agentMessage' ? last : null;
 }
 function renderSuggestion() {
   const session = current(), target = suggestionTarget(session);
@@ -3707,6 +3908,27 @@ function renderEscalationModels() {
   }
 
   fillModelEffort(select, $('#settings-escalation-effort'), state.presets, state.settings.escalationModel || 'auto', [new Option('Auto', 'auto')]);
+}
+// Settings is modal over a clear backdrop: a click outside it (the sidebar) closes Settings and then does what was clicked.
+// Both press and release must be outside, so a text selection dragged out of Settings does not close it.
+{
+  const dialog = $('#settings-dialog');
+  const outside = event => {
+    const box = dialog.getBoundingClientRect();
+    return event.target === dialog && (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom);
+  };
+  let pressedOutside = false;
+  dialog.addEventListener('pointerdown', event => { pressedOutside = outside(event); });
+  dialog.addEventListener('click', event => {
+    if (!pressedOutside || !outside(event)) return;
+    pressedOutside = false;
+    dialog.close();
+    const target = document.elementFromPoint(event.clientX, event.clientY);
+    // The Settings button itself only closes Settings.
+    if (!target || target.closest('#settings')) return;
+    target.closest('input, select, textarea')?.focus();
+    target.click();
+  });
 }
 $('#settings').onclick = async () => {
   // A browser opens from the state the runner keeps pushing to it; fetching all of it again took seconds on a phone.
@@ -4349,6 +4571,11 @@ document.addEventListener('keydown', event => {
   event.preventDefault(); openChatFind();
 });
 api.onState(applyState);
+// The tray menu's Settings and Bots entries.
+api.onTray?.(request => {
+  if (request?.action === 'settings') $('#settings').onclick();
+  else if (request?.action === 'bot' && state?.agents?.some(agent => agent.id === request.id)) selectAgent(request.id).catch(notify);
+});
 api.bootstrap().then(applyState).catch(notify);
 
 

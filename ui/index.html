@@ -189,6 +189,7 @@
   </dialog>
   <div id="agent-menu" popover="auto" role="menu" aria-label="Agent options"></div>
   <div id="agent-sort-menu" popover="auto" role="menu" aria-label="Sort and filter bots"></div>
+  <div id="bot-alerts" popover="auto" aria-label="Bot notifications"></div>
   <dialog id="agents-dialog" aria-labelledby="agents-title">
     <div class="dialog-heading"><div><div class="eyebrow">LOCAL AGENT TEAM</div><h2 id="agents-title">Your agents</h2></div><button type="button" class="close-dialog icon-button" aria-label="Close agent overview"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
     <div class="agents-toolbar"><p id="agents-summary" class="muted"></p><button id="groups-add" type="button">New group</button><button id="agents-add" type="button" class="primary">＋ New agent</button></div>
@@ -212,6 +213,7 @@
     <div class="agent-form-options"><label>Model<select id="agent-model"></select></label><label>Effort<select id="agent-effort"></select></label><label>Access<select id="agent-access"></select></label></div>
     <p id="agent-auto-row" class="hint" hidden><button id="agent-auto" class="compact-action" type="button">Return to Auto</button> This agent always uses one model. Auto picks one per task and asks before swapping.</p>
     <p class="hint">Your agent is saved immediately. Connections start in the background.</p>
+    <section id="agent-routines" class="routine-list" hidden><h3>Routines</h3><ul></ul><p class="hint">Ask in this bot's chat to change, pause or remove a routine.</p></section>
     <p id="agent-error" class="turn-error" role="alert"></p><div class="dialog-footer"><button id="agent-save" class="primary" type="submit">Create agent</button></div>
   </form></dialog>
   <dialog id="hub-dialog" aria-labelledby="hub-heading"><form id="hub-form">
@@ -219,6 +221,7 @@
     <label>Name<input id="hub-name" required maxlength="60"></label>
     <label>Workspace<span class="path-field"><input id="hub-workspace" required><button id="hub-browse" type="button">Browse…</button></span></label>
     <div class="agent-form-options"><label>Model<select id="hub-model" required></select></label><label>Effort<select id="hub-effort"></select></label><label>Access<select id="hub-access"></select></label></div>
+    <section id="hub-routines" class="routine-list" hidden><h3>Routines</h3><ul></ul><p class="hint">Every bot's routines. Ask Hub or the bot's chat to change, pause or remove one.</p></section>
     <p id="hub-error" class="turn-error" role="alert"></p>
   </form></dialog>
   <dialog id="settings-dialog"><form id="settings-form">
@@ -273,10 +276,10 @@
     <label id="runner-exit-row">On Exit<select id="settings-runner-exit" disabled><option value="close">Close App</option><option value="tray" selected>Stay on Tray</option></select></label>
     <label id="runner-start-row">Start at sign-in<select id="settings-runner-start" disabled><option value="off">Off</option><option value="on">On</option></select></label>
     <label>Reply suggestions<select id="settings-reply-suggestions" aria-describedby="reply-suggestions-detail"><option value="off">Off</option><option value="on">On</option></select></label>
+    <p id="reply-suggestions-detail" class="hint">After each answer, a quick call to the model that wrote it suggests your next message as grey text in the composer. It runs at that model's lowest effort and costs one extra small call per answer. Right arrow accepts it; on a touch screen, the button beside Send does. Off: no extra calls; you can still ask for one with /suggestion.</p>
     <label>Cold start after idle (minutes)<input id="settings-cold-start-minutes" type="number" min="0" max="10080" step="1" aria-describedby="cold-start-detail"></label>
     <label>Cold start context size (tokens)<input id="settings-cold-start-tokens" type="number" min="1000" max="10000000" step="1000" aria-describedby="cold-start-detail"></label>
     <p id="cold-start-detail" class="hint">Providers' prompt caches expire after minutes to an hour and do not say when, so the idle time is an estimate. When a bot's chat has been idle this long and its last context was at least this size, the next message starts a fresh session with a summary of the earlier chat and its latest messages, instead of re-reading everything uncached. The router model writes the summary (one call per 16,000 characters of new chat); a Cold start step in the chat shows it running, who summarized, its tokens and the result, and the app log records each cold start's saving. Hub chats are not affected; a Codex chat moves to a new thread. 0 minutes turns it off.</p>
-    <p id="reply-suggestions-detail" class="hint">After each answer, the model that wrote it suggests your next message as grey text. Right arrow accepts it; on a touch screen, the button beside Send does. One extra model call per answer.</p>
     <label>Chat checker, reviser, escalator and rule finder model<span class="model-effort-field"><select id="settings-chat-scan" aria-label="Chat checker model" aria-describedby="chat-scan-detail"></select><select id="settings-chat-scan-effort" aria-label="Chat checker effort" aria-describedby="chat-scan-detail"></select></span></label>
     <p id="chat-scan-detail" class="hint">Off by default. The model you pick does what the four switches below turn on. While it is unavailable, nothing is checked.</p>
     <label>Check each response<select id="settings-check-responses" aria-describedby="check-responses-detail"><option value="on">On</option><option value="off">Off</option></select></label>

@@ -1412,7 +1412,7 @@ class Agents extends EventEmitter {
         title: session.title, assignment: job.task, status: job.cancelled ? 'cancelled' : session.status, error: session.error || null,
         // The setup of the run that produced this result (after a failover, the provider that finished).
         setup: session.routes?.findLast(route => route.setup)?.setup || null,
-        text: result || 'No final answer was produced.', finalReport: true, truncated: report.length > 16000,
+        text: result || (job.cancelled ? 'Cancelled before a final report was written.' : 'No final answer was produced.'), finalReport: true, truncated: report.length > 16000,
         revision: job.revision || 1, amendments: job.amendments || [], superseded: !!superseded,
         artifacts: job.artifacts || [], workspaceCopy: job.workspaceCopy || null,
         budgetId: job.budgetId || null,

@@ -21,6 +21,8 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
   const preparing = new Set();
   handle('bootstrap', () => agents.snapshot());
   handle('connectorList', () => runner.connectors.list());
+  // Read-only list for the Edit dialogs: Hub's shows every routine, a bot's only its own (same rule as routines_report).
+  handle('routineList', agentId => agents.routines.report(agents.controller(agentId)));
   handle('connectorSave', input => runner.connectors.save(input));
   handle('connectorAction', (id, action) => runner.connectors.action(id, action));
   handle('providerConnection', (id, action) => require('./provider-connection.cjs').providerConnection(runner, id, action));
@@ -130,6 +132,7 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
   });
   handle('compact', id => agents.owner(id).compact(id));
   handle('replySuggestion', id => agents.owner(id).replySuggestion(id));
+  handle('suggestNext', id => agents.owner(id).suggestNext(id));
   handle('suggestWiki', id => agents.owner(id).suggestWiki(id));
   handle('clearConversation', async (agentId, groupId) => {
     const session = await agents.clearConversation(agentId, name => ask({

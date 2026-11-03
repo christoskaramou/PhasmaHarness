@@ -62,7 +62,7 @@ async function startServer({ data, port, origin }) {
       openFolder: async () => { throw new Error('Download the artifact to open it on this device.'); },
       stopDownloads: () => remote?.stopDownloads() });
     commands.set('appInfo', () => ({ version: require('../package.json').version, packaged: false }));
-    commands.set('runnerInfo', () => ({ status: 'Runner ready', autostart: { supported: false, enabled: true } }));
+    commands.set('runnerInfo', () => ({ status: 'Ready', autostart: { supported: false, enabled: true } }));
     remote = new RemoteRunner({ key: configuration.key(), sessions: value.sessions,
       saveSessions: sessions => configuration.save({ sessions }), snapshot: () => runner.agents.snapshot(),
       artifactDownload: (args, signal) => runner.agents.artifactDownload(args, signal),

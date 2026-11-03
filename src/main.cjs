@@ -1,4 +1,14 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, net, clipboard, Tray, Menu, nativeTheme } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, net, clipboard, Tray, Menu, nativeTheme, nativeImage } = require('electron');
+// The tray's Bots menu marks a working bot with this 16 px green dot (#22c55e), drawn as BGRA pixels with soft edges.
+function greenDot(size = 16, radius = 4.5) {
+  const pixels = Buffer.alloc(size * size * 4);
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const alpha = Math.max(0, Math.min(1, radius + 0.5 - Math.hypot(x + 0.5 - size / 2, y + 0.5 - size / 2)));
+    // Premultiplied BGRA, as Electron's bitmaps expect.
+    pixels.set([0x5e, 0xc5, 0x22, 0xff].map(value => Math.round(value * alpha)), (y * size + x) * 4);
+  }
+  return nativeImage.createFromBitmap(pixels, { width: size, height: size });
+}
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
@@ -140,7 +150,12 @@ async function start() {
     settingsFile: path.join(app.getPath('userData'), 'runner-window.json'),
     isQuitting: () => quitting || !!closing, quit: () => app.quit(),
     status: () => agents.allControllers().some(worker => worker.requests.size) ? 'Needs attention'
-      : agents.busy ? 'Work in progress' : 'Runner ready',
+      : agents.busy ? 'Work in progress' : 'Ready',
+    bots: () => [...agents.controllers].map(([id, worker]) => ({ id, name: agents.agentName(id),
+      working: !!(worker.busy || agents.executions.get(id)?.busy) })),
+    workingIcon: greenDot(),
+    openSettings: () => { if (!window.isDestroyed()) window.webContents.send('tray', { action: 'settings' }); },
+    openBot: id => { if (!window.isDestroyed()) window.webContents.send('tray', { action: 'bot', id }); },
     onError: error => log.error('Runner settings failed', { message: error.message }),
   });
   // Each update used to carry every bot's chats (6 MB on the user's data). The window now gets only the bots that changed,

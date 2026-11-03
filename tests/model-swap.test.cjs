@@ -94,32 +94,18 @@ test('Auto keeps the current model unless the suggestion fits better by a margin
 test('after a swap decision Auto waits, and after Keep current it does not ask again for similar tasks', () => {
   const available = measured(catalog), now = Date.now();
   const session = chat('weak', 4000), hard = pick('codex:strong:high', 'high');
+  // No cooldown: after a swap, Keep current or an unanswered question, the next matching task asks again.
   recordDecision(session, 'swapped', evaluateSwap({ selected: hard, session, available, now }), now);
   for (let task = 0; task < COOLDOWN.tasks; task++) {
-    const blocked = evaluateSwap({ selected: hard, session, available, now });
-    assert.equal(blocked.propose, false, `cooldown task ${task + 1}`);
-    assert.equal(blocked.decision.cooldown.kind, 'swapped');
-    assert.match(blocked.decision.reason, /but Auto swapped models recently/);
+    const again = evaluateSwap({ selected: hard, session, available, now });
+    assert.equal(again.propose, true, `task ${task + 1} asks again`);
+    assert.equal(again.decision.cooldown, null);
     countTask(session);
   }
-  assert.equal(evaluateSwap({ selected: hard, session, available, now }).propose, true, 'the cooldown ends after its tasks');
-  recordDecision(session, 'swapped', evaluateSwap({ selected: hard, session, available, now }), now);
-  assert.equal(evaluateSwap({ selected: hard, session, available, now: now + COOLDOWN.ms }).propose, true, '…or after its time');
-
-  // Keep current: no question for similar tasks to the same model until 10 tasks or 2 hours pass.
   recordDecision(session, 'declined', evaluateSwap({ selected: hard, session, available, now }), now);
-  for (let task = 0; task < COOLDOWN.tasks; task++) countTask(session);
   const similar = evaluateSwap({ selected: hard, session, available, now });
-  assert.equal(similar.propose, false); assert.equal(similar.decision.cooldown.kind, 'similar');
-  assert.equal(evaluateSwap({ selected: pick('codex:strong:xhigh', 'xhigh', { taskKind: 'audit', risk: 'critical' }), session, available, now }).propose, true,
-    'a task more than 15 points harder is not similar');
-  assert.equal(evaluateSwap({ selected: hard, session, available, now: now + DECLINED.ms }).propose, true);
-  for (let task = COOLDOWN.tasks; task < DECLINED.tasks; task++) countTask(session);
-  assert.equal(evaluateSwap({ selected: hard, session, available, now }).propose, true);
-
-  // An unanswered question only starts the short cooldown.
+  assert.equal(similar.propose, true); assert.equal(similar.decision.cooldown, null);
   recordDecision(session, 'expired', evaluateSwap({ selected: hard, session, available, now }), now);
-  for (let task = 0; task < COOLDOWN.tasks; task++) countTask(session);
   assert.equal(evaluateSwap({ selected: hard, session, available, now }).propose, true);
 });
 
@@ -168,12 +154,11 @@ test('Hub\'s own model: its rating of a request against a fresh pick among its L
   const near = evaluateHubSwap({ current: at('codex:mid:medium'), level: 'high', available });
   assert.deepEqual([near.propose, near.decision.gain], [false, 6]);
   assert.match(near.decision.reason, /^Kept mid · medium: strong · medium would fit requests like this \(high, difficulty 70\) better by 6, under the 15-point margin\.$/);
-  // The cooldowns are a bot's.
+  // No cooldown after a Keep current: the same question is asked again.
   const holder = {};
   recordDecision(holder, 'declined', hard);
-  const state = holder.modelSwapState;
-  assert.deepEqual([evaluateHubSwap({ current: at('codex:weak:medium'), level: 'high', available, state }).propose,
-    evaluateHubSwap({ current: at('codex:weak:medium'), level: 'high', available, state }).decision.cooldown.kind], [false, 'declined']);
+  assert.deepEqual([evaluateHubSwap({ current: at('codex:weak:medium'), level: 'high', available, state: holder.modelSwapState }).propose,
+    evaluateHubSwap({ current: at('codex:weak:medium'), level: 'high', available, state: holder.modelSwapState }).decision.cooldown], [true, null]);
   // Nothing to decide: the same model, no rating, a model no longer offered.
   assert.equal(evaluateHubSwap({ current: at('codex:mid:medium'), level: 'medium', available }), null);
   assert.equal(evaluateHubSwap({ current: at('codex:weak:medium'), level: null, available }), null);
@@ -280,7 +265,7 @@ test('a swap the score supports waits for Swap before the task starts, without b
   complete(); await until(() => !bot.busy);
 });
 
-test('Keep current runs the current model, and an unanswered question keeps it too, then cools down', async t => {
+test('Keep current runs the current model, and an unanswered question keeps it too, with no cooldown', async t => {
   const { bot, session, picks, turns, complete, send } = await setup(t);
   picks.push(pick('codex:strong:high', 'high'));
   const kept = send('Hard task one');
@@ -295,21 +280,23 @@ test('Keep current runs the current model, and an unanswered question keeps it t
   assert.equal(session.modelSwapState.last.kind, 'declined');
   complete(); await until(() => !bot.busy);
 
-  // Within the cooldown Auto keeps the model without asking, and says why.
+  // No cooldown: the next hard task asks again, and Keep current is recorded again.
   // The default effort cap (high) offers no xhigh presets, so the router picks within it.
   picks.push(pick('codex:strong:high', 'xhigh', { taskKind: 'audit', risk: 'critical' }));
-  await send('A different hard task');
+  const again = send('A different hard task');
+  await until(() => session.pendingMessage?.modelSwap);
+  bot.answerModelSwap(session.id, session.pendingMessage.modelSwap.id, 'keep');
+  await again;
   assert.equal(session.routes.at(-1).id, 'codex:weak:high');
-  assert.equal(session.routes.at(-1).modelSwap.outcome, 'kept');
-  assert.equal(session.routes.at(-1).modelSwap.cooldown.kind, 'declined');
+  assert.equal(session.routes.at(-1).modelSwap.outcome, 'declined');
+  assert.equal(session.routes.at(-1).modelSwap.cooldown, null);
   complete(); await until(() => !bot.busy);
 
-  // After the cooldown, an unanswered question keeps the current model.
-  session.modelSwapState.last.tasks = 3;
+  // An unanswered question keeps the current model.
   bot.modelSwapPromptMs = 20;
   picks.push(pick('codex:strong:high', 'xhigh', { taskKind: 'audit', risk: 'critical' }));
   await send('Another hard task');
-  assert.deepEqual(turns(), ['weak', 'weak', 'weak', 'weak']);
+  assert.equal(turns().at(-1), 'weak');
   assert.equal(session.routes.at(-1).modelSwap.outcome, 'expired');
   assert.equal(session.routes.at(-1).modelSwap.choice, 'no answer, so the current model stays');
   assert.equal(session.modelSwapState.last.kind, 'expired');
@@ -467,7 +454,8 @@ test('an unsure Jev assessment gets the smart router\'s second opinion, whose ch
   assert.match(route.reason, /Jev was unsure \(confidence 0\.13, low difficulty\); the smart router assessed this message\. router reason$/);
   complete(); await until(() => !bot.busy);
 
-  // A sure Jev is not second-guessed.
+  // A sure Jev is not second-guessed. An unanswered swap question expires at once and keeps the current model.
+  bot.modelSwapPromptMs = 20;
   calls.length = 0;
   jev = { ...pick('codex:weak:medium', 'medium'), source: 'jev', router: { confidence: 0.9 } };
   await send('Explain the queue');

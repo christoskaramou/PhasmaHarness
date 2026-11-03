@@ -70,7 +70,7 @@
 
     // Settings worth knowing.
     { id: 'tray', when: desktop,
-      text: 'Settings → General → On Exit → Stay on Tray keeps bots and routines running after you close the window. Quit runner in the tray menu stops them.' },
+      text: 'Settings → General → On Exit → Stay on Tray keeps bots and routines running after you close the window. Quit Harness in the tray menu stops them.' },
     { id: 'sign-in', when: () => desktop() && !/Linux/i.test(navigator.userAgent),
       text: 'Settings → General → Start at sign-in starts Harness when you log in, so routines run on time.' },
     { id: 'appearance', text: 'Settings → General → Appearance switches between System, Dark and Light.' },

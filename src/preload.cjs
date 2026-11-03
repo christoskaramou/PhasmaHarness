@@ -42,8 +42,10 @@ api.onConfirmation = callback => {
 api.queuedMessage = (...args) => ipcRenderer.invoke('queuedMessage', ...args);
 api.backgroundTask = (...args) => ipcRenderer.invoke('backgroundTask', ...args);
 api.replySuggestion = id => ipcRenderer.invoke('replySuggestion', id);
+api.suggestNext = id => ipcRenderer.invoke('suggestNext', id);
 api.suggestWiki = id => ipcRenderer.invoke('suggestWiki', id);
 api.connectorList = () => ipcRenderer.invoke('connectorList');
+api.routineList = agentId => ipcRenderer.invoke('routineList', agentId);
 api.connectorSave = input => ipcRenderer.invoke('connectorSave', input);
 api.connectorAction = (id, action) => ipcRenderer.invoke('connectorAction', id, action);
 api.phasmaGameChecks = workspace => ipcRenderer.invoke('phasmaGameChecks', workspace);
@@ -63,6 +65,11 @@ api.onUpdate = callback => {
   const listener = (_event, state) => callback(state);
   ipcRenderer.on('update', listener);
   return () => ipcRenderer.removeListener('update', listener);
+};
+api.onTray = callback => {
+  const listener = (_event, request) => callback(request);
+  ipcRenderer.on('tray', listener);
+  return () => ipcRenderer.removeListener('tray', listener);
 };
 api.onState = callback => {
   const listener = (_event, state) => callback(state);

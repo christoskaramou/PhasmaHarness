@@ -143,3 +143,12 @@ test('/wiki and reply suggestions skip a reply Jev gave itself and use the last 
   assert.equal(await controller.suggestWiki('s'), 0);
   assert.equal(calls[0].choice.model, 'gpt', 'the worker before the Jev answer writes the suggestions');
 });
+
+test('/suggestion asks for one suggestion even when the setting is off, and the setting still stops the automatic one', async () => {
+  const { controller, calls } = chat({ enabled: false });
+  assert.equal(await controller.replySuggestion('s'), null, 'automatic suggestions stay off');
+  assert.deepEqual(await controller.suggestNext('s'), { itemId: 'a1', text: 'Now add tests for it.' });
+  assert.equal(calls.length, 1, 'one extra call, for this answer only');
+  assert.deepEqual(await controller.suggestNext('s'), { itemId: 'a1', text: 'Now add tests for it.' });
+  assert.equal(calls.length, 1, 'the same answer is not asked twice');
+});

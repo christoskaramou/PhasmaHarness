@@ -1975,7 +1975,7 @@ test('Hub sends a task outside an Auto worker\'s reach to an idle worker that fi
   assert.equal(hub.data.agents.length, before, 'no copy of the sub-bot was made');
 });
 
-test('Hub Auto offers a model that fits its own rating of a request for its next messages, with Swap, Keep current and cooldowns', async t => {
+test('Hub Auto offers a model that fits its own rating of a request for its next messages, with Swap and Keep current and no cooldown', async t => {
   const { hub, session, replies, send } = await setup(t);
   const SCORES = { weak: 50, cheap: 65, strong: 100 }, COSTS = { weak: 0.1, cheap: 0.3, strong: 3 };
   const eligible = Object.keys(SCORES).flatMap(model => ['low', 'medium'].map(effort => ({ id: `codex:${model}:${effort}`, provider: 'codex', model, effort,
@@ -1997,12 +1997,12 @@ test('Hub Auto offers a model that fits its own rating of a request for its next
   assert.deepEqual([hard.status, hard.outcome, hard.choice, hub.data.hubMode, hub.data.hubModeSource], ['answered', 'swapped', 'you chose Swap', 'codex:strong:medium', 'auto']);
   assert.throws(() => hub.answerModelSwap(session.id, hard.id, 'keep'), /no longer open/);
 
-  // Within the cooldown nothing is asked; after it, an easy request on the strong model asks, and the next message without
-  // an answer keeps the model.
+  // No cooldown after a swap: an easy request on the strong model asks at once, and the next message without an answer
+  // keeps the model.
   current = eligible.find(p => p.id === 'codex:strong:medium');
   replies.push({ reply: 'Glad it helps.', difficulty: 'low', action: null });
   await send('Thanks');
-  assert.equal(last().modelSwap, undefined);
+  assert.equal(last().modelSwap?.status, 'pending', 'no cooldown: the easy request asks at once');
   hub.data.modelSwapState.last.tasks = 3;
   replies.push({ reply: 'Hello.', difficulty: 'low', action: null });
   await send('Hello');
@@ -2965,4 +2965,55 @@ test('a suggested comparison that helped puts its rule on trial, not into the ke
   await hub.undoComparison(session.id, record.id, 'rule');
   assert.equal(trials.readRules(rulesRoot)[0].state, 'removed');
   assert.equal(fs.readFileSync(file, 'utf8'), '# Project instructions\n\nStay small.\n');
+});
+
+test('history summaries on a CLI router run large chunks in parallel waves and merge them in order', async () => {
+  // 20 messages of 60,000 characters: 128k-character chunks of two messages, so 10 chunks in waves of 4, 4 and 2.
+  const history = Array.from({ length: 20 }, (_, i) => ({ id: `m${i}`, role: 'user', text: `M${i} ` + 'x'.repeat(59996) }));
+  let active = 0, peak = 0;
+  const calls = [], saves = [];
+  const session = { summary: 'EARLIER' };
+  const fake = { save: () => saves.push([session.summary, session.through]), smartRouter: { complete: async request => {
+    const input = JSON.parse(request.prompt);
+    active++; peak = Math.max(peak, active);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    active--;
+    const merge = input.messages.every(message => message.id.startsWith('part-'));
+    calls.push({ merge, summary: input.summary, first: input.messages[0].text.split(' ')[0] });
+    const text = merge ? `MERGED(${input.summary}|${input.messages.map(message => message.text).join(',')})` : `S(${input.messages.map(message => message.text.split(' ')[0]).join('+')})`;
+    return { decision: { summary: text.length > 7000 ? text.slice(0, 40) + '…' + calls.length : text }, usage: null };
+  } } };
+  const choice = { provider: 'claude-cli', model: 'claude-opus-5-5' };
+  assert.equal(Controller.prototype.summaryCalls(history, 0, 20, choice), 13, '10 chunks and a merge per wave');
+  await Controller.prototype.summarizeHistory.call(fake, session, history, 0, 20, { summary: 'summary', through: 'through' }, choice, new AbortController());
+  assert.equal(calls.length, 13, 'not 75 back-to-back 16k calls');
+  assert.equal(peak, 4, 'four summaries at a time');
+  assert.deepEqual(calls.filter(call => !call.merge).map(call => call.first), ['M0', 'M2', 'M4', 'M6', 'M8', 'M10', 'M12', 'M14', 'M16', 'M18']);
+  assert.ok(calls.filter(call => !call.merge).every(call => call.summary === ''), 'parts are summarized on their own');
+  assert.equal(calls.find(call => call.merge).summary, 'EARLIER', 'the first merge extends the existing summary');
+  assert.deepEqual(saves.map(([, through]) => through), ['m7', 'm15', 'm19'], 'saved after each wave, through its last whole message');
+  // An API or local router keeps 16k-character chunks: one per oversized message piece.
+  assert.equal(Controller.prototype.summaryCalls(history.slice(0, 1), 0, 1, { provider: 'openrouter' }) >= 4, true);
+});
+
+test('Hub changes to its strongest model when the message asks for a stronger one, and does the redo in its own chat', async t => {
+  const { hub, session, calls, send } = await setup(t);
+  hub.data.settings.mode = 'auto';
+  await send('Hello');
+  const eligible = hub.hubEligible();
+  assert.ok(eligible.length >= 2, 'the fixture offers several Hub models');
+  const rank = new Map(eligible.map((p, i) => [p.id, 10 + i * 10]));
+  hub.smartRouter.benchmarks = { catalog: workers => workers.map(w => ({ ...w, benchmarks: [{ source: 'aa-index', version: '4', harness: 'aa', score: rank.get(w.id) ?? 1 }] })) };
+  const top = eligible.at(-1);
+  hub.smartRouter.chooseHub = async () => assert.fail('a stronger-model request must not ask the router');
+  const planningBefore = calls.length, bots = hub.agents.controllers.size;
+  await send('use a smarter agent and redo it');
+  assert.equal(hub.data.hubMode, top.id, 'Hub moves to its strongest model');
+  assert.equal(session.routes.at(-1).id, top.id, 'the redo runs on that model in the Hub chat');
+  assert.equal(hub.agents.controllers.size, bots, 'no agent is started for it');
+  assert.equal(calls.length, planningBefore, 'the planning call does not decide it');
+  hub.data.hubMode = eligible[0].id; hub.data.hubModeSource = 'auto';
+  hub.smartRouter.chooseHub = async () => eligible[0];
+  await send('thanks, what next?');
+  assert.notEqual(calls.at(-1).choice.id, top.id, 'an ordinary message does not change the Hub model');
 });

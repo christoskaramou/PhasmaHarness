@@ -5,6 +5,39 @@ const { verificationGaps } = require('../job-reports.cjs');
 const { TOOLS } = require('../tools/agent-tools.cjs');
 const imageTools = require('../tools/image-tools.cjs');
 const { hubEffortAllowed } = require('../routing/effort-cap.cjs');
+const { capabilities } = require('../providers/capabilities.cjs');
+const { strongest, asksForStronger, atEffort } = require('../routing/smart-router.cjs');
+
+// History summaries: Codex and the CLIs run frontier models with large contexts, so they take ~32k-token chunks, four at a
+// time; API and local models keep 16k-character chunks (a local model may have a small context). A 1.5M-character chat
+// was 93 back-to-back calls; on a CLI it is now about a dozen, in four parallel waves.
+const SUMMARY_PARALLEL = 4;
+const summaryChunkChars = choice => (capabilities(choice?.provider || 'codex').api ? 16000 : 128000);
+// history[start, end) as chunks of whole messages; a message longer than a chunk becomes pieces. `last` is the index of
+// the message a chunk finishes (null for a piece before its message's last).
+function summaryChunks(history, start, end, choice) {
+  const limit = summaryChunkChars(choice), chunks = [];
+  let chunk = [], size = 0;
+  const flush = () => { if (chunk.length) chunks.push({ messages: chunk, last: start - 1 }); chunk = []; size = 0; };
+  for (; start < end; start++) {
+    const message = history[start];
+    if (message.text.length > limit) {
+      flush();
+      for (let offset = 0; offset < message.text.length; offset += limit)
+        chunks.push({ messages: [{ ...message, text: message.text.slice(offset, offset + limit) }], last: offset + limit >= message.text.length ? start : null });
+      continue;
+    }
+    if (size && size + message.text.length >= limit) flush();
+    chunk.push(message); size += message.text.length;
+  }
+  flush();
+  return chunks;
+}
+// About the calls summarizeHistory makes: one per chunk, plus a merge for each wave of more than one chunk.
+function countSummaryCalls(history, start, end, choice) {
+  const chunks = summaryChunks(history, start, end, choice).length, rest = chunks % SUMMARY_PARALLEL;
+  return chunks + Math.floor(chunks / SUMMARY_PARALLEL) + (rest > 1 ? 1 : 0);
+}
 
 const WORK = { name: 'agent_work', description: 'Send work to an existing Auto worker (agentId), or create one (name). Include a concrete task. Omit mode and effort for Auto; set them only when the user requests a specific model/effort. To use a manually pinned existing agent explicitly requested by the user, pass its exact roster mode and omit effort. Otherwise manually pinned workers are left alone and a new Auto worker is created. Follow-ups retain a previous explicit model choice. The original request remains available through agent_read_context.',
   inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, name: { type: 'string' },
@@ -108,6 +141,8 @@ async function summarize(controller, session, summary, chunk, choice, abort, rec
 }
 
 module.exports = {
+  summaryCalls(history, start, end, choice) { return countSummaryCalls(history, start, end, choice); },
+
   isCoordinator() { return !!this.agents && this.agentId === 'main'; },
 
   // The models Hub Auto runs: Low or Medium effort (or none to set), enabled and not at a usage limit.
@@ -115,12 +150,23 @@ module.exports = {
     return this.catalog().filter(p => p.worker && hubEffortAllowed(p) && this.available(p) && !this.limits.limited(p.provider || 'codex', p.model));
   },
 
-  async coordinatorChoice(mode, abort) {
+  // The strongest measured Hub model at its highest Hub effort (Low or Medium), when the message asks for a stronger model.
+  hubStrongerChoice(text) {
+    if (!asksForStronger(text)) return null;
+    const eligible = this.hubEligible();
+    const top = eligible.length ? strongest(this.smartRouter.benchmarks.catalog(eligible)) : null;
+    return top ? atEffort(top, 'medium', eligible) : null;
+  },
+
+  async coordinatorChoice(mode, abort, text = '') {
     abort.signal.throwIfAborted();
     const manual = mode && mode !== 'auto';
     let choice = this.resolveWorker(manual ? mode : this.data.hubMode);
     const usable = p => !!p && this.available(p) && !this.limits.limited(p.provider || 'codex', p.model);
-    if (!manual && (this.data.hubModeSource !== 'auto' || !hubEffortAllowed(choice) || !usable(choice))) {
+    // A message that asks for a stronger model ("use a smarter agent") moves Hub to the strongest Hub model at once.
+    const asked = manual ? null : this.hubStrongerChoice(text);
+    if (asked) choice = asked;
+    else if (!manual && (this.data.hubModeSource !== 'auto' || !hubEffortAllowed(choice) || !usable(choice))) {
       const eligible = this.hubEligible();
       if (!eligible.length) throw new Error('Hub Auto needs an enabled model with Low or Medium effort, or no configurable effort. Enable one in Providers, or choose a model manually for Hub.');
       const configured = this.effectiveRouter();
@@ -149,25 +195,27 @@ module.exports = {
     await this.summarizeHistory(session, history, start, end, { summary: 'hubSummary', through: 'hubSummaryThrough' }, choice, abort);
   },
 
-  // Folds history[start, end) ({ id, text } messages) into session[keys.summary] in bounded chunks, saving after each, so
-  // session[keys.through] always names the last message the summary covers. `record` counts each call's usage.
+  // Folds history[start, end) ({ id, text } messages) into session[keys.summary]. Chunks are summarized in parallel waves,
+  // then each wave's parts are merged, in order, into the running summary. The summary is saved after each wave, so
+  // session[keys.through] always names the last whole message it covers. `record` counts each call's usage.
   async summarizeHistory(session, history, start, end, keys, choice, abort, record = recordUsage) {
     let summary = session[keys.summary] || '';
-    while (start < end) {
-      const chunk = []; let size = 0;
-      while (start < end && (size === 0 || size + history[start].text.length < 16000)) {
-        const message = history[start];
-        if (message.text.length > 16000) {
-          if (chunk.length) break;
-          for (let offset = 0; offset < message.text.length; offset += 16000) {
-            summary = await summarize(this, session, summary, [{ ...message, text: message.text.slice(offset, offset + 16000) }], choice, abort, record);
-          }
-          start++; break;
-        }
-        chunk.push(message); size += message.text.length; start++;
+    const chunks = summaryChunks(history, start, end, choice);
+    for (let index = 0; index < chunks.length;) {
+      // A wave never ends inside a long message's pieces, so `through` stays exact.
+      let stop = Math.min(chunks.length, index + SUMMARY_PARALLEL);
+      while (stop < chunks.length && chunks[stop - 1].last === null) stop++;
+      const wave = chunks.slice(index, stop);
+      index = stop;
+      // One chunk folds straight into the summary; several are summarized at once, then merged into it in order.
+      if (wave.length === 1) summary = await summarize(this, session, summary, wave[0].messages, choice, abort, record);
+      else {
+        // ponytail: a wave extended over a very long message runs all its pieces at once; pool them if that ever matters.
+        const parts = await Promise.all(wave.map(chunk => summarize(this, session, '', chunk.messages, choice, abort, record)));
+        summary = await summarize(this, session, summary, parts.map((text, at) => ({ id: `part-${at + 1}`, role: 'summary of the next part, in order', text })), choice, abort, record);
       }
-      if (chunk.length) summary = await summarize(this, session, summary, chunk, choice, abort, record);
-      session[keys.summary] = summary; session[keys.through] = history[start - 1].id;
+      const last = wave.findLast(chunk => chunk.last !== null).last;
+      session[keys.summary] = summary; session[keys.through] = history[last].id;
       this.save();
     }
   },
@@ -311,7 +359,7 @@ module.exports = {
       if (session.userTurn) this.expireHubSwap();
       // Worker results resume Hub's model, including queues saved with an obsolete composer preset.
       const directResult = agentReply && agentResult && !agentResult.request?.comparison && (agentReplyCancelled || agentResult.request?.resultHandling === 'direct');
-      const choice = directResult ? null : await this.coordinatorChoice(agentReply && this.data.hubMode ? (this.data.hubModeSource === 'auto' ? 'auto' : this.data.hubMode) : mode, abort);
+      const choice = directResult ? null : await this.coordinatorChoice(agentReply && this.data.hubMode ? (this.data.hubModeSource === 'auto' ? 'auto' : this.data.hubMode) : mode, abort, agentReply ? '' : text);
       abort.signal.throwIfAborted();
       recordUsage(session, choice?.routerUsage);
       if (images.length && choice?.images === false && !this.jevImageAssist()) throw new Error('Choose an image-capable model for Hub, or turn on Jev image assist, before sending images.');

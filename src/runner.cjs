@@ -214,8 +214,9 @@ function autostart(app, enabled, platform = process.platform) {
 }
 
 class RunnerWindow {
-  constructor({ app, window, Tray, Menu, icon, isQuitting, quit, status = () => 'Runner ready', onError = () => {}, settingsFile }) {
-    Object.assign(this, { app, window, Menu, isQuitting, quit, status, onError });
+  constructor({ app, window, Tray, Menu, icon, isQuitting, quit, status = () => 'Ready', onError = () => {}, settingsFile,
+    bots = () => [], workingIcon = null, openSettings = () => {}, openBot = () => {} }) {
+    Object.assign(this, { app, window, Menu, isQuitting, quit, status, onError, bots, workingIcon, openSettings, openBot });
     this.settingsFile = settingsFile;
     this.onExit = 'tray';
     if (settingsFile) {
@@ -259,24 +260,25 @@ class RunnerWindow {
   }
 
   setAutostart(enabled) {
-    const result = autostart(this.app, enabled);
-    this.refresh(true);
-    return result;
+    return autostart(this.app, enabled);
   }
 
+  // Bots lists every bot; a working one gets a green dot beside its name. Start at sign-in lives in Settings.
   refresh(force = false) {
-    const status = this.status();
-    if (!force && status === this.menuStatus) return;
-    this.menuStatus = status;
-    const start = autostart(this.app);
+    const status = this.status(), bots = this.bots();
+    const key = JSON.stringify([status, bots]);
+    if (!force && key === this.menuKey) return;
+    this.menuKey = key;
     this.tray.setToolTip(`Phasma Harness · ${status}`);
+    const open = action => () => { this.show(); action(); };
     this.tray.setContextMenu(this.Menu.buildFromTemplate([
       { label: 'Open Harness', click: () => this.show() },
-      { label: status, enabled: false },
+      { label: 'Settings', click: open(() => this.openSettings()) },
+      { label: 'Bots', submenu: bots.length ? bots.map(bot => ({ label: bot.name, click: open(() => this.openBot(bot.id)),
+        ...(bot.working ? this.workingIcon ? { icon: this.workingIcon } : { label: `● ${bot.name}` } : {}) }))
+        : [{ label: 'No bots', enabled: false }] },
       { type: 'separator' },
-      { label: 'Start at sign-in', type: 'checkbox', checked: start.enabled, enabled: start.supported,
-        click: item => { try { this.setAutostart(item.checked); } catch (error) { this.onError(error); this.refresh(true); } } },
-      { label: 'Quit runner', click: this.quit },
+      { label: 'Quit Harness', click: this.quit },
     ]));
   }
 

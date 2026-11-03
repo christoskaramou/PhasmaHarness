@@ -79,7 +79,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('providerKey', (_event, id, key) => { if (key) providerKeys.set(id, key); else providerKeys.delete(id); return controller.snapshot(); });
   ipcMain.handle('appInfo', () => ({ version: '0.1.0', packaged: true }));
   let runnerStart = false, runnerExit = 'tray';
-  ipcMain.handle('runnerInfo', () => ({ status: 'Runner ready', running: true, background: true, onExit: runnerExit,
+  ipcMain.handle('runnerInfo', () => ({ status: 'Ready', running: true, background: true, onExit: runnerExit,
     autostart: { supported: true, enabled: runnerStart } }));
   ipcMain.handle('runnerOnExit', (_event, value) => (runnerExit = value));
   ipcMain.handle('runnerAutostart', (_event, enabled) => ({ supported: true, enabled: (runnerStart = enabled) }));
@@ -1969,11 +1969,12 @@ app.whenReady().then(async () => {
       inBounds: box.left >= 0 && box.top >= 0 && box.right <= innerWidth && box.bottom <= innerHeight };
   })()`);
   assert.equal(menuView.open, true);
-  assert.deepEqual(menuView.labels, ['Open', 'Edit', 'Delete']);
+  assert.deepEqual(menuView.labels, ['Open', 'Notifications', 'Edit', 'Delete']);
   assert.equal(menuView.color, await window.webContents.executeJavaScript('getComputedStyle(document.querySelector("#delete-confirm")).color'),
     'Delete retains the theme danger color');
   assert.equal(menuView.inBounds, true, 'menu stays visible near window edges');
   assert.equal(await window.webContents.executeJavaScript('document.activeElement === document.querySelector("#agent-menu")'), true);
+  await window.webContents.executeJavaScript('document.querySelector("#agent-menu").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })); true');
   await window.webContents.executeJavaScript('document.querySelector("#agent-menu").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })); true');
   await window.webContents.executeJavaScript('document.querySelector("#agent-menu").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })); true');
   assert.equal(await window.webContents.executeJavaScript('document.activeElement.textContent'), 'Edit');
@@ -1984,6 +1985,111 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#agent-dialog").dataset.agentId'), profile.id);
   assert.equal(await window.webContents.executeJavaScript('selectedAgent'), 'main', 'Right-click does not switch conversations');
   await window.webContents.executeJavaScript('document.querySelector("#agent-dialog").close(); true');
+  // The bot's bell is plain grey with no count (the user found them aggressive); it opens its notifications, coloured by
+  // severity, and does not switch conversations.
+  assert.deepEqual(await window.webContents.executeJavaScript(`(() => {
+    const bell = document.querySelector('#agent-list [data-agent="${profile.id}"] .agent-bell');
+    return [!!bell.querySelector('.agent-bell-count'), ['agent-bell', 'agent-bell unseen'].includes(bell.className)];
+  })()`), [false, true], 'no count badge and no severity class on the bell');
+  const bellView = await window.webContents.executeJavaScript(`(() => {
+    document.querySelector('#agent-list [data-agent="${profile.id}"] .agent-bell').click();
+    const popover = document.querySelector('#bot-alerts');
+    return { open: popover.matches(':popover-open'), heading: popover.querySelector('h3')?.textContent || '',
+      levels: [...popover.querySelectorAll('.bot-alert')].every(row => ['info', 'warning', 'error'].some(level => row.classList.contains(level))),
+      selected: selectedAgent };
+  })()`);
+  assert.equal(bellView.open, true, JSON.stringify(bellView));
+  assert.match(bellView.heading, /Notifications$/);
+  assert.equal(bellView.levels, true);
+  assert.equal(bellView.selected, 'main', 'the bell does not open the bot');
+  // Each entry is unread until hovered; right-click copies it.
+  const entryView = await window.webContents.executeJavaScript(`(async () => {
+    const popover = document.querySelector('#bot-alerts');
+    localStorage.removeItem('botAlertsRead'); botAlerts.seen = {}; botAlerts.read = {};
+    const entries = allAlertEntries;
+    allAlertEntries = () => [{ level: 'warning', title: 'Skill store warning', key: 'smoke-alert', at: Date.now(), chat: 'Chat' }];
+    botAlerts.id = ${JSON.stringify(profile.id)}; fillBotAlerts();
+    const rows = () => [...popover.querySelectorAll('.bot-alert')];
+    const first = rows()[0];
+    const before = first.classList.contains('unread'), key = first.dataset.copy;
+    first.dispatchEvent(new MouseEvent('mouseenter'));
+    const after = rows().find(row => row.dataset.copy === key)?.classList.contains('unread');
+    let copied = null; const copy = api.copyText; api.copyText = async text => { copied = text; };
+    rows()[0].dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }));
+    const menu = popover.querySelector('.bot-alert-menu'), shown = !menu.hidden, label = menu.textContent;
+    menu.querySelector('button').click(); await Promise.resolve();
+    api.copyText = copy;
+    allAlertEntries = () => [{ level: 'error', title: 'Failed · npm test', key: 'smoke-alert-2', at: Date.now(), chat: 'Chat' }, { level: 'warning', title: 'Skill store warning', key: 'smoke-alert', at: Date.now(), chat: 'Chat' }];
+    fillBotAlerts();
+    const markAll = [...popover.querySelectorAll('button')].find(button => button.textContent === 'Mark all as read');
+    const markAllEnabled = !!markAll && !markAll.disabled;
+    markAll?.click();
+    const unreadAfterMarkAll = popover.querySelectorAll('.bot-alert.unread').length;
+    const markAllDisabled = [...popover.querySelectorAll('button')].find(button => button.textContent === 'Mark all as read')?.disabled;
+    localStorage.removeItem('botAlertsCleared'); botAlerts.cleared = {}; fillBotAlerts();
+    [...popover.querySelectorAll('button')].find(button => button.textContent === 'Clear').click();
+    const rowsAfterClear = popover.querySelectorAll('.bot-alert').length;
+    const clearDisabled = [...popover.querySelectorAll('button')].find(button => button.textContent === 'Clear')?.disabled;
+    const stubbed = allAlertEntries;
+    allAlertEntries = () => [...stubbed(), { level: 'error', title: 'Failed · build', key: 'smoke-alert-3', at: Date.now(), chat: 'Chat' }];
+    fillBotAlerts();
+    const afterNew = [...popover.querySelectorAll('.bot-alert')].map(row => row.dataset.copy.split('\\n')[0]);
+    localStorage.removeItem('botAlertsCleared'); botAlerts.cleared = {}; allAlertEntries = entries; fillBotAlerts();
+    return { before, after, shown, label, copied, key, hidden: menu.hidden, markAllEnabled, unreadAfterMarkAll, markAllDisabled, rowsAfterClear, clearDisabled, afterNew,
+      indicator: !!document.querySelector('.agent-indicator') };
+  })()`);
+  assert.equal(entryView.before, true, 'a new entry shows as unread');
+  assert.equal(entryView.after, false, 'hovering marks the entry read');
+  assert.equal(entryView.shown, true); assert.equal(entryView.label, 'Copy');
+  assert.equal(entryView.copied, entryView.key, 'right-click Copy copies the entry');
+  assert.match(entryView.copied, /^Skill store warning\n/);
+  assert.equal(entryView.hidden, true);
+  assert.equal(entryView.markAllEnabled, true, 'Mark all as read is offered while entries are unread');
+  assert.equal(entryView.unreadAfterMarkAll, 0, 'Mark all as read clears every unread dot');
+  assert.equal(entryView.markAllDisabled, true);
+  // Successful tool calls stay out of the bell; failed ones say what they ran; messages and notices stay in grey.
+  const filtered = await window.webContents.executeJavaScript(`(() => {
+    const id = ${JSON.stringify(profile.id)}, saved = fleetState.agentStates[id];
+    fleetState.agentStates[id] = { ...saved, requests: [], connection: 'ready', sessions: [{ id: 'bell-filter', title: 'Chat', created: 1, items: [
+      { id: 'ok', type: 'mcpToolCall', server: 'Claude CLI', tool: 'Bash', arguments: { command: 'ls' }, status: 'completed', createdAt: 2 },
+      { id: 'run', type: 'commandExecution', command: 'npm ci', status: 'inProgress', createdAt: 3 },
+      { id: 'bad', type: 'mcpToolCall', server: 'Claude CLI', tool: 'Bash', arguments: { description: 'Run the tests', command: 'npm test' }, status: 'failed', createdAt: 4 },
+      { id: 'mail', type: 'agentMail', kind: 'question', fromName: 'Researcher', text: 'Which branch?', createdAt: 5 },
+      { id: 'note', type: 'notice', text: 'Rule kept', createdAt: 6 }] }] };
+    const entries = allAlertEntries(id).filter(entry => entry.chat === 'Chat' && ['ok', 'run', 'bad', 'mail', 'note'].includes(entry.key));
+    fleetState.agentStates[id] = saved;
+    return entries.map(entry => [entry.key, entry.level, entry.title]);
+  })()`);
+  assert.deepEqual(filtered, [['note', 'info', 'Rule kept'], ['mail', 'info', 'Question from Researcher'], ['bad', 'error', 'Bash · Run the tests · failed']]);
+  assert.equal(entryView.rowsAfterClear, 0, 'Clear empties the bell');
+  assert.equal(entryView.clearDisabled, true);
+  assert.deepEqual(entryView.afterNew, ['Failed · build'], 'entries after a Clear still show');
+  assert.equal(entryView.indicator, false, 'working bots no longer show a status dot');
+  await window.webContents.executeJavaScript('document.querySelector("#bot-alerts").hidePopover(); true');
+  // The tray menu's Settings opens Harness settings and a bot entry opens that bot.
+  window.webContents.send('tray', { action: 'settings' });
+  for (let i = 0; i < 100 && !await window.webContents.executeJavaScript('document.querySelector("#settings-dialog").open'); i++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#settings-dialog").open'), true, 'tray Settings opens Harness settings');
+  // A click outside Settings, on a bot in the sidebar, closes Settings and opens that bot.
+  const outsideClick = await window.webContents.executeJavaScript(`(async () => {
+    const dialog = document.querySelector('#settings-dialog');
+    const row = document.querySelector('#agent-list [data-agent="${profile.id}"]'), box = row.getBoundingClientRect();
+    const dialogBox = dialog.getBoundingClientRect();
+    const point = { bubbles: true, cancelable: true, clientX: box.left + 8, clientY: box.top + box.height / 2 };
+    const clear = point.clientX < dialogBox.left || point.clientX > dialogBox.right || point.clientY < dialogBox.top || point.clientY > dialogBox.bottom;
+    dialog.dispatchEvent(new PointerEvent('pointerdown', point));
+    dialog.dispatchEvent(new MouseEvent('click', point));
+    for (let i = 0; i < 100 && selectedAgent !== ${JSON.stringify(profile.id)}; i++) await new Promise(resolve => setTimeout(resolve, 10));
+    return { clear, open: dialog.open, selected: selectedAgent };
+  })()`);
+  assert.equal(outsideClick.clear, true, 'the bot row is outside Settings');
+  assert.equal(outsideClick.open, false, 'a click outside closes Settings');
+  assert.equal(outsideClick.selected, profile.id, 'the outside click opens the clicked bot');
+  await window.webContents.executeJavaScript('selectAgent("main")');
+  window.webContents.send('tray', { action: 'bot', id: profile.id });
+  for (let i = 0; i < 100 && await window.webContents.executeJavaScript('selectedAgent') !== profile.id; i++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(await window.webContents.executeJavaScript('selectedAgent'), profile.id, 'a tray bot entry opens that bot');
+  await window.webContents.executeJavaScript('selectAgent("main")');
   await window.webContents.executeJavaScript('document.querySelector("#main-agent-list .agent-nav").dispatchEvent(new KeyboardEvent("keydown", { key: "F10", shiftKey: true, bubbles: true, cancelable: true })); true');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#agent-menu").matches(":popover-open")'), true);
   assert.equal(await window.webContents.executeJavaScript('!!document.querySelector("#agent-menu [data-action=delete]")'), false, 'Main has no Delete menu option');
@@ -2190,7 +2296,7 @@ app.whenReady().then(async () => {
     nested: true,
     composer: [true, 'Read only: Researcher gives this bot its work.', true, true, true],
     modelCommand: "This bot follows Researcher's model and settings.",
-    card: ['open', 'delete'],
+    card: ['open', 'alerts', 'delete'],
     deleteNote: [false, 'The bots it made go with it: Reviewer.'],
   }, 'a sub-bot is nested, read only, not editable, and deleted with its creator');
   // They show only while their creator or one of them is selected; the creator counts them.
@@ -2298,7 +2404,7 @@ app.whenReady().then(async () => {
   const mainConversationId = agents.conversation(controller).id;
   oldConversation.items.push({ id: 'clear-history', type: 'agentMessage', text: 'Earlier agent history.' });
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
-  const commandNames = ['/help', '/compact', '/clear', '/stop', '/agents', '/settings', '/context', '/model', '/effort', '/access', '/switch', '/export', '/status', '/wiki'];
+  const commandNames = ['/help', '/compact', '/clear', '/stop', '/agents', '/settings', '/context', '/model', '/effort', '/access', '/switch', '/export', '/status', '/suggestion', '/wiki'];
   const sentBeforeCommands = sent.length, previewsBeforeCommands = previews;
   const typeCommand = text => window.webContents.executeJavaScript(`(() => {
     const prompt = document.querySelector('#prompt'); prompt.focus(); prompt.value = ${JSON.stringify(text)};

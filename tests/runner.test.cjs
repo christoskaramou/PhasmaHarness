@@ -8,7 +8,7 @@ const { randomUUID } = require('node:crypto');
 const { RunnerWindow, autostart, loginOptions, hasPendingWork, backupStores } = require('../src/runner.cjs');
 
 function fixture(settingsFile) {
-  let quitting = false, status = 'Runner ready', startup = false;
+  let quitting = false, status = 'Ready', startup = false;
   const calls = [];
   const app = { isPackaged: false, getAppPath: () => 'C:\\Work space\\Harness',
     getLoginItemSettings: options => { calls.push(['login-read', options]); return { openAtLogin: startup }; },
@@ -22,9 +22,11 @@ function fixture(settingsFile) {
     setContextMenu(menu) { this.menu = menu; }
     destroy() { calls.push('tray-destroyed'); }
   }
+  let bots = [{ id: 'main', name: 'Assistant', working: false }];
   const desktop = new RunnerWindow({ app, window, Tray, Menu: { buildFromTemplate: value => value }, icon: 'fixture',
-    settingsFile, isQuitting: () => quitting, quit: () => { quitting = true; calls.push('quit'); }, status: () => status });
-  return { desktop, app, window, calls, setStatus: value => { status = value; } };
+    settingsFile, isQuitting: () => quitting, quit: () => { quitting = true; calls.push('quit'); }, status: () => status,
+    bots: () => bots, workingIcon: 'green-dot', openSettings: () => calls.push('settings'), openBot: id => calls.push(['bot', id]) });
+  return { desktop, app, window, calls, setStatus: value => { status = value; }, setBots: value => { bots = value; } };
 }
 
 test('closing a window detaches the view and reopening preserves the same runner and approval waits', () => {
@@ -48,7 +50,7 @@ test('a crashed renderer reconnects on open and explicit Quit is distinct from w
   window.webContents.emit('render-process-gone');
   desktop.show();
   assert.deepEqual(calls.slice(-3), ['reload', 'show', 'focus']);
-  desktop.tray.menu.find(item => item.label === 'Quit runner').click();
+  desktop.tray.menu.find(item => item.label === 'Quit Harness').click();
   let prevented = false;
   window.emit('close', { preventDefault: () => { prevented = true; } });
   assert.equal(prevented, false);
@@ -65,6 +67,22 @@ test('tray updates coalesce repeated worker output and display pending attention
   setStatus('Needs attention');
   desktop.refresh();
   assert.ok(calls.some(call => call[0] === 'tooltip' && call[1].includes('Needs attention')));
+});
+
+test('tray menu: Open Harness, Settings, a Bots submenu with green dots on working bots, and Quit Harness', () => {
+  const { desktop, calls, setBots } = fixture();
+  assert.deepEqual(desktop.tray.menu.map(item => item.label || item.type), ['Open Harness', 'Settings', 'Bots', 'separator', 'Quit Harness']);
+  desktop.tray.menu.find(item => item.label === 'Settings').click();
+  assert.deepEqual(calls.slice(-3), ['show', 'focus', 'settings']);
+  setBots([{ id: 'main', name: 'Assistant', working: false }, { id: 'b1', name: 'Researcher', working: true }]);
+  desktop.refresh();
+  const bots = desktop.tray.menu.find(item => item.label === 'Bots').submenu;
+  assert.deepEqual(bots.map(item => [item.label, item.icon || null]), [['Assistant', null], ['Researcher', 'green-dot']]);
+  bots[1].click();
+  assert.deepEqual(calls.at(-1), ['bot', 'b1']);
+  setBots([]);
+  desktop.refresh();
+  assert.deepEqual(desktop.tray.menu.find(item => item.label === 'Bots').submenu.map(item => [item.label, item.enabled]), [['No bots', false]]);
 });
 
 test('start at sign-in uses matching executable arguments and never enables itself', () => {

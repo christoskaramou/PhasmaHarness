@@ -2,7 +2,7 @@
 // Auto's model swaps on a bot (src/controller/model-swaps.cjs). The router suggests a worker for each new task
 // (smart-router.cjs). A bot that already has a model keeps it unless the suggestion fits this task's difficulty better
 // by a wide margin, and that margin grows with the conversation the bot would lose. After a swap, or after the user
-// keeps the current model, there is a cooldown. A swap the score supports waits for the user's Swap or Keep current.
+// keeps the current model. A swap the score supports waits for the user's Swap or Keep current.
 // The constants are choices, not calibrations.
 const { scorer, atEffort, pickPreset, currentRoute, modelKey } = require('./smart-router.cjs');
 
@@ -86,16 +86,9 @@ function measure(current, suggested, difficulty, available) {
   return { from, to, gain: from.fit === null || to.fit === null ? null : to.fit - from.fit };
 }
 
-function cooldown(state, suggested, difficulty, now) {
-  const last = state?.last;
-  if (!last) return null;
-  const active = limit => last.tasks < limit.tasks && now - last.at < limit.ms;
-  if (active(COOLDOWN))
-    return { kind: last.kind, tasksLeft: COOLDOWN.tasks - last.tasks, until: last.at + COOLDOWN.ms };
-  if (last.kind === 'declined' && last.to === modelKey(suggested) && Math.abs(difficulty - last.difficulty) <= DECLINED.points && active(DECLINED))
-    return { kind: 'similar', tasksLeft: DECLINED.tasks - last.tasks, until: last.at + DECLINED.ms };
-  return null;
-}
+// No cooldown: a swap question is asked again whenever the margin is met, even after a swap, Keep current or a question
+// that ran out. The user always gets to pick.
+function cooldown() { return null; }
 
 const WAITING = { swapped: 'swapped models', declined: 'was told to keep this model', expired: 'asked about a swap',
   similar: 'was told to keep this model for a similar task' };

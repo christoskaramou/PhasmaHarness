@@ -18,6 +18,8 @@ const WAKE_MS = 5000;
 const ASK_TOOLS = ['Read', 'Glob', 'Grep', 'Bash', 'Edit', 'Write', 'WebFetch', 'WebSearch'];
 // Tools that only work with an interactive Claude Code user; in the Harness they would show as unanswerable prompts.
 const INTERACTIVE_TOOLS = ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'];
+// Claude's own subagent tools: a turn that must not start a subagent refuses them.
+const SUBAGENT_TOOLS = ['Agent', 'Task'];
 const ASK_NOTE = '\nHarness access: tool calls outside the pre-approved set wait for the user\'s approval. Prefer Read/Glob/Grep for inspection and group shell commands to keep approvals few.';
 // Claude reads the user's messages only between steps, so a foreground wait on its own background task hides them.
 const BACKGROUND_NOTE = '\nBackground work: after starting a background command or task, end your turn; its completion wakes you with a turn of its own. Never wait for it in the foreground (sleep loops, polling a file or log): the user\'s messages cannot reach you until that command ends. A subagent instead finishes its task before it reports.';
@@ -232,7 +234,7 @@ class ClaudeCLI {
     }
     return await this.refresh();
   }
-  run({ cwd, model, effort, prompt, images = [], resume, access, signal, onEvent = () => {}, approve, schema, helpers, onInput, instructions = WORKER_INSTRUCTIONS, managedInstructions = false, persistSession = false }) {
+  run({ cwd, model, effort, prompt, images = [], resume, access, signal, onEvent = () => {}, approve, schema, helpers, onInput, instructions = WORKER_INSTRUCTIONS, managedInstructions = false, persistSession = false, noSubagents = false }) {
     let promptDirectory;
     return new Promise((resolve, reject) => {
       if (signal?.aborted) return reject(new Error('Claude stopped.'));
@@ -271,7 +273,7 @@ class ClaudeCLI {
             // other commands, edits outside the workspace and web access ask.
             args.push('--allowedTools', ['Read', 'Glob', 'Grep', ...helperTools].join(','));
           }
-          args.push('--disallowedTools', INTERACTIVE_TOOLS.join(','), '--permission-prompt-tool', 'stdio');
+          args.push('--disallowedTools', [...INTERACTIVE_TOOLS, ...(noSubagents ? SUBAGENT_TOOLS : [])].join(','), '--permission-prompt-tool', 'stdio');
         } else if (access === 'read-only') {
           const allowed = ['Read', 'Glob', 'Grep', ...(helpers ? helpers.allowedTools(access) : [])];
           args.push('--tools', allowed.join(','));
@@ -280,6 +282,7 @@ class ClaudeCLI {
           args.push('--allowedTools', allowed.join(','));
         }
         // danger-full-access: leave Claude's native tool set unrestricted; helpers arrive via mcp-config.
+        if (noSubagents) args.push('--disallowedTools', SUBAGENT_TOOLS.join(','));
       }
       args.push('--permission-mode', access === 'danger-full-access' && !schema ? 'bypassPermissions'
         : ask ? (access === 'workspace-write' ? 'acceptEdits' : 'default') : 'dontAsk');

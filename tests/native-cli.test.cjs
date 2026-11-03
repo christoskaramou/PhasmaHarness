@@ -183,12 +183,19 @@ test('an idle worker with a large context starts a fresh session from a summary 
   await send('Right after'); assert.equal(runs().at(-1).resume, 'native-session');
   assert.equal(summaries.length, 1);
 
+  // Without usage reports, the size after a cold start is the summary plus the messages after it, not the whole chat.
+  idle(31); await send('Short break');
+  assert.equal(runs().at(-1).resume, 'native-session', 'the summary and the messages after it are under the size setting');
+  assert.equal(summaries.length, 1);
+  for (let i = 0; i < 3; i++) await send(`Later ${i} ` + 'y'.repeat(1500));
   idle(31); await send('Another break');
+  assert.match(steps().at(-1).lines.join(' '), /estimated from the earlier summary and the messages after it/);
   assert.equal(summaries[1].summary, 'SUMMARY-1', 'a later cold start extends the summary');
   assert.ok(!summaries[1].messages.some(message => /Question 0/.test(message.text)));
   assert.match(runs().at(-1).prompt, /SUMMARY-2/);
   assert.match(steps().at(-1).lines.join(' '), /extending the earlier summary/);
 
+  for (let i = 0; i < 3; i++) await send(`More ${i} ` + 'z'.repeat(1500));
   controller.failSummary = true; idle(31); await send('Router is down');
   assert.equal(runs().at(-1).resume, 'native-session', 'a failed summary falls back to resuming');
   assert.equal(steps().at(-1).title, 'Cold start · DeepSeek A · failed');

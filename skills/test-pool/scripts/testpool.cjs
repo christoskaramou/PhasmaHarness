@@ -349,9 +349,10 @@ function jevDecisions(ask, result, settings) {
 }
 
 // ---------- running ----------
-function expand(value, root) {
-  return value.replace(/\$\{(root|home|env:([A-Za-z_][A-Za-z0-9_]*))\}/g, (_, name, env) =>
-    name === 'root' ? root : name === 'home' ? os.homedir() : (process.env[env] || ''));
+// ${env:X} reads the environment the test gets (TESTPOOL_RUN_DIR and the others exist only there).
+function expand(value, root, env = process.env) {
+  return value.replace(/\$\{(root|home|env:([A-Za-z_][A-Za-z0-9_]*))\}/g, (_, name, key) =>
+    name === 'root' ? root : name === 'home' ? os.homedir() : (env[key] || ''));
 }
 
 function killTree(child) {
@@ -365,10 +366,10 @@ function runStep(id, step, root, runDir, extraEnv) {
   const logFile = path.join(runDir, `${id}.log`);
   const missing = (step.requires || []).map(r => expand(r, root)).find(r => !fs.existsSync(path.resolve(root, r)));
   if (missing) return Promise.resolve({ id, status: 'skip', reason: `missing ${posix(missing)}`, ms: 0 });
-  const command = expand((process.platform === 'win32' && step.commandWindows) || step.command, root);
-  const cwd = path.resolve(root, expand(step.cwd || '.', root));
   const env = { ...process.env, ...extraEnv, TESTPOOL_TEST_ID: id };
-  for (const [k, v] of Object.entries(step.env || {})) env[k] = expand(v, root);
+  const command = expand((process.platform === 'win32' && step.commandWindows) || step.command, root, env);
+  const cwd = path.resolve(root, expand(step.cwd || '.', root, env));
+  for (const [k, v] of Object.entries(step.env || {})) env[k] = expand(v, root, env);
   delete env.JEV_API_KEY; delete env.JEV_API_KEY_FILE; // tests never need the Jev key
   delete env.ELECTRON_RUN_AS_NODE; // set when Harness or Codex starts the runner; an Electron app under test would start as Node
   return new Promise(resolve => {

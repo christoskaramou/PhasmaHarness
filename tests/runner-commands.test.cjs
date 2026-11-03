@@ -159,3 +159,16 @@ test('a sub-bot’s chat is watched: sending, the queue, access and new chats ar
   await commands.get('answer')('chat', { id: 'request', decision: 'accept' }, 'sub');
   assert.equal(answered.length, 1, 'approval answers reach the sub-bot');
 });
+
+test('routineList shows Hub every routine and a bot only its own', () => {
+  const { Routines } = require('../src/routines.cjs');
+  const routine = (id, agentId) => ({ schemaVersion: 2, id, name: id, text: 'do ' + id, agentId, ownerId: 'chat', enabled: true,
+    schedule: { type: 'calendar', days: [0, 1, 2, 3, 4, 5, 6], time: '21:00', timeZone: 'UTC' } });
+  const primary = { agentId: 'main', data: { routines: { a: routine('a', 'main'), b: routine('b', 'bot'), c: routine('c', 'other') } } };
+  const bot = { agentId: 'bot' };
+  const f = fixture();
+  Object.assign(f.agents, { primary, controller: id => ({ main: primary, bot })[id], agentName: id => id });
+  f.agents.routines = new Routines(f.agents);
+  assert.deepEqual(f.call('routineList', 'main').map(r => r.id).sort(), ['a', 'b', 'c']);
+  assert.deepEqual(f.call('routineList', 'bot').map(r => [r.id, r.trigger]), [['b', 'daily at 21:00 (UTC)']]);
+});

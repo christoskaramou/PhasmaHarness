@@ -6,6 +6,8 @@ const { isCLI } = require('../providers/capabilities.cjs');
 const { TOOL: CONTEXT_TOOL } = require('../workspace/context-search.cjs');
 const { TOOLS: HELPER_TOOLS } = require('../tools/tool-helpers.cjs');
 const { TOOLS: AGENT_TOOLS } = require('../tools/agent-tools.cjs');
+// A stronger-model request is done by Hub's own chat: no agent is started for it.
+const NO_AGENT_NOTE = 'Hub does this request itself on its stronger model; no agent is started for it.';
 
 module.exports = {
 
@@ -35,6 +37,7 @@ module.exports = {
     if (signal?.aborted || this.cliAbort?.signal.aborted) throw new Error('Helper call stopped.');
     if (['connector_tools', 'connector_call'].includes(tool)) return this.connectorTool(session, tool, args, signal);
     if (tool === 'router_read_output' && this.connectors) return this.toolHelpers.read(session, args);
+    if (session.hubStronger && AGENT_TOOLS.some(item => item.name === tool)) throw new Error(NO_AGENT_NOTE);
     if (this.agents && AGENT_TOOLS.some(item => item.name === tool)) return this.agents.tool(this, session, tool, args);
     if (!isCLI(session.activeProvider)) throw new Error('Only agent tools are available through the Codex helper MCP.');
     this.toolHelpers.jev = this.smartRouter.jev;
@@ -104,6 +107,7 @@ module.exports = {
     const p = message.params, session = this.data.sessions.find(s => s.threadId === p?.threadId);
     const active = () => session?.helperTools && this.busy === session.id && !this.stopping.has(session.id) && this.assignmentCurrent(session) && this.activeTurns.get(session.id) === p.turnId;
     if (!active() || p.namespace || ![...HELPER_TOOLS, ...(this.agents ? AGENT_TOOLS : [])].some(tool => tool.name === p.tool) || this.helperRequests.has(message.id) ||
+      (session.hubStronger && AGENT_TOOLS.some(tool => tool.name === p.tool)) ||
       !p.arguments || typeof p.arguments !== 'object' || Array.isArray(p.arguments)) {
       this.client.rejectRequest(message.id, 'Unsupported or inactive tool-helper call.'); return;
     }

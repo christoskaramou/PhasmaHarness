@@ -782,6 +782,10 @@ class Controller extends EventEmitter {
       await this.agents.stop(id);
       return { stopped: true };
     }
+    // A message that asks for a stronger model is done by Hub itself: its chat runs it as a tool turn on the strongest Hub
+    // model, and no agent is started for it (agent tools are refused for that turn, see bridgeTool and helperToolCall).
+    const hubStronger = this.isCoordinator() && !agentReply && !routineRun && !wikiTaskId && !this.planPreset() ? this.hubStrongerChoice(text) : null;
+    if (hubStronger) { this.data.hubMode = hubStronger.id; this.data.hubModeSource = 'auto'; this.save(); mode = hubStronger.id; }
     if (this.busy || this.agents?.groupRuns.has(id)) {
       if (this.busy && this.busy !== id && !(this.isCoordinator() && (session.group || this.session(this.busy).group))) {
         throw new Error('Another turn is running. Switch to that session to queue a message.');
@@ -799,6 +803,7 @@ class Controller extends EventEmitter {
     }
     session.queuePaused = false;
     session.activeTaskId = null;
+    session.hubStronger = !!hubStronger;
     const chosenMode = mode || this.data.settings.mode;
     session.agentReplyCancelledActive = agentReplyCancelled === true;
     session.routineRunActive = routineRun?.occurrenceId || null;
@@ -809,7 +814,7 @@ class Controller extends EventEmitter {
     // failover re-send is the same message again, not a reaction.
     if (session.userTurn && !failover)
       this.scanAfterUserTurn(session, text);
-    if (this.isCoordinator()) return this.sendCoordinator(session, { text, images, fileMessage, mode: chosenMode, agentReply, agentReplyCancelled, agentResult, agentMail, routineRun });
+    if (this.isCoordinator() && !hubStronger) return this.sendCoordinator(session, { text, images, fileMessage, mode: chosenMode, agentReply, agentReplyCancelled, agentResult, agentMail, routineRun });
     const assigned = !!session.delegation && this.agents?.executionText(session.delegation) === text;
     const originalRequest = assigned ? this.agents.requestFor(session.delegation) : null;
     const routingText = originalRequest?.text || text;
@@ -1248,7 +1253,7 @@ class Controller extends EventEmitter {
         } } : {}),
         cwd: this.workspace(session.workspace), model: selected.model, effort: selected.effort || null, effortOption: selected.effortOption, parameterized: selected.parameterized, parameters: selected.parameters,
         prompt, recoveryPrompt, images, instructions: keptInstructions ? '' : fullInstructions, managedInstructions: true,
-        resume: session[sessionKey], access: session.agentReplyCancelledActive ? 'read-only' : session.access, signal: abort.signal,
+        resume: session[sessionKey], access: session.agentReplyCancelledActive ? 'read-only' : session.access, signal: abort.signal, noSubagents: session.hubStronger === true,
         helpers: keptInstructions && helpers ? { ...helpers, instructions: '' } : helpers,
         approve: (tool, options = {}) => new Promise(resolve => {
           if (abort.signal.aborted || turnOver || options.signal?.aborted) return resolve(false);

@@ -1771,6 +1771,21 @@ test('cancelling a completed parent still stops transferred descendants and pres
   assert.equal(owner.items.find(item => item.type === 'agentResult').status, 'cancelled');
 });
 
+test('a cancelled job reports that it was cancelled, not that no final answer was produced', async t => {
+  const { agents, primary, workspace, addWorker } = await setup(t);
+  const worker = await addWorker('Builder');
+  const source = primary.create(workspace, 'workspace-write');
+  await start(primary, source);
+  const job = agents.delegate(primary, source, worker.agentId, 'Create a file named hello.txt that says hi.');
+  await until(() => worker.activeTurns.size);
+  await agents.stop(job.jobId);
+  await until(() => source.items.some(item => item.type === 'agentResult'));
+  const receipt = source.items.find(item => item.type === 'agentResult');
+  assert.equal(receipt.status, 'cancelled');
+  assert.equal(receipt.text, 'Cancelled before a final report was written.');
+  assert.doesNotMatch(receipt.text, /No final answer/);
+});
+
 test('Main creates a persistent idle agent through a dynamic tool using conversation permissions', async t => {
   const { agents, primary, workspace } = await setup(t);
   primary.data.settings.access = 'danger-full-access';

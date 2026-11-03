@@ -72,7 +72,7 @@ function Wait-HarnessClosed($folder, [int]$timeoutSeconds = 45, [int]$killSecond
                     continue
                 }
                 if ($blocked) { throw "Dependencies are still in use or inaccessible: $blocked. Close the app using this file and retry. No dependencies were changed." }
-                throw "Harness did not finish shutting down (processes: $($running.ProcessId -join ', ')), even after it was ended. Quit runner from its tray icon and retry. No dependencies were changed."
+                throw "Harness did not finish shutting down (processes: $($running.ProcessId -join ', ')), even after it was ended. Quit Harness from its tray icon and retry. No dependencies were changed."
             }
             Start-Sleep -Milliseconds 300
         }

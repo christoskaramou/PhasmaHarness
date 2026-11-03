@@ -613,3 +613,18 @@ test('Jev routing sees attached images fitted to its 280-1568 px limits, and jud
 });
 
 
+
+test('a message that asks for a stronger model gets the strongest measured model at once, even as a continued task', async () => {
+  const router = new SmartRouter(__dirname);
+  router.benchmarks = indexed.benchmarks;
+  router.inspect = async () => evidence;
+  let decision;
+  router.classifyCodex = async () => ({ decision, usage: { totalTokens: 100 } });
+  const session = { routingCatalog: catalog, routerChoice: { provider: 'codex', model: 'small', effort: 'low' }, job: job(smallHigh, 'done') };
+  decision = assessed({ workspaceRelevant: false, sameTask: true });
+  const asked = await router.choose('swap to smarter agent please and redo it', session, []);
+  assert.equal(asked.id, bigHigh.id, 'the strongest model, not the cheap one the router guessed');
+  assert.match(asked.reason, /^You asked for a stronger model\. /);
+  const plain = await router.choose('more of this', session, []);
+  assert.equal(plain.id, smallHigh.id, 'without the request, a continued task keeps its worker');
+});

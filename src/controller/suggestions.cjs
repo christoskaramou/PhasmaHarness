@@ -55,8 +55,8 @@ const conversationOf = (items, count) => items.slice(-count).map(item => ({ role
 // Reply suggestions (Settings → General, on unless turned off): after the model answers, one structured call to the model that
 // wrote that answer suggests the user's next message. The UI shows it as grey text; nothing is sent until the user does.
 module.exports = {
-  async replySuggestion(id) {
-    if (this.data.settings.replySuggestions === false)
+  async replySuggestion(id, { force = false } = {}) {
+    if (this.data.settings.replySuggestions === false && !force)
       return null;
 
     const session = this.session(id);
@@ -94,6 +94,9 @@ module.exports = {
     this.suggestions.set(id, { itemId: last.id, result });
     return result;
   },
+
+  // /suggestion: the same suggestion on demand, whether Reply suggestions is on or off.
+  suggestNext(id) { return this.replySuggestion(id, { force: true }); },
 
   // /wiki: the same quick model reads the recent chat and the workspace's docs/wiki index and suggests durable wiki changes
   // as a notice. Nothing is written; the notice's Apply asks this chat's bot to make them under the project's own rules.

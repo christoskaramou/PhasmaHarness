@@ -144,11 +144,18 @@ function provenChoice(result, decision, session, available) {
     reason: clip(`Proven setup for ${decision.taskKind} work in this project. ${result.reason || ''}`, 240) };
 }
 
+// A message that asks for a stronger model ("use a smarter agent", "swap to a better model") gets the strongest measured
+// model for this message at once, not the router's guess, and does not continue a cheaper worker's task.
+const STRONGER = /\b(?:smarter|stronger|better|more capable|more powerful|bigger|higher-end|best)(?:\s+\w+)?\s+(?:model|agent|bot)s?\b|\b(?:swap|switch|change|upgrade)\s+(?:to\s+)?(?:a\s+|the\s+)?(?:smarter|stronger|better|bigger|higher-end)\b/i;
+const asksForStronger = text => typeof text === 'string' && STRONGER.test(text);
+
 function finalChoice(assessment, text, session, workspace, available) {
-  const decision = { ...assessment, ...pickPreset(assessment, session, available) };
-  const kept = taskWorker(decision, session, available);
+  const stronger = asksForStronger(text);
+  const rated = stronger ? { ...assessment, difficulty: 'high' } : assessment;
+  const decision = { ...rated, ...pickPreset(rated, session, available), ...(stronger ? { reason: clip(`You asked for a stronger model. ${assessment.reason || ''}`, 240) } : {}) };
+  const kept = stronger ? null : taskWorker(decision, session, available);
   if (kept) return keepTask(decision, kept, text, session, workspace, available);
-  const chosen = { ...applyPolicy(decision, text, session, workspace, available), sameTask: decision.sameTask === true && !!session.job?.worker };
+  const chosen = { ...applyPolicy(decision, text, session, workspace, available), sameTask: decision.sameTask === true && !!session.job?.worker && !stronger };
   return decision.userPick ? { ...chosen, userPick: true } : provenChoice(chosen, decision, session, available);
 }
 
@@ -745,4 +752,4 @@ class SmartRouter {
   }
 }
 
-module.exports = { SmartRouter, routerModel, contextFor, applyPolicy, conversationDelta, strongest, atEffort, pickPreset, scorer, currentRoute, modelKey };
+module.exports = { SmartRouter, routerModel, contextFor, applyPolicy, conversationDelta, strongest, asksForStronger, atEffort, pickPreset, scorer, currentRoute, modelKey };
