@@ -88,7 +88,7 @@ test('tray menu: Open Harness, Settings, a Bots submenu with green dots on worki
 test('start at sign-in uses matching executable arguments and never enables itself', () => {
   const { app, calls } = fixture();
   const options = loginOptions(app, 'C:\\Electron\\electron.exe');
-  assert.deepEqual(options.args, ['"C:\\Work space\\Harness"', '--background']);
+  assert.deepEqual(options.args, ['C:\\Work space\\Harness', '--background']);
   assert.equal(autostart(app, undefined, 'win32').enabled, false);
   assert.equal(calls.some(call => call[0] === 'login-write'), false);
   assert.equal(autostart(app, true, 'win32').enabled, true);

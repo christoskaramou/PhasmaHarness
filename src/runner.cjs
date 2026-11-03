@@ -195,7 +195,7 @@ function backupStores(filename) {
 }
 
 function loginOptions(app, executable = process.execPath) {
-  return { path: executable, args: [...(app.isPackaged ? [] : [`"${app.getAppPath()}"`]), '--background'] };
+  return { path: executable, args: [...(app.isPackaged ? [] : [app.getAppPath()]), '--background'] };
 }
 
 function autostart(app, enabled, platform = process.platform) {
