@@ -12,3 +12,4 @@ tools/bin/
 dist/
 /.testpool/
 /docs/wiki/
+/.tmp/
