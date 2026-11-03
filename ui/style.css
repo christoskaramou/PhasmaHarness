@@ -4359,6 +4359,10 @@ main > header {
   line-height:1.5
 }
 
+.serious-setting>.hint {
+  margin-bottom:0
+}
+
 #panel-general .serious-setting>label {
   margin:2px 0 10px
 }
