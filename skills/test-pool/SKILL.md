@@ -116,6 +116,7 @@ Results are written to `.testpool/runs/`: `last.json`, `history.jsonl`, and one 
 - **It is unrelated or pre-existing:** say that plainly in your reply. Don't change the code under test to hide it.
 - **Never** weaken, disable or delete a failing test to make it pass. If the test itself is wrong, fix the test and explain why.
 - Automatic retries stop after `maxBlocks` for the same failures. Report what is still failing.
+- `settings.autoRun: false` turns off the runs after each reply for that repository; `run <ids>` still works by hand.
 
 ## Setup (once per machine)
 

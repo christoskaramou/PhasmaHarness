@@ -437,6 +437,12 @@ test('CLI: init, validate, list, dry-run check, run and the hook entry point', t
   const hooked = cli(['hook', '--agent', 'claude'], JSON.stringify({ cwd: dir, session_id: 'cli' }));
   assert.equal(hooked.status, 2);
   assert.match(hooked.stderr, /FAILED broken/);
+  catalog(dir, { settings: { autoRun: false }, tests: [testEntry('broken', { paths: ['src/**'], command: failCmd })] });
+  touch(dir, 'src/x.cpp', '3\n');
+  const off = cli(['hook', '--agent', 'claude'], JSON.stringify({ cwd: dir, session_id: 'cli' }));
+  assert.equal(off.status, 0, 'autoRun false: the hook runs nothing');
+  assert.equal(off.stdout + off.stderr, '');
+  assert.equal(cli(['run', 'broken']).status, 1, 'manual runs still work with autoRun false');
   write(dir, { '.testpool/catalog.json': '{ nope' });
   assert.equal(cli(['validate']).status, 1);
 });

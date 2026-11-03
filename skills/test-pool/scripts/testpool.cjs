@@ -14,7 +14,7 @@ const PLATFORMS = ['win32', 'linux', 'darwin'];
 const SKIP_EXIT = 77;
 const JEV_URL = 'https://api.typesafe.ai/v1/systemone';
 const JEV_MODEL = 'jev-1.13.0';
-const DEFAULTS = { budgetSec: 900, jev: 'auto', maxBlocks: 2, stickyRuns: 3, firstRunWindowMin: 120, skipConfidence: 0.75, expensiveConfidence: 0.9, keepRuns: 20 };
+const DEFAULTS = { autoRun: true, budgetSec: 900, jev: 'auto', maxBlocks: 2, stickyRuns: 3, firstRunWindowMin: 120, skipConfidence: 0.75, expensiveConfidence: 0.9, keepRuns: 20 };
 const ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const timing = { graceMs: 10000 }; // wait for output pipes after exit; tests shorten it
 const JEV_RULE = 'An AI coding agent just finished a reply in this repository. Decide whether one pooled regression test should run now. ' +
@@ -56,6 +56,7 @@ function validate(raw) {
   if (raw.version !== 1) errors.push('version must be 1');
   const settings = { ...DEFAULTS, ...(raw.settings || {}) };
   if (!['auto', 'off'].includes(settings.jev)) errors.push('settings.jev must be "auto" or "off"');
+  if (typeof settings.autoRun !== 'boolean') errors.push('settings.autoRun must be true or false');
   for (const key of ['budgetSec', 'maxBlocks', 'stickyRuns', 'firstRunWindowMin', 'keepRuns'])
     if (!Number.isInteger(settings[key]) || settings[key] < 0) errors.push(`settings.${key} must be a non-negative integer`);
   for (const key of ['skipConfidence', 'expensiveConfidence'])
@@ -544,6 +545,9 @@ async function hook(agent, input, opts = {}) {
   if (agent === 'cursor' && input.status && input.status !== 'completed') return { code: 0 };
   const root = findRoot(cwd);
   if (!root || !fs.existsSync(path.join(root, POOL_DIR, 'catalog.json'))) return { code: 0 };
+  // settings.autoRun false: no runs after replies; "run <ids>" still works by hand.
+  const loaded = loadCatalog(root);
+  if (!loaded.errors.length && loaded.catalog.settings.autoRun === false) return { code: 0 };
   let result;
   try { result = await check(root, { ...opts, lastMessage: input.last_assistant_message || '' }); }
   catch (error) {
