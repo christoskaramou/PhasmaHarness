@@ -61,3 +61,13 @@ test('a Harness notice exports as its own section', () => {
   const markdown = conversationMarkdown({ items: [{ type: 'notice', localOnly: true, text: 'Kept the rule "Export greet." in PhasmaHarness.md.', ruleNotice: { kind: 'kept' } }] });
   assert.match(markdown, /## Harness\n\nKept the rule "Export greet\." in PhasmaHarness\.md\./);
 });
+
+test('a bell-only notification (the test pool passing) stays out of the export, like it stays out of the chat', () => {
+  const markdown = conversationMarkdown({ title: 'Chat', items: [
+    { id: 'u', type: 'userMessage', content: [{ type: 'text', text: 'Fix it' }] },
+    { id: 'n1', type: 'notice', localOnly: true, bellOnly: true, text: 'Test pool: 3 passed, 2 not needed.' },
+    { id: 'n2', type: 'notice', localOnly: true, text: 'Kept the rule "Indent with tabs."' },
+  ] });
+  assert.doesNotMatch(markdown, /Test pool: 3 passed/);
+  assert.match(markdown, /Kept the rule/);
+});

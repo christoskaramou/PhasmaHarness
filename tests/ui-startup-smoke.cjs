@@ -3388,6 +3388,9 @@ app.whenReady().then(async () => {
   ownerChat.items.push({ id: 'setup-preferred', type: 'notice', localOnly: true, createdAt: Date.now(),
     text: 'Auto now uses Terra for debugging work in this project: 3 of 3 tasks passed their checks first time (Sol: 2 of 3).',
     ruleNotice: { kind: 'setupPreferred', setupKind: 'debugging', preset: 'terra' } });
+  // The test pool's passed/skipped summary is a bell notification only; it never shows in the chat.
+  ownerChat.items.push({ id: 'test-pool-pass', type: 'notice', localOnly: true, bellOnly: true, createdAt: Date.now(),
+    text: 'Test pool: 3 passed, 2 not needed.' });
   const undoRuleCalls = [];
   ipcMain.handle('undoRule', (_event, ...args) => {
     undoRuleCalls.push(args);
@@ -3398,6 +3401,7 @@ app.whenReady().then(async () => {
     .map(node => ({ text: node.textContent, undo: node.querySelector('button')?.getAttribute('aria-label') || null }))`);
   assert.deepEqual(notices.map(notice => notice.undo), ['Undo the kept rule', null, 'Put the rule back', 'Stop trying the rule', 'Remove the note', 'Stop preferring this model'],
     'kept, rolled-back, new trial and note notices offer Undo');
+  assert.equal(notices.some(notice => notice.text.includes('Test pool')), false, 'a bell-only notice is not in the chat');
   assert.match(notices[0].text, /^Kept the rule "Create done\.txt first\." in PhasmaHarness\.md/);
   assert.match(notices[1].text, /^Dropped the trial rule "Export greet\.": the failure it targets came back\.$/);
   await window.webContents.executeJavaScript(`document.querySelector('.message.notice button').click(); true`);

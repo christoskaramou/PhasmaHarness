@@ -68,8 +68,21 @@ test('a failing pool after a Full-access turn goes back to the bot as a Test poo
   fs.writeFileSync(path.join(root, 'src.txt'), 'ok again\n');
   await bot.runTestPool(root, session);
   assert.equal(bot.sent.length, 1, 'a pass sends nothing to the bot');
-  assert.match(session.notice, /^Test pool: 1 passed/);
-  assert.ok(session.noticeExpiresAt > Date.now(), 'a pass notice goes away by itself');
+  const pass = session.items.at(-1);
+  assert.deepEqual([pass.type, pass.bellOnly], ['notice', true], 'a pass is a notification in the bell, not a banner over the chat');
+  assert.match(pass.text, /^Test pool: 1 passed/);
+  assert.equal(session.notice, undefined, 'no pass banner');
+});
+
+test('a test pool problem (an invalid catalog) stays a banner over the chat, not a bell notification', async () => {
+  const root = repo();
+  fs.writeFileSync(path.join(root, '.testpool', 'catalog.json'), '{ not json');
+  const bot = controller();
+  const session = chat(root);
+  await bot.runTestPool(root, session);
+  assert.match(session.notice || '', /invalid/i);
+  assert.equal(session.noticeExpiresAt, null, 'it stays until the next run');
+  assert.equal(session.items.some(item => item.bellOnly), false);
 });
 
 test('a job’s failing pool only shows as a notice: its result already went back', async () => {
@@ -114,7 +127,7 @@ test('pooled tests get neither Harness’s Electron-as-Node switch nor its Jev k
   const session = chat(root);
   await bot.runTestPool(root, session);
   assert.equal(bot.sent.length, 0, bot.sent[0]?.text);
-  assert.match(session.notice, /^Test pool: 1 passed/);
+  assert.match(session.items.at(-1).text, /^Test pool: 1 passed/);
 });
 
 test('late pool failures never send into cleared, busy, changed or restricted chats', async () => {

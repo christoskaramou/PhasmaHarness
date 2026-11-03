@@ -2793,7 +2793,8 @@ function renderMessages(session) {
   if (chats.length > 1) entries.sort((a, b) => a.at - b.at);
   for (const { item, session } of entries) {
     const maintenance = (session.routes || []).filter(route => route.wikiMaintenanceTaskId);
-    if (item.internal || item.agentReply || maintenance.some(route => route.messageId === (item.clientId || item.id) || (route.turnId && route.turnId === item.turnId))) continue;
+    // bellOnly: a notification (e.g. the test pool's passed and skipped tests) listed in the bot's bell, not the chat.
+    if (item.internal || item.agentReply || item.bellOnly || maintenance.some(route => route.messageId === (item.clientId || item.id) || (route.turnId && route.turnId === item.turnId))) continue;
     ids.add(item.id);
     let entry = messageNodes.get(item.id);
     const selected = item.type === 'userMessage' ? session.routes.find(r => r.messageId === (item.clientId || item.id)) : null;

@@ -9,7 +9,7 @@ const { verificationText, batchText } = require('./job-reports.cjs');
 function conversationMarkdown(session, batchReports = {}) {
   const maintenance = (session.routes || []).filter(route => route.wikiMaintenanceTaskId);
   const messages = (session.items || []).flatMap(item => {
-    if (item.internal || item.pending || maintenance.some(route => route.messageId === (item.clientId || item.id) || (route.turnId && route.turnId === item.turnId))) return [];
+    if (item.internal || item.pending || item.bellOnly || maintenance.some(route => route.messageId === (item.clientId || item.id) || (route.turnId && route.turnId === item.turnId))) return [];
     let title, text;
     if (item.type === 'userMessage') {
       title = item.routineRun ? 'Routine · ' + item.routineRun.name : 'You';

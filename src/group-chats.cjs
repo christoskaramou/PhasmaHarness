@@ -318,7 +318,7 @@ async function reply(controller, session, message, run, target, input, order, nu
     mirror = () => {
       session.groupTurn.state = worker.busy === work.id ? (worker.requests.size ? 'needs-input' : 'running') : 'waiting';
       for (const item of work.items) {
-        if (previous.has(item.id) || item.internal || !['agentMessage', 'plan', 'notice'].includes(item.type)) continue;
+        if (previous.has(item.id) || item.internal || item.bellOnly || !['agentMessage', 'plan', 'notice'].includes(item.type)) continue;
         const id = `${message.id}:${item.id}`;
         const copy = { ...item, id, turnId, localOnly: true, groupSpeaker: { id: target.id, name: target.name } };
         // A discussion reply shows its stance as a chip and drops the task status line, which means nothing in a chat.

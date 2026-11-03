@@ -30,6 +30,8 @@ const LOOKS = 3;
 
 // Host verification stays on trusted bundled code; a compared worker skill must not replace its checker.
 const TEST_POOL = path.resolve(__dirname, '..', '..', 'skills', 'test-pool', 'scripts', 'testpool.cjs');
+// A test pool message about a problem: it stays as a banner until the next run.
+const PROBLEM = /fail|invalid|error/i;
 // One test pool run per repository at a time; a turn that ends meanwhile gets one more run afterwards.
 const poolRuns = new Map();
 
@@ -497,7 +499,7 @@ module.exports = {
     const notice = text => {
       const retained = this.data?.sessions.find(chat => chat.id === session.id) || session;
       retained.notice = text;
-      retained.noticeExpiresAt = /failed|invalid|error/i.test(text) ? null : Date.now() + 10000;
+      retained.noticeExpiresAt = PROBLEM.test(text) ? null : Date.now() + 10000;
       this.save?.();
       this.changed();
     };
@@ -526,9 +528,16 @@ module.exports = {
     try {
       message = JSON.parse(stdout.trim() || 'null')?.systemMessage;
     } catch { /* no notice */ }
-    if (message)
+    // What passed or was skipped is a notification in the bot's bell, not a banner over the chat (the user's request,
+    // 2026-11-03). Problems (still failing, an invalid catalog, an error) keep the banner, like failures above.
+    if (message && PROBLEM.test(message))
       notice(message);
-    else if (code !== 0)
+    else if (message) {
+      const retained = this.data?.sessions.find(chat => chat.id === session.id) || session;
+      retained.items.push({ id: randomUUID(), type: 'notice', localOnly: true, bellOnly: true, createdAt: Date.now(), text: message });
+      this.save?.();
+      this.changed();
+    } else if (code !== 0)
       this.log?.warn('Test pool exited unexpectedly', { code, stderr: stderr.slice(-300) });
   },
 
