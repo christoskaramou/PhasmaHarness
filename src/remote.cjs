@@ -20,10 +20,10 @@ const SESSION_MS = 30 * 24 * 60 * 60 * 1000;
 const CLIENT_ID = /^[a-f0-9-]{36}$/;
 const REMOTE_METHODS = new Set([
   'bootstrap', 'saveAgent', 'renameHub', 'saveGroup', 'deleteAgent',
-  'browseWorkspace', 'settings', 'benchmarkData', 'create', 'permissions', 'load', 'image', 'rename', 'archive',
+  'browseWorkspace', 'settings', 'create', 'permissions', 'load', 'image', 'rename', 'archive',
   'deleteSession', 'preview', 'send', 'stop', 'reviseJob', 'reconcileJob', 'jobBudget',
   'stopArtifactRun', 'artifactAction', 'artifactDownload', 'stopDownloads', 'appInfo', 'runnerInfo', 'updateStatus', 'queuedMessage', 'backgroundTask', 'replySuggestion', 'suggestWiki', 'compact',
-  'clearConversation', 'acknowledgeTask', 'applyCopy', 'undoComparison', 'undoRule', 'dreamNow', 'dismissSkillNotice', 'answerModelSwap', 'proposeWiki', 'answer', 'readDocument', 'answerConfirmation',
+  'clearConversation', 'acknowledgeTask', 'applyCopy', 'undoComparison', 'undoRule', 'dreamNow', 'dismissSkillNotice', 'proposeWiki', 'answer', 'readDocument', 'answerConfirmation',
   'providerConnection', 'renewModels', 'providerModels',
   'connectorList', 'connectorSave', 'connectorAction', 'openFile', 'linkImage', 'routineList',
 ]);

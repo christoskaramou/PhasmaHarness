@@ -13,8 +13,10 @@ module.exports = {
   // paused at the usage limit. Returns the pending call, or null when nothing was asked.
   reflectOnLesson(session, task, lesson, root, project) {
     const owner = this.agents?.primary || this;
-    const router = owner.effectiveRouter();
-    if (!router || !owner.available(router))
+    // Only the Secondary model the user picked reads the task; at its usage limit no lesson is written rather than
+    // another provider's model reading it.
+    const router = owner.secondaryPick();
+    if (!router)
       return null;
     if (this.agents?.backgroundQuota(this, session, router))
       return null;

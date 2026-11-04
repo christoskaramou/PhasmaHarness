@@ -173,13 +173,22 @@ function groupedOptions(groups) {
 }
 
 // The chosen model's efforts, with `id`'s own picked; hidden when the model has one or none.
-function fillEfforts(effort, group, id) {
+// `auto`: Auto effort comes first (the bot's router picks the effort per message), chosen for an Auto effort mode and for a
+// model just picked.
+function fillEfforts(effort, group, id, auto = false) {
   const variants = group?.variants || [];
-  const values = variants.map(p => p.effort || '');
+  const autoOn = auto && variants.length > 1;
+  const values = [...(autoOn ? ['auto'] : []), ...variants.map(p => p.effort || '')];
   if ([...effort.options].map(o => o.value).join('|') !== values.join('|'))
-    effort.replaceChildren(...variants.map(p => new Option(p.effort || 'default', p.effort || '')));
-  effort.value = variants.find(p => p.id === id)?.effort || values[0] || '';
+    effort.replaceChildren(...(autoOn ? [new Option('Auto effort', 'auto')] : []), ...variants.map(p => new Option(p.effort || 'default', p.effort || '')));
+  const own = variants.find(p => p.id === id);
+  effort.value = autoOn && (HarnessAgentState.parseAutoEffort(id) || !own) ? 'auto' : own?.effort || values[0] || '';
   effort.hidden = variants.length < 2;
+}
+// The model group of a mode: an Auto effort mode's model, or the group holding that preset.
+function groupOf(groups, id) {
+  const auto = HarnessAgentState.parseAutoEffort(id);
+  return auto ? groups.find(g => g.key === `${auto.provider}|${auto.model}`) : groups.find(g => g.variants.some(p => p.id === id));
 }
 
 // The composer's model picker, grouped by provider; "Connecting…" until every provider is ready. Returns whether it
@@ -195,8 +204,8 @@ function renderComposerModels() {
   if (preset.dataset.signature === signature)
     return false;
 
-  const defaultOption = state.coordinator ? new Option('Choose a model', '') : new Option('Auto', 'auto');
-  defaultOption.disabled = !!state.coordinator;
+  const defaultOption = new Option('Choose a model', '');
+  defaultOption.disabled = true;
   preset.replaceChildren(defaultOption, ...groupedOptions(groups));
   preset.dataset.signature = signature;
   return true;
@@ -208,8 +217,9 @@ function currentMode() {
     return state.coordinator && state.settings.mode === 'auto' ? state.hubMode || null : state.settings.mode;
 
   const group = presetGroups().find(g => g.key === $('#preset').value);
-  if (!group) return state.coordinator ? null : 'auto';
-  return (group.variants.find(p => (p.effort || '') === $('#effort').value) || group.variants[0]).id;
+  // No model shown (none offered yet): the saved mode applies; the retired Auto is never sent for a bot.
+  if (!group) return null;
+  return preferredMode(group);
 }
 // Hub shows its pinned model; workers retain the Auto choice.
 function showMode(id) {
@@ -221,16 +231,17 @@ function showMode(id) {
 
   const groups = presetGroups();
   if (state.coordinator && id === 'auto') id = state.hubMode;
-  const group = groups.find(g => g.variants.some(p => p.id === id));
-  $('#preset').value = group ? group.key : state.coordinator ? '' : 'auto';
-  fillEfforts($('#effort'), group, id);
+  const group = groupOf(groups, id);
+  $('#preset').value = group ? group.key : '';
+  fillEfforts($('#effort'), group, id, true);
   $('#effort').disabled = !!readOnlyNote();
   refreshLocalModel();
 }
 
 let localModelKey = '', localModelState = null, localModelChecked = 0, localModelPending = false, localModelAction = false;
 function localModelChoice() {
-  const choice = state?.presets.find(p => p.id === currentMode()) || (currentMode() === 'auto' ? current()?.routes?.findLast(p => !p.directAnswer) : null);
+  const auto = HarnessAgentState.parseAutoEffort(currentMode());
+  const choice = state?.presets.find(p => p.id === currentMode()) || auto || (currentMode() === 'auto' ? current()?.routes?.findLast(p => !p.directAnswer) : null);
   return choice && state.settings.providers?.some(p => p.id === choice.provider && p.enabled !== false) ? { provider: choice.provider, model: choice.model } : null;
 }
 function renderLocalModel() {
@@ -277,18 +288,6 @@ $('#local-model-unload').onclick = () => changeLocalModel('unload');
 setInterval(() => { if (!document.hidden) refreshLocalModel(); }, 10000);
 window.addEventListener('focus', () => refreshLocalModel(true));
 
-// Effort cap (next to Auto in the composer, and Settings → Routing): every model Harness picks itself (Smart and Jev
-// routing, the escalation model on Auto, comparison runs) is at or below it. Max means no cap and is marked with a
-// warning, since it is the slowest and most expensive level.
-const EFFORT_CAP_TEXT = {
-  low: 'Auto picks efforts up to low.', medium: 'Auto picks efforts up to medium.', high: 'Auto picks efforts up to high (recommended).',
-  xhigh: 'Auto picks efforts up to xhigh.', max: '⚠ No cap: Auto may pick max effort, the slowest and most expensive level.' };
-function capHint(cap) {
-  return `${EFFORT_CAP_TEXT[cap] || ''} The same cap holds wherever Harness picks a model itself: Smart and Jev routing, ` +
-    'the escalation model while it is on Auto, and comparison runs. They only see models at or below it (a model with ' +
-    'no level that low keeps its lowest). A model you pick by hand (for a bot, the escalation model, the chat checker or ' +
-    'routing) keeps the effort you chose.';
-}
 // Composer dropdowns are as wide as their selected text (not their longest option), like buttons.
 const measure = document.createElement('canvas').getContext('2d');
 function fitSelect(select) {
@@ -317,16 +316,8 @@ function resizeComposer() {
 
 new ResizeObserver(resizeComposer).observe($('.composer-bottom'));
 
-function fitComposer() { for (const id of ['#preset', '#effort', '#permissions', '#effort-cap']) fitSelect($(id)); }
+function fitComposer() { for (const id of ['#preset', '#effort', '#permissions']) fitSelect($(id)); }
 document.fonts?.ready.then(() => { if (state) fitComposer(); });
-function showEffortCap() {
-  const select = $('#effort-cap'), cap = state.settings.effortCap || 'high';
-  select.value = cap;
-  select.hidden = $('#preset').value !== 'auto';
-  select.classList.toggle('max-cap', cap === 'max');
-  select.title = EFFORT_CAP_TEXT[cap] || '';
-}
-
 // Usage and limits as each provider reports them (Settings → Providers).
 const clock = ms => new Date(ms).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
 
@@ -391,13 +382,8 @@ function renderModelPickers() {
     showMode(state.settings.mode);
     fitComposer();
   }
-  if ($('#settings-dialog').open) {
-    renderRoutingModels();
-    renderChatScanModels();
-    renderLowModels();
-    renderEscalationModels();
-    renderBenchmarkWorkers();
-  }
+  if ($('#settings-dialog').open)
+    renderDreamModels();
   if ($('#agent-dialog').open)
     renderAgentModels();
   if ($('#hub-dialog').open)
@@ -599,8 +585,6 @@ let shownRequest = null;
 let watchedAgent = null;
 let routeVersion = 0;
 let toastTimer;
-let noticeTimer;
-let bannerShown = { text: '', at: 0 };
 const drafts = new Map();
 const imageDrafts = new Map();
 const fileDrafts = new Map();
@@ -733,6 +717,12 @@ function chatSessions(session) {
   return [session].filter(Boolean);
 }
 function basename(value) { return value?.split(/[\\/]/).filter(Boolean).at(-1) || 'Choose a folder'; }
+// The instant status line (the user's speed plan, 2026-11-04): Harness, not a model, shows it the moment a message is
+// sent, while routing and the work start; the reply replaces it. One phrase per message, so it does not flicker.
+const ACK_PHRASES = ['On it…', 'Let me look at it…', 'Looking into it…', 'Checking now…', 'Give me a moment…'];
+function ackPhrase(id) {
+  return ACK_PHRASES[[...String(id || '')].reduce((sum, char) => sum + char.charCodeAt(0), 0) % ACK_PHRASES.length];
+}
 function routerName(value, effort) {
   if (value?.startsWith('jev-')) return `Jev ${value.slice(4)}`;
   if (!value) return 'Router';
@@ -838,8 +828,53 @@ function applyState(next) {
     api.load(selectedId).then(applyState).catch(notify);
 }
 
-async function selectAgent(id, groupId = null) {
+// Back/forward through the chats you opened, like a browser: buttons by the brand, Alt+Left/Right (Cmd+[ / ] on Mac)
+// and the mouse's back/forward buttons. Opening a chat drops the forward entries. Bots deleted since are skipped.
+// ponytail: in-memory only (resets on reload), capped at 50 entries.
+const navBack = [], navForward = [];
+const navHere = () => ({ id: selectedAgent,
+  groupId: selectedId && selectedId !== fleetState?.agentStates?.[selectedAgent]?.conversationId ? selectedId : null });
+const navValid = entry => entry.id === 'main' || !!state?.agents?.some(agent => agent.id === entry.id);
+const navSame = (a, b) => a.id === b.id && (a.groupId || null) === (b.groupId || null);
+function renderNav() {
+  $('#nav-back').disabled = !navBack.some(navValid);
+  $('#nav-forward').disabled = !navForward.some(navValid);
+}
+async function navigate(step) {
+  const [from, to] = step < 0 ? [navBack, navForward] : [navForward, navBack];
+  let entry;
+  while ((entry = from.pop()) && !navValid(entry));
+  if (!entry) return renderNav();
+  const here = navHere();
+  try { await selectAgent(entry.id, entry.groupId, false); }
+  catch (error) { from.push(entry); renderNav(); throw error; }
+  to.push(here); renderNav();
+}
+$('#nav-back').onclick = () => navigate(-1).catch(notify);
+$('#nav-forward').onclick = () => navigate(1).catch(notify);
+document.addEventListener('keydown', event => {
+  if (document.querySelector('dialog:modal')) return;
+  const mac = /Mac/.test(navigator.platform);
+  const step = mac
+    ? (event.metaKey && !event.altKey && !event.ctrlKey && !event.shiftKey ? { '[': -1, ']': 1 }[event.key] : 0)
+    : (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey ? { ArrowLeft: -1, ArrowRight: 1 }[event.key] : 0);
+  if (!step) return;
+  event.preventDefault(); navigate(step).catch(notify);
+});
+addEventListener('mouseup', event => {
+  if (event.button !== 3 && event.button !== 4 || document.querySelector('dialog:modal')) return;
+  event.preventDefault(); navigate(event.button === 3 ? -1 : 1).catch(notify);
+});
+
+async function selectAgent(id, groupId = null, record = true) {
   if (submitting || readingImages || changingPermissions) throw new Error('Wait for the current input operation before switching agents.');
+  if (record && selectedAgent) {
+    const here = navHere();
+    if (!navSame(here, { id, groupId: groupId && groupId !== fleetState?.agentStates?.[id]?.conversationId ? groupId : null })) {
+      navBack.push(here); if (navBack.length > 50) navBack.shift();
+      navForward.length = 0; renderNav();
+    }
+  }
   window.HarnessDictation?.stopForNavigation();
   drafts.set(draftKey(), $('#prompt').value);
   selectedAgent = id; selectedId = groupId || fleetState.agentStates?.[id]?.conversationId || null; draftAccess = null; shownRequest = null;
@@ -933,13 +968,16 @@ function autosaveEditor(dialog, { read, fill, save }) {
       } catch (failure) {
         clearSaved();
         error.textContent = String(failure.message || failure).replace(/^Error invoking remote method '[^']+': Error: /, '');
-        fill(saved);
+        // Part of the change may have saved before the failure (failure.saved): show that, and keep it as saved.
+        if (failure.saved) dialog.dataset.saved = JSON.stringify(failure.saved);
+        fill(failure.saved || saved);
         throw failure;
       }
     });
     return saves;
   };
-  const close = () => commit().then(() => dialog.close(), () => {});
+  // Resolves true once closed, false when the save failed and the dialog stays open.
+  const close = () => commit().then(() => { dialog.close(); return true; }, () => false);
   dialog.addEventListener('cancel', event => {
     if (!dialog.dataset.editing)
       return;
@@ -1134,6 +1172,10 @@ function editAgent(profile) {
   showInherit();
   // A fresh list for this agent: nothing left from the last time the dialog was open.
   dialog.dataset.mode = profile?.mode || state.settings.mode;
+  dialog.dataset.secondary = profile?.secondaryModel || 'inherit';
+  dialog.dataset.router = profile?.router || 'inherit';
+  dialog.dataset.cap = profile?.effortCap || 'inherit';
+  $('#agent-secondary').dataset.signature = '';
   $('#agent-model').dataset.signature = '';
   $('#agent-model').replaceChildren();
   $('#agent-save').disabled = false;
@@ -1152,20 +1194,88 @@ function dialogChoice(select, effort, groups) {
 }
 
 // Effort stays beside the model and is greyed out when the model has no choice of effort.
-function showDialogEfforts(select, effort, groups, id) {
+function showDialogEfforts(select, effort, groups, id, auto = false) {
   const group = groups.find(g => g.key === select.value);
-  fillEfforts(effort, group, id);
+  fillEfforts(effort, group, id, auto);
   effort.disabled = effort.hidden;
   effort.hidden = false;
   if (!group)
     effort.replaceChildren(new Option(select.value === 'auto' ? 'Chosen by Auto' : '—', ''));
 }
 
+// A bot's Router, Secondary model and Effort cap (the dialog's data-router, data-secondary and data-cap). A bot's dialog
+// offers Inherit, its creator's values (Hub's, for a bot you made) shown beside it; Hub's dialog has none.
+const ROUTER_LABELS = { off: 'Off', jev: 'Jev', secondary: 'Secondary model' };
+const CAP_LABELS = { low: 'Up to low', medium: 'Up to medium', high: 'Up to high', xhigh: 'Up to xhigh', max: 'No cap' };
+// Up the creator chain: a creator's live state holds its resolved values; without one (a browser before the fleet state
+// arrives, a creator just deleted), its saved values, else its own creator's. Never the open chat's unless it is that
+// creator's. Unknown stays undefined: the option then reads just "Inherit".
+const SAVED_KEYS = { router: 'router', secondary: 'secondaryModel', cap: 'effortCap' };
+function inheritedSettings(dialog) {
+  const profiles = state.agents || [];
+  const result = {}, seen = new Set();
+  let id = profiles.find(agent => agent.id === dialog.dataset.agentId)?.createdBy || 'main';
+  while (id && !seen.has(id) && Object.keys(SAVED_KEYS).some(key => result[key] === undefined)) {
+    seen.add(id);
+    const live = fleetState?.agentStates?.[id] || (selectedAgent === id ? state : null);
+    const values = live ? { router: live.routerKind || 'secondary', secondary: live.secondaryId || 'off', cap: live.settings?.effortCap || 'high' }
+      : Object.fromEntries(Object.entries(SAVED_KEYS).map(([key, saved]) => [key, profiles.find(agent => agent.id === id)?.[saved]]));
+    for (const key of Object.keys(SAVED_KEYS)) result[key] ??= values[key];
+    if (live || id === 'main') break;
+    id = profiles.find(agent => agent.id === id)?.createdBy || 'main';
+  }
+  return result;
+}
+const secondaryLabel = id => id === 'off' ? 'Off' : (state.chatScanPresets || []).find(p => p.id === id)?.label || id;
+function renderBotSettings(prefix) {
+  const dialog = $(`#${prefix}-dialog`), d = dialog.dataset, inherit = prefix === 'agent';
+  const from = inherit ? inheritedSettings(dialog) : null;
+  const inheritOption = label => inherit ? [new Option(label ? `Inherit (${label})` : 'Inherit', 'inherit')] : [];
+  const router = $(`#${prefix}-router`), cap = $(`#${prefix}-effort-cap`);
+  // Rebuilt only when the options change (fillPicker), so a live update never closes an open list.
+  fillPicker(router, [...inheritOption(ROUTER_LABELS[from?.router]), ...Object.entries(ROUTER_LABELS).map(([value, label]) => new Option(label, value))], d.router);
+  if (router.value !== d.router) router.value = d.router;
+  fillPicker(cap, [...inheritOption(CAP_LABELS[from?.cap]), ...Object.entries(CAP_LABELS).map(([value, label]) => new Option(label, value))], d.cap);
+  if (cap.value !== d.cap) cap.value = d.cap;
+  const select = $(`#${prefix}-secondary`), effort = $(`#${prefix}-secondary-effort`);
+  if (providersConnecting().active) {
+    showConnecting(select);
+    effort.disabled = true;
+  } else
+    fillModelEffort(select, effort, state.chatScanPresets || [], d.secondary, [...inheritOption(secondaryLabel(from?.secondary)), new Option('Off', 'off')]);
+  // Without a router, Auto effort runs the model's default effort; say why.
+  const value = (key, inherited) => (d[key] === 'inherit' ? inherited : d[key]);
+  const routerNow = value('router', from?.router), secondaryNow = value('secondary', from?.secondary);
+  const note = $(`#${prefix}-router-note`);
+  const secondaryOff = routerNow === 'secondary' && secondaryNow === 'off';
+  // A saved Secondary model no longer offered is no router either (secondaryPick); not judged while providers connect.
+  const secondaryGone = !!secondaryNow && secondaryNow !== 'off' && !providersConnecting().active && !(state.chatScanPresets || []).some(p => p.id === secondaryNow);
+  // Jev without a saved key, or turned off in Providers, routes with the Secondary model (routerKind).
+  const jevOff = routerNow === 'jev' && (secondaryNow === 'off' || secondaryGone) && !(state.jev?.configured && state.jev.enabled !== false);
+  note.textContent = routerNow === 'off' ? 'No router: Auto effort runs the model’s default effort.'
+    : secondaryOff ? 'No router: the Router is the Secondary model, which is Off, so Auto effort runs the model’s default effort.'
+    : routerNow === 'secondary' && secondaryGone ? 'No router: the Secondary model is unavailable, so Auto effort runs the model’s default effort.'
+    : jevOff ? `No router: Jev has no key saved or is off in Providers, and the Secondary model is ${secondaryGone ? 'unavailable' : 'Off'}, so Auto effort runs the model’s default effort.` : '';
+  note.classList.toggle('secondary-off', secondaryOff);
+  note.hidden = !note.textContent;
+}
+for (const prefix of ['agent', 'hub']) {
+  const dialog = $(`#${prefix}-dialog`);
+  $(`#${prefix}-router`).onchange = () => { dialog.dataset.router = $(`#${prefix}-router`).value; renderBotSettings(prefix); };
+  $(`#${prefix}-effort-cap`).onchange = () => { dialog.dataset.cap = $(`#${prefix}-effort-cap`).value; renderBotSettings(prefix); };
+  for (const picker of [`#${prefix}-secondary`, `#${prefix}-secondary-effort`]) {
+    $(picker).onchange = () => {
+      dialog.dataset.secondary = modelEffortChoice($(`#${prefix}-secondary`), $(`#${prefix}-secondary-effort`), state.chatScanPresets || []);
+      renderBotSettings(prefix);
+    };
+  }
+}
+
 // The agent dialog's model list; the agent's saved model stays chosen, or shows as unavailable. Saving waits for it.
 function renderAgentModels() {
+  renderBotSettings('agent');
   const select = $('#agent-model');
   const mode = $('#agent-dialog').dataset.mode;
-  $('#agent-auto-row').hidden = !mode || mode === 'auto';
   if (providersConnecting().active) {
     showConnecting(select);
     $('#agent-effort').disabled = true;
@@ -1175,12 +1285,14 @@ function renderAgentModels() {
 
   const wasConnecting = select.dataset.signature === 'connecting';
   const groups = presetGroups(state.presets);
-  const options = [new Option('Auto', 'auto'), ...groupedOptions(groups)];
-  const group = groups.find(g => g.variants.some(p => p.id === mode));
+  const placeholder = new Option('Choose a model', '');
+  placeholder.disabled = true;
+  const options = [placeholder, ...groupedOptions(groups)];
+  const group = groupOf(groups, mode);
   if (mode && mode !== 'auto' && !group)
     options.push(new Option(mode + ' (unavailable)', mode));
-  fillPicker(select, options, group?.key || mode);
-  showDialogEfforts(select, $('#agent-effort'), groups, mode);
+  fillPicker(select, options, group?.key || (mode === 'auto' ? '' : mode));
+  showDialogEfforts(select, $('#agent-effort'), groups, mode, true);
   if (wasConnecting)
     $('#agent-save').disabled = false;
 }
@@ -1192,16 +1304,10 @@ function agentChoice() {
 for (const picker of ['#agent-model', '#agent-effort']) {
   $(picker).onchange = () => {
     $('#agent-dialog').dataset.mode = agentChoice();
+    if (!$('#agent-dialog').dataset.editing) $('#agent-error').textContent = '';
     renderAgentModels();
   };
 }
-// A pinned agent goes back to Auto; an open Edit dialog saves it at once, a new agent with Create.
-$('#agent-auto').onclick = () => {
-  $('#agent-dialog').dataset.mode = 'auto';
-  renderAgentModels();
-  agentEditor.commit();
-  $('#agent-model').focus();
-};
 
 // The Hub dialog's model list: every enabled model can run the Hub. Saving waits for it.
 function hubGroups() {
@@ -1209,6 +1315,7 @@ function hubGroups() {
 }
 
 function renderHubModels() {
+  renderBotSettings('hub');
   const select = $('#hub-model');
   if (providersConnecting().active) {
     showConnecting(select);
@@ -1220,9 +1327,9 @@ function renderHubModels() {
   const placeholder = new Option('Choose a model', '');
   placeholder.disabled = true;
   const mode = $('#hub-dialog').dataset.mode;
-  const group = groups.find(g => g.variants.some(p => p.id === mode));
+  const group = groupOf(groups, mode);
   fillPicker(select, [placeholder, ...groupedOptions(groups)], group?.key || '');
-  showDialogEfforts(select, $('#hub-effort'), groups, mode);
+  showDialogEfforts(select, $('#hub-effort'), groups, mode, true);
 }
 
 function hubChoice() {
@@ -1247,6 +1354,10 @@ function editHub(profile) {
   $('#hub-access').replaceChildren(...state.accessModes.map(mode => new Option(mode.label, mode.id)));
   $('#hub-access').value = dialog.dataset.access;
   $('#hub-dialog').dataset.mode = main.settings.mode === 'auto' ? main.hubMode : main.settings.mode;
+  $('#hub-dialog').dataset.secondary = main.secondaryId || 'off';
+  $('#hub-dialog').dataset.router = main.routerKind || 'secondary';
+  $('#hub-dialog').dataset.cap = main.settings.effortCap || 'high';
+  $('#hub-secondary').dataset.signature = '';
   $('#hub-model').dataset.signature = '';
   $('#hub-model').replaceChildren();
   renderHubModels();
@@ -1259,21 +1370,25 @@ function editHub(profile) {
 // Workspace and access are the main bot's settings; name and model go through renameHub. Each save sends only what changed.
 const hubEditor = autosaveEditor($('#hub-dialog'), {
   read: () => ({ name: $('#hub-name').value, workspace: $('#hub-workspace').value.trim(), access: $('#hub-access').value,
-    mode: $('#hub-dialog').dataset.mode }),
+    mode: $('#hub-dialog').dataset.mode, secondaryModel: $('#hub-dialog').dataset.secondary, router: $('#hub-dialog').dataset.router,
+    effortCap: $('#hub-dialog').dataset.cap }),
   fill: saved => {
     $('#hub-name').value = saved.name;
     $('#hub-workspace').value = saved.workspace;
     $('#hub-access').value = saved.access;
     $('#hub-dialog').dataset.mode = saved.mode;
+    Object.assign($('#hub-dialog').dataset, { secondary: saved.secondaryModel, router: saved.router, cap: saved.effortCap });
     renderHubModels();
   },
   save: async (next, saved) => {
-    const changed = Object.fromEntries(['workspace', 'access'].filter(key => next[key] !== saved[key]).map(key => [key, next[key]]));
+    const changed = Object.fromEntries(['workspace', 'access', 'secondaryModel', 'router', 'effortCap'].filter(key => next[key] !== saved[key]).map(key => [key, next[key]]));
     if (Object.keys(changed).length)
       applyState(await window.router.settings(changed, 'main'));
     // The model is checked only when it changed, so a rename still works while providers reconnect.
-    if (next.name !== saved.name || next.mode !== saved.mode)
-      await api.renameHub({ name: next.name, ...(next.mode !== saved.mode ? { mode: next.mode } : {}) });
+    if (next.name !== saved.name || next.mode !== saved.mode) {
+      try { await api.renameHub({ name: next.name, ...(next.mode !== saved.mode ? { mode: next.mode } : {}) }); }
+      catch (error) { if (Object.keys(changed).length) error.saved = { ...saved, ...changed }; throw error; }
+    }
   },
 });
 $('#hub-form').onsubmit = event => {
@@ -1308,7 +1423,8 @@ $('#hub-browse').onclick = async () => {
 };
 const agentForm = () => ({ id: $('#agent-dialog').dataset.agentId || undefined, name: $('#agent-name').value,
   instructions: $('#agent-instructions').value, workspace: $('#agent-workspace').value, inheritWorkspace: $('#agent-inherit').checked,
-  mode: $('#agent-dialog').dataset.mode, access: $('#agent-access').value });
+  mode: $('#agent-dialog').dataset.mode, access: $('#agent-access').value, secondaryModel: $('#agent-dialog').dataset.secondary || 'inherit',
+  router: $('#agent-dialog').dataset.router || 'inherit', effortCap: $('#agent-dialog').dataset.cap || 'inherit' });
 const agentEditor = autosaveEditor($('#agent-dialog'), {
   read: agentForm,
   fill: saved => {
@@ -1318,6 +1434,7 @@ const agentEditor = autosaveEditor($('#agent-dialog'), {
     $('#agent-inherit').checked = saved.inheritWorkspace;
     showInherit();
     $('#agent-dialog').dataset.mode = saved.mode;
+    Object.assign($('#agent-dialog').dataset, { secondary: saved.secondaryModel, router: saved.router, cap: saved.effortCap });
     renderAgentModels();
     $('#agent-access').value = saved.access;
   },
@@ -1327,6 +1444,11 @@ $('#agent-form').onsubmit = async event => {
   event.preventDefault();
   if ($('#agent-dialog').dataset.editing)
     return agentEditor.commit();
+  // A chat still on the retired Auto preselects no model; say so rather than send an empty one.
+  if (!agentChoice()) {
+    $('#agent-error').textContent = 'Choose a model for this bot.';
+    return $('#agent-model').focus();
+  }
 
   $('#agent-save').disabled = true; $('#agent-save').textContent = 'Saving…';
   try {
@@ -1373,7 +1495,15 @@ function closeAgentMenu(restoreFocus = false) {
   agentMenu.hidePopover();
   if (restoreFocus) agentMenuOpener?.focus();
 }
+// An Auto effort mode's label: its model, then Auto effort.
+function autoEffortLabel(mode) {
+  const auto = HarnessAgentState.parseAutoEffort(mode);
+  return auto ? `${groupOf(presetGroups(), mode)?.label || auto.model} · Auto effort` : null;
+}
 function preferredMode(group, effort = $('#effort')) {
+  // A model with one effort has no Auto effort (fillEfforts hides it): that effort is saved.
+  if (effort.value === 'auto' && group.variants.length > 1)
+    return HarnessAgentState.autoEffortMode(group.provider, group.variants[0].model);
   return (group.variants.find(p => (p.effort || '') === effort.value) || group.variants.find(p => p.effort === 'medium') || group.variants[0]).id;
 }
 const groupSession = id => (fleetState?.agentStates?.main?.sessions || state.sessions).find(chat => chat.id === id);
@@ -1682,6 +1812,19 @@ $('#agent-search').addEventListener('input', () => renderAgents());
 $('#agent-search').addEventListener('keydown', event => {
   if (event.key === 'Escape') { event.preventDefault(); event.target.value = ''; renderAgents(); }
 });
+// Unread replies: a bot whose latest reply came after you last had its chat open (in a focused window) shows an aura
+// around its icon. The time of the last reply seen is kept per bot in localStorage; a bot seen for the first time starts
+// read, so nothing glows after an update. A working bot shows its working animation instead.
+const repliesSeen = storedAlerts('botRepliesSeen');
+function replyUnread(id, at, status) {
+  if (repliesSeen[id] === undefined || (id === selectedAgent && document.hasFocus())) {
+    if (repliesSeen[id] !== at) { repliesSeen[id] = at; localStorage.setItem('botRepliesSeen', JSON.stringify(repliesSeen)); }
+    return false;
+  }
+  return at > repliesSeen[id] && status !== 'Working';
+}
+window.addEventListener('focus', () => { if (state) renderAgents(); });
+
 function renderAgents() {
   const agents = state.agents || [{ id: 'main', name: 'Assistant' }];
   const switching = submitting || readingImages || changingPermissions;
@@ -1705,9 +1848,9 @@ function renderAgents() {
     let lastUserAt = 0;
     for (const chat of worker.sessions) for (const item of chat.items)
       if (item.type === 'userMessage' && !item.routineRun && item.createdAt > lastUserAt) lastUserAt = item.createdAt;
-    return { ...agent, status, preview, lastUserAt, alerts: alertBadge(agent.id), task: task?.title, waiting: task?.waitingForAgent, queued: !!queued || !!waiting,
+    return { ...agent, status, preview, lastUserAt, unread: replyUnread(agent.id, latest?.createdAt || 0, status), alerts: alertBadge(agent.id), task: task?.title, waiting: task?.waitingForAgent, queued: !!queued || !!waiting,
       batchIdle: !!agent.temporaryBatch && !backgroundPending && !pendingWork(worker),
-      workspace: conversation?.workspace || agent.workspace || worker.settings.workspace, modeLabel: worker.presets.find(p => p.id === worker.settings.mode)?.label || 'Auto',
+      workspace: conversation?.workspace || agent.workspace || worker.settings.workspace, modeLabel: worker.presets.find(p => p.id === worker.settings.mode)?.label || autoEffortLabel(worker.settings.mode) || 'Auto',
       accessLabel: worker.accessModes.find(a => a.id === (conversation?.access || worker.settings.access))?.label,
       error: !['ready', 'connecting'].includes(worker.connection) ? worker.error : null };
   });
@@ -1789,6 +1932,7 @@ function renderAgents() {
     if (row.status === 'Ready') node.classList.add('agent-idle');
     // Working: the avatar breathes in grey and the preview shimmers, instead of a green dot.
     if (row.status === 'Working') node.classList.add('agent-working');
+    if (row.unread) { node.classList.add('agent-unread'); node.setAttribute('aria-label', `${row.name} · ${row.status} · new reply`); }
     node.append(avatar(row), label);
     if (row.subBots) {
       const count = element('span', 'agent-subbots', String(row.subBots));
@@ -2128,7 +2272,6 @@ function render() {
   if (!state) return;
   renderSlashMenu();
   probeWorkspace();
-  $('#benchmark-summary').textContent = state.benchmarks ? `${state.benchmarks.records} benchmark records · ${state.benchmarks.matched}/${state.benchmarks.workers} models matched` : 'Routing benchmarks';
   const session = current();
   renderAgents();
   renderGroups();
@@ -2166,28 +2309,11 @@ function render() {
   $('#jev-plug').setAttribute('aria-label', $('#jev-plug').title);
   $('#jev-plug').setAttribute('aria-pressed', String(!!state.jev.configured));
   $('#jev-health').textContent = jevIssue;
-  renderRoutingDetail();
   $('#jev-test').disabled = !state.jev.configured || jevBusy;
   $('#jev-remove').disabled = !jevKeySaved || jevBusy;
   $('#jev-save').disabled = jevBusy;
-  clearTimeout(noticeTimer);
-  const sticky = state.error || (state.busy && state.busy !== selectedId && !session?.group
-    ? state.coordinator ? 'Hub is replying in another chat. Your message can queue here.' : 'Another session is working. You can browse here while it finishes.' : '');
-  const noticeExpiresAt = session?.noticeExpiresAt ?? (session?.notice?.startsWith('Context compacted.') ? 0 : Infinity);
-  let flash = session?.error || (Date.now() < noticeExpiresAt ? session?.notice : '') || '';
-  if (sticky || !flash) bannerShown = { text: '', at: 0 };
-  else {
-    const key = `${session?.id || ''}:${flash}`;
-    if (bannerShown.text !== key) bannerShown = { text: key, at: Date.now() };
-    const left = 5000 - (Date.now() - bannerShown.at);
-    if (left <= 0) flash = '';
-    else noticeTimer = setTimeout(render, left);
-  }
-  $('#banner').textContent = sticky || flash;
-  $('#banner').hidden = !$('#banner').textContent;
   renderComposerModels();
   showMode(state.settings.mode);
-  showEffortCap();
   fitComposer();
   $('#welcome').hidden = chatSessions(session).some(chat => chat.items.length || chat.pendingMessage);
   renderSendButton();
@@ -2240,7 +2366,7 @@ function render() {
   $('#turn-error').hidden = !turnError;
   renderModelFetching();
   $('#working-text').textContent = (session?.groupTurn ? `${session.groupTurn.round > 1 ? `Round ${session.groupTurn.round} · ` : ''}${session.groupTurn.name} ${session.groupTurn.state === 'needs-input' ? 'needs your input' : session.groupTurn.state === 'waiting' ? 'is waiting to reply' : 'is replying'}…` : '') || session?.waitingForAgent || (session?.compacting ? 'Compacting conversation context…' : state.routing === selectedId && state.routing
-    ? `Choosing a model with ${routerName(state.routerModel)}…` : `${session?.routes.at(-1)?.label || 'Codex CLI'} ${backgroundWait(session) || 'is working'}…`);
+    ? ackPhrase(session?.pendingMessage?.id) : `${session?.routes.at(-1)?.label || 'Codex CLI'} ${backgroundWait(session) || 'is working'}…`);
   const usage = session?.usage;
   const total = usage?.total;
   const { contextWindow, contextTokens, contextKnown } = contextUsage(session);
@@ -2742,59 +2868,6 @@ function renderComparison(view, sessionId, opened = true) {
   return details;
 }
 
-// Auto's question before a bot swaps models (src/controller/model-swaps.cjs): the scores, the margin, and what each answer
-// does: Create a new bot, Swap here or Keep current. Hub's own question (under its reply) has Swap and Keep current.
-// Unanswered by expiresAt (a bot) or by the next message (Hub), the current model stays.
-function renderModelSwap(swap, session) {
-  const card = element('div', 'model-swap');
-  card.setAttribute('role', 'group'); card.setAttribute('aria-label', 'Model swap question');
-  const { current, suggested, context } = swap;
-  const tokens = `about ${context.tokens.toLocaleString()} tokens of this conversation`;
-  card.append(
-    element('p', '', `Auto suggests ${suggested.label} instead of ${current.label} ${swap.hub ? 'for Hub’s next messages' : 'for this task'}.`),
-    element('p', 'muted', `Difficulty ${swap.difficulty}/100 (${swap.level}). Fit for this task: ${current.label} ${current.fit}, ${suggested.label} ${suggested.fit}. ` +
-      `Gain ${swap.gain} against a ${swap.margin}-point margin (${swap.baseMargin} base + ${context.points} switching cost).`));
-  const option = (label, text) => { const item = element('li', '', ''); item.append(element('strong', '', `${label}: `), text); return item; };
-  const options = element('ul', 'model-swap-options');
-  if (swap.hub) options.append(
-    option('Swap', `Hub uses ${suggested.label} from your next message. Nothing is lost: Hub sends its context with every request.`),
-    option('Keep current', `Hub stays on ${current.label}.`));
-  else options.append(
-    option('Create a new bot', `a new bot runs this task on ${suggested.label}. This bot keeps ${current.label} and its whole conversation, and the new bot’s result comes back here.`),
-    option('Swap here', `this bot switches to ${suggested.label} for this task and the next ones. ` + (!context.tokens ? 'This chat has no conversation yet, so nothing is lost.'
-      : context.crossProvider ? `It loses its working context: ${suggested.label} gets ${tokens} as a quoted copy, not this session, so details such as earlier tool results can be lost.`
-        : `It keeps this conversation but loses the prompt cache: ${suggested.label} re-reads ${tokens} in full, which costs more on the first message.`)),
-    option('Keep current', `this task runs on ${current.label}. Nothing changes.`));
-  card.append(options);
-  const actions = element('div', 'model-swap-actions');
-  const choices = swap.hub ? [['swap', `Swap to ${suggested.label}`], ['keep', 'Keep current']] : [['subbot', 'Create a new bot'], ['swap', 'Swap here'], ['keep', 'Keep current']];
-  const buttons = choices.map(([choice, text], index) => {
-    const button = element('button', index === 0 ? 'compact-action primary' : 'compact-action', text); button.type = 'button';
-    button.onclick = async () => {
-      buttons.forEach(b => { b.disabled = true; });
-      try { await api.answerModelSwap(session.id, swap.id, choice); }
-      catch (error) { buttons.forEach(b => { b.disabled = false; }); notify(error); }
-    };
-    return button;
-  });
-  actions.append(...buttons, element('span', 'muted', swap.hub ? `Your next message without an answer keeps ${current.label}.`
-    : `Keeps ${current.label} at ${new Date(swap.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} if unanswered.`));
-  card.append(actions);
-  return card;
-}
-
-const SWAP_WAIT = { swapped: 'cooldown after a swap', declined: 'cooldown after Keep current', expired: 'cooldown after an unanswered question',
-  similar: 'you kept it for a similar task' };
-function modelSwapLine(swap) {
-  const ran = swap.outcome === 'swapped' ? `swapped ${swap.current.label} → ${swap.suggested.label}`
-    : swap.outcome === 'delegated' ? `kept ${swap.current.label}; new bot ${swap.subBot?.name || ''} runs ${swap.suggested.label}`
-      : `kept ${swap.current.label}, Auto suggested ${swap.suggested.label}`;
-  // In the order of the reason Auto records (src/routing/model-swap.cjs): no score, under the margin, then a cooldown.
-  const why = swap.outcome !== 'kept' ? swap.choice : swap.gain === null ? 'no measured score' : swap.gain < swap.margin ? 'under the margin'
-    : swap.cooldown ? SWAP_WAIT[swap.cooldown.kind] : 'under the margin';
-  return `Model swap: ${ran} · difficulty ${swap.difficulty}/100 · gain ${swap.gain ?? '—'} vs margin ${swap.margin} · ${why}`;
-}
-
 // A line from Harness about the project's rules and notes (src/controller/trials.cjs, src/controller/chat-scan.cjs), with
 // Undo where something changed.
 function renderNotice(item, node, session) {
@@ -2812,7 +2885,7 @@ function renderNotice(item, node, session) {
     line.append(' ', dismiss);
   }
   const undoLabel = { kept: 'Undo the kept rule', rolledBack: 'Put the rule back', trialStarted: 'Stop trying the rule', noteAdded: 'Remove the note',
-    noteForgotten: 'Bring the note back', setupPreferred: 'Stop preferring this model' }[notice.kind];
+    noteForgotten: 'Bring the note back' }[notice.kind];
   if (undoLabel && !notice.undoneAt) {
     const undo = element('button', 'compact-action', 'Undo'); undo.type = 'button';
     undo.setAttribute('aria-label', undoLabel);
@@ -3072,9 +3145,6 @@ function renderMessages(session) {
       if (item.groupSpeaker) { label.classList.add('group-speaker'); node.prepend(label); }
       if (user && batch) node.append(renderBatchReport(batch, batchOpened));
       if (item.hubComparison) node.append(renderComparison(item.hubComparison, session.id, comparisonOpened));
-      // Hub's own model on Auto: its question under a reply, then what was chosen (src/controller/model-swaps.cjs).
-      if (!user && item.modelSwap)
-        node.append(item.modelSwap.status === 'pending' ? renderModelSwap(item.modelSwap, session) : element('p', 'routing-status', modelSwapLine(item.modelSwap)));
       if (user) {
         const images = item.content.filter(part => part.type === 'image');
         images.forEach((part, index) => {
@@ -3088,11 +3158,8 @@ function renderMessages(session) {
       if (item.pending || (selected && !['manual', 'hub-auto'].includes(selected.source))) {
         const row = element('div', 'routing-row');
         entry.routeNode = row; node.after(row);
-        if (item.pending && item.modelSwap && !item.error) row.append(renderModelSwap(item.modelSwap, session));
-        else if (item.pending) row.append(element('p', 'routing-status', item.error ? `Not sent: ${item.error}` : state.planRouting ? state.planRouting.reason : `Choosing a model with ${routerName(state.routerModel)}…`));
+        if (item.pending) row.append(element('p', 'routing-status', item.error ? `Not sent: ${item.error}` : state.planRouting ? state.planRouting.reason : ackPhrase(item.id)));
       }
-      // Every Auto swap decision shows under its message: kept or swapped, the score, the margin and who chose.
-      if (selected?.modelSwap && entry.routeNode) entry.routeNode.append(element('p', 'routing-status', modelSwapLine(selected.modelSwap)));
       if (selected && selected.source !== 'manual' && selected.source !== 'hub-auto') {
         const details = element('details', 'activity');
         const meter = selected.router;
@@ -3194,8 +3261,9 @@ async function updatePreview() {
     return;
   }
   if (!prompt.trim()) {
-    const selected = state?.presets.find(p => p.id === currentMode());
-    $('#route-preview').replaceChildren(element('span', 'route-dot'), element('strong', '', selected?.label || 'Auto'), element('span', '', selected ? 'Your manual selection.' : 'Task context is checked when you send.'));
+    const selected = state?.presets.find(p => p.id === currentMode()), auto = autoEffortLabel(currentMode());
+    $('#route-preview').replaceChildren(element('span', 'route-dot'), element('strong', '', selected?.label || auto || 'Auto'),
+      element('span', '', selected ? 'Your manual selection.' : auto ? 'The effort is picked when you send.' : 'Task context is checked when you send.'));
     return;
   }
   try {
@@ -3381,7 +3449,7 @@ function commandDetails(name) {
     ['Agent', agentName], ['Connection', state.connection],
     ['Activity', session?.compacting ? 'Compacting' : session?.waitingForAgent || (state.waitingForAgents?.length ? 'Waiting for child agents' : state.busy ? 'Working' : session?.delegation?.state === 'queued' ? 'Queued' : 'Idle')],
     ['Current task', task ? `${task.goal}\n${task.state}` : session?.pendingMessage ? 'Sending message…' : 'No tracked task'],
-    ['Model', state.presets.find(p => p.id === currentMode())?.label || (state.coordinator ? 'Choose a model' : state.settings.mode)],
+    ['Model', state.presets.find(p => p.id === currentMode())?.label || autoEffortLabel(currentMode()) || (state.coordinator ? 'Choose a model' : state.settings.mode)],
     ['Access', state.accessModes.find(a => a.id === (session?.access || draftAccess || state.settings.access))?.label || 'Unknown'],
     ['Queued work', queue.length ? queue.map((m, i) => `${i + 1}. ${m.text || 'Image attachment'}${m.error ? ` — ${m.error}` : ''}`).join('\n') : 'None'],
     ['Child agents with pending work', children.join('\n') || 'None'],
@@ -3710,20 +3778,11 @@ const saveMode = async mode => { try { await changeMode(mode); } catch (error) {
 // A new model keeps the current effort when it supports it, else medium, else its lowest effort.
 $('#preset').onchange = () => {
   const group = presetGroups().find(g => g.key === $('#preset').value);
-  if (!group) return state.coordinator ? undefined : saveMode('auto');
+  if (!group) return undefined;
   const mode = preferredMode(group);
   showMode(mode); saveMode(mode);
 };
 $('#effort').onchange = () => saveMode(currentMode());
-$('#effort-cap').onchange = async () => {
-  try { applyState(await api.settings({ effortCap: $('#effort-cap').value })); updatePreview(); }
-  catch (error) { notify(error); showEffortCap(); }
-};
-$('#settings-effort-cap').onchange = () => {
-  const cap = $('#settings-effort-cap').value;
-  $('#settings-effort-cap').classList.toggle('max-cap', cap === 'max');
-  $('#effort-cap-detail').textContent = capHint(cap);
-};
 async function changeAccess(access) {
   if (!selectedId) { draftAccess = access; render(); return; }
   changingPermissions = true; render();
@@ -3837,6 +3896,18 @@ function fillModelEffort(select, effort, presets, saved, first) {
 }
 
 // The picked model at the effort beside it, or its lowest effort when it has no such level; any other choice as it is.
+// Settings → General → Dream model: Hub's model at its highest effort (the default), or any worker model.
+function renderDreamModels() {
+  const select = $('#settings-dream-model');
+  if (providersConnecting().active) {
+    showConnecting(select);
+    $('#settings-dream-effort').disabled = true;
+    return;
+  }
+
+  fillModelEffort(select, $('#settings-dream-effort'), state.presets, state.settings.dreamModel || 'hub', [new Option('Hub’s model, highest effort', 'hub')]);
+}
+
 function modelEffortChoice(select, effort, presets) {
   const group = presetGroups(presets).find(g => g.key === select.value);
   if (!group)
@@ -3845,74 +3916,10 @@ function modelEffortChoice(select, effort, presets) {
   return (group.variants.find(p => (p.effort || '') === effort.value) || group.variants[0]).id;
 }
 
-// The Settings choices saved as one preset ID from a model picker and the effort picker beside it.
-const modelEffortSettings = {
-  routingModel: () => [$('#settings-router-preset'), $('#settings-router-effort'), state.routerPresets],
-  chatScanModel: () => [$('#settings-chat-scan'), $('#settings-chat-scan-effort'), state.chatScanPresets || []],
-  autoLowModel: () => [$('#settings-low-model'), $('#settings-low-effort'), state.presets],
-  escalationModel: () => [$('#settings-escalation-model'), $('#settings-escalation-effort'), state.presets],
-};
-
-function renderRoutingModels(selected = state.settings.routing === 'jev' ? 'jev' : state.settings.routerPreset) {
-  const select = $('#settings-router-preset');
-  if (providersConnecting().active) {
-    showConnecting(select);
-    $('#settings-router-effort').disabled = true;
-    renderRoutingDetail();
-    return;
-  }
-
-  const first = [new Option('Jev', 'jev')];
-  if (selected !== 'jev' && !state.routerPresets.some(p => p.id === selected)) {
-    const placeholder = new Option(state.routerPresets.length ? 'Choose an enabled routing model' : 'Enable a routing model in Providers', '');
-    placeholder.disabled = true;
-    first.unshift(placeholder);
-    selected = '';
-  }
-  fillModelEffort(select, $('#settings-router-effort'), state.routerPresets, selected, first);
-  renderRoutingDetail();
-}
-
-// Off (the default), or any enabled model that answers in a schema.
-function renderChatScanModels() {
-  const select = $('#settings-chat-scan');
-  if (providersConnecting().active) {
-    showConnecting(select);
-    $('#settings-chat-scan-effort').disabled = true;
-    return;
-  }
-
-  fillModelEffort(select, $('#settings-chat-scan-effort'), state.chatScanPresets || [], state.settings.chatScanModel || 'off',
-    [new Option('Off', 'off')]);
-}
-
-// Auto (the default: Harness picks from benchmarks) or any worker model.
-function renderLowModels() {
-  const select = $('#settings-low-model');
-  if (providersConnecting().active) {
-    showConnecting(select);
-    $('#settings-low-effort').disabled = true;
-    return;
-  }
-
-  fillModelEffort(select, $('#settings-low-effort'), state.presets, state.settings.autoLowModel || 'auto', [new Option('Auto', 'auto')]);
-}
-
-// Auto (the default: the strongest model by benchmark scores within the effort cap) or any worker model.
-function renderEscalationModels() {
-  const select = $('#settings-escalation-model');
-  if (providersConnecting().active) {
-    showConnecting(select);
-    $('#settings-escalation-effort').disabled = true;
-    return;
-  }
-
-  fillModelEffort(select, $('#settings-escalation-effort'), state.presets, state.settings.escalationModel || 'auto', [new Option('Auto', 'auto')]);
-}
-// Settings is modal over a clear backdrop: a click outside it (the sidebar) closes Settings and then does what was clicked.
-// Both press and release must be outside, so a text selection dragged out of Settings does not close it.
-{
-  const dialog = $('#settings-dialog');
+// Settings and the Edit dialogs are modal: a click outside one (the sidebar) closes it and then does what was clicked.
+// Both press and release must be outside, so a text selection dragged out of the dialog does not close it. `close` gets
+// the click to replay once the dialog has closed.
+function closeOnOutsideClick(dialog, close, skip = () => false) {
   const outside = event => {
     const box = dialog.getBoundingClientRect();
     return event.target === dialog && (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom);
@@ -3922,12 +3929,26 @@ function renderEscalationModels() {
   dialog.addEventListener('click', event => {
     if (!pressedOutside || !outside(event)) return;
     pressedOutside = false;
-    dialog.close();
-    const target = document.elementFromPoint(event.clientX, event.clientY);
-    // The Settings button itself only closes Settings.
-    if (!target || target.closest('#settings')) return;
-    target.closest('input, select, textarea')?.focus();
-    target.click();
+    const { clientX: x, clientY: y } = event;
+    close(() => {
+      const target = document.elementFromPoint(x, y);
+      if (!target || skip(target)) return;
+      target.closest('input, select, textarea')?.focus();
+      target.click();
+    });
+  });
+}
+// The Settings button itself only closes Settings.
+closeOnOutsideClick($('#settings-dialog'), replay => { $('#settings-dialog').close(); replay(); }, target => target.closest('#settings'));
+// An Edit dialog saves as it closes (autosaveEditor's cancel path) and stays open if that save fails; a new bot's form,
+// not saved yet, stays open so a stray click does not lose it.
+for (const id of ['#agent-dialog', '#hub-dialog']) {
+  const dialog = $(id);
+  closeOnOutsideClick(dialog, replay => {
+    if (!dialog.dataset.editing) return;
+    const at = Date.now();
+    // The click is replayed only when this save closed the dialog; a failed one leaves nothing to fire later.
+    dialog.closeEditor().then(closed => { if (closed && Date.now() - at < 3000) replay(); });
   });
 }
 $('#settings').onclick = async () => {
@@ -3936,27 +3957,20 @@ $('#settings').onclick = async () => {
     try { applyState(await api.bootstrap()); }
     catch (error) { notify(error); return; }
   }
-  renderRoutingModels();
-  $('#settings-effort-cap').value = state.settings.effortCap || 'high';
-  $('#settings-effort-cap').onchange();
   $('#settings-context').value = state.settings.contextRanking || 'local';
   $('#settings-tools').value = state.settings.toolSelection || 'off';
-  $('#settings-jev-compare').value = state.settings.jevCompare === true ? 'on' : 'off';
   $('#settings-jev-images').value = state.settings.jevImages !== false && state.jev?.configured ? 'on' : 'off';
   $('#settings-jev-images').disabled = !state.jev?.configured;
   $('#settings-reply-suggestions').value = state.settings.replySuggestions === false ? 'off' : 'on';
-  $('#settings-cold-start-minutes').value = state.settings.coldStartMinutes ?? 60;
+  $('#settings-cold-start-minutes').value = state.settings.coldStartMinutes ?? 15;
   $('#settings-cold-start-tokens').value = state.settings.coldStartTokens ?? 100000;
   $('#settings-show-tips').value = state.settings.showTips === false ? 'off' : 'on';
   for (const [id, key] of Object.entries(ON_SWITCHES))
     $(`#${id}`).value = state.settings[key] === false ? 'off' : 'on';
-  renderChatScanModels();
-  renderLowModels();
-  renderEscalationModels();
-  renderRoutingDetail();
   $('#jev-key').value = '';
   $('#jev-result').textContent = '';
   $('#jev-provider').open = false;
+  renderDreamModels();
   renderProviders();
   renderChecks();
   $('#settings-save-status').textContent = '';
@@ -4122,129 +4136,6 @@ $('#update-notes').onclick = () => { if (update.url) api.openLink(update.url).ca
 $('#update-dismiss').onclick = () => { updateHidden = update.latest; if (update.status === 'error') update = { ...update, status: 'available' }; renderUpdate(); };
 api.onUpdate?.(next => { update = next; renderUpdate(); });
 api.updateStatus?.().then(next => { update = next; renderUpdate(); }).catch(() => {});
-let benchmarkCandidate = null;
-function renderBenchmarkTable(data) {
-  $('#benchmark-table').replaceChildren(...data.records.map(record => {
-    const row = element('tr');
-    row.append(element('td', '', `${record.model} · ${record.effort}`),
-      element('td', '', `${record.source} ${record.version} (${record.harness})`),
-      element('td', '', Object.entries(record.metrics).map(([key, value]) => `${key}: ${value}`).join(' · ')));
-    return row;
-  }));
-}
-// The worker that refreshes benchmarks; a rebuilt list suggests Astra xhigh when offered.
-function renderBenchmarkWorkers() {
-  const select = $('#benchmark-worker');
-  if (providersConnecting().active) {
-    showConnecting(select);
-    $('#benchmark-worker-effort').disabled = true;
-    $('#benchmark-refresh').disabled = true;
-    return;
-  }
-
-  // The worker picked so far stays; the first time, the suggested one.
-  const workers = state.presets.filter(p => p.available && p.enabled !== false && p.id !== 'jev');
-  const picked = benchmarkWorker();
-  const suggested = workers.find(p => p.model === 'gpt-6-astra' && p.effort === 'xhigh') || workers[0];
-  fillModelEffort(select, $('#benchmark-worker-effort'), workers, workers.some(p => p.id === picked) ? picked : suggested?.id || '', []);
-  $('#benchmark-refresh').disabled = !!state.busy || !workers.length;
-}
-
-function benchmarkWorker() {
-  return modelEffortChoice($('#benchmark-worker'), $('#benchmark-worker-effort'),
-    state.presets.filter(p => p.available && p.enabled !== false && p.id !== 'jev'));
-}
-
-for (const picker of ['#benchmark-worker', '#benchmark-worker-effort'])
-  $(picker).onchange = renderBenchmarkWorkers;
-
-async function showBenchmarks() {
-  const { data, summary } = await api.benchmarkData();
-  benchmarkCandidate = null;
-  $('#benchmark-apply').disabled = true;
-  $('#benchmark-status').textContent = `${summary.records} records · ${summary.matched}/${summary.workers} enabled model/effort combinations matched · checked ${summary.updatedAt}. ${summary.warning || ''}`;
-  $('#benchmark-preview').textContent = JSON.stringify(data, null, 2);
-  renderBenchmarkTable(data);
-  $('#benchmark-sources').replaceChildren(...summary.sources.map(source => {
-    const row = element('p', 'muted');
-    const link = element('a', '', source.name); link.href = source.url;
-    link.onclick = event => { event.preventDefault(); api.openLink(source.url).catch(notify); };
-    row.append(link, document.createTextNode(` · ${source.records ? source.records + ' records' : 'refresh target; no imported results'}`));
-    return row;
-  }));
-  $('#benchmark-worker').dataset.signature = '';
-  renderBenchmarkWorkers();
-  $('#benchmark-reset').disabled = !!state.busy;
-}
-$('#benchmark-import').onclick = async () => {
-  try {
-    const candidate = await api.benchmarkImport();
-    if (!candidate) return;
-    benchmarkCandidate = candidate;
-    $('#benchmark-preview').textContent = JSON.stringify(candidate, null, 2);
-    renderBenchmarkTable(candidate);
-    $('#benchmark-preview').closest('details').open = true;
-    $('#benchmark-status').textContent = `Candidate: ${candidate.records.length} records, checked ${candidate.updatedAt}. Replaces the active table. Review scores and source links before applying; format validation does not verify factual accuracy.`;
-    $('#benchmark-apply').disabled = !!state.busy;
-  } catch (error) { notify(error); }
-};
-$('#benchmark-apply').onclick = async () => {
-  try {
-    if (!benchmarkCandidate) return;
-    applyState(await api.benchmarkApply(benchmarkCandidate));
-    await showBenchmarks();
-    $('#benchmark-status').textContent += ' Applied for the next automatic route.';
-  } catch (error) { notify(error); }
-};
-$('#benchmark-reset').onclick = async () => {
-  try { applyState(await api.benchmarkReset()); await showBenchmarks(); } catch (error) { notify(error); }
-};
-$('#benchmark-refresh').onclick = async () => {
-  const button = $('#benchmark-refresh'); button.disabled = true;
-  try {
-    if (state.busy) throw new Error('Finish the current turn before preparing a benchmark refresh.');
-    const mode = benchmarkWorker();
-    if (!mode) throw new Error('Choose a connected refresh worker first.');
-    const { prompt, workspace } = await api.benchmarkRefresh();
-    const agent = await api.saveAgent({ name: `Benchmark refresh ${new Date().toISOString()}`, workspace, mode, access: 'workspace-write', instructions: 'Research and update model benchmark evidence.' });
-    applyState(await api.bootstrap()); await selectAgent(agent.id);
-    const session = await api.create(workspace, 'workspace-write');
-    applyState(await api.settings({ mode }));
-    $('#settings-dialog').close();
-    await selectSession(session.id);
-    drafts.set(session.id, prompt); $('#prompt').value = prompt; updatePreview(); $('#prompt').focus();
-    notify('Refresh task prepared. Review the selected worker and press Send when ready.');
-  } catch (error) { notify(error); }
-  finally { button.disabled = !!state.busy || !$('#benchmark-worker').value; }
-};
-// Shown with a saved Jev key while Smart routes; the result is only a log next to the model that ran.
-function renderJevCompare() {
-  const shown = !!state.jev?.configured && $('#settings-router-preset').value !== 'jev';
-  $('#jev-compare-row').hidden = $('#jev-compare-detail').hidden = !shown;
-  if (!shown) return;
-  const s = state.jev.compare;
-  const pct = (n, of) => `${Math.round(n / of * 100)}%`;
-  const stats = !s?.compared ? '' : ` ${s.compared} compared: same model ${pct(s.sameModel, s.compared)} (and effort ${pct(s.sameWorker, s.compared)}), same provider ${pct(s.sameProvider, s.compared)}` +
-    `${s.manual ? `; your manual picks ${pct(s.manualSameModel, s.manual)} same model` : ''} · Jev cost $${s.costUsd.toFixed(4)}${s.errors ? ` · ${s.errors} failed` : ''}.`;
-  $('#jev-compare-detail').textContent = 'Log only. When on, Jev is also asked which model it would pick, so each message is sent to Jev and billed by Jev; routing and the model that runs do not change.' + stats;
-}
-function renderRoutingDetail() {
-  const jev = $('#settings-router-preset option[value=jev]');
-  if (jev) {
-    jev.textContent = `Jev · ${state.jev?.model || 'version pending'}${!state.jev?.configured ? ' · unavailable' : ''}`;
-    jev.title = state.jev?.model ? 'Model reported by the last successful Jev response.' : 'The provider reports the exact version after a successful Jev request.';
-    jev.disabled = !state.jev?.configured;
-  }
-  renderJevCompare();
-  const provider = $('#settings-router-preset').value === 'jev' ? 'jev' : 'smart';
-  $('#settings-router-preset').disabled = !!state.planRouting || providersConnecting().active;
-  if ($('#settings-router-preset').disabled)
-    $('#settings-router-effort').disabled = true;
-  $('#settings-router-preset').title = state.planRouting ? state.planRouting.reason + ' This overrides the saved routing preference.'
-    : provider === 'jev' && state.jev.enabled === false ? 'Jev is disabled in Providers. Auto uses Smart until you enable Jev again.'
-    : provider === 'jev' && !state.jev.configured ? 'Save your Jev API key in Providers to enable this routing option.' : '';
-}
-$('#settings-router-preset').onchange = renderRoutingDetail;
 $('#jev-plug').onclick = async event => {
   event.preventDefault(); event.stopPropagation();
   if (!(state.jev.keySaved ?? state.jev.configured)) { $('#jev-provider').open = true; $('#jev-key').focus(); return; }
@@ -4255,7 +4146,7 @@ $('#jev-plug').onclick = async event => {
 };
 $('#jev-save').onclick = async () => {
   const key = $('#jev-key').value; $('#jev-key').value = '';
-  try { applyState(await withProviderAction('jev', 'Saving key…', () => api.jevSaveKey(key))); renderJevCompare(); $('#jev-result').textContent = state.jev.enabled === false ? 'Key saved. Use the plug to enable Jev.' : 'Key saved. Test the connection, then pick Jev as Routing → Routing model.'; }
+  try { applyState(await withProviderAction('jev', 'Saving key…', () => api.jevSaveKey(key))); $('#jev-result').textContent = state.jev.enabled === false ? 'Key saved. Use the plug to enable Jev.' : 'Key saved. Test the connection, then pick Jev as a bot’s Router in its Edit dialog.'; }
   catch (error) { notify(error); }
 };
 $('#jev-test').onclick = async () => {
@@ -4268,7 +4159,7 @@ $('#jev-test').onclick = async () => {
   finally { testingJev = false; render(); }
 };
 $('#jev-remove').onclick = async () => {
-  try { applyState(await withProviderAction('jev', 'Removing key…', () => api.jevRemoveKey())); renderRoutingModels(); $('#settings-context').value = state.settings.contextRanking || 'local'; $('#settings-tools').value = state.settings.toolSelection || 'off'; $('#settings-jev-compare').value = 'off'; renderRoutingDetail(); $('#jev-result').textContent = 'Saved key removed.'; }
+  try { applyState(await withProviderAction('jev', 'Removing key…', () => api.jevRemoveKey())); $('#settings-context').value = state.settings.contextRanking || 'local'; $('#settings-tools').value = state.settings.toolSelection || 'off'; $('#jev-result').textContent = 'Saved key removed.'; }
   catch (error) { notify(error); }
 };
 let settingsWrites = Promise.resolve();
@@ -4282,7 +4173,7 @@ async function saveSetting(control, key, value, agentId = selectedAgent) {
   $('#settings-save-status').textContent = 'Saving…';
   try {
     if (key === 'workspace' && checksDirty) await saveChecks();
-    const values = key === 'routingModel' ? (value === 'jev' ? { routing: 'jev' } : { routing: 'smart', routerPreset: value }) : { [key]: value };
+    const values = { [key]: value };
     applyState(await queueSettingsWrite(() => window.router.settings(values, agentId)));
     if (agentId === selectedAgent) control.value = typeof value === 'boolean' ? (value ? 'on' : 'off') : String(value);
     updatePreview();
@@ -4291,9 +4182,9 @@ async function saveSetting(control, key, value, agentId = selectedAgent) {
     showSaved($('#settings-dialog'));
   } catch (error) {
     if (agentId === selectedAgent) {
-      const saved = key === 'routingModel' ? (state.settings.routing === 'jev' ? 'jev' : state.settings.routerPreset) : ((key === 'workspace' || key === 'access') ? current()?.[key] ?? state.settings[key] : state.settings[key])
-        ?? { effortCap: 'high', contextRanking: 'local', toolSelection: 'off', jevCompare: false,
-          chatScanModel: 'off', autoLowModel: 'auto', escalationModel: 'auto', showTips: true, ...Object.fromEntries(Object.values(ON_SWITCHES).map(name => [name, true])) }[key];
+      const saved = ((key === 'workspace' || key === 'access') ? current()?.[key] ?? state.settings[key] : state.settings[key])
+        ?? { effortCap: 'high', contextRanking: 'local', toolSelection: 'off',
+ showTips: true, ...Object.fromEntries(Object.values(ON_SWITCHES).map(name => [name, true])) }[key];
       control.value = typeof value === 'boolean' ? (saved ? 'on' : 'off') : String(saved ?? '');
       control.onchange?.();
     }
@@ -4303,10 +4194,8 @@ async function saveSetting(control, key, value, agentId = selectedAgent) {
     delete control.dataset.saving;
     // A model picker that switched to "Connecting…" meanwhile stays disabled.
     control.disabled = control.dataset.signature === 'connecting';
-    // Model and effort pickers hold a model and a level, not the saved preset ID; show the saved choice again.
-    ({ routingModel: renderRoutingModels, chatScanModel: renderChatScanModels, autoLowModel: renderLowModels,
-      escalationModel: renderEscalationModels })[key]?.();
-    renderRoutingDetail();
+    // The Dream model's pickers hold a model and a level, not the saved preset ID; show the saved choice again.
+    if (key === 'dreamModel') renderDreamModels();
   }
 }
 // The chat checker's switches (General) and failed-check escalation (Checks), each on unless turned off.
@@ -4316,20 +4205,19 @@ const ON_SWITCHES = {
 };
 const settingsFields = {
   ...ON_SWITCHES,
-  'settings-router-preset': 'routingModel', 'settings-effort-cap': 'effortCap',
   'settings-context': 'contextRanking', 'settings-tools': 'toolSelection',
-  'settings-jev-compare': 'jevCompare', 'settings-jev-images': 'jevImages',
-  'settings-reply-suggestions': 'replySuggestions', 'settings-chat-scan': 'chatScanModel', 'settings-low-model': 'autoLowModel',
-  'settings-low-effort': 'autoLowModel', 'settings-show-tips': 'showTips', 'settings-router-effort': 'routingModel',
-  'settings-chat-scan-effort': 'chatScanModel', 'settings-escalation-model': 'escalationModel', 'settings-escalation-effort': 'escalationModel',
+  'settings-jev-images': 'jevImages',
+  'settings-reply-suggestions': 'replySuggestions', 'settings-show-tips': 'showTips',
   'settings-cold-start-minutes': 'coldStartMinutes', 'settings-cold-start-tokens': 'coldStartTokens',
+  'settings-dream-model': 'dreamModel', 'settings-dream-effort': 'dreamModel',
 };
 $('#settings-form').addEventListener('input', clearSaved);
 $('#settings-form').addEventListener('change', event => {
   const control = event.target, key = settingsFields[control.id];
   if (!key) return;
-  const toggle = ['jevCompare', 'jevImages', 'replySuggestions', 'showTips', ...Object.values(ON_SWITCHES)].includes(key);
-  const value = toggle ? control.value === 'on' : control.type === 'number' ? Number(control.value) : modelEffortSettings[key] ? modelEffortChoice(...modelEffortSettings[key]()) : control.value;
+  const toggle = ['jevImages', 'replySuggestions', 'showTips', ...Object.values(ON_SWITCHES)].includes(key);
+  const value = toggle ? control.value === 'on' : control.type === 'number' ? Number(control.value)
+    : key === 'dreamModel' ? modelEffortChoice($('#settings-dream-model'), $('#settings-dream-effort'), state.presets) : control.value;
   saveSetting(control, key, value);
 });
 $('#settings-form').onsubmit = event => event.preventDefault();
@@ -4806,7 +4694,6 @@ function renderProviders() {
     }
   }
 
-  renderRoutingModels();
   renderProviderConnections();
 }
 
@@ -4892,14 +4779,11 @@ document.querySelectorAll('.settings-tab').forEach(tab => {
     });
     $('#panel-general').hidden = name !== 'general';
     $('#panel-browser').hidden = name !== 'browser';
-    $('#panel-routing').hidden = name !== 'routing';
     $('#panel-tools').hidden = name !== 'tools';
     $('#panel-providers').hidden = name !== 'providers';
     $('#panel-connectors').hidden = name !== 'connectors';
     $('#panel-checks').hidden = name !== 'checks';
     $('#panel-about').hidden = name !== 'about';
-    $('#panel-benchmarks').hidden = name !== 'benchmarks';
-    if (name === 'benchmarks') showBenchmarks().catch(notify);
     if (name === 'connectors') HarnessConnectors.show();
     if (name === 'checks') renderChecks();
     if (name === 'providers') {

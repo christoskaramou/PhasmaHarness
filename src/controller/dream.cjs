@@ -13,6 +13,20 @@ const trials = require('../trials.cjs');
 
 const sentence = text => (/[.!?]$/.test(text) ? text : `${text}.`);
 
+// Settings → General → Dream model, one for every bot: the model picked there while it is usable, else Hub's model at its
+// highest effort.
+function dreamPreset(controller) {
+  const owner = controller.agents?.primary || controller;
+  const id = owner.data.settings.dreamModel;
+  // A Dream model the user set dreams or nothing: unavailable or at its usage limit, the dream waits rather than
+  // running on another model (2026-11-04, the user's rule). "hub" is Hub's model at its highest effort.
+  if (id && id !== 'hub') {
+    const picked = owner.catalog().find(p => p.worker && p.id === id);
+    return picked && owner.available(picked) && !owner.limits?.limited(picked.provider || 'codex', picked.model) ? picked : null;
+  }
+  return owner.strongestPreset();
+}
+
 module.exports = {
   // Never throws or delays the gate. Returns the pending call, or null when no dream is due.
   maybeDream(session) {
@@ -56,7 +70,7 @@ module.exports = {
     if (!manual && owner.data.settings.dream === false)
       return { skipped: 'Dream is off.' };
 
-    const model = this.strongestPreset();
+    const model = dreamPreset(this);
     if (!model || !owner.available(model))
       return { skipped: 'No model is available to dream with.' };
     if (this.agents?.backgroundQuota(this, session, model))
@@ -65,14 +79,16 @@ module.exports = {
     const state = dream.readDreams(root);
     const ruleRecords = trials.readRules(root);
     const notes = chatScan.readNotes(root);
-    // Chats are read only with the user's consent to chat reading (a chat checker picked, Find rules from your replies on);
-    // otherwise the dream works from lessons alone.
-    const readChats = !!this.chatScanner() && owner.data.settings.scanReplies !== false;
+    // Chats are read only with the user's consent to chat reading (a Secondary model saved for Hub, or, while none is
+    // saved, the checker picked before Secondary models; and Find rules from your replies on); otherwise the dream works
+    // from lessons alone. The old router standing in for an unsaved Secondary model is not consent, and Off is a refusal.
+    const consent = owner.secondarySaved?.() ? owner.secondaryPick() : this.sharedChatScanner();
+    const readChats = !!consent && owner.data.settings.scanReplies !== false;
     const sessions = readChats ? this.projectSessions(project) : [];
     const input = dream.dreamInput({ sessions, lessons: readLessons(root), rules: this.learnedRules(project, ruleRecords), ruleRecords, notes,
       since: state.lastAt, read: state.read, earlier: state.earlier });
     if (input.newEvidence < (manual ? 1 : dream.MIN_NEW))
-      return { skipped: manual ? `Nothing new to read in ${path.basename(project)}${readChats ? '' : ' (your replies are read only while a chat checker is picked)'}.`
+      return { skipped: manual ? `Nothing new to read in ${path.basename(project)}${readChats ? '' : ' (your replies are read only while Hub has a Secondary model)'}.`
         : 'Not enough new evidence yet.' };
     if (!dream.claimDream(root, Date.now(), manual))
       return { skipped: 'A dream already ran today.' };
@@ -110,7 +126,8 @@ module.exports = {
 
   // The chats of every agent whose project is this one (batch copies count toward their source project).
   projectSessions(project) {
-    const controllers = this.agents?.allControllers?.() || [this];
+    // A bot whose own Secondary model is Off (saved or inherited) keeps its chats out of the dream.
+    const controllers = (this.agents?.allControllers?.() || [this]).filter(controller => controller.data?.settings?.secondaryModel !== 'off');
     return controllers.flatMap(controller => controller.data?.sessions || [])
       .filter(session => !session.archived && session.workspace && this.lessonWorkspace(session.workspace) === project);
   },

@@ -53,6 +53,25 @@ function personalMcp() {
   }
 }
 
+// A finished worker turn leaves its Claude process running for the chat's next turn, which then skips the CLI start
+// and MCP connects (measured 2026-11-04: 1.8 to 9.8 s cold, under 1 s warm). Like Cursor's: at most three stay warm
+// across all bots, each for 10 minutes after its last turn, oldest first. A turn with other arguments (model, effort,
+// access, instructions, folder) starts a fresh process.
+const WARM = new Map();
+const WARM_MS = 10 * 60 * 1000, WARM_MAX = 3;
+function dropWarm(sessionId, stop = true) {
+  const entry = WARM.get(sessionId);
+  if (!entry) return null;
+  clearTimeout(entry.timer);
+  entry.child.removeListener('close', entry.onClose);
+  WARM.delete(sessionId);
+  if (stop) {
+    stopTree(entry.child);
+    if (entry.promptDirectory) fs.rmSync(entry.promptDirectory, { recursive: true, force: true });
+  }
+  return entry;
+}
+
 function executable() {
   const native = path.join(os.homedir(), '.local', 'bin', process.platform === 'win32' ? 'claude.exe' : 'claude');
   return fs.existsSync(native) ? native : 'claude';
@@ -235,7 +254,8 @@ class ClaudeCLI {
     return await this.refresh();
   }
   run({ cwd, model, effort, prompt, images = [], resume, access, signal, onEvent = () => {}, approve, schema, helpers, onInput, instructions = WORKER_INSTRUCTIONS, managedInstructions = false, persistSession = false, noSubagents = false }) {
-    let promptDirectory;
+    let promptDirectory, kept = false;
+    const self = this;
     return new Promise((resolve, reject) => {
       if (signal?.aborted) return reject(new Error('Claude stopped.'));
       const args = ['-p', '--verbose', '--input-format', 'stream-json', '--output-format', 'stream-json', '--include-partial-messages', '--model', model,
@@ -298,10 +318,19 @@ class ClaudeCLI {
         for (const request of controls.values()) request.reject(new Error('Claude closed before answering.'));
         fn(value);
       };
-      const child = this.start(args, cwd); let buffer = '', result, stderr = '';
+      // A worker turn reuses its chat's warm process when nothing it was started with changed.
+      const poolable = !!onInput && !schema;
+      const signature = poolable ? JSON.stringify([cwd, systemPrompt, args.map(arg => (promptDirectory && arg.startsWith(promptDirectory) ? 'file' : arg))
+        .filter((arg, index, list) => arg !== '--resume' && list[index - 1] !== '--resume')]) : null;
+      const warm = poolable && resume ? dropWarm(resume, false) : null;
+      const reused = warm && warm.owner === this && warm.signature === signature && warm.child.exitCode === null && !warm.child.killed ? warm : null;
+      if (warm && !reused) { stopTree(warm.child); if (warm.promptDirectory) fs.rmSync(warm.promptDirectory, { recursive: true, force: true }); }
+      if (reused && promptDirectory) { fs.rmSync(promptDirectory, { recursive: true, force: true }); promptDirectory = reused.promptDirectory; }
+      const child = reused ? reused.child : this.start(args, cwd); let buffer = '', result, stderr = '';
       // The whole tree: Claude's tool commands and MCP servers would otherwise outlive it.
       const abort = () => stopTree(child); signal?.addEventListener('abort', abort, { once: true });
-      child.stdin.on('error', () => {});
+      if (!reused) child.stdin.on('error', () => {});
+      let parked = false;
       let closed = false;
       // After a result Claude keeps running while a background task of it (background Bash, Monitor) runs, and answers
       // again when one ends, in a turn of its own that may start more tasks. Its input stays open until Claude is idle
@@ -324,7 +353,7 @@ class ClaudeCLI {
       };
       // Send now: Claude's own send-now interrupt hands it a waiting message at once and ends no background task; a plain
       // interrupt would end them, so a CLI without it keeps the message waiting for the current step.
-      let sendNow = false;
+      let sendNow = reused?.sendNow || false;
       // A resumed session first answers what it was left owing (a stopped task's notification) in a turn of its own, with
       // its own result; the prompt counts as taken only once Claude echoes it back (--replay-user-messages).
       const promptId = randomUUID();
@@ -333,6 +362,7 @@ class ClaudeCLI {
         clearTimeout(wake);
         if (!idle || deliveries.size || background || !child.stdin.writable || child.stdin.writableEnded) return;
         onInput?.(null);
+        if (poolable && result && !result.is_error && result.session_id && !signal?.aborted && !settled) return park();
         child.stdin.end();
       };
       // Once this run has had a task, a finished task's wake-up can follow Claude's answer (a task that ended mid-turn) or
@@ -385,8 +415,9 @@ class ClaudeCLI {
           ? { behavior: 'allow', updatedInput: input, toolUseID: request.tool_use_id }
           : { behavior: 'deny', message: 'The user declined this in Phasma Harness.', toolUseID: request.tool_use_id } });
       };
-      child.stderr.on('data', d => { stderr = (stderr + d).slice(-2000); });
-      child.stdout.on('data', d => {
+      const onStderr = d => { stderr = (stderr + d).slice(-2000); };
+      child.stderr.on('data', onStderr);
+      const onStdout = d => {
         buffer += d;
         if (settled) return;
         if (buffer.length > 16 * 1024 * 1024) { done(reject, new Error('Claude event exceeded the size limit.')); stopTree(child); return; }
@@ -450,9 +481,11 @@ class ClaudeCLI {
           onEvent(event);
         }
         watchDeliveries();
-      });
-      child.once('error', error => done(reject, error));
-      child.once('close', code => {
+      };
+      child.stdout.on('data', onStdout);
+      const onError = error => done(reject, error);
+      child.once('error', onError);
+      const onClose = code => {
         closed = true;
         signal?.removeEventListener('abort', abort);
         for (const cancel of pending.values()) cancel.abort();
@@ -469,7 +502,19 @@ class ClaudeCLI {
           done(reject, error);
         }
         else done(resolve, result);
-      });
+      };
+      child.once('close', onClose);
+      // The turn is over and Claude idle: keep the process for the chat's next turn instead of closing it.
+      function park() {
+        parked = true;
+        child.stdout.removeListener('data', onStdout); child.stderr.removeListener('data', onStderr);
+        child.removeListener('error', onError); child.removeListener('close', onClose);
+        signal?.removeEventListener('abort', abort);
+        for (const cancel of pending.values()) cancel.abort();
+        kept = true;
+        self.park(result.session_id, { child, signature, promptDirectory, sendNow });
+        done(resolve, result);
+      }
       const message = JSON.stringify({ type: 'user', uuid: promptId, parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'text', text: prompt }, ...images.map(url => imageData(url)).map(({ mime, data }) => ({ type: 'image', source: { type: 'base64', media_type: mime, data } }))] } }) + '\n';
       // Live input and approval answers share stdin until Claude finishes processing queued messages.
       if (ask || onInput) child.stdin.write(message); else child.stdin.end(message);
@@ -513,10 +558,23 @@ class ClaudeCLI {
         });
       }, control);
     }).finally(() => {
-      if (promptDirectory) fs.rmSync(promptDirectory, { recursive: true, force: true });
+      // A parked process still reads its instruction files (subagents); they go when it does.
+      if (promptDirectory && !kept) fs.rmSync(promptDirectory, { recursive: true, force: true });
     });
   }
+  park(sessionId, entry) {
+    dropWarm(sessionId);
+    entry.owner = this;
+    entry.onClose = () => dropWarm(sessionId);
+    entry.child.once('close', entry.onClose);
+    entry.timer = setTimeout(() => dropWarm(sessionId), WARM_MS);
+    entry.timer.unref?.();
+    WARM.set(sessionId, entry);
+    while (WARM.size > WARM_MAX) dropWarm(WARM.keys().next().value);
+  }
+  warmCount() { return [...WARM.values()].filter(entry => entry.owner === this).length; }
   close() {
+    for (const [id, entry] of [...WARM]) if (entry.owner === this) dropWarm(id);
     for (const child of this.children) stopTree(child);
     if (this.usageCleanupHost && !this.children.has(this.usageCleanupHost)) stopTree(this.usageCleanupHost);
   }

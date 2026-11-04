@@ -102,11 +102,6 @@ function pickPreset(decision, session, available) {
   const current = available.find(p => p.id === currentRoute(session)?.id);
   const choose = (p, rule) => ({ preset: p.id, reason: clip(`${difficulty} difficulty: ${rule}. ${decision.reason}`, 240) });
 
-  // Settings → Routing → Model for simple messages; while it is outside the effort cap or at a usage limit, Harness picks.
-  const yours = difficulty === 'low' && available.find(p => p.id === session.autoLowModel);
-  if (yours)
-    return { ...choose(yours, 'your model for simple messages'), userPick: true };
-
   if (['high', 'xhigh'].includes(difficulty)) {
     const top = strongest(available);
     const runs = top && atEffort(top, difficulty, available);
@@ -132,18 +127,6 @@ function pickPreset(decision, session, available) {
   return choose(atEffort(current || available[0], difficulty, available), 'no measured scores, so this chat\'s or the first offered model');
 }
 
-// A preset this project's checks proved for this kind of work (src/setups.cjs) wins on low and medium difficulty, after
-// the effort matching, so it keeps its own effort; hard tasks keep the strongest measured model.
-function provenChoice(result, decision, session, available) {
-  const id = session.provenSetups?.[decision.taskKind];
-  const proven = id && ['low', 'medium'].includes(decision.difficulty) ? available.find(p => p.id === id) : null;
-  if (!proven || proven.id === result.id)
-    return result;
-
-  return { ...result, ...proven, routerPick: result.routerPick || result.id, proven: true,
-    reason: clip(`Proven setup for ${decision.taskKind} work in this project. ${result.reason || ''}`, 240) };
-}
-
 // A message that asks for a stronger model ("use a smarter agent", "swap to a better model") gets the strongest measured
 // model for this message at once, not the router's guess, and does not continue a cheaper worker's task.
 const STRONGER = /\b(?:smarter|stronger|better|more capable|more powerful|bigger|higher-end|best)(?:\s+\w+)?\s+(?:model|agent|bot)s?\b|\b(?:swap|switch|change|upgrade)\s+(?:to\s+)?(?:a\s+|the\s+)?(?:smarter|stronger|better|bigger|higher-end)\b/i;
@@ -155,8 +138,7 @@ function finalChoice(assessment, text, session, workspace, available) {
   const decision = { ...rated, ...pickPreset(rated, session, available), ...(stronger ? { reason: clip(`You asked for a stronger model. ${assessment.reason || ''}`, 240) } : {}) };
   const kept = stronger ? null : taskWorker(decision, session, available);
   if (kept) return keepTask(decision, kept, text, session, workspace, available);
-  const chosen = { ...applyPolicy(decision, text, session, workspace, available), sameTask: decision.sameTask === true && !!session.job?.worker && !stronger };
-  return decision.userPick ? { ...chosen, userPick: true } : provenChoice(chosen, decision, session, available);
+  return { ...applyPolicy(decision, text, session, workspace, available), sameTask: decision.sameTask === true && !!session.job?.worker && !stronger };
 }
 
 function applyPolicy(decision, text, session, workspace, available) {
@@ -267,27 +249,6 @@ class SmartRouter {
   }
 
   cancel() { this.abort?.abort(); }
-
-  // Jev's worker choice for a message that was already routed (by this router or by hand), for the opt-in
-  // comparison log. It follows Jev routing (a workspace scan and a second question only when Jev asks for the
-  // workspace), and never touches the active routing or starts a worker.
-  async shadowJev(text, session, signal) {
-    if (!this.jev?.configured) throw new Error('No Jev key saved.');
-    const available = this.benchmarks.catalog(session.routingCatalog || []);
-    if (!available.length) throw new Error('No worker preset is available.');
-    let workspace = { available: false, nativeProject: false, signals: [], files: [], coverage: 'not-needed', limitations: [] };
-    let result = await this.jev.classify(contextFor(text, session, EMPTY_WORKSPACE), signal, session.attachedImages);
-    let cost = result.estimatedCostUsd || 0;
-    if (result.decision.workspaceRelevant && !taskWorker(result.decision, session, available)) {
-      const scanned = await Promise.resolve().then(() => this.inspect(session.workspace, text, AbortSignal.any([signal, AbortSignal.timeout(10000)]))).catch(() => null);
-      if (signal.aborted) throw Object.assign(new Error('Comparison stopped.'), { name: 'AbortError' });
-      if (scanned) workspace = scanned;
-      result = await this.jev.classify(contextFor(text, session, workspace), signal, session.attachedImages);
-      cost += result.estimatedCostUsd || 0;
-    }
-    const chosen = finalChoice(result.decision, text, session, workspace, available);
-    return { id: chosen.id, provider: chosen.provider || 'codex', model: chosen.model, effort: chosen.effort || null, confidence: result.confidence, costUsd: cost };
-  }
 
   close() {
     this.cancel();

@@ -141,7 +141,8 @@ test('an idle worker with a large context starts a fresh session from a summary 
     return { decision: { summary: `SUMMARY-${summaries.length}` }, usage: { inputTokens: 100, cachedInputTokens: 0, outputTokens: 10 } };
   };
   const logs = []; controller.log = { info: (message, data) => logs.push({ message, data }), warn() {}, error() {} };
-  Object.assign(controller.data.settings, { coldStartMinutes: 30, coldStartTokens: 1000 });
+  // A picked Secondary model writes the summary (the old router no longer stands in).
+  Object.assign(controller.data.settings, { coldStartMinutes: 30, coldStartTokens: 1000, secondaryModel: controller.data.settings.routerPreset });
   const session = controller.create(root, 'read-only');
   const send = text => controller.send({ id: session.id, text, mode: 'native:deepseek:model-a', task: 'off' });
   const runs = () => calls.filter(call => typeof call === 'object');

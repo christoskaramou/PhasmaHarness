@@ -1,12 +1,16 @@
 const { randomUUID } = require('node:crypto');
 
 const GENERAL = {
-  routingModel: 'jev or an ID from routerChoices',
-  effortCap: ['low', 'medium', 'high', 'xhigh', 'max'],
-  jevEnabled: 'boolean', jevCompare: 'boolean', jevImages: 'boolean',
+  jevEnabled: 'boolean', jevImages: 'boolean', dreamModel: 'hub (Hub’s model at its highest effort) or a model ID',
   contextRanking: ['local', 'jev'], toolSelection: ['off', 'jev'], largeResponses: 'boolean',
 };
-const LOCAL = { workspace: 'Absolute folder path', access: ['read-only', 'workspace-write', 'danger-full-access'], mode: 'auto or a model ID' };
+const LOCAL = { workspace: 'Absolute folder path', access: ['read-only', 'workspace-write', 'danger-full-access'],
+  mode: 'A model ID, or autoeffort:<provider>:<model> for Auto effort',
+  // inherit is for bots only: Hub has no creator to take a value from.
+  router: ['inherit', 'off', 'jev', 'secondary'], secondaryModel: 'inherit (bots only), off or a model ID',
+  effortCap: ['inherit', 'low', 'medium', 'high', 'xhigh', 'max'] };
+// A bot's own Router, Secondary model and Effort cap are on its profile; Hub's are its settings.
+const BOT_OWN = new Set(['router', 'secondaryModel', 'effortCap']);
 const SPECIAL = {
   appearance: ['system', 'dark', 'light'], onExit: ['close', 'tray'], startAtSignIn: 'boolean',
   browserAccess: '{ enabled: boolean, port: integer, origin: HTTPS address or null }',
@@ -16,7 +20,6 @@ const SPECIAL = {
   providerKey: '{ id: provider ID, key: new secret or null to remove }; reads show configured flags only',
   jevKey: 'New secret or null to remove; reads show configured status only',
   checks: 'Array of workspace checks using the existing Checks format',
-  benchmarks: 'Validated benchmark snapshot or null to reset to bundled evidence',
 };
 const MANUAL = new Set(['access', 'workspace', 'browserAccess', 'providers', 'providerConnection', 'providerKey', 'jevKey', 'checks', 'startAtSignIn']);
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -43,25 +46,28 @@ class SettingsTools {
     const names = args.names === undefined ? Object.keys(available) : args.names;
     if (!Array.isArray(names) || names.some(name => !Object.hasOwn(available, name))) throw new Error('Unknown setting name. Read without names to list supported settings.');
     const settings = {};
+    // A sub-bot follows the bot that made it: its Router, Secondary model and Effort cap change on that bot.
+    const followsCreator = target !== primary && this.agents.isSubBot(this.agents.profile(target.agentId));
     for (const name of names) {
       let value;
-      if (name === 'routingModel') value = primary.data.settings.routing === 'jev' ? 'jev' : primary.data.settings.routerPreset;
-      else if (Object.hasOwn(GENERAL, name)) value = primary.data.settings[name] ?? null;
+      if (Object.hasOwn(GENERAL, name)) value = primary.data.settings[name] ?? null;
+      else if (BOT_OWN.has(name) && target !== primary) value = this.agents.profile(target.agentId)?.[name] || 'inherit';
+      else if (name === 'router') value = target.routerKindSaved?.() ?? target.data.settings.router ?? null;
+      else if (name === 'secondaryModel') value = target.secondaryId?.() ?? target.data.settings.secondaryModel ?? null;
       else if (Object.hasOwn(LOCAL, name)) value = target.data.settings[name];
       else if (name === 'checks') value = primary.data.settings.checks?.[target.data.settings.workspace] || [];
       else if (name === 'models') value = primary.catalog();
       else if (name === 'providers' || name === 'providerKey') value = (primary.data.settings.providers || []).map(({ id, name: label, baseUrl, enabled }) =>
         ({ id, name: label, ...(name === 'providerKey' ? {} : { baseUrl, enabled }), configured: !!primary.providers?.configured(id) }));
       else if (name === 'jevKey') value = { configured: !!primary.smartRouter.jev?.keyStore?.configured };
-      else if (name === 'benchmarks') value = args.names ? primary.smartRouter.benchmarks.data
-        : { records: primary.smartRouter.benchmarks.data.records?.length || 0, note: 'Read names:[benchmarks] for the complete evidence snapshot.' };
       else if (name === 'providerConnection') {
         const state = primary.snapshot();
         value = { codex: primary.data.settings.chatgptEnabled !== false, 'claude-cli': !!primary.data.settings.claudeEnabled,
           'cursor-cli': primary.data.settings.cursorEnabled !== false,
           ...Object.fromEntries(Object.entries(state.nativeCLIs || {}).map(([id, state]) => [id, state.enabled])) };
       } else value = this.host.read?.(name) ?? (name === 'about' ? { version: require('../package.json').version, packaged: false } : null);
-      settings[name] = { value, ...(name === 'routingModel' && value === 'jev' ? { providerModel: primary.smartRouter.jev?.model || null } : {}), format: available[name], writable: !!this.host.ask && name !== 'about' && !MANUAL.has(name) &&
+      settings[name] = { value, ...(name === 'router' && value === 'jev' ? { providerModel: primary.smartRouter.jev?.model || null } : {}), format: available[name], writable: !!this.host.ask && name !== 'about' && !MANUAL.has(name) &&
+        !(followsCreator && (BOT_OWN.has(name) || name === 'mode')) &&
         (!['appearance', 'onExit', 'startAtSignIn', 'browserAccess', 'providerKey', 'jevKey'].includes(name) || !!this.host.write),
         confirmationRequired: name !== 'about' && !MANUAL.has(name) };
     }
@@ -80,12 +86,26 @@ class SettingsTools {
     if (this.requests.filter(item => ['confirming', 'queued'].includes(item.status)).length >= 10) throw new Error('Ten settings changes are already waiting. Finish the current reply first.');
     const json = JSON.stringify(args.value);
     if (typeof json !== 'string') throw new Error('Setting value must be JSON.');
-    if (json.length > (name === 'benchmarks' ? 1024 * 1024 : 32768)) throw new Error('Setting value is too large.');
+    if (json.length > 32768) throw new Error('Setting value is too large.');
     const value = JSON.parse(json);
     if (Object.hasOwn(GENERAL, name) || Object.hasOwn(LOCAL, name)) {
       const format = GENERAL[name] || LOCAL[name];
       if ((Array.isArray(format) && !format.includes(value)) || (format === 'boolean' && typeof value !== 'boolean')) throw new Error('Invalid setting value.');
     }
+    // Refused before asking the user, as apply would, so nobody approves a change that cannot apply.
+    const primary = this.controller, own = target !== primary;
+    const available = choice => !!choice && primary.available(choice);
+    if (BOT_OWN.has(name) && !own && value === 'inherit') throw new Error('Hub has no Inherit: choose a value.');
+    // Every bot runs one model, Hub included: the retired whole-catalogue Auto is not offered.
+    if (name === 'mode' && (value === 'auto' || typeof value !== 'string' || !available(primary.resolveWorker(value))))
+      throw new Error('Choose an available model ID, or autoeffort:<provider>:<model> for Auto effort. Read models for the choices.');
+    if (name === 'secondaryModel' && !['off', ...(own ? ['inherit'] : [])].includes(value) && !available(primary.chatScanChoices().find(p => p.id === value)))
+      throw new Error('Choose off, an available model ID' + (own ? ' or inherit' : '') + ' for the Secondary model.');
+    if (name === 'dreamModel' && value !== 'hub' && !available(primary.catalog().find(p => p.worker && p.id === value)))
+      throw new Error('Choose hub or an available model ID for the Dream model.');
+    // A sub-bot follows the bot that made it: its model, Router, Secondary model and Effort cap change there.
+    if ((BOT_OWN.has(name) || name === 'mode') && own && this.agents.isSubBot(this.agents.profile(target.agentId)))
+      throw new Error(`${this.agents.agentName(target.agentId)} works for the bot that made it and follows its settings. Change that bot instead.`);
     const record = { id: randomUUID(), name, agentId: target.agentId, value, status: 'confirming' };
     this.requests = this.requests.filter((item, index) =>
       ['confirming', 'queued', 'applying'].includes(item.status) || index >= this.requests.length - 19);
@@ -155,16 +175,14 @@ class SettingsTools {
     const primary = this.controller;
     this.agents.controller(agentId);
     if (Object.hasOwn(GENERAL, name) || Object.hasOwn(LOCAL, name)) {
-      const values = name === 'routingModel' ? (value === 'jev' ? { routing: 'jev' } : { routing: 'smart', routerPreset: value }) : { [name]: value };
-      this.agents.settings(values, agentId);
+      if (BOT_OWN.has(name) && agentId && agentId !== 'main') await this.agents.saveAgent({ ...this.agents.profile(agentId), [name]: value }, null, { keepBatch: true });
+      else this.agents.settings({ [name]: value }, agentId);
       primary.warmRouter();
     } else if (name === 'models') {
       const actions = ['toggle', 'toggleCodexModel', 'enableDiscovered'];
       if (!object(value) || !actions.includes(value.action)) throw new Error('Invalid provider/model action.');
       primary.providerSettings(value);
       await this.agents.refresh();
-    } else if (name === 'benchmarks') {
-      primary.smartRouter.benchmarks.replace(value === null ? require('../benchmarks/snapshot.json') : value);
     } else {
       if (!this.host.write) throw new Error('Change this setting in the desktop app.');
       await this.host.write(name, value);

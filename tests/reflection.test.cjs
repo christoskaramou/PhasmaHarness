@@ -57,7 +57,7 @@ test('a lesson\'s reflection is asked once per input, saved by re-reading the le
   recordLesson(root, lesson);
   const calls = [], warnings = [];
   const router = { id: 'router', provider: 'codex', model: 'gpt-5.6-terra', label: 'Terra' };
-  const owner = { effectiveRouter: () => router, available: () => true, smartRouter: { complete: async request => {
+  const owner = { secondaryPick: () => router, available: () => true, smartRouter: { complete: async request => {
     calls.push(request);
     // Another write lands while the call runs; the save must keep it.
     recordLesson(root, lessonFromTask(task(), 'checks-passed'));
@@ -76,6 +76,13 @@ test('a lesson\'s reflection is asked once per input, saved by re-reading the le
   assert.equal(record.seen, 2, 'the write made during the call survives');
   assert.match(fs.readFileSync(path.join(root, 'lessons.md'), 'utf8'), /Proposed rule: Keep exported function names when refactoring\. \(from: "Renamed fetchUser to loadUser in retry\.js"\)/);
   assert.equal(reflect(), null, 'the same input is not asked again');
+  // At the Secondary model's usage limit (secondaryPick null) no other provider's router reads the task.
+  const limited = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-reflection-'));
+  t.after(() => fs.rmSync(limited, { recursive: true, force: true }));
+  recordLesson(limited, lesson);
+  const atLimit = { ...owner, secondaryPick: () => null, effectiveRouter: () => ({ ...router, id: 'other', provider: 'claude-cli' }) };
+  assert.equal(reflection.reflectOnLesson.call({ ...controller, agents: { primary: atLimit, backgroundQuota: () => null } }, { items }, task(), lesson, limited, limited), null);
+  assert.equal(calls.length, 1, 'nothing was asked');
   assert.deepEqual(readRules(root).map(rule => [rule.rule, rule.state, rule.check, rule.source]),
     [['Keep exported function names when refactoring.', 'trial', 'unit', 'a reflection']], 'a grounded rule for a failure seen twice goes on trial');
 

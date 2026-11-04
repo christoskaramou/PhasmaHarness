@@ -27,7 +27,6 @@ const { createRunner, RunnerWindow } = require('./runner.cjs');
 const { configureWindowZoom } = require('./window-zoom.cjs');
 const { configureTextContextMenu } = require('./text-context-menu.cjs');
 const { confirmations } = require('./confirmations.cjs');
-const { validateSnapshot, pruneSources, MAX_BYTES } = require('./routing/benchmarks.cjs');
 const { Log } = require('./log.cjs');
 const { buildDiagnostics } = require('./diagnostics.cjs');
 const { AsyncLocalStorage } = require('node:async_hooks');
@@ -172,7 +171,7 @@ async function start() {
     }
     browserAccess?.broadcast('state', state);
   });
-  const sharedChanges = new Set(['benchmarkApply', 'benchmarkReset', 'cursorLogin', 'cursorRefresh', 'cursorLogout', 'claudeLogin', 'claudeRefresh', 'claudeLogout', 'connectChatGPT', 'logoutChatGPT', 'installProvider', 'providerSettings', 'providerKey', 'nativeProviderAction', 'jevSaveKey', 'jevRemoveKey', 'jevTest', 'checks']);
+  const sharedChanges = new Set(['cursorLogin', 'cursorRefresh', 'cursorLogout', 'claudeLogin', 'claudeRefresh', 'claudeLogout', 'connectChatGPT', 'logoutChatGPT', 'installProvider', 'providerSettings', 'providerKey', 'nativeProviderAction', 'jevSaveKey', 'jevRemoveKey', 'jevTest', 'checks']);
   const connectionActions = { connectChatGPT: 'codex', claudeLogin: 'claude-cli', claudeRefresh: 'claude-cli', cursorLogin: 'cursor-cli', cursorRefresh: 'cursor-cli', jevTest: 'jev' };
   const commands = new Map();
   const invoke = async (name, args) => {
@@ -272,29 +271,6 @@ async function start() {
   });
   // The recorded audio; Dictation checks it is the open recording's and valid PCM before it reaches the engine.
   handle('voiceTranscribe', (id, audio) => voice.transcribe(id, audio));
-  const benchmarkWorkers = () => controller.catalog().filter(p => p.worker && p.enabled && controller.available(p));
-  handle('benchmarkRefresh', () => {
-    const workspace = path.join(app.getPath('userData'), 'benchmark-refresh');
-    fs.mkdirSync(workspace, { recursive: true });
-    return { prompt: controller.smartRouter.benchmarks.refreshPrompt(benchmarkWorkers()), workspace };
-  });
-  handle('benchmarkImport', async () => {
-    const selection = await dialog.showOpenDialog(window, { title: 'Preview benchmark update', properties: ['openFile'], filters: [{ name: 'Benchmark JSON', extensions: ['json'] }] });
-    if (selection.canceled) return null;
-    const filename = selection.filePaths[0];
-    if (fs.statSync(filename).size > MAX_BYTES) throw new Error('Benchmark file exceeds 1 MB.');
-    return validateSnapshot(pruneSources(JSON.parse(fs.readFileSync(filename, 'utf8'))));
-  });
-  handle('benchmarkApply', data => {
-    if (controller.busy) throw new Error('Finish the current turn before replacing benchmark evidence.');
-    controller.smartRouter.benchmarks.replace(data);
-    controller.changed(); return controller.snapshot();
-  });
-  handle('benchmarkReset', () => {
-    if (controller.busy) throw new Error('Finish the current turn before replacing benchmark evidence.');
-    controller.smartRouter.benchmarks.replace(require('../benchmarks/snapshot.json'));
-    controller.changed(); return controller.snapshot();
-  });
   for (const action of ['cursorLogin', 'cursorRefresh', 'cursorLogout']) handle(action, async () => {
     if (controller.busy) throw new Error('Wait for the current turn to finish.');
     if (action === 'cursorLogin') {
@@ -438,7 +414,9 @@ async function start() {
   handle('jevRemoveKey', () => {
     if (controller.busy) throw new Error('Stop the current turn before removing the Jev key.');
     jevKey.remove(); controller.smartRouter.jev.resetHealth();
-    return controller.settings({ routing: controller.data.settings.routing === 'jev' ? 'smart' : controller.data.settings.routing, contextRanking: 'local', toolSelection: 'off', jevCompare: false });
+    // Hub routing with Jev moves to its Secondary model (a bot's own Jev router falls back to it per message).
+    return controller.settings({ routing: controller.data.settings.routing === 'jev' ? 'smart' : controller.data.settings.routing,
+      ...(controller.data.settings.router === 'jev' ? { router: 'secondary' } : {}), contextRanking: 'local', toolSelection: 'off' });
   });
   handle('jevTest', async () => {
     if (controller.busy) throw new Error('Wait for the current turn to finish before testing Jev.');

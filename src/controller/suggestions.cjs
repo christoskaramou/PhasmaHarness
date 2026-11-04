@@ -36,6 +36,10 @@ function excerpt(text) {
 // The model that wrote the chat's last answer, at its lowest available effort: short side tasks need no deep reasoning.
 // A reply Jev gave itself has no worker model, so the last answer a worker gave counts instead.
 function quickModel(controller, session) {
+  // The bot's Secondary model does its side tasks when one is picked; at its usage limit the chat's own model does,
+  // never another provider's model.
+  const own = controller.secondaryPick?.();
+  if (own) return own;
   const route = (session.routes || []).findLast(entry => !entry.directAnswer);
   const used = route && (controller.resolveWorker?.(route.id) || route);
   const same = used ? (controller.catalog?.() || []).filter(p => p.model === used.model &&

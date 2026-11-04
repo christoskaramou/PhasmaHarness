@@ -134,7 +134,7 @@ test('a due dream with enough evidence asks the strongest model once; its rule g
   const self = {
     wikiStore: { ensure: () => ({ root }) }, comparisonOf: () => null, lessonWorkspace: workspace => workspace, agents: null,
     available: () => true, strongestPreset: () => ({ id: 'big', model: 'big', label: 'Big' }), learnedRules: () => '',
-    chatScanner: () => ({ id: 'checker' }),
+    sharedChatScanner: () => ({ id: 'checker' }),
     data: { settings: {}, sessions: [...chats, chat('elsewhere', [user('Unrelated other project text', 90)], 'C:/other')] },
     log: { warn: (...args) => calls.push(['warn', ...args]) }, save() {}, changed() {}, session: () => session,
     smartRouter: { complete: async request => {
@@ -173,14 +173,14 @@ test('no dream without enough new evidence, without consent to read chats, in a 
   const base = {
     wikiStore: { ensure: () => ({ root }) }, comparisonOf: () => null, lessonWorkspace: workspace => workspace, agents: null,
     available: () => true, strongestPreset: () => ({ id: 'big', model: 'big' }), learnedRules: () => '', log: { warn() {} },
-    chatScanner: () => ({ id: 'checker' }), data: { settings: {}, sessions: [chat('a', [user('One message', 10)])] }, smartRouter: { complete: async () => { asked++; return { decision: { actions: [] } }; } },
+    sharedChatScanner: () => ({ id: 'checker' }), data: { settings: {}, sessions: [chat('a', [user('One message', 10)])] }, smartRouter: { complete: async () => { asked++; return { decision: { actions: [] } }; } },
   };
   Object.assign(base, methods);
   const session = { workspace: 'C:/project' };
   assert.equal(methods.maybeDream.call(base, session), null);
   assert.equal(dream.due(root), true, 'too little evidence leaves the dream due');
   base.data.sessions = chats;
-  assert.equal(methods.maybeDream.call({ ...base, chatScanner: () => null }, session), null, 'chat checker Off: chats are not read');
+  assert.equal(methods.maybeDream.call({ ...base, sharedChatScanner: () => null }, session), null, 'chat checker Off: chats are not read');
   assert.equal(methods.maybeDream.call({ ...base, data: { ...base.data, settings: { scanReplies: false } } }, session), null,
     'Find rules from your replies off: chats are not read');
   assert.equal(methods.maybeDream.call({ ...base, comparisonOf: () => ({}) }, session), null);
@@ -192,15 +192,16 @@ test('no dream without enough new evidence, without consent to read chats, in a 
 
 test('whether the dream reads chats comes from the saved chat checker setting, not a default', async t => {
   const chatScanMethods = require('../src/controller/chat-scan.cjs');
-  const run = async settings => {
+  const run = async (settings, secondary = {}) => {
     const root = tempRoot(t);
     let asked = 0;
     const self = {
-      ...methods, chatScanChoices: chatScanMethods.chatScanChoices, chatScanner: chatScanMethods.chatScanner,
+      ...methods, chatScanChoices: chatScanMethods.chatScanChoices, sharedChatScanner: chatScanMethods.sharedChatScanner,
       catalog: () => [{ id: 'claude-cli:claude-haiku-5-5:high', worker: true }, { id: 'big', worker: true }],
       wikiStore: { ensure: () => ({ root }) }, comparisonOf: () => null, lessonWorkspace: workspace => workspace, agents: null,
       available: () => true, strongestPreset: () => ({ id: 'big', model: 'big' }), learnedRules: () => '', log: { warn() {} },
       data: { settings, sessions: chats }, smartRouter: { complete: async () => { asked++; return { decision: { actions: [] } }; } },
+      ...secondary,
     };
     await methods.maybeDream.call(self, { workspace: 'C:/project' });
     return asked;
@@ -209,6 +210,17 @@ test('whether the dream reads chats comes from the saved chat checker setting, n
   assert.equal(await run({ chatScanModel: 'claude-cli:claude-haiku-5-5:high', scanReplies: false }), 0, 'Find rules from your replies off');
   assert.equal(await run({}), 0, 'no checker saved');
   assert.equal(await run({ chatScanModel: 'off' }), 0, 'checker set to Off');
+  // Hub's Secondary model: never saved, the old router standing in is no consent; Off refuses even with an old checker.
+  assert.equal(await run({}, { secondarySaved: () => null, secondaryPick: () => ({ id: 'old-router' }) }), 0, 'the old router is not consent');
+  assert.equal(await run({ chatScanModel: 'claude-cli:claude-haiku-5-5:high' }, { secondarySaved: () => 'off', secondaryPick: () => null }), 0,
+    'Secondary model Off: chats are not read, whatever checker was saved before');
+  assert.equal(await run({}, { secondarySaved: () => 'big', secondaryPick: () => ({ id: 'big' }) }), 1, 'a saved Secondary model: chats are read');
+});
+
+test('a bot whose own Secondary model is Off keeps its chats out of the dream', () => {
+  const own = (secondaryModel, id) => ({ data: { settings: { secondaryModel }, sessions: [{ id, workspace: 'C:/project' }] } });
+  const self = { agents: { allControllers: () => [own('big', 'kept'), own('off', 'refused'), own(undefined, 'inherits-hub')] }, lessonWorkspace: workspace => workspace };
+  assert.deepEqual(methods.projectSessions.call(self, 'C:/project').map(session => session.id), ['kept', 'inherits-hub']);
 });
 
 test('Dream off in Settings: no dream until it is turned back on', async t => {
@@ -217,7 +229,7 @@ test('Dream off in Settings: no dream until it is turned back on', async t => {
   const self = {
     ...methods, wikiStore: { ensure: () => ({ root }) }, comparisonOf: () => null, lessonWorkspace: workspace => workspace, agents: null,
     available: () => true, strongestPreset: () => ({ id: 'big', model: 'big' }), learnedRules: () => '', log: { warn() {} },
-    chatScanner: () => ({ id: 'checker' }), data: { settings: { dream: false }, sessions: chats },
+    sharedChatScanner: () => ({ id: 'checker' }), data: { settings: { dream: false }, sessions: chats },
     smartRouter: { complete: async () => { asked++; return { decision: { actions: [] } }; } },
   };
   assert.equal(methods.maybeDream.call(self, { workspace: 'C:/project' }), null);
@@ -232,7 +244,7 @@ test('read positions move only after a successful dream; a failed one leaves the
   const make = (complete, root = tempRoot(t)) => ({ root, self: {
     ...methods, ...trialMethods, wikiStore: { ensure: () => ({ root }) }, comparisonOf: () => null, lessonWorkspace: workspace => workspace,
     agents: null, available: () => true, strongestPreset: () => ({ id: 'big', model: 'big' }), learnedRules: () => '',
-    log: { warn() {} }, chatScanner: () => ({ id: 'checker' }), data: { settings: {}, sessions: chats }, save() {}, changed() {},
+    log: { warn() {} }, sharedChatScanner: () => ({ id: 'checker' }), data: { settings: {}, sessions: chats }, save() {}, changed() {},
     smartRouter: { complete },
   } });
 
@@ -270,7 +282,7 @@ test('Dream now runs without the daily wait, the five-message minimum or the Dre
   const self = {
     ...methods, ...trialMethods, wikiStore: { ensure: () => ({ root }) }, comparisonOf: () => null, lessonWorkspace: workspace => workspace,
     agents: null, available: () => true, strongestPreset: () => ({ id: 'big', model: 'big', label: 'Big' }), learnedRules: () => '',
-    log: { warn() {} }, chatScanner: () => ({ id: 'checker' }), session: () => session, save() {}, changed() {},
+    log: { warn() {} }, sharedChatScanner: () => ({ id: 'checker' }), session: () => session, save() {}, changed() {},
     data: { settings: { dream: false }, sessions: [chat('a', [said('Indented with spaces.'), user('Please use tabs in this project.', 5)])] },
     smartRouter: { complete: async () => { asked++; return { decision: { actions: [] } }; } },
   };
@@ -283,9 +295,37 @@ test('Dream now runs without the daily wait, the five-message minimum or the Dre
   assert.match(fs.readFileSync(path.join(root, dream.PAGE), 'utf8'), /\(Dream now\) · Big · nothing to change/);
 
   await assert.rejects(methods.dreamNow.call(self, 's'), /Nothing new to read in project\./, 'what it read is not read again');
-  await assert.rejects(methods.dreamNow.call({ ...self, chatScanner: () => null }, 's'), /only while a chat checker is picked/);
+  await assert.rejects(methods.dreamNow.call({ ...self, sharedChatScanner: () => null }, 's'), /only while Hub has a Secondary model/);
   await assert.rejects(methods.dreamNow.call({ ...self, strongestPreset: () => null }, 's'), /No model is available/);
   await assert.rejects(methods.dreamNow.call({ ...self, agents: { backgroundQuota: () => true } }, 's'), /usage limit/);
   await assert.rejects(methods.dreamNow.call({ ...self, session: () => ({ id: 'x', items: [] }) }, 'x'), /project folder/);
   assert.equal(asked, 1);
+});
+
+test('the Dream model is one setting for every bot: a picked model dreams while usable, and only it; Hub’s model at its highest effort is the default', async t => {
+  const picked = { id: 'picked', model: 'picked', label: 'Picked', worker: true };
+  const dreamWith = async (dreamModel, usable = true) => {
+    const root = tempRoot(t);
+    const session = { id: 's', workspace: 'C:/project', items: [] };
+    const hub = { data: { settings: { dreamModel } }, catalog: () => [picked], available: p => p !== picked || usable,
+      strongestPreset: () => ({ id: 'hub-top', model: 'hub', label: 'Hub top' }) };
+    const self = {
+      ...methods, ...trialMethods, wikiStore: { ensure: () => ({ root }) }, comparisonOf: () => null, lessonWorkspace: workspace => workspace,
+      agents: { primary: hub, backgroundQuota: () => false }, available: () => true, learnedRules: () => '',
+      // A bot's own rule writer is not the dreamer.
+      strongestPreset: () => assert.fail('the dream does not use the bot’s own model'),
+      log: { warn() {} }, sharedChatScanner: () => ({ id: 'checker' }), session: () => session, save() {}, changed() {},
+      data: { settings: {}, sessions: [chat('a', [said('Indented with spaces.'), user('Please use tabs in this project.', 5)])] },
+      smartRouter: { complete: async () => ({ decision: { actions: [] } }) },
+    };
+    Object.assign(hub, { smartRouter: self.smartRouter, save() {}, changed() {}, log: self.log });
+    hub.data.sessions = self.data.sessions;
+    return (await methods.dreamNow.call(self, 's')).model;
+  };
+  // 2026-11-04: dreams ran on the bot's own model after the shared Escalation model was removed.
+  assert.equal(await dreamWith('picked'), 'Picked');
+  assert.equal(await dreamWith('hub'), 'Hub top');
+  assert.equal(await dreamWith(undefined), 'Hub top', 'the default');
+  // A model the user picked is never swapped for another (2026-11-04, the user's rule): the dream waits instead.
+  await assert.rejects(dreamWith('picked', false), /No model is available to dream with/, 'a picked model that is unavailable dreams nothing');
 });

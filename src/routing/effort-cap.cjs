@@ -1,6 +1,5 @@
-// Effort cap for automatic routing (the selector next to Auto, and Settings → Routing). Smart and Jev routing are only
-// offered workers at or below the cap, so both routers, difficulty-based selection and usage-limit failover
-// choose within it; a task that continues keeps its model at the highest effort still allowed. Manual picks are not capped.
+// Effort cap for Auto effort (each bot's Edit dialog). Smart and Jev routing are only offered efforts at or below the
+// cap, so both routers and escalation choose within it; a task that continues keeps its model at the highest effort still allowed. Manual picks are not capped.
 const EFFORT_ORDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 const EFFORT_CAPS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const DEFAULT_EFFORT_CAP = 'high'; // also the recommended level

@@ -43,6 +43,8 @@ async function setup(t) {
   };
   const primary = factory(path.join(directory, 'sessions.json'), workspace);
   await primary.initialize(); primary.data.settings.mode = 'terra-light';
+  // Hub picked a Secondary model (the old router no longer stands in for an unsaved one), so its bots route.
+  primary.data.settings.secondaryModel = primary.data.settings.routerPreset;
   const agents = new Agents(primary, async () => {}, factory);
   t.after(async () => {
     agents.closing = true; agents.pump();
@@ -98,6 +100,8 @@ test('direct bots and delegated execution get the same Harness-kept rules, and C
 test('direct tracked tasks reserve their budget before routing and do not charge later chat to it', async t => {
   const { agents, add } = await setup(t);
   const bot = await add('Direct task');
+  // Saved on legacy Auto (routed across models), so a message saved with 'auto' still routes.
+  agents.profile(bot.agentId).mode = bot.data.settings.mode = 'auto';
   const chat = agents.conversation(bot, true);
   let routedBudget;
   bot.smartRouter.choose = async () => {
@@ -121,9 +125,26 @@ test('direct tracked tasks reserve their budget before routing and do not charge
   complete(bot, chat);
 });
 
+test('a direct answer closes its tracked task, starts no worker turn and frees the bot for its next message', async t => {
+  const { agents, add } = await setup(t);
+  const bot = await add('Quick');
+  const chat = agents.conversation(bot, true);
+  const auto = 'autoeffort:codex:gpt-5.6-terra';
+  bot.smartRouter.choose = async () => ({ ...bot.autoEffortDefault(auto), source: 'model', reason: 'sized', sameTask: false,
+    assessment: { difficulty: 'low', taskKind: 'general', workspaceRelevant: false, needsChecks: false, risk: 'low', uncertainty: 'low' } });
+  bot.smartRouter.complete = async request => ({ decision: request.schema?.properties?.handOff ? { handOff: false, answer: 'Yes.' } : { verdict: 'accept', findings: [] } });
+  const route = await bot.send({ id: chat.id, text: 'Is JSON a subset of YAML 1.2?', mode: auto, task: 'on' });
+  assert.equal(route.directAnswer, true);
+  assert.deepEqual([chat.tasks[0].state, chat.activeTaskId, bot.busy, chat.status], ['not-checked', null, null, 'completed']);
+  assert.equal(bot.client.calls.some(call => call.method === 'turn/start'), false, 'no worker turn');
+  assert.equal(agents.budgets.forSession(chat), null, 'nothing keeps the task in flight');
+  assert.equal(chat.items.at(-1).text, 'Yes.');
+});
+
 test('a direct-task router usage limit pauses before any fallback request', async t => {
   const { agents, add } = await setup(t);
   const bot = await add('Router limit'), chat = agents.conversation(bot, true);
+  agents.profile(bot.agentId).mode = bot.data.settings.mode = 'auto'; // legacy Auto: a router limit still fails the send
   let attempts = 0;
   bot.effectiveRouter = () => ({ ...bot.resolveWorker('terra-light'), id: attempts ? 'replacement-router' : 'original-router' });
   bot.smartRouter.choose = async () => {
@@ -1798,7 +1819,7 @@ test('Main creates a persistent idle agent through a dynamic tool using conversa
   assert.equal(profile.name, 'Reviewer');
   assert.equal(profile.workspace, workspace);
   assert.equal(profile.access, 'read-only');
-  assert.equal(profile.mode, 'auto');
+  assert.equal(profile.mode, 'autoeffort:codex:gpt-5.6-terra', 'a bot Hub makes takes Hub’s model with Auto effort');
   assert.ok(agents.snapshot().agents.some(agent => agent.id === profile.id));
   assert.ok(readSessionData(primary.filename).agents.some(agent => agent.id === profile.id));
   const child = agents.controller(profile.id);
@@ -1825,7 +1846,7 @@ test('named and delegated agents can create agents through every provider bridge
     const profile = await parent.bridgeTool(session.id, 'agent_create', { name: provider, instructions: 'Help with the task.', mode: 'auto' });
     assert.equal(profile.workspace, workspace);
     assert.equal(profile.access, 'workspace-write');
-    assert.equal(profile.mode, 'auto');
+    assert.equal(profile.mode, 'autoeffort:codex:gpt-5.6-terra');
     assert.equal(agents.controller(profile.id).busy, null);
   }
   delete session.delegation; delete session.agentReplyActive;
@@ -1930,11 +1951,11 @@ test('agents discover available models and create children with default or reque
   ];
   const parent = await add('Parent');
   const expected = [
-    { mode: 'auto', model: 'Auto', efforts: [] },
-    { mode: 'codex:gpt-5.6-terra:medium', provider: 'codex', model: 'gpt-5.6-terra', effort: 'medium', efforts: ['low', 'medium', 'high'] },
-    { mode: 'claude-cli:review-model:medium', provider: 'claude-cli', model: 'review-model', effort: 'medium', efforts: ['low', 'medium', 'high'] },
-    { mode: 'cursor-cli:review-model:low', provider: 'cursor-cli', model: 'review-model', effort: 'low', efforts: ['low', 'medium', 'high'] },
-    { mode: 'cursor-cli:plain:default', provider: 'cursor-cli', model: 'plain', effort: 'default', efforts: ['default'] },
+    { mode: 'auto', model: 'Auto effort on Hub’s model', efforts: [] },
+    { mode: 'autoeffort:codex:gpt-5.6-terra', provider: 'codex', model: 'gpt-5.6-terra', effort: 'auto', efforts: ['auto', 'low', 'medium', 'high'] },
+    { mode: 'autoeffort:claude-cli:review-model', provider: 'claude-cli', model: 'review-model', effort: 'auto', efforts: ['auto', 'low', 'medium', 'high'] },
+    { mode: 'autoeffort:cursor-cli:review-model', provider: 'cursor-cli', model: 'review-model', effort: 'auto', efforts: ['auto', 'low', 'medium', 'high'] },
+    { mode: 'autoeffort:cursor-cli:plain', provider: 'cursor-cli', model: 'plain', effort: 'auto', efforts: ['auto', 'default'] },
   ];
   let codexChild;
   for (const creator of [primary, parent]) {
@@ -1950,7 +1971,8 @@ test('agents discover available models and create children with default or reque
         const selected = primary.resolveWorker(profile.mode);
         assert.equal(selected.provider, provider);
         assert.equal(selected.model, choice.model);
-        assert.equal(selected.effort, effort || choice.effort);
+        if (effort) assert.equal(selected.effort, effort);
+        else assert.equal(profile.mode, choice.mode, 'a model without an effort gets Auto effort, as agent_create is told');
         assert.equal(profile.access, 'read-only');
         assert.equal(agents.controller(profile.id).data.settings.mode, profile.mode);
         assert.equal(readSessionData(primary.filename).agents.find(a => a.id === profile.id).mode, profile.mode);
@@ -1986,7 +2008,7 @@ test('agent model requests fail without creating profiles when unavailable, malf
   assert.equal(agents.primary.data.agents.length, 0);
   assert.equal(JSON.stringify(readSessionData(primary.filename)), disk);
   primary.data.settings.disabledCodexModels = ['gpt-5.6-terra'];
-  assert.deepEqual(await primary.bridgeTool(source.id, 'agent_models', {}), [{ mode: 'auto', model: 'Auto', efforts: [] }]);
+  assert.deepEqual(await primary.bridgeTool(source.id, 'agent_models', {}), [{ mode: 'auto', model: 'Auto effort on Hub’s model', efforts: [] }]);
   await assert.rejects(primary.bridgeTool(source.id, 'agent_create', { name: 'Disabled', instructions: '', mode: 'terra-light' }), /unavailable/);
   primary.data.settings.disabledCodexModels = [];
   primary.account = null;
@@ -2418,6 +2440,15 @@ test('the Main Bot changes a bot’s name, role, model and effort at the user’
   assert.deepEqual([agents.profile(worker.agentId).instructions, agents.profile(worker.agentId).mode], [profile.instructions, profile.mode], 'only what is passed changes');
   assert.throws(() => agents.tool(primary, source, 'agent_update', { agentId: worker.agentId, workspace: 'C:/elsewhere' }), /Invalid agent tool call/);
   await assert.rejects(agents.tool(primary, source, 'agent_update', { agentId: 'main', name: 'Boss' }), /Choose another bot/);
+  const own = await agents.tool(primary, source, 'agent_update', { agentId: 'main', mode: choice.mode, effort });
+  assert.deepEqual([own.agentId, primary.data.settings.mode, primary.resolveWorker(own.mode).effort], ['main', own.mode, effort], 'the Main Bot sets its own model and effort');
+  // An Auto effort pick leaves hubMode, the exact model and effort Hub last ran, for Hub's next message to set.
+  const ran = primary.data.hubMode;
+  await agents.tool(primary, source, 'agent_update', { agentId: 'main', mode: choice.mode });
+  assert.deepEqual([primary.data.settings.mode, primary.data.hubMode], [choice.mode, ran]);
+  await agents.tool(primary, source, 'agent_update', { agentId: 'main', mode: 'auto' });
+  assert.equal(primary.data.settings.mode, 'autoeffort:codex:gpt-5.6-terra', 'Auto is Hub’s model with Auto effort');
+  assert.equal(agents.agentMode('auto', 'auto'), 'autoeffort:codex:gpt-5.6-terra', 'effort auto with no model is Hub’s model on Auto effort, as agent_create allows');
   const strong = await add('Strong', workspace, 'danger-full-access');
   await assert.rejects(agents.tool(primary, source, 'agent_update', { agentId: strong.agentId, instructions: 'Do anything.' }), /more access than this conversation/);
   const chat = agents.conversation(worker, true);
@@ -3667,7 +3698,7 @@ test('Jev plug state persists, keeps preferences and keys, and stops calls acros
   let reads = 0, requests = 0;
   const key = { configured: true, read() { reads++; return 'test-key'; } };
   for (const c of [primary, child]) c.smartRouter.jev = new JevClient(key, async () => { requests++; throw new Error('stub transport'); }, () => primary.data.settings.jevEnabled !== false);
-  Object.assign(primary.data.settings, { routing: 'jev', contextRanking: 'jev', toolSelection: 'jev', jevCompare: true });
+  Object.assign(primary.data.settings, { routing: 'jev', contextRanking: 'jev', toolSelection: 'jev' });
   assert.throws(() => agents.settings({ jevEnabled: 'false' }), /Invalid Jev enabled/);
   agents.settings({ jevEnabled: false }, child.agentId);
   assert.equal(readSessionData(primary.filename).settings.jevEnabled, false);
@@ -3687,7 +3718,7 @@ test('Jev plug state persists, keeps preferences and keys, and stops calls acros
   assert.equal(requests, 1, 'switching Jev on checks it once, not once per bot');
   assert.equal(primary.routingProvider, 'jev');
   assert.equal(child.smartRouter.jev.configured, true);
-  assert.deepEqual(['contextRanking', 'toolSelection', 'jevCompare'].map(k => primary.data.settings[k]), ['jev', 'jev', true]);
+  assert.deepEqual(['contextRanking', 'toolSelection'].map(k => primary.data.settings[k]), ['jev', 'jev']);
   await assert.rejects(child.smartRouter.jev.test(), /transport error/);
   assert.equal(reads, 2); assert.equal(requests, 2);
 });
@@ -3809,4 +3840,103 @@ test('turning reply suggestions on reaches a bot that is mid-turn', async t => {
   agents.settings({ replySuggestions: true }, 'main');
   bot.busy = null;
   assert.equal(bot.data.settings.replySuggestions, true, 'the bot asks for a suggestion as soon as its turn ends');
+});
+
+test('each bot has a Router, Secondary model (or Off) and effort cap of its own or inherited from its creator; Auto effort routes only its model’s effort', async t => {
+  const { agents, primary, workspace, add } = await setup(t);
+  primary.models[0].supportedReasoningEfforts = ['low', 'medium', 'high'].map(reasoningEffort => ({ reasoningEffort }));
+  agents.configure = async controller => { controller.client.models = primary.models; };
+  const choices = primary.chatScanChoices().filter(p => primary.available(p));
+  assert.ok(choices.length >= 2, 'two enabled models to pick from');
+  const [picked, other] = choices;
+  const bot = await add('Docs');
+
+  // Hub's values reach a bot that inherits; a bot's own value wins; Inherit (not stored) goes back to Hub's.
+  agents.settings({ secondaryModel: other.id, router: 'secondary', effortCap: 'medium' }, 'main');
+  assert.deepEqual([bot.secondaryPick()?.id, bot.routerKind(), bot.data.settings.effortCap], [other.id, 'secondary', 'medium'], 'a new bot inherits Hub’s');
+  await agents.saveAgent({ ...agents.profile(bot.agentId), secondaryModel: picked.id, router: 'off', effortCap: 'low' });
+  assert.deepEqual([bot.secondaryPick()?.id, bot.effectiveRouter()?.id, bot.chatScanner()?.id, bot.routerKind(), bot.data.settings.effortCap],
+    [picked.id, picked.id, picked.id, 'off', 'low'], 'its own values do its secondary work');
+  assert.equal(primary.secondaryPick()?.id, other.id, 'a bot’s values never change Hub’s');
+  await agents.saveAgent({ ...agents.profile(bot.agentId), name: 'Docs writer' });
+  assert.equal(agents.profile(bot.agentId).secondaryModel, picked.id, 'an edit that does not mention them keeps them');
+  const sub = await agents.saveAgent({ name: 'Helper', instructions: 'Help.', workspace, access: 'workspace-write', mode: 'terra-light', createdBy: bot.agentId });
+  await agents.initializeController(agents.controller(sub.id));
+  assert.deepEqual([agents.controller(sub.id).secondaryPick()?.id, agents.controller(sub.id).routerKind()], [picked.id, 'off'], 'a sub-bot inherits its creator’s');
+
+  // Off: no secondary work and, with the Secondary model as router, no router.
+  await agents.saveAgent({ ...agents.profile(bot.agentId), secondaryModel: 'off', router: 'secondary' });
+  assert.deepEqual([bot.secondaryPick(), bot.chatScanner(), bot.effectiveRouter(), bot.routerKind()], [null, null, null, 'off']);
+  await assert.rejects(agents.saveAgent({ ...agents.profile(bot.agentId), secondaryModel: 'nope' }), /Unknown secondary model/);
+  await assert.rejects(agents.saveAgent({ ...agents.profile(bot.agentId), router: 'nope' }), /Unknown router/);
+  await assert.rejects(agents.saveAgent({ ...agents.profile(bot.agentId), effortCap: 'nope' }), /Unknown effort cap/);
+  assert.throws(() => agents.settings({ secondaryModel: 'nope' }, 'main'), /Unknown secondary model/);
+  await agents.saveAgent({ ...agents.profile(bot.agentId), secondaryModel: 'inherit', router: 'inherit', effortCap: 'inherit' });
+  assert.deepEqual(['secondaryModel', 'router', 'effortCap'].map(key => agents.profile(bot.agentId)[key]), [undefined, undefined, undefined], 'Inherit is not stored');
+  assert.equal(bot.secondaryPick()?.id, other.id);
+
+  // Auto effort: the router sees only the bot's own model, within its cap; escalation is that model's highest effort.
+  const model = primary.resolveWorker(picked.id);
+  const auto = `autoeffort:${model.provider || 'codex'}:${model.model}`;
+  assert.equal(primary.resolveWorker(auto)?.model, model.model, 'an Auto effort mode resolves to its model');
+  const offered = bot.autoCatalog([], auto);
+  assert.ok(offered.length >= 2 && offered.every(p => p.model === model.model), 'only that model’s efforts');
+  await agents.saveAgent({ ...agents.profile(bot.agentId), mode: auto, effortCap: 'medium' });
+  assert.ok(bot.autoCatalog([], auto).every(p => ['low', 'medium'].includes(p.effort)), 'within the bot’s cap');
+  assert.equal(bot.higherEffort({ provider: model.provider, model: model.model, effort: 'low' })?.effort, 'medium', 'escalation: the same model at its highest effort within the cap');
+  assert.equal(bot.higherEffort({ provider: model.provider, model: model.model, effort: 'medium' }), null, 'none when the task already ran there');
+});
+
+test('bots saved on Auto move to Auto effort on the model they ran last, else Hub’s; Hub moves to its current model', async t => {
+  const { agents, primary, add } = await setup(t);
+  primary.data.settings.claudeEnabled = true;
+  primary.claude.status = { loggedIn: true };
+  primary.claude.models = [{ id: 'claude-cli:claude-opus-5-5', provider: 'claude-cli', model: 'claude-opus-5-5', label: 'Opus', worker: true, rank: 35, efforts: ['high'] }];
+  const ran = await add('Ran'), fresh = await add('Fresh'), gone = await add('Gone');
+  for (const bot of [ran, fresh, gone]) agents.profile(bot.agentId).mode = 'auto';
+  agents.conversation(ran, true).routes = [{ id: 'claude-cli:claude-opus-5-5:high', provider: 'claude-cli', model: 'claude-opus-5-5', effort: 'high', at: 2 }];
+  agents.conversation(gone, true).routes = [{ id: 'codex:retired-model:high', provider: 'codex', model: 'retired-model', effort: 'high', at: 2 }];
+  Object.assign(primary.data, { hubMode: 'codex:gpt-5.6-terra:low' });
+  primary.data.settings.mode = 'auto';
+  agents.migrateAutoModes();
+  assert.deepEqual([primary.data.settings.mode, agents.profile(ran.agentId).mode, agents.profile(fresh.agentId).mode, agents.profile(gone.agentId).mode],
+    ['autoeffort:codex:gpt-5.6-terra', 'autoeffort:claude-cli:claude-opus-5-5', 'autoeffort:codex:gpt-5.6-terra', 'autoeffort:codex:gpt-5.6-terra'],
+    'a model no longer offered is not saved: Hub’s model instead');
+  assert.equal(ran.data.settings.mode, 'autoeffort:claude-cli:claude-opus-5-5', 'the bot runs it at once');
+  // Hub on a set model: a bot that never ran takes that model with Auto effort (it was left on Auto before).
+  const later = await add('Later');
+  agents.profile(later.agentId).mode = 'auto';
+  primary.data.settings.mode = 'codex:gpt-5.6-terra:low';
+  agents.migrateAutoModes();
+  assert.equal(agents.profile(later.agentId).mode, 'autoeffort:codex:gpt-5.6-terra');
+});
+
+test('review fixes: Auto effort without a router keeps the cap, a disabled Secondary model never blocks other edits, a bot cannot change Hub’s settings, and an unavailable old router means no router', async t => {
+  const { agents, primary, add } = await setup(t);
+  primary.models[0].supportedReasoningEfforts = ['low', 'medium', 'high'].map(reasoningEffort => ({ reasoningEffort }));
+  agents.configure = async controller => { controller.client.models = primary.models; };
+  const bot = await add('Docs');
+  const model = primary.resolveWorker('terra-light');
+  const auto = `autoeffort:${model.provider || 'codex'}:${model.model}`;
+  await agents.saveAgent({ ...agents.profile(bot.agentId), mode: auto, router: 'off', effortCap: 'low' });
+  assert.equal(bot.autoEffortDefault(auto).effort, 'low', 'no router: the default effort stays within the cap');
+
+  const picked = primary.chatScanChoices().find(p => primary.available(p));
+  await agents.saveAgent({ ...agents.profile(bot.agentId), secondaryModel: picked.id });
+  primary.chatScanChoices = () => [];
+  await agents.saveAgent({ ...agents.profile(bot.agentId), name: 'Docs writer' });
+  assert.equal(agents.profile(bot.agentId).name, 'Docs writer', 'a Secondary model disabled later does not block a rename');
+
+  assert.throws(() => agents.settings({ router: 'jev' }, bot.agentId), /Edit dialog/);
+  assert.equal(primary.data.settings.router, undefined, 'Hub’s router is unchanged');
+
+  // Nothing picked: no Secondary model, even with the old router available (it no longer stands in, the user's choice
+  // 2026-11-04), so Auto effort runs the default effort and the dialog shows Off. An old chat checker still counts.
+  const fresh = await add('Fresh');
+  delete fresh.data.settings.secondaryModel; delete fresh.data.settings.chatScanModel;
+  assert.ok(fresh.routerChoices().some(p => p.id === fresh.data.settings.routerPreset && fresh.available(p)), 'the old router is there');
+  assert.deepEqual([fresh.secondaryPick(), fresh.secondaryId(), fresh.routerKind()], [null, 'off', 'off']);
+  delete primary.chatScanChoices; // emptied above for the rename check
+  primary.data.settings.chatScanModel = picked.id; // the checker was one setting for the whole app
+  assert.equal(fresh.secondaryPick()?.id, picked.id, 'the chat checker picked before Secondary models stands in');
 });

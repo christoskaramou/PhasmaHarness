@@ -186,27 +186,6 @@ test('Jev context ranking names each excerpt by an ID key, never by list positio
   assert.equal(result.mode, 'jev');
 });
 
-test('the Jev comparison follows Jev routing without touching the active routing', async () => {
-  const router = new SmartRouter(__dirname);
-  const order = [];
-  router.inspect = async () => { order.push('scan'); return evidence; };
-  router.jev = { configured: true, async classify(context) {
-    const scanned = JSON.stringify(context).includes('"available":true');
-    order.push(scanned ? 'evidence' : 'first');
-    return { decision: decision(true), confidence: 0.8, estimatedCostUsd: 0.0001 };
-  } };
-  // A comparison may run while the router is busy with the next message.
-  router.abort = new AbortController();
-  const result = await router.shadowJev('review changes', session, new AbortController().signal);
-  assert.deepEqual(order, ['first', 'scan', 'evidence']);
-  assert.deepEqual(result, { id: 'worker', provider: 'codex', model: 'test-model', effort: 'low', confidence: 0.8, costUsd: 0.0002 });
-  order.length = 0;
-  router.jev.classify = async () => { order.push('first'); return { decision: decision(false), confidence: 0.9, estimatedCostUsd: 0.0001 }; };
-  router.inspect = async () => assert.fail('a general message needs no workspace scan');
-  assert.equal((await router.shadowJev('hello', session, new AbortController().signal)).costUsd, 0.0001);
-  assert.deepEqual(order, ['first']);
-});
-
 // One model per task: fixtures with two models so a kept worker, a fresh pick and the strongest model differ.
 const small = { id: 'codex:small:low', provider: 'codex', model: 'small', effort: 'low', label: 'small · low' };
 const smallHigh = { id: 'codex:small:high', provider: 'codex', model: 'small', effort: 'high', label: 'small · high' };
@@ -397,12 +376,6 @@ test('Harness picks the worker: unmeasured workers are not ranked, unknown cost 
     'a repair by a stronger model does not become the chat\'s model for new work');
   assert.equal(id({}, available.filter(p => p.model !== 'cheap')), 'codex:best:low', 'known cost before unknown cost');
   assert.equal(id({}, [row('unmeasured'), row('other')]), 'codex:unmeasured:low', 'nothing measured: the first offered model');
-  // Settings → Routing → Model for simple messages: low work only, while offered; it beats the current model too.
-  const yours = { autoLowModel: 'codex:unmeasured:low', routes: [{ id: 'codex:nocost:low' }] };
-  assert.equal(id(yours), 'codex:unmeasured:low');
-  assert.match(pickPreset(low, yours, available).reason, /^low difficulty: your model for simple messages\. test$/);
-  assert.equal(pickPreset({ difficulty: 'medium', reason: 'test' }, yours, available).preset, 'codex:nocost:low', 'medium keeps Harness\'s pick');
-  assert.equal(id({ autoLowModel: 'codex:gone:low' }), 'codex:cheap:low', 'a model no longer offered (cap, limit, disabled) leaves it to Harness');
   // 2026-10-25: the reason named the model's first preset's score (low, 42.3) for an Opus high pick.
   const efforts = ['low', 'medium', 'high'].map((effort, i) => ({ id: `codex:opus:${effort}`, provider: 'codex', model: 'opus', effort,
     benchmarks: effort === 'medium' ? [] : [{ source: 'aa-index', version: '4', harness: 'aa', score: [50, 0, 70][i] }] }));

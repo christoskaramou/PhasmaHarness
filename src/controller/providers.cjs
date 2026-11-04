@@ -7,7 +7,18 @@ const { EFFORTS: CLAUDE_EFFORTS } = require('../providers/claude.cjs');
 const { NATIVE_CLI_INFO } = require('../providers/native-cli.cjs');
 const { codexWindowReset } = require('../providers/limits.cjs');
 const { PRESETS, ROUTER_PRESETS } = require('../routing/router.cjs');
-const { capCatalog } = require('../routing/effort-cap.cjs');
+const { capCatalog, EFFORT_ORDER } = require('../routing/effort-cap.cjs');
+// "use higher effort", "more effort", "max effort", "effort to high", "use xhigh effort".
+const EFFORT_WORDS = '(low|medium|high|xhigh|max(?:imum)?|higher|highest|more|bigger|stronger|extra)';
+function askedEffort(text) {
+  if (typeof text !== 'string') return null;
+  const match = text.match(new RegExp(`\\b${EFFORT_WORDS}\\s+(?:reasoning\\s+)?effort\\b`, 'i')) ||
+    text.match(new RegExp(`\\beffort\\s+(?:to\\s+|at\\s+|on\\s+)?${EFFORT_WORDS}\\b`, 'i'));
+  if (!match) return null;
+  const word = match[1].toLowerCase();
+  return ['low', 'medium', 'high', 'xhigh'].includes(word) ? word : 'top';
+}
+const { parseAutoEffort } = require('../../ui/agent-state.js');
 const { DEFAULT_ROUTER, LEGACY_CLAUDE_ROUTERS, PROVIDER_NAMES, cheapRouter } = require('./shared.cjs');
 
 module.exports = {
@@ -295,6 +306,14 @@ module.exports = {
 
   resolveWorker(id) {
     if (!id || id === 'auto') return null;
+    // Auto effort: the model at its preferred level, else medium, else its lowest (the effort used without a router).
+    const auto = parseAutoEffort(id);
+    if (auto) {
+      const variants = this.catalog().filter(p => p.worker && (p.provider || 'codex') === auto.provider && p.model === auto.model);
+      const usable = variants.filter(p => this.available(p));
+      const pool = usable.length ? usable : variants;
+      return pool.find(p => p.preferred) || pool.find(p => p.effort === 'medium') || pool[0] || null;
+    }
     const direct = this.catalog().find(p => p.id === id && p.worker);
     if (direct) return direct;
     // An ID saved before efforts were per worker (claude-cli:<model>, cursor-cli:<model>:default, or an older Cursor
@@ -324,7 +343,7 @@ module.exports = {
 
   warmRouter() {
     if (this.routingProvider === 'jev' || this.connection !== 'ready' || !this.smartRouter.warm || this.planPreset()) return;
-    const choice = this.routerChoices().find(p => p.id === this.data.settings.routerPreset && this.available(p));
+    const choice = this.secondaryPick();
     if (choice) this.smartRouter.warm(choice);
   },
 
@@ -336,17 +355,112 @@ module.exports = {
     if (router) this.data.settings.routerPreset = router.id;
   },
 
-  // The configured router, or, while its provider is at a usage limit, the cheapest available router of another provider.
+  // The bot's Secondary model (its Edit dialog) does its secondary work: routing its messages when it is the router,
+  // checking and revising its replies, finding rules from them, reply suggestions and cold-start summaries. Null while
+  // Off, disabled or unavailable; never saved, the chat checker picked before Secondary models stands in (the user's
+  // pick), and otherwise there is none: the old router no longer stands in (2026-11-04, the user's choice). At its usage
+  // limit there is none either: a model the user picked is never swapped for another provider's (2026-11-04, the
+  // user's rule), so routing, checks and the rest skip or run their defaults until the limit clears.
+  secondaryPick() {
+    const picked = this.secondaryChoice();
+    return picked && this.available(picked) && !this.limits.limited(picked.provider || 'codex', picked.model) ? picked : null;
+  },
+
+  // The Secondary model the user picked (saved, or never saved: the chat checker picked before Secondary models).
+  secondaryChoice() {
+    const saved = this.secondarySaved();
+    if (saved === 'off') return null;
+    return saved ? this.chatScanChoices().find(p => p.id === saved) || null : this.sharedChatScanner();
+  },
+
+
+  // The Secondary model as saved: Off, a model, or null when never saved (a bot gets its own or its creator's, see
+  // agents.sync). Never saved: the chat checker picked before Secondary models (secondaryPick).
+  secondarySaved() {
+    const id = this.data.settings.secondaryModel;
+    return id && !['auto', 'inherit'].includes(id) ? id : null;
+  },
+
+  // The Secondary model shown for a bot: as saved, else the chat checker picked before Secondary models, else Off.
+  secondaryId() {
+    return this.secondarySaved() || this.secondaryChoice()?.id || 'off';
+  },
+
+  // The router as saved: Off, Jev or the Secondary model (Hub's, saved before per-bot routers, was its routing setting).
+  routerKindSaved() {
+    return this.data.settings.router || (this.data.settings.routing === 'jev' ? 'jev' : 'secondary');
+  },
+
+  // The router that runs: Jev, else the Secondary model, else none. Jev turned off in Providers, or without a saved key,
+  // routes with the Secondary model; a Secondary model router with the Secondary model Off (or unavailable) means no
+  // router: Auto effort then runs the model's default effort.
+  routerKind() {
+    const kind = this.routerKindSaved();
+    // A Jev call that fails (down, key refused) routes that message with the Secondary model instead (send).
+    const jev = kind === 'jev' && this.data.settings.jevEnabled !== false && this.smartRouter.jev?.configured !== false;
+    if (jev) return 'jev';
+    return kind !== 'off' && this.secondaryPick() ? 'secondary' : 'off';
+  },
+
+  // Routing turned off by the user: Router Off, or no router left with the Secondary model saved as Off. An old router
+  // that is only unavailable is not this: legacy Auto then still finds another router.
+  routerTurnedOff() {
+    return this.routerKindSaved() === 'off' || (this.secondarySaved() === 'off' && this.routerKind() === 'off');
+  },
+
+  // The model that does a bot's secondary work: its Secondary model; none while that is Off.
   effectiveRouter() {
-    const configured = this.routerChoices().find(p => p.id === this.data.settings.routerPreset);
-    if (!configured || !this.limits.limited(configured.provider || 'codex', configured.model)) return configured;
-    return cheapRouter(this.routerChoices().filter(p => this.available(p) && !this.limits.limited(p.provider || 'codex', p.model))) || configured;
+    return this.secondaryPick();
+  },
+
+  // The bot's one model (an Auto effort mode, or a model at a set effort; Hub's current model on legacy Auto) and its
+  // efforts within the bot's cap, lowest first.
+  ownVariants(mode = this.data.settings.mode) {
+    const auto = parseAutoEffort(mode);
+    const base = auto || (mode === 'auto' && this.isCoordinator?.() ? this.resolveWorker(this.data.hubMode) : this.resolveWorker(mode));
+    if (!base?.model) return [];
+    const same = this.catalog().filter(p => p.worker && (p.provider || 'codex') === (base.provider || 'codex') && p.model === base.model && this.available(p));
+    return capCatalog(same, this.data.settings.effortCap).sort((a, b) => EFFORT_ORDER.indexOf(a.effort) - EFFORT_ORDER.indexOf(b.effort));
+  },
+
+  // Auto effort without a router: the model's preferred effort, else medium, else its highest, within the bot's cap.
+  autoEffortDefault(mode) {
+    const variants = this.ownVariants(mode);
+    return variants.find(p => p.preferred) || variants.find(p => p.effort === 'medium') || variants.at(-1) || this.resolveWorker(mode);
+  },
+
+  // An effort the user asked for in their message ("use higher effort", "use high effort"), on the model the bot runs:
+  // a named level runs that level, never above the cap; "higher", "more", "max" or "highest" runs the highest within the
+  // cap (the user's pick, 2026-11-04). The router is not asked, and a continuing task moves to it too. Null otherwise.
+  requestedEffort(text, mode, session, { more = false } = {}) {
+    const asked = askedEffort(text);
+    // more: only "higher", "more", "max" (Hub, whose messages name efforts for the workers it starts).
+    if (!asked || (more && asked !== 'top')) return null;
+    const last = (session?.routes || []).findLast(route => !route.directAnswer && route.model);
+    const base = parseAutoEffort(mode) || (mode === 'auto' ? last : this.resolveWorker(mode));
+    if (!base?.model) return null;
+    const variants = this.ownVariants(`autoeffort:${base.provider || 'codex'}:${base.model}`).filter(p => p.effort);
+    if (!variants.length) return null;
+    if (asked === 'top') return variants.at(-1);
+    return variants.find(p => p.effort === asked) || variants.filter(p => EFFORT_ORDER.indexOf(p.effort) <= EFFORT_ORDER.indexOf(asked)).at(-1) || variants[0];
+  },
+
+  // Escalation: the bot's model at its highest effort within its cap, when that is higher than `route`'s. None while its
+  // provider is at a usage limit, so a repair, rule writer or dream does not start a call that cannot run.
+  higherEffort(route) {
+    const top = this.ownVariants(route ? `autoeffort:${route.provider || 'codex'}:${route.model}` : undefined).at(-1);
+    if (!top || this.limits.limited(top.provider || 'codex', top.model)) return null;
+    return !route || EFFORT_ORDER.indexOf(top.effort) > EFFORT_ORDER.indexOf(route.effort) ? top : null;
   },
 
   // The workers Auto routes among: enabled, within the effort cap, image-capable for images, and without those of a
   // provider at its usage limit while another provider can take the message.
-  autoCatalog(images = []) {
-    const usable = capCatalog(this.catalog().filter(p => p.worker && this.available(p) && (!images.length || p.images)), this.data.settings.effortCap);
+  autoCatalog(images = [], mode = null) {
+    // Auto effort: only that model's efforts. Images do not filter it out: its one model runs, and a text-only one is
+    // refused after routing unless Jev image assist describes the images (send), as with its router off.
+    const auto = parseAutoEffort(mode);
+    const usable = capCatalog(this.catalog().filter(p => p.worker && this.available(p) && (!images.length || p.images || auto) &&
+      (!auto || ((p.provider || 'codex') === auto.provider && p.model === auto.model))), this.data.settings.effortCap);
     const unlimited = usable.filter(p => !this.limits.limited(p.provider || 'codex', p.model));
     return unlimited.length ? unlimited : usable;
   },
@@ -407,29 +521,6 @@ module.exports = {
   },
 
   // Codex (ChatGPT) usage windows; a window at 100% marks Codex limited until it resets.
-  // Opt-in (Settings → Routing → Compare with Jev): after a message is routed, ask Jev in the background which
-  // worker it would pick and log it next to the one that runs. Log only: routing and the worker are unaffected,
-  // and a comparison still running when the next message is sent makes that message skip it.
-  compareWithJev(session, text, images, selected, previousState) {
-    const settings = this.data.settings;
-    if (settings.jevCompare !== true || settings.routing === 'jev' || !this.jevCompare || !this.smartRouter.jev?.configured || !this.smartRouter.shadowJev) return;
-    if (!selected?.id || selected.wikiTaskId || this.jevComparing) return;
-    const usable = capCatalog(this.catalog().filter(p => p.worker && this.available(p) && (!images.length || p.images)), settings.effortCap);
-    const unlimited = usable.filter(p => !this.limits.limited(p.provider || 'codex', p.model));
-    // A copy of the conversation as it was before this message, like the router saw it.
-    const context = { ...session, ...previousState, items: [...(session.items || [])], routes: [...(session.routes || [])], directContext: [...(session.directContext || [])],
-      configuredChecks: settings.checks?.[session.workspace] || [], routingCatalog: unlimited.length ? unlimited : usable, attachedImageCount: images.length, attachedImages: this.jevImageAssist() ? images : [],
-      autoLowModel: settings.autoLowModel };
-    const used = { id: selected.id, provider: selected.provider || 'codex', model: selected.model, effort: selected.effort || null, source: selected.source === 'manual' ? 'manual' : 'router' };
-    const abort = new AbortController();
-    this.jevComparing = abort;
-    const compare = () => this.smartRouter.shadowJev(text, context, AbortSignal.any([abort.signal, AbortSignal.timeout(30000)]));
-    (this.agents ? this.agents.budgets.scoped(session, compare) : compare())
-      .then(jev => this.jevCompare.record({ at: Date.now(), used, jev }),
-        error => { if (!abort.signal.aborted) this.jevCompare.record({ at: Date.now(), used, error: String(error?.message || error).slice(0, 160) }); })
-      .finally(() => { if (this.jevComparing === abort) this.jevComparing = null; if (!abort.signal.aborted) this.changed(); });
-  },
-
   // A rolling update is merged into the last read only for the same limit bucket (other buckets are per-model quotas).
   // With credits, usage can continue past a full window, so only a failed turn marks the limit then.
   codexUsage(snapshot, merge = false) {
@@ -501,7 +592,9 @@ module.exports = {
       this.data.settings.providers = this.data.settings.providers.filter(p => p.id !== provider.id);
       this.data.settings.providerModels = (this.data.settings.providerModels || []).filter(m => m.provider !== provider.id);
       // Nothing may keep pointing at the removed provider's models (other providers' choices are left alone).
-      const settings = this.data.settings, removed = id => String(id || '').startsWith(provider.id + ':');
+      // An Auto effort mode names its provider after the prefix (autoeffort:<provider>:<model>).
+      const settings = this.data.settings, removed = id => String(id || '').startsWith(provider.id + ':') || parseAutoEffort(id)?.provider === provider.id;
+      // Hub then picks a model on its next message and moves to Auto effort on it (coordinatorChoice).
       if (removed(settings.mode)) settings.mode = 'auto';
       if (removed(settings.routerPreset))
         settings.routerPreset = cheapRouter(this.routerChoices().filter(p => this.available(p)))?.id || DEFAULT_ROUTER;

@@ -11,7 +11,8 @@ function setup() {
     data: { settings: { mode: 'auto', workspace: '/project', access: 'workspace-write', effortCap: 'high',
       checks: {}, privateCredential: 'NEVER RETURN THIS', providers: [{ id: 'local', name: 'Local', baseUrl: 'http://localhost/v1', enabled: true }] } },
     providers: { configured: () => true }, smartRouter: { jev: { keyStore: { configured: true } }, benchmarks: { data: { records: [] } } },
-    catalog: () => [{ id: 'model', enabled: true }], routerChoices: () => [{ id: 'router' }],
+    catalog: () => [{ id: 'model', enabled: true, worker: true }], routerChoices: () => [{ id: 'router' }],
+    chatScanChoices: () => [{ id: 'model' }], resolveWorker: id => (id === 'model' || id === 'autoeffort:codex:model' ? { id: 'model' } : null), available: () => true,
     snapshot: () => ({ nativeCLIs: {} }), changed() {}, warmRouter() {},
   };
   Object.assign(agents, { busy: true, closing: false, allControllers: () => [worker],
@@ -110,18 +111,30 @@ test('a failed confirmation cannot leave a pending change blocking the runner fo
 });
 
 
-test('Routing model changes method and model together while retaining the Jev fallback', async () => {
-  const { service, worker, agents, saved } = setup();
-  worker.data.settings.routerPreset = 'router';
-  await service.write(worker, { name: 'routingModel', value: 'jev' });
+test('Router, Secondary model and Effort cap are written per bot; Hub has no Inherit', async () => {
+  const { service, worker, agents, saved, prompts } = setup();
+  await service.write(worker, { name: 'router', value: 'jev' });
   agents.busy = false;
   await service.flush();
-  assert.equal(service.read(worker, { names: ['routingModel'] }).settings.routingModel.value, 'jev');
-  assert.equal(worker.data.settings.routerPreset, 'router');
-  await service.write(worker, { name: 'routingModel', value: 'router' });
-  await service.flush();
-  assert.deepEqual(saved[1].values, { routing: 'smart', routerPreset: 'router' });
-  assert.equal(service.read(worker, { names: ['routingModel'] }).settings.routingModel.value, 'router');
+  assert.deepEqual(saved[0], { values: { router: 'jev' }, id: 'main' });
+  assert.equal(service.read(worker, { names: ['router'] }).settings.router.value, 'jev');
+  await assert.rejects(service.write(worker, { name: 'router', value: 'smart' }));
+  await assert.rejects(service.write(worker, { name: 'effortCap', value: 'unlimited' }));
+  // Refused before the user is asked, since applying would fail: Inherit for Hub, and any of the three for a sub-bot.
+  await assert.rejects(service.write(worker, { name: 'effortCap', value: 'inherit' }), /Hub has no Inherit/);
+  await assert.rejects(service.write(worker, { name: 'secondaryModel', value: 'inherit' }), /Hub has no Inherit/);
+  const sub = { ...worker, agentId: 'sub', data: { settings: { ...worker.data.settings } } };
+  Object.assign(agents, { controller: id => (id === 'sub' ? sub : worker), profile: id => ({ id, createdBy: 'parent' }), isSubBot: profile => profile.createdBy !== 'main' });
+  const prompted = prompts.length;
+  await assert.rejects(service.write(worker, { name: 'mode', value: 'auto', agentId: 'sub' }), /Choose an available model ID/, 'no legacy Auto for a bot');
+  await assert.rejects(service.write(worker, { name: 'mode', value: 'auto' }), /Choose an available model ID/, 'nor for Hub');
+  for (const [name, value] of [['mode', 'no-such-model'], ['secondaryModel', 'no-such-model'], ['dreamModel', 'no-such-model']])
+    await assert.rejects(service.write(worker, { name, value }), /Choose/, `an unknown ${name} is refused before the user is asked`);
+  await assert.rejects(service.write(worker, { name: 'mode', value: 'model', agentId: 'sub' }), /works for the bot that made it/, 'a sub-bot’s model follows its creator');
+  await assert.rejects(service.write(worker, { name: 'router', value: 'off', agentId: 'sub' }), /works for the bot that made it/);
+  assert.equal(prompts.length, prompted, 'the user was never asked');
+  assert.deepEqual(['router', 'secondaryModel', 'effortCap', 'mode'].map(name => service.read(worker, { names: [name], agentId: 'sub' }).settings[name].writable),
+    [false, false, false, false], 'read_settings does not offer them, or the model, for a sub-bot');
 });
 
 test('a confirmation answered after its turn ended, or never answered, applies nothing', async t => {

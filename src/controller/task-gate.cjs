@@ -90,13 +90,6 @@ module.exports = {
     if (checksSkippedByRouter) task.checks = Object.freeze([]);
     task.checksSkippedByRouter = checksSkippedByRouter;
     if (selected) task.route = routeOf(selected);
-    // Auto's kind of work and difficulty, and whether it continued the previous task, for proven setups
-    // (src/setups.cjs); a manual pick has none.
-    if (selected?.assessment?.taskKind) {
-      task.kind = selected.assessment.taskKind;
-      task.difficulty = selected.assessment.difficulty || null;
-      task.sameTask = selected.sameTask === true;
-    }
     task.summary = summaryLine(task);
     return task;
   },
@@ -391,7 +384,6 @@ module.exports = {
       // Trial outcomes first, so a carried trial rule's failure reaches the lesson in the same pass.
       this.recordTrials(session, task);
       this.saveLesson(session, task);
-      this.recordSetup(session, task);
       // At most once a day per project: review its memory across chats in the background (src/controller/dream.cjs).
       this.maybeDream(session);
       this.releaseSlot(session);
@@ -549,10 +541,9 @@ module.exports = {
     if (task.repair || !task.route?.model || this.comparisonOf(session))
       return null;
 
-    const effort = task.difficulty || task.route.effort || 'medium';
-    const repair = this.repairPreset(effort, (task.inputImages || []).length > 0);
-    const same = repair && (repair.provider || 'codex') === (task.route.provider || 'codex') && repair.model === task.route.model;
-    if (!repair || same || this.agents?.backgroundQuota(this, session, repair))
+    // The same model at its highest effort within the bot's cap; none when the task already ran there.
+    const repair = this.repairPreset(task.route, (task.inputImages || []).length > 0);
+    if (!repair || this.agents?.backgroundQuota(this, session, repair))
       return null;
 
     return repair;

@@ -8,6 +8,19 @@ var HarnessAgentState = (() => {
   /** @type {{workspace:'inheritWorkspace', access:'inheritAccess', mode:'inheritMode'}} */
   const INHERITED = { workspace: 'inheritWorkspace', access: 'inheritAccess', mode: 'inheritMode' };
 
+  // Auto effort: a bot's one model, its effort picked for each message by the bot's router. Saved as one mode string.
+  const AUTO_EFFORT = 'autoeffort:';
+  /** @param {string|undefined} provider @param {string} model */
+  const autoEffortMode = (provider, model) => `${AUTO_EFFORT}${provider || 'codex'}:${model}`;
+  /** @param {unknown} mode */
+  function parseAutoEffort(mode) {
+    if (typeof mode !== 'string' || !mode.startsWith(AUTO_EFFORT)) return null;
+    const rest = mode.slice(AUTO_EFFORT.length), at = rest.indexOf(':');
+    return at > 0 && at < rest.length - 1 ? { provider: rest.slice(0, at), model: rest.slice(at + 1) } : null;
+  }
+  // Settings each bot has, or takes from its creator (Hub, for a top-level bot) on Inherit, the default.
+  const BOT_SETTINGS = { router: ['off', 'jev', 'secondary'], effortCap: ['low', 'medium', 'high', 'xhigh', 'max'] };
+
   /** @param {Profile|null|undefined} profile */
   function isSubBot(profile) {
     return !!profile?.createdBy && profile.createdBy !== 'main' && !profile.temporaryBatch;
@@ -92,6 +105,6 @@ var HarnessAgentState = (() => {
     return next;
   }
 
-  return { INHERITED, isSubBot, inheritedSource, backgroundView, trimFleet, keepSessions };
+  return { INHERITED, AUTO_EFFORT, autoEffortMode, parseAutoEffort, BOT_SETTINGS, isSubBot, inheritedSource, backgroundView, trimFleet, keepSessions };
 })();
 if (typeof module !== 'undefined') module.exports = HarnessAgentState;

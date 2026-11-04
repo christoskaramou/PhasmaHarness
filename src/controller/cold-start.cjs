@@ -8,7 +8,9 @@ const { stripTaskStatus } = require('../routing/task-state.cjs');
 // approximation the user sets. After it, resuming a big native session re-reads all of it, tool output included, at the
 // uncached price. Instead the router model summarizes the older visible chat (once; later cold starts extend the summary)
 // and a new native session gets that summary plus the latest messages.
-const COLD_START_MINUTES = 60, COLD_START_TOKENS = 100000, KEEP = 4;
+// 2026-11-04 (speed plan #5, the user's pick): 15 idle minutes by default, and a chat over COLD_START_LIMIT tokens starts
+// fresh at its next message even when not idle, so no turn carries a huge context.
+const COLD_START_MINUTES = 15, COLD_START_TOKENS = 100000, COLD_START_LIMIT = 300000, KEEP = 4;
 
 const chatMessages = items => items
   .filter(item => item.type === 'userMessage' || (item.type === 'agentMessage' && item.phase !== 'commentary'))
@@ -37,7 +39,8 @@ module.exports = {
     const tokens = this.data.settings.coldStartTokens ?? COLD_START_TOKENS;
     // Chats from before this setting have no end time; their last turn's start stands in.
     const endedAt = session[backend + 'TurnEndedAt'] ?? session.routes?.findLast(route => (route.provider || 'codex') === (selected.provider || 'codex'))?.at;
-    if (!minutes || !session[sessionKey] || !endedAt || Date.now() - endedAt < minutes * 60000) return null;
+    if (!minutes || !session[sessionKey] || !endedAt) return null;
+    const idle = Date.now() - endedAt >= minutes * 60000;
     const history = chatMessages(session.items.filter(item => item.id !== clientId && item.clientId !== clientId));
     // The last call's input is the native context size. Cursor and DeepSeek report none, so what the native session was
     // given stands in at about four characters a token: after a cold start the summary plus the messages after it,
@@ -46,9 +49,12 @@ module.exports = {
     const covered = session.coldSummaryThrough ? history.findIndex(message => message.id === session.coldSummaryThrough) : -1;
     const size = measured ?? Math.ceil(covered < 0 ? JSON.stringify(history).length / 4
       : ((session.coldSummary || '').length + JSON.stringify(history.slice(covered + 1)).length) / 4);
-    if (size < tokens || history.length <= KEEP) return null;
-    const router = this.effectiveRouter();
-    if (!router || !this.available(router)) return null;
+    const over = size >= Math.max(COLD_START_LIMIT, tokens);
+    if ((!idle || size < tokens) && !over) return null;
+    if (history.length <= KEEP) return null;
+    // Only the Secondary model the user picked summarizes the chat; never another provider's in its place.
+    const router = this.secondaryPick();
+    if (!router) return null;
     // Edited or cleared history: the old summary no longer matches.
     if (session.coldSummaryThrough && !history.some(message => message.id === session.coldSummaryThrough)) {
       session.coldSummary = ''; session.coldSummaryThrough = null;
@@ -63,7 +69,8 @@ module.exports = {
     // Held as pendingColdStep until the message is committed: the chat draws it after the pending message, then moves it
     // into the items after that message, so the row never sits above the message the user sent.
     const step = { id: randomUUID(), type: 'toolStep', localOnly: true, createdAt: Date.now(), turnId: null, tool: 'cold_start', coldStart: true, title: `Cold start · ${by} · summarizing`, lines: [
-      `Why: this chat was idle ${idleMinutes} min (setting: ${minutes}) and its context is ${number(size)} tokens${measured === undefined ? covered < 0 ? ', estimated from the visible chat' : ', estimated from the earlier summary and the messages after it' : ''} (setting: ${number(tokens)}). The provider's prompt cache has likely expired, so resuming would re-read all of it at the full price.`,
+      (idle ? `Why: this chat was idle ${idleMinutes} min (setting: ${minutes}) and its context is ${number(size)} tokens${measured === undefined ? covered < 0 ? ', estimated from the visible chat' : ', estimated from the earlier summary and the messages after it' : ''} (setting: ${number(tokens)}). The provider's prompt cache has likely expired, so resuming would re-read all of it at the full price.`
+        : `Why: this chat's context is ${number(size)} tokens, over the ${number(Math.max(COLD_START_LIMIT, tokens))} limit, so every call would re-read all of it and start slowly.`),
       `What: ${by} summarizes the older chat in about ${parts} call${parts === 1 ? '' : 's'}${start ? ', extending the earlier summary' : ''}. Then a fresh ${worker} session gets that summary and the latest ${KEEP} messages. Your visible chat stays as it is.`,
     ] };
     session.pendingColdStep = step; this.changed();

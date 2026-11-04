@@ -8,8 +8,6 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { projectRules } = require('../workspace/project-instructions.cjs');
 const { redact } = require('../log.cjs');
-const { capCatalog } = require('../routing/effort-cap.cjs');
-const { strongest, atEffort } = require('../routing/smart-router.cjs');
 const chatScan = require('../chat-scan.cjs');
 const trials = require('../trials.cjs');
 const { checkReflection } = require('../reflection.cjs');
@@ -69,8 +67,8 @@ module.exports = {
       request: textOf(items[0]) };
   },
 
-  // The chat checker reads the exchange: its verdicts decide the chat rules the task carried, how the user took a task
-  // without checks becomes its proven-setup record, and a worthy mistake goes to the strongest model. Each exchange once,
+  // The chat checker reads the exchange: its verdicts decide the chat rules the task carried, and a worthy mistake goes to
+  // the rule writer. Each exchange once,
   // within the background usage limit.
   runScan(session, exchange, reaction) {
     const owner = this.agents?.primary || this;
@@ -97,13 +95,6 @@ module.exports = {
         for (const record of trials.recordChatVerdicts(root, exchange.task, scan.verdicts))
           this.settleTrial(session, root, project, record);
       }
-
-      // Only a task that settled without checks: one with check results has its record from them already. A follow-up
-      // Auto kept on the same task would score the earlier mistake's fix as right first time, and a routine run is
-      // "accepted" by any next message, since the user did not ask for it then.
-      const unchecked = exchange.task?.state === 'not-checked' && !exchange.task.sameTask && !exchange.items[0]?.routineRun;
-      if (unchecked && scan.outcome)
-        this.recordSetup(exchange.taskSession, exchange.task, { outcome: scan.outcome, noticeIn: session });
 
       return scan.worthy ? this.escalateExchange(session, exchange, reaction, root, rules, scan) : null;
     });
@@ -195,59 +186,34 @@ module.exports = {
   // The chat checker the user picked in Settings; none (Off, the default) means no scanning. Only that model checks: while
   // it is unavailable nothing is scanned.
   chatScanner() {
+    // The bot's Secondary model; none while it is Off. Never saved: the chat checker picked before Secondary models.
+    // Only the model the user picked reads chats: at its usage limit nothing is checked, rather than handing the
+    // exchange to another provider's router (secondaryPick does that for routing only).
+    return this.secondaryPick();
+  },
+
+  // The checker saved for the whole app before Secondary models; dreaming (per project, across bots) still reads it.
+  sharedChatScanner() {
     const owner = this.agents?.primary || this;
     const picked = owner.chatScanChoices().find(p => p.id === owner.data.settings.chatScanModel);
     return picked && owner.available(picked) ? picked : null;
   },
 
-  // Enabled workers that `fit`, within the effort cap and usage limits, with measured scores joined as the router's own
-  // catalog gets them.
-  measuredWorkers(fits) {
-    const owner = this.agents?.primary || this;
-    const workers = owner.catalog().filter(p => p.worker && owner.available(p) && fits(p));
-    const capped = capCatalog(workers, owner.data.settings.effortCap).filter(p => !owner.limits?.limited(p.provider || 'codex', p.model));
-    return owner.smartRouter.benchmarks?.catalog(capped) || capped;
-  },
-
-  // The Escalation model picked in Settings, used as set while it is enabled, below its usage limit and `fits`; null on
-  // Auto (the default) or otherwise, and the caller picks the strongest measured model instead.
-  escalationPick(fits) {
-    const owner = this.agents?.primary || this;
-    const id = owner.data.settings.escalationModel;
-    const picked = id && id !== 'auto' ? owner.catalog().find(p => p.worker && p.id === id) : null;
-    const usable = picked && owner.available(picked) && !owner.limits?.limited(picked.provider || 'codex', picked.model);
-    return usable && fits(picked) ? picked : null;
-  },
-
-  // The chat rule writer: the Escalation model, else the strongest enabled worker, within the effort cap and usage limits,
-  // at medium effort when it has one. Without measured scores (offline, models too new) the router's model writes it, so a
-  // flag is not lost.
+  // The chat rule writer (and the dream's fallback model): the bot's own model at its highest effort within its cap; a
+  // bot without one (legacy Auto), or with it at a usage limit, uses Hub's Secondary model as picked. Both send the chat,
+  // so at that model's limit too there is none and the work is skipped, never moved to another provider's model.
   strongestPreset() {
-    const picked = this.escalationPick(() => true);
-    if (picked)
-      return picked;
-
-    const usable = this.measuredWorkers(() => true);
-    const best = strongest(usable);
-    if (!best)
-      return (this.agents?.primary || this).effectiveRouter();
-
-    const same = usable.filter(p => p.model === best.model && (p.provider || 'codex') === (best.provider || 'codex'));
-    return same.find(p => p.effort === 'medium') || best;
+    const top = this.higherEffort?.();
+    // A bot with a model of its own uses only that one: at its usage limit there is none, not Hub's Secondary model.
+    if (top || this.ownVariants?.().length) return top || null;
+    return (this.agents?.primary || this).secondaryPick();
   },
 
-  // The cascade's repair worker, with image support when the task had images: the Escalation model as set, else the
-  // strongest measured one at the task's difficulty's effort. None without measured scores, since then nothing says
-  // which model is stronger.
-  repairPreset(difficulty, images = false) {
-    const fits = p => !images || p.images !== false;
-    const picked = this.escalationPick(fits);
-    if (picked)
-      return picked;
-
-    const usable = this.measuredWorkers(fits);
-    const best = strongest(usable);
-    return best ? atEffort(best, difficulty, usable) : null;
+  // The cascade's repair worker: the task's own model at its highest effort within the bot's cap, with image support
+  // when the task had images. None when the task already ran at that effort.
+  repairPreset(route, images = false) {
+    const repair = this.higherEffort(route);
+    return repair && (!images || repair.images !== false) ? repair : null;
   },
 
   // What the project already says: its AGENTS.md, the rules Harness kept and the rules riding matching tasks.

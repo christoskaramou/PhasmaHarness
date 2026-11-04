@@ -130,3 +130,27 @@ test('startup backups include journal-only agents, worker contexts and messages 
     assert.equal(fs.existsSync(backup + '.journal'), false);
   }
 });
+
+test('a save re-encodes only what may have changed, and an older message edited in place is still saved by the next full pass', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'phasma-store-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const filename = path.join(directory, 'sessions.json');
+  const store = new SessionStore(filename);
+  const items = Array.from({ length: 50 }, (_, index) => ({ id: `m${index}`, type: 'agentMessage', text: `old ${index}` }));
+  const data = { version: 1, sessions: [{ id: 'chat', items }, { id: 'other', items: [{ id: 'o', text: 'x' }] }] };
+  store.save(data); store.save(data);
+  const reload = () => { const fresh = new SessionStore(filename); const loaded = fresh.load({ sessions: [] }); fresh.closeJournal(); return loaded; };
+  items.at(-1).text = 'streamed'; items.push({ id: 'new', text: 'new' });
+  store.save(data);
+  assert.deepEqual(reload().sessions[0].items.slice(-2).map(item => item.text), ['streamed', 'new'], 'tail edits and new messages save at once');
+  data.sessions[1].items = [{ id: 'o', text: 'replaced' }];
+  store.save(data);
+  assert.equal(reload().sessions[1].items[0].text, 'replaced', 'a replaced list saves at once');
+  items[0].text = 'edited long ago';
+  store.save(data);
+  assert.equal(reload().sessions[0].items[0].text, 'old 0', 'an old in-place edit waits for the full pass');
+  store.fullAt = 0;
+  store.save(data);
+  assert.equal(reload().sessions[0].items[0].text, 'edited long ago', 'and the full pass saves it');
+  store.closeJournal();
+});

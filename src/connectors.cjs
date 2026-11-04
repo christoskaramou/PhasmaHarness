@@ -194,6 +194,8 @@ class Connectors extends EventEmitter {
     catch { /* open records a safe status; Settings remains usable. */ }
     return this.snapshot();
   }
+  // Startup only: status lives in memory, so reconnect saved enabled connectors; failures stay visible as each row's status.
+  connectEnabled() { return Promise.all(this.records.filter(record => record.enabled).map(record => this.connect(record.id).catch(() => {}))); }
   async open(record, owner, workspace, interactive = false) {
     if (this.closing || this.blocked.has(record.id) || !record.enabled || this.record(record.id) !== record) throw new Error('Connector is disabled or changed.');
     const key = `${record.id}:${owner}`, existing = this.connections.get(key);

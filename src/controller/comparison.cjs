@@ -8,11 +8,11 @@ const { randomUUID } = require('node:crypto');
 const comparisons = require('../comparisons.cjs');
 const { DEFAULT_MINUTES, DEFAULT_ATTEMPTS } = require('../job-budgets.cjs');
 const { readLessons, relevantLessons, markSuggested, lessonKey } = require('../lessons.cjs');
-const { capCatalog } = require('../routing/effort-cap.cjs');
 const trials = require('../trials.cjs');
 const skillPackages = require('../skill-packages.cjs');
 const { DEFAULT_SKILLS, skillContent } = require('../worker-instructions.cjs');
 const { skillHashes, canonical } = require('../setup-fingerprint.cjs');
+const { parseAutoEffort } = require('../../ui/agent-state.js');
 
 const DAY = 24 * 60 * 60 * 1000;
 const list = files => files.slice(0, 5).join(', ') + (files.length > 5 ? ` and ${files.length - 5} more` : '');
@@ -108,7 +108,9 @@ module.exports = {
       throw new Error('A comparison is already running in this project. Wait for its results first.');
 
     this.agents.checkDelegationCapacity(this, session, pairs * 2);
-    const mode = args.mode && args.mode !== 'auto' ? this.agents.agentMode(args.mode, args.effort) : await this.comparisonMode(session, args.task, workspace, checks);
+    // A named model on Auto effort (agent_models' default) runs at its default effort, so every run uses the same one.
+    const named = args.mode && args.mode !== 'auto' ? this.agents.agentMode(args.mode, args.effort) : null;
+    const mode = named ? (parseAutoEffort(named) ? this.autoEffortDefault(named)?.id || named : named) : await this.comparisonMode(session, args.task, workspace, checks);
     return {
       args: { task: args.task.trim(), change: args.change.trim(), target: args.target, pairs, workspace, mode,
         ...(candidate ? { skill: args.skill, candidatePath: candidate } : {}) },
@@ -117,19 +119,13 @@ module.exports = {
     };
   },
 
-  // Without a named model, Auto picks one for this request once, and every run uses it, so the runs never differ in model.
-  async comparisonMode(session, text, workspace, checks) {
-    const router = this.effectiveRouter();
-    const catalog = capCatalog(this.catalog().filter(worker => worker.worker && this.available(worker)), this.data.settings.effortCap);
-    if (!router || !this.available(router) || !catalog.length)
-      throw new Error('Auto routing is unavailable, so name a model for the comparison.');
+  // Without a named model, every run uses Hub's model at its default effort, so the runs never differ in model or effort.
+  comparisonMode() {
+    const worker = this.autoEffortDefault(this.agents.hubAutoEffort());
+    if (!worker?.id)
+      throw new Error('Name a model for the comparison.');
 
-    const choice = await this.smartRouter.choose(text, { ...session, workspace, configuredChecks: checks, routingCatalog: catalog, routerChoice: router },
-      this.models, 'smart', router.id);
-    if (!choice?.id)
-      throw new Error('Auto did not pick a worker model for this task, so name one for the comparison.');
-
-    return this.agents.agentMode(choice.id);
+    return worker.id;
   },
 
   // Before Bot dispatches a fresh request: a lesson about it that failed again while it was offered tests, once, a

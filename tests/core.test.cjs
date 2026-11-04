@@ -109,7 +109,7 @@ test('task tracking does not inject a checklist; optional proposals stay advisor
   assert.equal(session.items.find(i => i.clientId === user.clientId).content[0].text, original);
 });
 
-async function setup(t) {
+async function setup(t, { secondary = true } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'phasma-harness-test-'));
   const fake = new Fake();
   const smartRouter = { calls: [], cancel() { }, close() { }, jev: null, async choose() { throw new Error('unexpected route'); } };
@@ -118,6 +118,9 @@ async function setup(t) {
   controller.claude.refresh = async () => controller.claude.status;
   controller.cursor.refresh = async () => controller.cursor.status;
   await controller.initialize();
+  // The user picked a Secondary model (the old router no longer stands in for an unsaved one), so messages route.
+  // secondary: false leaves it unsaved (the chat checker picked before Secondary models, if any, stands in).
+  if (secondary) controller.data.settings.secondaryModel = controller.data.settings.routerPreset;
   t.after(() => { controller.close(); fs.rmSync(directory, { recursive: true, force: true }); });
   return { controller, fake, smartRouter };
 }
@@ -453,7 +456,7 @@ test('completion before the turn/start response is buffered and replayed', async
 });
 
 test('delayed completion of an older turn does not finish the current turn', async t => {
-  const { controller, fake } = await setup(t);
+  const { controller, fake } = await setup(t, { secondary: false });
   const session = controller.create();
   await controller.send({ id: session.id, text: 'first', mode: 'terra-light' });
   const first = fake.turnIds[0];
@@ -734,7 +737,7 @@ test('the next turn clears a test-pool notice but keeps other notices', async t 
 });
 
 test('compaction finishes through thread/compacted or turn/completed for the owned turn', async t => {
-  const { controller, fake } = await setup(t);
+  const { controller, fake } = await setup(t, { secondary: false });
   const session = controller.create();
   await controller.send({ id: session.id, text: 'hello', mode: 'terra-light' });
   const previous = fake.turnIds[0];
@@ -1769,7 +1772,7 @@ async function chatExchange(controller, fake, session, text, reply, mode = 'terr
 }
 
 test('a correction in the chat becomes a trial rule through the scanner and the strongest model, and three avoided mistakes keep it', async t => {
-  const { controller, fake } = await setup(t);
+  const { controller, fake } = await setup(t, { secondary: false });
   const { WikiStore } = require('../src/workspace/wiki-store.cjs');
   const trials = require('../src/trials.cjs');
   const chatScan = require('../src/chat-scan.cjs');
@@ -1817,59 +1820,7 @@ test('a correction in the chat becomes a trial rule through the scanner and the 
   assert.throws(() => controller.undoRule(session.id, notice.id), /left its trial/);
 });
 
-test('a preset that passes a kind of work\'s checks first time more often than another becomes Auto\'s choice there, with Undo', async t => {
-  const { controller, fake, smartRouter } = await setup(t);
-  const { WikiStore } = require('../src/workspace/wiki-store.cjs');
-  const setups = require('../src/setups.cjs');
-  controller.wikiStore = new WikiStore(path.join(path.dirname(controller.filename), 'wiki-store'));
-  const session = controller.create();
-  controller.permissions(session.id, 'danger-full-access');
-  arm(controller, fake);
-  addCheck(controller, session, ['unit']);
-  let failing = 0;
-  fake.onExec = () => failing-- > 0 ? { exitCode: 1, stdout: 'Error: off by one', stderr: '' } : { exitCode: 0, stdout: 'ok', stderr: '' };
-  const contexts = [];
-  let preset = 'terra-light';
-  smartRouter.choose = async (_text, context) => {
-    contexts.push(context.provenSetups);
-    return { ...controller.resolveWorker(preset), source: 'model', reason: 'test', assessment: { taskKind: 'debugging', difficulty: 'low' } };
-  };
-  const task = async (text, { on, corrected = false }) => {
-    preset = on;
-    failing = corrected ? 1 : 0;
-    await controller.send({ id: session.id, text, mode: 'auto', task: 'on' });
-    complete(controller, session, fake.turnIds.at(-1));
-    if (corrected) {
-      const turns = fake.turnIds.length;
-      await until(() => fake.turnIds.length === turns + 1);
-      complete(controller, session, fake.turnIds.at(-1));
-    }
-    await controller.gateDone;
-    // Wiki upkeep may follow a passed task; let it finish before the next request.
-    if (controller.busy) {
-      complete(controller, session, fake.turnIds.at(-1));
-      await until(() => !controller.busy);
-    }
-  };
-
-  for (let i = 0; i < 3; i++) {
-    await task(`Fix crash ${i}`, { on: 'terra-light' });
-    await task(`Fix bug ${i}`, { on: 'codex:gpt-5.6-sol:high', corrected: i === 0 });
-  }
-  assert.deepEqual([session.tasks[0].kind, session.tasks[0].difficulty], ['debugging', 'low']);
-  const root = controller.wikiStore.ensure(session.workspace).root;
-  assert.deepEqual(setups.readSetups(root).records.map(record => [record.preset, record.outcome]).slice(0, 2), [['terra-light', 'clean'], ['codex:gpt-5.6-sol:high', 'corrected']]);
-  const notice = session.items.findLast(item => item.ruleNotice?.kind === 'setupPreferred');
-  assert.match(notice.text, /^Auto now uses .+ for debugging work in this project: 3 of 3 tasks passed their checks first time/);
-
-  await task('Fix crash again', { on: 'terra-light' });
-  assert.deepEqual(contexts.at(-1), { debugging: 'terra-light' }, 'Auto routes with the preference');
-  controller.undoRule(session.id, notice.id);
-  await task('Fix one more crash', { on: 'terra-light' });
-  assert.deepEqual(contexts.at(-1), {}, 'Undo drops it');
-});
-
-// Cascade: an Auto task whose checks still fail after its one correction goes, once, to the strongest offered worker.
+// Cascade: an Auto task whose checks still fail after its one correction runs, once, at its model's highest effort.
 async function cascadeSetup(t, failures) {
   const { controller, fake, smartRouter } = await setup(t);
   const { WikiStore } = require('../src/workspace/wiki-store.cjs');
@@ -1881,11 +1832,11 @@ async function cascadeSetup(t, failures) {
   let failing = failures;
   fake.onExec = () => failing-- > 0 ? { exitCode: 1, stdout: 'Error: off by one in pager.js', stderr: '' } : { exitCode: 0, stdout: 'ok', stderr: '' };
   smartRouter.choose = async () => ({ ...controller.resolveWorker('terra-light'), source: 'model', reason: 'test', assessment: { taskKind: 'debugging', difficulty: 'medium' } });
-  // The test catalog has no measured scores; name the strongest model so the repair's target shows.
+  // A fixed repair target, so the repair's model shows in the turn.
   const big = controller.resolveWorker('codex:gpt-5.6-sol:high');
   const asked = [];
-  controller.repairPreset = (difficulty, images) => {
-    asked.push([difficulty, images]);
+  controller.repairPreset = (route, images) => {
+    asked.push([route?.effort || 'medium', images]);
     return big;
   };
   const turns = () => fake.calls.filter(call => call.method === 'turn/start');
@@ -1896,9 +1847,8 @@ async function cascadeSetup(t, failures) {
   return { controller, fake, session, big, asked, turns, settle };
 }
 
-test('checks still failing after one correction hand an Auto task once to the strongest worker, which proven setups count as the first worker failing', async t => {
+test('checks still failing after one correction run an Auto task once more at its model’s highest effort', async t => {
   const { controller, session, big, asked, turns, settle } = await cascadeSetup(t, 2);
-  const setups = require('../src/setups.cjs');
 
   await controller.send({ id: session.id, text: 'Fix the off-by-one in pager.js', mode: 'auto', task: 'on' });
   await settle(1);
@@ -1908,7 +1858,7 @@ test('checks still failing after one correction hand an Auto task once to the st
 
   const task = session.tasks[0];
   assert.equal(task.state, 'checks-passed');
-  assert.deepEqual(asked, [['medium', false]]);
+  assert.deepEqual(asked, [['low', false]], 'from the effort the task ran at');
   assert.deepEqual([task.repair.from, task.repair.route.id], ['terra-light', big.id]);
   const repairTurn = turns()[2].params;
   assert.deepEqual([repairTurn.model, repairTurn.effort], [big.model, big.effort], 'the repair runs on the strongest worker');
@@ -1918,9 +1868,6 @@ test('checks still failing after one correction hand an Auto task once to the st
   assert.match(repairText, /off by one in pager\.js/);
   assert.equal(session.routes.at(-1).escalatedFrom, 'terra-light');
   assert.equal(session.job.worker.id, big.id, 'a follow-up on this task continues on the model that fixed it');
-
-  const root = controller.wikiStore.ensure(session.workspace).root;
-  assert.deepEqual(setups.readSetups(root).records.map(record => [record.preset, record.outcome]), [['terra-light', 'failed']]);
 });
 
 test('the cascade runs once, a manual pick escalates at its own effort, it can be turned off, and a failed repair says who took over', async t => {
@@ -1961,39 +1908,48 @@ test('the cascade runs once, a manual pick escalates at its own effort, it can b
   assert.throws(() => off.controller.settings({ escalateFailedChecks: 'no' }), /Invalid on\/off setting/);
 });
 
-test('a repair takes the Escalation model as set, else the best measured model at the task\'s effort within the cap, and none without scores', async t => {
+test('the chat checker is only the Secondary model the user picked: at its usage limit nothing checks', async t => {
   const { controller } = await setup(t);
-  // Settings → Escalation model: a pick is used as set and needs no scores.
-  assert.throws(() => controller.settings({ escalationModel: 'no-such-model' }), /Unknown escalation model/);
-  controller.settings({ escalationModel: 'codex:gpt-5.6-sol:high' });
-  assert.equal(controller.repairPreset('low').id, 'codex:gpt-5.6-sol:high');
-  controller.settings({ escalationModel: 'auto' });
-  assert.equal(controller.repairPreset('high'), null, 'unmeasured: nothing says which model is stronger');
+  const picked = controller.chatScanChoices().find(p => controller.available(p));
+  controller.data.settings.secondaryModel = picked.id;
+  assert.equal(controller.chatScanner()?.id, picked.id);
+  controller.limits.limited = (_provider, model) => model === picked.model;
+  assert.equal(controller.chatScanner(), null, 'another provider’s router never reads the chat in its place');
+});
 
-  const scores = { 'gpt-6-astra': 70, opus: 60 };
-  controller.smartRouter.benchmarks = { catalog: list => list.map(p => ({ ...p, benchmarks: [{ source: 'aa-index', version: '4', harness: 'aa', score: scores[p.model] || 40 }] })) };
-  const medium = controller.repairPreset('medium');
-  assert.deepEqual([medium.model, medium.effort], ['gpt-6-astra', 'medium']);
+test('a repair runs the task’s own model at its highest effort within the cap, and none when the task already ran there', async t => {
+  const { controller } = await setup(t);
+  const variants = controller.catalog().filter(p => p.worker && p.provider === 'codex' && p.model === 'gpt-5.6-sol' && controller.available(p));
+  assert.ok(variants.length > 1, 'the fixture has a model with several efforts');
+  controller.data.settings.effortCap = 'max';
+  const low = variants.find(p => p.effort === 'low') || variants[0];
+  const top = controller.repairPreset(low);
+  assert.deepEqual([top.model, top.effort], ['gpt-5.6-sol', variants.at(-1).effort], 'the same model at its highest effort');
+  assert.equal(controller.repairPreset(top), null, 'none when the task already ran there');
   controller.data.settings.effortCap = 'medium';
-  const capped = controller.repairPreset('xhigh');
-  assert.deepEqual([capped.model, capped.effort], ['gpt-6-astra', 'medium'], 'the effort cap still holds');
-  assert.equal(controller.strongestPreset().model, 'gpt-6-astra', 'the chat scanner\'s pick is unchanged');
-
-  // A picked Escalation model holds above the cap too, and also writes chat rules; at a usage limit it gives way to the
-  // Auto pick.
-  controller.data.settings.escalationModel = 'codex:gpt-5.6-sol:high';
-  assert.equal(controller.repairPreset('low').id, 'codex:gpt-5.6-sol:high');
-  assert.equal(controller.strongestPreset().id, 'codex:gpt-5.6-sol:high');
-  const limits = controller.limits;
-  controller.limits = { limited: (_provider, model) => model === 'gpt-5.6-sol' };
-  assert.equal(controller.repairPreset('medium').model, 'gpt-6-astra');
-  controller.limits = limits;
+  assert.equal(controller.repairPreset(low)?.effort, variants.some(p => p.effort === 'medium') ? 'medium' : undefined, 'the effort cap holds');
+  controller.data.settings.mode = `autoeffort:codex:gpt-5.6-sol`;
+  assert.equal(controller.strongestPreset().model, 'gpt-5.6-sol', 'the rule writer is the bot’s own model too');
+  const limited = controller.limits.limited;
+  controller.limits.limited = (_provider, model) => model === 'gpt-5.6-sol';
+  assert.equal(controller.repairPreset(low), null, 'none while its provider is at a usage limit');
+  assert.ok(controller.secondaryPick(), 'the Secondary model, on another model, could run');
+  assert.equal(controller.strongestPreset(), null, 'but a bot with its own model uses only it: the rule writer and the dream skip');
+  // The whole provider at its limit, Secondary model included: routing may borrow another provider's router, but the
+  // rule writer and the dream's fallback read the chat, so there is none and they skip.
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  controller.limits.limited = provider => provider === 'codex';
+  assert.ok(controller.routerChoices().some(p => p.provider === 'claude-cli' && controller.available(p)), 'another provider’s router is there');
+  assert.equal(controller.secondaryPick(), null, 'but never stands in for the Secondary model the user picked');
+  assert.equal(controller.strongestPreset(), null, 'so the rule writer and the dream skip');
+  controller.limits.limited = limited;
 });
 
 // The chat checker: a Git workspace with one file the user had already changed before the task started (or a plain
 // folder), the checker's verdicts in order, and a stronger worker a repair can take.
 async function checkerSetup(t, { verdicts = [], checks = true, git = true } = {}) {
-  const { controller, fake, smartRouter } = await setup(t);
+  const { controller, fake, smartRouter } = await setup(t, { secondary: false });
   const { execFileSync } = require('node:child_process');
   const { WikiStore } = require('../src/workspace/wiki-store.cjs');
   controller.wikiStore = new WikiStore(path.join(path.dirname(controller.filename), 'wiki-store'));
@@ -2085,8 +2041,7 @@ test('the chat checker reads a response without checks, sends grounded findings 
   assert.equal(task.summary, `No checks configured · ${task.critique.model} accepted it after one revision`);
 });
 
-test('the chat checker\'s escalate hands an Auto task to a stronger worker with its findings, which proven setups count as the first worker failing', async t => {
-  const setups = require('../src/setups.cjs');
+test('the chat checker\'s escalate runs an Auto task again at its model’s highest effort with its findings', async t => {
   const flagged = { verdict: 'escalate', findings: [finding('reply', 'returns the final item', 'The request asked for an empty-list fix; the reply describes another change.')] };
   const { controller, session, big, looks, turns, run } = await checkerSetup(t, { checks: false, verdicts: [flagged] });
   const task = await run(2);
@@ -2098,10 +2053,6 @@ test('the chat checker\'s escalate hands an Auto task to a stronger worker with 
   assert.match(repair.input[0].text, /reply: The request asked for an empty-list fix/);
   assert.equal(looks.length, 2, 'the stronger worker\'s response is checked too');
   assert.equal(task.summary, `No checks configured · ${task.critique.model} accepted it after ${big.label} took over`);
-
-  const root = controller.wikiStore.ensure(session.workspace).root;
-  assert.deepEqual(setups.readSetups(root).records.map(record => [record.preset, record.outcome]), [['terra-light', 'failed']],
-    'never credited to the first worker');
 });
 
 test('the chat checker looks at most three times: a second revise escalates, an escalation that cannot run is the revise, a manual pick escalates at its own effort, and what is left is reported', async t => {
@@ -2124,8 +2075,8 @@ test('the chat checker looks at most three times: a second revise escalates, an 
 
   const manual = await checkerSetup(t, { verdicts: [escalate] });
   const asked = [];
-  manual.controller.repairPreset = effort => {
-    asked.push(effort);
+  manual.controller.repairPreset = route => {
+    asked.push(route.effort || 'medium');
     return manual.big;
   };
   const picked = await manual.run(2, 'terra-light');
@@ -2162,7 +2113,8 @@ test('each chat checker switch turns its step off: no look, no revise (straight 
 test('with the checker off, failing or quoting nothing it was shown, the work stays as it is; a plain folder is checked on its reply alone', async t => {
   const off = await checkerSetup(t);
   off.controller.settings({ chatScanModel: 'off' });
-  const unchecked = await off.run(1);
+  // No checker and no Secondary model means no router either: the task runs on a set model.
+  const unchecked = await off.run(1, 'terra-light');
   assert.deepEqual([off.looks.length, unchecked.summary], [0, 'Configured checks passed · coverage not assessed']);
   assert.equal(off.controller.baselines?.size || 0, 0, 'no snapshot without a checker');
 
@@ -2185,36 +2137,6 @@ test('with the checker off, failing or quoting nothing it was shown, the work st
   assert.equal(replyOnly.summary, `No checks configured · checked by ${replyOnly.critique.model}, no problems found`);
 });
 
-test('without checks, the chat checker reading your replies teaches Auto which preset gets a kind of work right first time', async t => {
-  const { controller, fake, smartRouter } = await setup(t);
-  const { WikiStore } = require('../src/workspace/wiki-store.cjs');
-  const setups = require('../src/setups.cjs');
-  controller.wikiStore = new WikiStore(path.join(path.dirname(controller.filename), 'wiki-store'));
-  const session = controller.create();
-  controller.permissions(session.id, 'danger-full-access');
-  arm(controller, fake);
-  // Each scan reads the exchange before it: terra's three are accepted, sol's first is corrected.
-  const replies = ['accepted', 'corrected', 'accepted', 'accepted', 'accepted', 'accepted'];
-  chatModels(controller, { flagFirst: false, escalation: null, outcome: scans => replies[scans - 1] || 'unclear' });
-  let preset;
-  smartRouter.choose = async () => ({ ...controller.resolveWorker(preset), source: 'model', reason: 'test', assessment: { taskKind: 'debugging', difficulty: 'low' } });
-
-  for (let i = 0; i < 3; i++) {
-    preset = 'terra-light';
-    await chatExchange(controller, fake, session, `Fix crash ${i}`, 'Fixed it.', 'auto');
-    preset = 'codex:gpt-5.6-sol:high';
-    await chatExchange(controller, fake, session, `Fix bug ${i}`, 'Fixed it.', 'auto');
-  }
-  await chatExchange(controller, fake, session, 'Thanks, all good', 'Glad to help.', 'auto');
-  await until(() => session.items.some(item => item.ruleNotice?.kind === 'setupPreferred'));
-
-  const root = controller.wikiStore.ensure(session.workspace).root;
-  assert.deepEqual(setups.readSetups(root).records.slice(0, 2).map(record => [record.preset, record.outcome, record.source]),
-    [['terra-light', 'clean', 'chat'], ['codex:gpt-5.6-sol:high', 'corrected', 'chat']]);
-  const notice = session.items.findLast(item => item.ruleNotice?.kind === 'setupPreferred');
-  assert.match(notice.text, /^Auto now uses .+ for debugging work in this project: 3 of 3 tasks needed no correction from you/);
-});
-
 test('tips are on unless turned off, and the setting takes only on or off', async t => {
   const { controller } = await setup(t);
   assert.equal(controller.data.settings.showTips, undefined, 'on by default');
@@ -2224,7 +2146,7 @@ test('tips are on unless turned off, and the setting takes only on or off', asyn
 });
 
 test('the chat checker is off until a model is picked, and Off turns it off again', async t => {
-  const { controller, fake } = await setup(t);
+  const { controller, fake } = await setup(t, { secondary: false });
   const { WikiStore } = require('../src/workspace/wiki-store.cjs');
   controller.wikiStore = new WikiStore(path.join(path.dirname(controller.filename), 'wiki-store'));
   const session = controller.create();
@@ -2241,10 +2163,6 @@ test('the chat checker is off until a model is picked, and Off turns it off agai
   controller.settings({ chatScanModel: 'codex:gpt-5.6-sol:high' });
   assert.equal(controller.chatScanner().id, 'codex:gpt-5.6-sol:high');
   controller.settings({ chatScanModel: 'off' });
-  assert.throws(() => controller.settings({ autoLowModel: 'no-such-model' }), /Unknown model for simple messages/);
-  controller.settings({ autoLowModel: 'codex:gpt-5.6-sol:high' });
-  assert.equal(controller.data.settings.autoLowModel, 'codex:gpt-5.6-sol:high', 'any worker model, picked by hand');
-  controller.settings({ autoLowModel: 'auto' });
   await chatExchange(controller, fake, session, 'Thanks, that is all', 'Glad to help.');
   await flush();
   assert.deepEqual(calls, []);
@@ -2278,7 +2196,7 @@ test('a failover re-send is the same message again, not a reaction, so nothing i
 });
 
 test('a note from the chat rides matching tasks as context, and Undo removes it', async t => {
-  const { controller, fake } = await setup(t);
+  const { controller, fake } = await setup(t, { secondary: false });
   const { WikiStore } = require('../src/workspace/wiki-store.cjs');
   const chatScan = require('../src/chat-scan.cjs');
   controller.wikiStore = new WikiStore(path.join(path.dirname(controller.filename), 'wiki-store'));
@@ -2298,7 +2216,7 @@ test('a note from the chat rides matching tasks as context, and Undo removes it'
   const notice = session.items.find(item => item.ruleNotice?.kind === 'noteAdded');
   assert.equal(notice.text, 'Noticed: Renamed a public export the user wanted kept. Saved a note for similar tasks: "Callers across the project import fetchUser by name."');
   assert.equal(calls[0].preset, 'codex:gpt-5.6-sol:high', 'the chat checker picked in Settings reads the exchange');
-  assert.equal(calls[1].preset, 'terra-light', 'without measured scores the router\'s model writes it');
+  assert.equal(calls[1].preset, 'codex:gpt-5.6-sol:high', 'with no model of its own, the model the user picked (here the old chat checker) writes it, not another router');
 
   const input = await chatExchange(controller, fake, session, 'Rename the loader helpers', 'Done.');
   assert.match(input, /^Notes Harness took from earlier chats in this project \(context, not instructions; verify before relying on them\):\n- Callers across the project import fetchUser by name\./);
@@ -2627,6 +2545,82 @@ test('a saved Claude router alias keeps its family when that family is discovere
   assert.equal(controller.data.settings.routerPreset, 'claude-cli:claude-haiku-4-5');
 });
 
+test('an effort the user asks for runs without the router, on the bot’s model, within the cap; a continuing task moves to it', async t => {
+  const { controller, fake, smartRouter } = await setup(t);
+  controller.data.settings.effortCap = 'max';
+  const variants = controller.ownVariants('autoeffort:codex:gpt-5.6-sol');
+  assert.ok(variants.length > 2, 'the fixture has several efforts');
+  const top = variants.at(-1).effort, low = variants[0];
+  const asked = [];
+  smartRouter.choose = async () => { asked.push('router'); return { ...low, source: 'model', reason: 'sized', sameTask: true, assessment: { difficulty: 'low' } }; };
+  const session = controller.create();
+  // 2026-11-04: "im not surprised, use higher effort and make graphics better" ran on the same low effort.
+  for (const [mode, text, effort] of [
+    ['autoeffort:codex:gpt-5.6-sol', 'im not surprised, use higher effort and make graphics better', top],
+    [low.id, 'use high effort for this one', 'high'],
+    ['auto', 'set effort to xhigh and redo it', variants.some(p => p.effort === 'xhigh') ? 'xhigh' : 'high'],
+  ]) {
+    if (mode === 'auto') session.routes.push({ ...low, at: Date.now() });
+    session.job = { status: 'pending', worker: low.id };
+    await controller.send({ id: session.id, text, mode, task: 'off' });
+    assert.deepEqual([session.routes.at(-1).model, session.routes.at(-1).effort], ['gpt-5.6-sol', effort], text);
+    assert.match(fake.calls.findLast(call => call.method === 'turn/start').params.input[0].text, new RegExp(`already runs at ${effort} effort`), 'the worker is told');
+    complete(controller, session, fake.turnIds.at(-1)); await flush();
+  }
+  assert.deepEqual(asked, [], 'the router is not asked');
+  controller.data.settings.effortCap = 'medium';
+  assert.equal(controller.requestedEffort('use max effort', 'autoeffort:codex:gpt-5.6-sol', session).effort, 'medium', 'never above the cap');
+  assert.equal(controller.requestedEffort('the effort was fine', 'autoeffort:codex:gpt-5.6-sol', session), null);
+});
+
+test('a simple message is answered directly by the Secondary model; anything else, or a hand-off, goes to the worker', async t => {
+  const { controller, fake, smartRouter } = await setup(t);
+  const auto = 'autoeffort:codex:gpt-5.6-terra';
+  const secondary = controller.secondaryPick();
+  const simple = { difficulty: 'low', taskKind: 'general', workspaceRelevant: false, needsChecks: false, risk: 'low', uncertainty: 'low' };
+  let assessment = simple, reply = { handOff: false, answer: 'Paris.' };
+  const asked = [];
+  smartRouter.choose = async () => ({ ...controller.autoEffortDefault(auto), source: 'model', reason: 'sized', sameTask: false, assessment });
+  smartRouter.complete = async (request, choice) => {
+    if (request.schema?.properties?.handOff) { asked.push({ choice: choice.id, prompt: JSON.parse(request.prompt) }); return { decision: reply }; }
+    return { decision: { verdict: 'accept', findings: [] } };
+  };
+  const session = controller.create();
+  const route = await controller.send({ id: session.id, text: 'What is the capital of France?', mode: auto, task: 'on' });
+  assert.equal(fake.turnIds.length, 0, 'no worker turn');
+  assert.deepEqual([route.directAnswer, route.id, asked[0].choice], [true, secondary.id, secondary.id], 'the Secondary model answered');
+  assert.equal(asked[0].prompt.message, 'What is the capital of France?');
+  assert.deepEqual(session.items.slice(-2).map(item => [item.type, item.text || item.content?.[0]?.text]),
+    [['userMessage', 'What is the capital of France?'], ['agentMessage', 'Paris.']]);
+  assert.match(session.items.at(-1).routeLabel, /direct answer$/);
+  assert.deepEqual([session.pendingMessage, session.status, controller.busy], [null, 'completed', null]);
+
+  // The worker's next turn sees the exchange (Codex reads it from the direct context).
+  assessment = { ...simple, taskKind: 'mechanical' };
+  await controller.send({ id: session.id, text: 'Rename count to total in a.js', mode: auto, task: 'off' });
+  assert.equal(fake.turnIds.length, 1, 'not general chat: the worker takes it, without asking the Secondary model');
+  assert.equal(asked.length, 1);
+  assert.match(fake.calls.findLast(call => call.method === 'turn/start').params.input[0].text, /capital of France[\s\S]*Paris\./);
+  complete(controller, session, fake.turnIds.at(-1)); await flush();
+
+  // The Secondary model hands it off, or a task is in progress ("ok continue"): the worker takes it.
+  assessment = simple; reply = { handOff: true, answer: 'Probably.' }; // a hand-off wins even with an answer
+  await controller.send({ id: session.id, text: 'Is that right?', mode: auto, task: 'off' });
+  assert.deepEqual([fake.turnIds.length, asked.length], [2, 2], 'a hand-off goes to the worker');
+  complete(controller, session, fake.turnIds.at(-1)); await flush();
+  reply = { handOff: false, answer: 'Sure.' };
+  session.job = { ...(session.job || {}), status: 'pending' };
+  await controller.send({ id: session.id, text: 'ok continue', mode: auto, task: 'off' });
+  assert.deepEqual([fake.turnIds.length, asked.length], [3, 2], 'a task in progress takes it, unasked');
+  complete(controller, session, fake.turnIds.at(-1)); await flush();
+  session.job = null;
+
+  // A set effort, or no Secondary model, never answers directly.
+  await controller.send({ id: session.id, text: 'What is 2 + 2?', mode: 'terra-light', task: 'off' });
+  assert.deepEqual([fake.turnIds.length, asked.length], [4, 2], 'a set effort is not routed');
+  complete(controller, session, fake.turnIds.at(-1)); await flush();
+});
+
 test('Jev failure falls back to the smart router; a stop or a missing smart router does not', async t => {
   const { controller, fake, smartRouter } = await setup(t);
   controller.data.settings.routing = 'jev';
@@ -2654,10 +2648,42 @@ test('Jev failure falls back to the smart router; a stop or a missing smart rout
 
   // No usable smart router: the Jev error is reported, nothing else is called.
   calls.length = 0;
-  controller.data.settings.routerPreset = 'codex:missing:low';
+  controller.data.settings.secondaryModel = 'codex:missing:low';
   smartRouter.choose = async (_text, _session, _models, provider) => { calls.push(provider); throw new Error('Jev routing stopped: timeout.'); };
   await assert.rejects(controller.send({ id: session.id, text: 'third', mode: 'auto', task: 'off' }), /Jev routing stopped: timeout/);
   assert.deepEqual(calls, ['jev']);
+
+  // Auto effort keeps the bot usable, as Hub's does: with no router left, its model's default effort runs.
+  calls.length = 0;
+  const auto = 'autoeffort:codex:gpt-5.6-terra', fallback = controller.autoEffortDefault(auto);
+  await controller.send({ id: session.id, text: 'fourth', mode: auto, task: 'off' });
+  assert.deepEqual(calls, ['jev']);
+  assert.equal(fake.turnIds.length, 2, 'the worker turn started');
+  assert.deepEqual([session.routes.at(-1).model, session.routes.at(-1).effort], [fallback.model, fallback.effort]);
+  assert.match(session.routes.at(-1).routerFallback, /Jev routing stopped: timeout.*default effort runs/);
+  complete(controller, session, session.turnId);
+  await flush();
+  // A router's usage limit is the router's, not the bot's model: the default effort runs too.
+  calls.length = 0;
+  smartRouter.choose = async (_text, _session, _models, provider) => { calls.push(provider); throw Object.assign(new Error('Jev allowance exhausted.'), { limit: { reason: 'Jev allowance exhausted.' }, limitProvider: 'jev' }); };
+  await controller.send({ id: session.id, text: 'fifth', mode: auto, task: 'off' });
+  assert.match(session.routes.at(-1).routerFallback, /Jev allowance exhausted.*default effort runs/);
+  complete(controller, session, session.turnId);
+  await flush();
+  // The router gone while the send waited to start: the default effort, not "This bot has no router".
+  const kind = controller.routerKind, effective = controller.effectiveRouter;
+  Object.assign(controller, { routerKind: () => 'secondary', effectiveRouter: () => null });
+  smartRouter.choose = async () => assert.fail('no router to call');
+  await controller.send({ id: session.id, text: 'sixth', mode: auto, task: 'off' });
+  assert.match(session.routes.at(-1).routerFallback, /no router.*default effort runs/);
+  Object.assign(controller, { routerKind: kind, effectiveRouter: effective });
+  complete(controller, session, session.turnId);
+  await flush();
+  // A text-only model with Auto effort stays its router's only choice when images are attached.
+  const textOnly = controller.catalog().filter(p => p.worker && p.model === 'gpt-5.6-terra').map(p => ({ ...p, images: false }));
+  controller.catalog = () => textOnly;
+  assert.ok(controller.autoCatalog(['data:image/png;base64,AA'], auto).length, 'Auto effort is not emptied by images');
+  assert.equal(controller.autoCatalog(['data:image/png;base64,AA']).length, 0, 'legacy Auto still routes only to image models');
 });
 
 test('disconnecting a provider in the Harness hides its models without signing the CLI out', async t => {
@@ -2948,27 +2974,28 @@ test('usage limits: an Auto message fails over once to another provider; manual 
   assert.equal(controller.limits.limited('claude-cli'), null);
 });
 
-test('a router at its usage limit is replaced by another provider\'s router for that message', async t => {
+test('a router at its usage limit is never replaced by another provider\'s router: Auto effort runs its default effort', async t => {
   const { controller, smartRouter } = await setup(t);
   controller.data.settings.claudeEnabled = true;
   controller.claude.status = { installed: true, loggedIn: true };
-  controller.data.settings.routerPreset = 'claude-cli:haiku';
-  const routers = [], catalogs = [];
+  controller.data.settings.secondaryModel = 'claude-cli:haiku';
+  const routers = [];
   smartRouter.choose = async (_text, session) => {
     routers.push(session.routerChoice.id);
-    catalogs.push(session.routingCatalog.map(p => p.provider || 'codex'));
-    if (session.routerChoice.provider === 'claude-cli') throw Object.assign(new Error('Smart routing stopped: limit'), { limit: { until: null, reason: 'limit' }, limitProvider: 'claude-cli' });
-    return { ...session.routingCatalog.find(p => (p.provider || 'codex') === 'codex'), source: 'model', reason: 'test' };
+    throw Object.assign(new Error('Smart routing stopped: limit'), { limit: { until: null, reason: 'limit' }, limitProvider: 'claude-cli' });
   };
   const session = controller.create();
-  await controller.send({ id: session.id, text: 'hi', mode: 'auto', task: 'off' });
-  assert.equal(routers[0], 'claude-cli:haiku');
-  assert.ok(routers[1] && !routers[1].startsWith('claude-cli:'));
-  assert.ok(catalogs[0].includes('claude-cli'), 'Claude workers were offered before the limit');
-  assert.ok(!catalogs[1].includes('claude-cli'), 'the replacement router is not offered the limited Claude workers');
+  // Legacy Auto has no default to fall back to: the limit is reported, and no other router is asked.
+  await assert.rejects(controller.send({ id: session.id, text: 'hi', mode: 'auto', task: 'off' }), /limit/);
+  assert.deepEqual(routers, ['claude-cli:haiku']);
   assert.ok(controller.limits.limited('claude-cli'));
-  assert.equal(controller.effectiveRouter().provider, 'codex', 'later messages skip the limited router directly');
-  assert.equal(controller.data.settings.routerPreset, 'claude-cli:haiku', 'the saved router choice is kept');
+  assert.equal(controller.effectiveRouter(), null, 'later messages have no router until the limit clears');
+  assert.equal(controller.data.settings.secondaryModel, 'claude-cli:haiku', 'the saved router choice is kept');
+  // Auto effort runs its model's default effort without calling any router.
+  const auto = 'autoeffort:codex:gpt-5.6-terra';
+  await controller.send({ id: session.id, text: 'hello', mode: auto, task: 'off' });
+  assert.deepEqual(routers, ['claude-cli:haiku'], 'no other provider\'s router');
+  assert.equal(session.routes.at(-1).id, controller.autoEffortDefault(auto).id);
 });
 
 test('usage limits: Stop is never overridden by the failover, and the refused attempt runs no checks', async t => {
@@ -2991,7 +3018,9 @@ test('usage limits: Stop is never overridden by the failover, and the refused at
   assert.equal(fake.turnIds.length, 1);
   assert.equal((session.queue || []).length, 0, 'nothing was queued after Stop');
   assert.match(session.error, /usage limit/);
-  // Not stopped: the refused attempt ends without running checks, and the message goes to Claude.
+  // Not stopped: the refused attempt ends without running checks, and the message goes to Claude. The router the
+  // user picked is a Claude model, so routing itself survives the Codex limit (no router is swapped in).
+  controller.data.settings.secondaryModel = 'claude-cli:haiku';
   controller.limits.clear('codex');
   let claudeRuns = 0;
   controller.claude.run = async () => { claudeRuns++; return { result: 'done' }; };
@@ -3029,62 +3058,6 @@ test('a Claude Opus weekly limit leaves the other Claude models usable, and only
   assert.match(session.notice, /Claude Opus reached its usage limit/);
   assert.ok(controller.limits.limited('claude-cli', 'opus'), 'a Sonnet success does not lift the Opus limit');
   assert.equal(controller.limits.limited('claude-cli', 'sonnet'), null);
-});
-
-test('Compare with Jev only logs Jev\'s pick next to the model that ran, one comparison at a time', async t => {
-  const { controller, fake, smartRouter } = await setup(t);
-  const records = [];
-  controller.jevCompare = { record: entry => records.push(entry), summary: () => ({ compared: records.length }) };
-  smartRouter.choose = async (_text, session) => ({ ...session.routingCatalog.find(p => p.model === 'gpt-5.6-terra' && p.effort === 'low'), source: 'model', reason: 'test' });
-  const shadows = [];
-  let release;
-  smartRouter.shadowJev = (text, context, signal) => {
-    shadows.push({ text, items: context.items.map(item => item.content?.[0]?.text), catalog: context.routingCatalog.length, signal });
-    return new Promise(resolve => { release = () => resolve({ id: 'codex:gpt-6-astra:high', provider: 'codex', model: 'gpt-6-astra', effort: 'high', confidence: 0.7, costUsd: 0.0001 }); });
-  };
-  const session = controller.create();
-  // Off by default, and it needs a Jev key.
-  await controller.send({ id: session.id, text: 'first', mode: 'auto', task: 'off' });
-  complete(controller, session, fake.turnIds[0]); await flush();
-  assert.equal(shadows.length, 0);
-  assert.throws(() => controller.settings({ jevCompare: true }), /Jev API key/);
-  smartRouter.jev = { configured: true };
-  controller.settings({ jevCompare: true });
-  // A saved "on" never blocks saving settings when the key file is gone.
-  smartRouter.jev = { configured: false };
-  controller.settings({ jevCompare: true, fontScale: 115 });
-  assert.equal(controller.data.settings.fontScale, 115);
-  smartRouter.jev = { configured: true };
-  await controller.send({ id: session.id, text: 'second', mode: 'auto', task: 'off' });
-  assert.equal(shadows.length, 1);
-  assert.deepEqual(shadows[0].items, ['first'], 'Jev sees the conversation as it was before this message');
-  assert.ok(shadows[0].catalog > 0);
-  assert.equal(session.routes.at(-1).model, 'gpt-5.6-terra', 'the routed model runs unchanged');
-  complete(controller, session, fake.turnIds[1]); await flush();
-  // While a comparison is in flight the next message skips it; no calls pile up.
-  await controller.send({ id: session.id, text: 'third', mode: 'codex:gpt-5.6-sol:high', task: 'off' });
-  complete(controller, session, fake.turnIds[2]); await flush();
-  assert.equal(shadows.length, 1);
-  release(); await flush();
-  assert.deepEqual(records[0].used, { id: session.routes[1].id, provider: 'codex', model: 'gpt-5.6-terra', effort: 'low', source: 'router' });
-  assert.equal(records[0].jev.model, 'gpt-6-astra');
-  assert.ok(!JSON.stringify(records).includes('second'), 'no message text is logged');
-  // Manual choices are compared too; with Jev as the router there is nothing to compare.
-  await controller.send({ id: session.id, text: 'fourth', mode: 'codex:gpt-5.6-sol:high', task: 'off' });
-  release(); await flush();
-  assert.equal(records[1].used.source, 'manual');
-  complete(controller, session, fake.turnIds[3]); await flush();
-  controller.data.settings.routing = 'jev';
-  await controller.send({ id: session.id, text: 'fifth', mode: 'codex:gpt-5.6-sol:high', task: 'off' });
-  assert.equal(shadows.length, 2);
-  assert.deepEqual(controller.snapshot().jev.compare, { compared: 2 });
-  // Turning it off stops a comparison in flight without logging it.
-  complete(controller, session, fake.turnIds[4]); await flush();
-  controller.data.settings.routing = 'smart';
-  await controller.send({ id: session.id, text: 'sixth', mode: 'auto', task: 'off' });
-  const signal = shadows.at(-1).signal;
-  controller.settings({ jevCompare: false });
-  assert.equal(signal.aborted, true);
 });
 
 test('one model per task: the task, its worker and the worker\'s reported status follow each turn', async t => {
@@ -3525,9 +3498,14 @@ test('API providers: add, enable a discovered model, and remove the provider wit
   controller.providerSettings({ action: 'removeProvider', id: 'lm-studio' });
   assert.equal(controller.data.settings.mode, 'claude-cli:claude-opus-5-5:high');
   assert.equal(controller.data.settings.routerPreset, 'claude-cli:claude-haiku-5');
+  // An Auto effort mode on the removed provider is cleared too.
+  controller.providerSettings({ action: 'provider', provider: { id: 'lm-studio', name: 'LM Studio', baseUrl: 'http://localhost:1234/v1', enabled: true } });
+  controller.data.settings.mode = 'autoeffort:lm-studio:qwen3-coder-30b-a3b';
+  controller.providerSettings({ action: 'removeProvider', id: 'lm-studio' });
+  assert.equal(controller.data.settings.mode, 'auto', 'Hub picks a model on its next message and moves to Auto effort on it');
   assert.deepEqual(controller.data.settings.providers, []);
   assert.equal(controller.catalog().some(p => p.provider === 'lm-studio'), false);
-  assert.deepEqual(removedKeys, ['lm-studio', 'lm-studio']);
+  assert.deepEqual(removedKeys, ['lm-studio', 'lm-studio', 'lm-studio']);
   assert.throws(() => controller.providerSettings({ action: 'removeProvider', id: 'lm-studio' }), /Unknown provider/);
 });
 
@@ -3877,6 +3855,31 @@ test('Send now cannot resume through an unconfirmed cleanup block', async t => {
   assert.equal(session.queueSending, false);
 });
 
+test('cold start: 15 idle minutes by default, and a context over 300,000 tokens starts fresh without waiting', async t => {
+  const { controller, fake, smartRouter } = await setup(t);
+  let summaries = 0;
+  smartRouter.complete = async () => { summaries++; return { decision: { summary: 'S' }, usage: { inputTokens: 1, cachedInputTokens: 0, outputTokens: 1 } }; };
+  const session = controller.create();
+  for (let i = 0; i < 6; i++) {
+    await controller.send({ id: session.id, text: `Question ${i}`, mode: 'terra-light', task: 'off' });
+    session.items.push({ id: `answer-${i}`, type: 'agentMessage', phase: 'final_answer', text: `Answer ${i}` });
+    complete(controller, session, fake.turnIds.at(-1));
+  }
+  const worker = controller.resolveWorker('terra-light');
+  const cold = async (tokens, idleMinutes) => {
+    session.usage = { last: { inputTokens: tokens, cachedInputTokens: 0, outputTokens: 1 } };
+    session.codexTurnEndedAt = Date.now() - idleMinutes * 60000;
+    session.coldSummary = ''; session.coldSummaryThrough = null; session.threadId = 'thread-test';
+    return controller.coldStart(session, worker, 'codex', 'next', new AbortController()).catch(() => null);
+  };
+  await cold(150000, 10); assert.equal(summaries, 0, 'under 15 idle minutes, under the limit: it resumes');
+  await cold(150000, 20); assert.equal(summaries, 1, 'the default idle time is 15 minutes');
+  await cold(320000, 1); assert.equal(summaries, 2, 'over 300,000 tokens: fresh at once');
+  assert.match(session.pendingColdStep?.lines[0] || session.items.findLast(item => item.coldStart)?.lines[0] || '', /over the 300,000 limit/);
+  controller.data.settings.coldStartMinutes = 0;
+  await cold(320000, 1); assert.equal(summaries, 2, '0 still turns cold starts off');
+});
+
 test('an idle, large Codex chat moves to a new thread with a summary and keeps its earlier chat visible', async t => {
   const { controller, fake, smartRouter } = await setup(t);
   const summaries = [];
@@ -3925,4 +3928,56 @@ test('an idle, large Codex chat moves to a new thread with a summary and keeps i
   controller.loaded.delete(session.id); await controller.resume(session);
   for (const text of ['Question 0', 'Answer 5', 'New thread answer'])
     assert.ok(session.items.some(item => (item.text || item.content?.[0]?.text) === text), `${text} stays visible after reopening`);
+});
+
+test('reply suggestions and cold-start summaries use only the Secondary model the user picked, never another provider in its place', async t => {
+  const { controller, smartRouter } = await setup(t);
+  const picked = controller.secondaryPick();
+  assert.ok(picked, 'the fixture picked a Secondary model');
+  const used = [];
+  smartRouter.complete = async (_request, choice) => { used.push(choice.id); return { decision: { suggestion: 'Next step' } }; };
+  const session = controller.create();
+  session.routes = [{ id: 'terra-light', provider: 'codex', model: 'gpt-5.6-terra', effort: 'low' }];
+  session.items.push({ id: 'answer', type: 'agentMessage', phase: 'final_answer', text: 'Done.' });
+  await controller.replySuggestion(session.id, { force: true });
+  assert.deepEqual(used, [picked.id], 'the Secondary model suggests');
+  // At its usage limit routing may move to another provider's router, but the chat stays with the chat's own model.
+  controller.limits.limited = (_provider, model) => model === picked.model;
+  controller.suggestions.clear();
+  await controller.replySuggestion(session.id, { force: true });
+  assert.equal(controller.resolveWorker(used[1])?.model, 'gpt-5.6-terra', 'the chat’s own model, not another provider');
+  // A cold start at that limit writes no summary; once the limit clears, the Secondary model writes it.
+  Object.assign(controller.data.settings, { coldStartMinutes: 1, coldStartTokens: 10 });
+  const idle = controller.create();
+  Object.assign(idle, { threadId: 'thread-idle', codexTurnEndedAt: Date.now() - 600000, usage: { last: { inputTokens: 5000 } } });
+  for (let i = 0; i < 12; i++) idle.items.push({ id: `m${i}`, type: i % 2 ? 'agentMessage' : 'userMessage', phase: 'final_answer', text: `Message ${i}`, content: [{ type: 'text', text: `Message ${i}` }] });
+  const worker = controller.resolveWorker('terra-light');
+  const calls = used.length;
+  assert.equal(await controller.coldStart(idle, worker, 'codex', 'next', new AbortController()), null);
+  assert.equal(used.length, calls, 'nobody else was asked to summarize');
+  controller.limits.limited = () => false;
+  await controller.coldStart(idle, worker, 'codex', 'next', new AbortController()).catch(() => null);
+  assert.equal(used.at(-1), picked.id, 'the Secondary model summarizes');
+});
+
+test('the Dream model saves as Hub’s model or an available worker, and an Escalation model picked before keeps dreaming', async t => {
+  const { controller } = await setup(t);
+  controller.settings({ dreamModel: 'codex:gpt-5.6-sol:high' });
+  assert.equal(controller.data.settings.dreamModel, 'codex:gpt-5.6-sol:high');
+  controller.settings({ dreamModel: 'hub' });
+  assert.equal(controller.data.settings.dreamModel, 'hub');
+  assert.throws(() => controller.settings({ dreamModel: 'codex:missing:high' }), /Unknown dream model/);
+  assert.throws(() => controller.settings({ dreamModel: 'auto' }), /Unknown dream model/);
+
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'phasma-harness-test-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const file = path.join(directory, 'state.json');
+  fs.writeFileSync(file, JSON.stringify({ version: 1, sessions: [], settings: { workspace: directory, mode: 'auto', access: 'workspace-write', escalationModel: 'codex:gpt-5.6-sol:high' } }));
+  const reopened = new Controller(file, directory, new Fake(), { cancel() {}, close() {} });
+  t.after(() => reopened.close());
+  assert.equal(reopened.data.settings.dreamModel, 'codex:gpt-5.6-sol:high');
+  fs.writeFileSync(file, JSON.stringify({ version: 1, sessions: [], settings: { workspace: directory, mode: 'auto', access: 'workspace-write', escalationModel: 'auto' } }));
+  const fresh = new Controller(file, directory, new Fake(), { cancel() {}, close() {} });
+  t.after(() => fresh.close());
+  assert.equal(fresh.data.settings.dreamModel, undefined, 'Auto escalation leaves Hub’s model dreaming');
 });

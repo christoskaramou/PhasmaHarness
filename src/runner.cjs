@@ -9,8 +9,6 @@ const { Providers } = require('./providers/providers.cjs');
 const { JevKey } = require('./providers/jev-key.cjs');
 const { JevClient } = require('./providers/jev.cjs');
 const { ContextSearch } = require('./workspace/context-search.cjs');
-const { BenchmarkStore } = require('./routing/benchmarks.cjs');
-const { JevCompareLog } = require('./routing/jev-compare.cjs');
 const { DecisionLog } = require('./trace.cjs');
 const { containRunner } = require('./runner-containment.cjs');
 const { Updater } = require('./updater.cjs');
@@ -51,9 +49,7 @@ async function createRunner({ app, data = app?.getPath('userData'), safeStorage,
   const controller = new Controller(store, workspace, undefined, undefined, { wikiStore });
   controller.runnerRecoverySafe = containment.recoverySafe === true;
   controller.log = log;
-  controller.jevCompare = new JevCompareLog(path.join(log.directory, 'jev-compare.jsonl'));
   controller.trace = new DecisionLog(path.join(log.directory, 'decisions.jsonl'));
-  controller.smartRouter.benchmarks = new BenchmarkStore(path.join(data, 'benchmarks.json'));
   const jevKey = new JevKey(path.join(data, 'jev-key.enc'), safeStorage);
   const connectors = new Connectors(data, safeStorage);
   const jevReported = { model: null };
@@ -107,6 +103,7 @@ async function createRunner({ app, data = app?.getPath('userData'), safeStorage,
       if (agents.closing) return;
       agents.routines.start();
       controller.warmRouter();
+      connectors.connectEnabled(); // Background: slow servers must not delay startup.
     },
     async shutdown(options) {
       try {

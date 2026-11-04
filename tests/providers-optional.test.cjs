@@ -348,6 +348,7 @@ test('Claude turns feed the context meter and support manual compaction', async 
 
 test('every Auto message is routed from the full catalog with the current worker known to the pick, so it can upgrade', async t => {
   const controller = await start(t, { claude: true });
+  controller.data.settings.secondaryModel = controller.data.settings.routerPreset; // the user picked a router
   const calls = [];
   controller.smartRouter.choose = async (text, session) => {
     calls.push({ offered: session.routingCatalog.map(p => p.id), current: (session.routes || []).findLast(route => !route.directAnswer)?.id });

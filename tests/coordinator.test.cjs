@@ -273,6 +273,8 @@ async function setup(t) {
   };
   const hub = factory(path.join(root, 'sessions.json'), root);
   await hub.initialize(); hub.data.settings.mode = 'terra-light';
+  // Hub picked a Secondary model (the old router no longer stands in for an unsaved one), so its bots route.
+  hub.data.settings.secondaryModel = hub.data.settings.routerPreset;
   const agents = new Agents(hub, async () => {}, factory);
   const session = agents.conversation(hub, true, root, 'workspace-write');
   t.after(async () => {
@@ -1256,8 +1258,10 @@ test('Hub keeps its chat model, preserves old history and never starts a native 
   hub.data.settings.mode = 'auto';
   await send('Hello');
   const model = calls[0].choice.id;
+  // Legacy Auto moves to Auto effort on its first pick; put it back to test the legacy pin (a removed provider resets to it).
+  const again = text => { hub.data.settings.mode = 'auto'; return send(text); };
   hub.effectiveRouter = () => { throw new Error('Must use the pinned model'); };
-  await send('How does this work?');
+  await again('How does this work?');
   assert.equal(calls[1].choice.id, model);
   assert.deepEqual(session.routes.map(route => route.source), ['hub-auto', 'hub-auto'], 'initial and pinned Auto turns keep their selection origin');
   assert.deepEqual(readSessionData(hub.filename).sessions.find(s => s.id === session.id).routes.map(route => route.source), ['hub-auto', 'hub-auto']);
@@ -1267,7 +1271,7 @@ test('Hub keeps its chat model, preserves old history and never starts a native 
   assert.equal(agents.snapshot().agents[0].name, 'Assistant');
   await assert.rejects(agents.deleteAgent('main'), /cannot be deleted/);
   hub.available = () => false;
-  await assert.rejects(send('Again'), /Hub Auto needs/);
+  await assert.rejects(again('Again'), /Hub Auto needs/);
   assert.equal(calls.length, 2, 'no replacement can run when all models are unavailable');
 });
 
@@ -1286,19 +1290,23 @@ test('Hub Auto replaces a disconnected Claude pin with OpenAI and retains the co
   await send('Remember this conversation');
   assert.equal(calls[0].choice.provider, 'claude-cli');
   const oldPin = hub.data.hubMode;
+  assert.equal(hub.data.settings.mode, 'autoeffort:claude-cli:balanced', 'legacy Auto moves to Auto effort on the model it picked');
+  const again = text => { hub.data.settings.mode = 'auto'; return send(text); };
   hub.setProviderEnabled('claude-cli', false);
   hub.setProviderEnabled('codex', true);
   await hub.refreshAccount();
-  await send('Continue after switching providers');
+  await again('Continue after switching providers');
   assert.equal(calls[1].choice.provider, 'codex');
   assert.match(calls[1].request.prompt, /Remember this conversation/);
   assert.equal(calls[1].choice.source, 'hub-auto');
   assert.notEqual(hub.data.hubMode, oldPin);
   assert.equal(hub.data.hubModeSource, 'auto');
-  assert.equal(hub.data.settings.mode, 'auto');
+  assert.equal(hub.data.settings.mode, `autoeffort:codex:${calls[1].choice.model}`);
   assert.equal(readSessionData(hub.filename).hubMode, calls[1].choice.id);
-  await send('Continue again');
-  assert.equal(selections, 2, 'the healthy replacement stays pinned');
+  await again('Continue again');
+  // The first message had no router (Hub's Secondary model is on the disconnected Codex; no other provider's is swapped
+  // in), so only the second asked one; the healthy replacement then stays pinned.
+  assert.equal(selections, 1, 'the healthy replacement stays pinned');
   assert.equal(calls[2].choice.id, calls[1].choice.id);
   assert.equal(hub.data.sessions[0].id, session.id);
   assert.equal(hub.client.calls.some(c => c.method === 'turn/start'), false);
@@ -1312,6 +1320,7 @@ test('Hub Auto replaces removed or rate-limited pins without overriding manual m
     const oldPin = hub.resolveWorker(hub.data.hubMode);
     if (unavailable === 'removed') hub.models = hub.models.filter(p => p.model !== oldPin.model);
     else hub.limits.limited = (_provider, model) => model === oldPin.model;
+    hub.data.settings.mode = 'auto'; // the legacy pin (moved to Auto effort by the first pick)
     await send('Next');
     assert.notEqual(calls[1].choice.model, oldPin.model);
   });
@@ -1349,6 +1358,8 @@ test('Hub Auto asks either router to choose from arbitrary available models acro
           hub.data.settings.providerModels = models.map(model => ({ id: `cursor-cli:${model}:default`, model, provider, enabled: true, rank: 35, worker: true, router: true }));
         }
       }
+      // The user picked a router on this subscription: one at another provider's is never swapped in.
+      hub.data.settings.secondaryModel = hub.chatScanChoices().find(p => (p.provider || 'codex') === provider && hub.available(p))?.id;
       const before = hub.catalog(), selections = [];
       hub.data.settings.jevEnabled = true;
       hub.smartRouter.chooseHub = async (workers, selectedProvider) => {
@@ -1385,7 +1396,7 @@ test('Hub Auto rejects unsupported effort while accepting previously unknown mod
   hub.models.push(entries('unknown-model', ['medium', 'high']));
   await send('Hello');
   assert.equal(calls[0].choice.model, 'unknown-model'); assert.equal(calls[0].choice.effort, 'medium');
-  hub.data.hubMode = null;
+  hub.data.hubMode = null; hub.data.settings.mode = 'auto';
   hub.data.settings.disabledCodexModels = ['unknown-model'];
   await assert.rejects(send('Again'), /Hub Auto needs/);
   hub.data.settings.disabledCodexModels = [];
@@ -1407,16 +1418,19 @@ test('Hub Auto switches to LM Studio alone, retains default effort and reuses it
   selector.complete = async () => assert.fail('One eligible model needs no classifier');
   let selections = 0;
   hub.smartRouter.chooseHub = async (...args) => { selections++; return selector.chooseHub(...args); };
+  hub.data.settings.mode = 'auto'; // the legacy pin, moved to Auto effort by the first pick
   await send('Continue locally');
   const local = calls[1].choice;
   assert.equal(local.provider, 'lm-studio'); assert.equal(local.model, 'new-local-model');
   assert.equal(local.effort, null); assert.equal(local.source, 'hub-auto');
   assert.match(calls[1].request.prompt, /Remember our plan/);
   assert.equal(readSessionData(hub.filename).hubMode, local.id);
+  hub.data.settings.mode = 'auto';
   await send('Continue again');
-  assert.equal(selections, 1, 'default effort remains a valid Auto pin');
+  assert.equal(selections, 0, 'no router (Hub’s Secondary model is on the disabled Codex) asks; the default effort remains a valid Auto pin');
   assert.equal(calls[2].choice.id, local.id); assert.equal(calls[2].choice.effort, null);
   hub.limits.limited = provider => provider === 'lm-studio';
+  hub.data.settings.mode = 'auto';
   await assert.rejects(send('Limited'), /Hub Auto needs/);
   hub.limits.limited = () => false;
   hub.data.settings.providerModels[0].enabled = false;
@@ -1599,7 +1613,7 @@ test('Hub creates Auto workers with inherited access and images, stays responsiv
   replies.push(action('agent_work', { name: 'Fixer', task: 'Inspect the image and fix the issue.' }));
   await hub.send({ id: session.id, text: 'Fix this issue', images: [image] });
   const profile = hub.data.agents[0], worker = agents.execution(profile.id);
-  assert.equal(profile.mode, 'auto'); assert.equal(profile.access, 'workspace-write');
+  assert.equal(profile.mode, 'autoeffort:codex:gpt-5.6-terra', 'Hub’s model with Auto effort'); assert.equal(profile.access, 'workspace-write');
   await until(() => worker.activeTurns.size > 0);
   const work = agents.conversation(worker);
   assert.deepEqual(work.delegation.images, [image]);
@@ -1660,11 +1674,14 @@ test('Hub queues another request for an explicitly selected busy worker with hon
 test('Hub saves its effective mode and resumes old worker results with its pinned model', async t => {
   for (const mode of ['auto', 'terra-light']) await t.test(mode, async t => {
     const { hub, session, calls, send } = await setup(t);
-    hub.data.settings.mode = 'removed-local-model';
+    // A message saved with the retired Auto runs Hub's current model, so the legacy case starts with Hub on it too.
+    hub.data.settings.mode = mode === 'auto' ? 'auto' : 'removed-local-model';
     await hub.send({ id: session.id, text: 'Hello', mode });
-    const selected = calls.at(-1).choice.id;
-    assert.equal(hub.data.settings.mode, mode);
-    assert.equal(readSessionData(hub.filename).settings.mode, mode);
+    const selected = calls.at(-1).choice.id, picked = calls.at(-1).choice;
+    // Legacy Auto moves to Auto effort on the model it picked.
+    const saved = mode === 'auto' ? `autoeffort:${picked.provider || 'codex'}:${picked.model}` : mode;
+    assert.equal(hub.data.settings.mode, saved);
+    assert.equal(readSessionData(hub.filename).settings.mode, saved);
     hub.smartRouter.chooseHub = async () => assert.fail('A returned result must reuse the pin');
     session.queuePaused = true;
     session.queue = [{ id: 'old-result', text: 'The review completed.', mode: 'removed-local-model', task: 'off', agentReply: true }];
@@ -1675,7 +1692,22 @@ test('Hub saves its effective mode and resumes old worker results with its pinne
     assert.equal(session.status, 'completed'); assert.equal(session.error, null);
     assert.equal(session.queue.length, 0); assert.equal(session.queuePaused, false);
     await send('Continue');
-    assert.equal(calls.at(-1).choice.id, selected);
+    // On Auto effort the next message keeps the model; its router picks the effort.
+    if (mode === 'auto') assert.equal(calls.at(-1).choice.model, picked.model);
+    else assert.equal(calls.at(-1).choice.id, selected);
+  });
+});
+
+test('a worker result runs Hub’s current model, not the one it last ran, and keeps that choice', async t => {
+  for (const [first, next] of [['terra-light', 'autoeffort:codex:gpt-5.6-terra'], ['autoeffort:codex:gpt-5.6-terra', 'terra-light']]) await t.test(next, async t => {
+    const { hub, session, calls } = await setup(t);
+    await hub.send({ id: session.id, text: 'Hello', mode: first });
+    hub.data.settings.mode = next; // the Hub Edit dialog changes only Hub's mode
+    session.queuePaused = true;
+    session.queue = [{ id: 'result', text: 'The review completed.', mode: first, task: 'off', agentReply: true }];
+    await hub.queuedMessage(session.id, 'result', 'send');
+    assert.equal(calls.at(-1).choice.source, next.startsWith('autoeffort:') ? 'hub-auto' : 'manual');
+    assert.equal(hub.data.settings.mode, next, 'the choice is not undone');
   });
 });
 
@@ -1690,7 +1722,7 @@ test('Hub automatic dispatch avoids old manual pins and has no alternate delegat
   assert.equal(hub.data.agents.find(p => p.id === manual.id).mode, 'terra-light');
   assert.equal(agents.controller(manual.id).busy, null);
   const created = hub.data.agents.find(p => p.id !== manual.id);
-  assert.equal(created.mode, 'auto'); assert.equal(session.hubWorker, created.id);
+  assert.equal(created.mode, 'autoeffort:codex:gpt-5.6-terra'); assert.equal(session.hubWorker, created.id);
   replies.push(action('agent_work', { agentId: manual.id, mode: manual.mode, task: 'Use this specific agent as requested.' }));
   await send('Ask Local specialist to help too');
   assert.equal(session.hubWorker, manual.id);
@@ -1705,7 +1737,7 @@ test('Hub creates several agents at once from one request, with an accurate coun
 
   replies.push(action('agent_create', { names, instructions: 'General helper' }));
   await send('create 10 agents with random names');
-  const strict = { ...action('agent_create', { name: null, instructions: 'General helper', mode: null, effort: null, names }), difficulty: null };
+  const strict = { ...action('agent_create', { name: null, instructions: 'General helper', mode: null, effort: null, names }) };
   assert.doesNotThrow(() => require('../src/providers/structured.cjs').structuredResponse(strict, calls.at(-1).request.schema),
     'real providers validate the list against Hub\'s response schema');
   assert.deepEqual(hub.data.agents.map(agent => agent.name), names, 'the request is the approval: one action creates every agent');
@@ -1736,6 +1768,7 @@ test('the Hub runs on any model, Muse and Antigravity included, picked by hand o
   const agy = { id: 'native:antigravity:a', provider: 'native:antigravity', model: 'a', effort: null, worker: true, router: true, enabled: true };
   hub.catalog = () => [muse, agy];
   hub.available = () => true;
+  hub.data.settings.secondaryModel = muse.id; // a router on these providers
   const offered = [];
   hub.smartRouter.chooseHub = async eligible => {
     offered.push(eligible.map(p => p.id));
@@ -1794,7 +1827,7 @@ test('Hub management preserves access checks and rejects unsupported tools and s
   assert.equal(session.status, 'interrupted'); assert.equal(hub.busy, null);
 });
 
-test('Hub review dispatch lets Jev and Smart route to available Claude instead of a pinned local agent', async t => {
+test('Hub review dispatch avoids a pinned local agent; Jev or Smart routes the new worker’s effort on Hub’s model', async t => {
   for (const routing of ['jev', 'smart']) await t.test(routing, async t => {
     const { hub, session, agents, replies, send } = await setup(t);
     hub.data.settings.routing = routing; hub.data.settings.jevEnabled = true;
@@ -1809,9 +1842,9 @@ test('Hub review dispatch lets Jev and Smart route to available Claude instead o
       worker.smartRouter.choose = async (text, context, models, provider) => {
         routingCalls++;
         assert.equal(provider, routing); assert.equal(text, 'Review PE changes', 'routing receives the user request, not Hub wording');
-        assert.ok(context.routingCatalog.some(p => p.provider === 'local'), 'local models remain eligible through normal routing');
-        const choice = context.routingCatalog.find(p => p.provider === 'claude-cli');
-        assert.ok(choice, 'available Claude must reach the worker router');
+        // One model per bot: the router sees only the efforts of the worker's model (Hub's, with Auto effort).
+        assert.ok(context.routingCatalog.length && context.routingCatalog.every(p => p.provider === 'codex' && p.model === 'gpt-5.6-terra'), 'only Hub’s model reaches the worker router');
+        const choice = context.routingCatalog.at(-1);
         return { ...choice, source: routing, needsChecks: false };
       };
       worker.submitWorker = async (work, choice) => { submitted = choice; return choice; };
@@ -1820,7 +1853,7 @@ test('Hub review dispatch lets Jev and Smart route to available Claude instead o
     await send('Review PE changes');
     await until(() => !!submitted);
     assert.equal(routingCalls, 1);
-    assert.equal(submitted.provider, 'claude-cli'); assert.equal(submitted.effort, 'high', 'Hub effort limits do not constrain the worker');
+    assert.equal(submitted.provider, 'codex'); assert.equal(submitted.model, 'gpt-5.6-terra');
     assert.equal(agents.controller(manual.id).busy, null);
     assert.equal(agents.profile(manual.id).mode, 'local:gemma-test');
   });
@@ -1903,123 +1936,6 @@ test('Hub honors explicit worker model and effort without changing its chat mode
   assert.equal(session.items.at(-1).text, 'Kept its model.');
   assert.equal(session.error, null);
   assert.equal(hub.data.agents.length, 2, 'no worker was created or sent');
-});
-
-test('Hub sends a task outside an Auto worker\'s reach to an idle worker that fits, or a new one with its role and access', async t => {
-  const { hub, session, agents, replies, send } = await setup(t);
-  const SCORES = { weak: 50, cheap: 65, strong: 100 }, COSTS = { weak: 0.1, cheap: 0.3, strong: 3 };
-  const catalog = Object.keys(SCORES).flatMap(model => ['low', 'medium', 'high'].map(effort => ({ id: `codex:${model}:${effort}`, provider: 'codex', model, effort,
-    label: `${model} · ${effort}`, worker: true, enabled: true, images: true, benchmarks: [{ source: 'aa-index', version: '4', harness: 'aa', score: SCORES[model], costUsd: COSTS[model] }] })));
-  // A read-only Auto reviewer whose background conversation, where Hub's tasks run, has a model.
-  const worker = async (name, model) => {
-    const profile = await agents.saveAgent({ name, workspace: session.workspace, access: 'read-only', mode: 'auto', instructions: 'Review code.' });
-    if (model) {
-      const execution = agents.execution(profile.id);
-      await Promise.all(agents.initializing.values());
-      execution.autoCatalog = () => catalog;
-      agents.conversation(execution, true, session.workspace, 'read-only').routes = [{ id: `codex:${model}:medium`, provider: 'codex', model, effort: 'medium' }];
-    }
-    return profile;
-  };
-  const job = id => agents.conversation(agents.executions.get(id))?.delegation;
-  const reply = () => session.items.findLast(item => item.type === 'agentMessage').text;
-
-  // Too hard for its model, and no other worker: a new Auto worker with its role and its lower access takes it.
-  const reviewer = await worker('Reviewer', 'weak');
-  replies.push(action('agent_work', { agentId: reviewer.id, task: 'Audit the session handling.', difficulty: 'high' }));
-  await send('Audit the session handling');
-  const created = hub.data.agents.find(profile => profile.name === 'Reviewer 2');
-  assert.deepEqual([created.mode, created.instructions, created.access], ['auto', 'Review code.', 'read-only']);
-  assert.equal(session.hubWorker, created.id);
-  assert.ok(job(created.id)); assert.equal(job(reviewer.id), undefined);
-  // A new worker may still be starting, so its task can be queued.
-  assert.match(reply(), /^(Sent the task to|Queued the task for) \*\*Reviewer 2\*\*\./);
-  assert.ok(reply().endsWith(' This high task (difficulty 70) is beyond weak · high: strong · high fits it better by 66, over the 15-point margin. So it went to a new Auto worker instead of **Reviewer**.'));
-
-  // More than an easy task needs: an idle worker with the same role and access and no model yet takes it. The busy new
-  // worker and Reviewer, whose weak model is below this task too, are passed over.
-  const lead = await worker('Lead', 'strong'), spare = await worker('Spare');
-  const count = hub.data.agents.length;
-  replies.push(action('agent_work', { agentId: lead.id, task: 'List the config keys.', difficulty: 'low' }));
-  await send('List the config keys');
-  assert.equal(session.hubWorker, spare.id); assert.equal(hub.data.agents.length, count, 'no worker was created');
-  assert.match(reply(), /^(Sent the task to|Queued the task for) \*\*Spare\*\*\. .* strong · low is more than this low task \(difficulty 15\) needs: cheap · low fits it better by 17, over the 15-point margin\. So it went to another Auto worker instead of \*\*Lead\*\*\.$/);
-
-  // Within reach, and without a rating, the chosen worker takes the task: a long conversation raises the margin.
-  const background = agents.executions.get(reviewer.id), work = agents.conversation(background);
-  work.items.push({ type: 'agentMessage', text: 'x'.repeat(32000) });
-  // Hub's tasks never pause on a swap question in the worker's chat: the router's stronger pick keeps the model, unasked.
-  background.available = () => true;
-  background.smartRouter.choose = async () => ({ ...catalog.find(p => p.id === 'codex:strong:high'), reason: 'Router pick.', source: 'model',
-    assessment: { difficulty: 'high', taskKind: 'review', risk: 'low', uncertainty: 'low' } });
-  replies.push(action('agent_work', { agentId: reviewer.id, task: 'Check one call site.', difficulty: 'low' }));
-  await send('Check one call site');
-  assert.equal(session.hubWorker, reviewer.id); assert.ok(job(reviewer.id));
-  assert.match(reply(), /^(Sent the task to|Queued the task for) \*\*Reviewer\*\*\. [^.]*here\.$/, 'no reach note');
-  await until(() => work.routes.at(-1)?.modelSwap);
-  assert.deepEqual([work.routes.at(-1).id, work.routes.at(-1).modelSwap.outcome], ['codex:weak:high', 'unasked']);
-  assert.equal(work.pendingMessage?.modelSwap, undefined);
-  replies.push(action('agent_work', { agentId: lead.id, task: 'List more keys.' }));
-  await send('List more keys');
-  assert.equal(session.hubWorker, lead.id); assert.equal(hub.data.agents.length, count);
-
-  // 2026-11-01 ReachLab's audit: a rated task to another bot's sub-bot was redirected to a copy of it instead of refused.
-  const helper = await agents.saveAgent({ name: 'Helper', workspace: session.workspace, access: 'read-only', mode: 'auto', instructions: 'Review code.', createdBy: lead.id });
-  const helperWork = agents.execution(helper.id);
-  await Promise.all(agents.initializing.values());
-  helperWork.autoCatalog = () => catalog;
-  agents.conversation(helperWork, true, session.workspace, 'read-only').routes = [{ id: 'codex:weak:medium', provider: 'codex', model: 'weak', effort: 'medium' }];
-  const before = hub.data.agents.length;
-  replies.push(action('agent_work', { agentId: helper.id, task: 'Audit the session handling.', difficulty: 'high' }));
-  await assert.rejects(send('Audit the session handling'), /Helper works for the bot that made it/);
-  assert.equal(hub.data.agents.length, before, 'no copy of the sub-bot was made');
-});
-
-test('Hub Auto offers a model that fits its own rating of a request for its next messages, with Swap and Keep current and no cooldown', async t => {
-  const { hub, session, replies, send } = await setup(t);
-  const SCORES = { weak: 50, cheap: 65, strong: 100 }, COSTS = { weak: 0.1, cheap: 0.3, strong: 3 };
-  const eligible = Object.keys(SCORES).flatMap(model => ['low', 'medium'].map(effort => ({ id: `codex:${model}:${effort}`, provider: 'codex', model, effort,
-    label: `${model} · ${effort}`, worker: true, enabled: true, images: true, benchmarks: [{ source: 'aa-index', version: '4', harness: 'aa', score: SCORES[model], costUsd: COSTS[model] }] })));
-  hub.hubEligible = () => eligible;
-  let current = eligible.find(p => p.id === 'codex:weak:medium');
-  // As coordinatorChoice does: Hub Auto's pick is recorded as Auto's.
-  hub.coordinatorChoice = async () => { hub.data.hubModeSource = 'auto'; return { ...current, source: 'hub-auto', reason: 'Hub chat model.' }; };
-  const last = () => session.items.findLast(item => item.type === 'agentMessage');
-
-  // A request Hub rates hard for itself, on a weak model: the question waits under the reply, and nothing waits for it.
-  replies.push({ reply: 'Here is the migration plan.', difficulty: 'high', action: null });
-  await send('Plan the database migration');
-  const hard = last().modelSwap;
-  assert.deepEqual([hard.status, hard.hub, hard.current.label, hard.suggested.label, hard.difficulty, hard.gain, hard.margin],
-    ['pending', true, 'weak · medium', 'strong · medium', 70, 66, 15]);
-  assert.equal(hub.data.hubSwapQuestion.id, hard.id); assert.equal(hub.busy, null);
-  hub.answerModelSwap(session.id, hard.id, 'swap');
-  assert.deepEqual([hard.status, hard.outcome, hard.choice, hub.data.hubMode, hub.data.hubModeSource], ['answered', 'swapped', 'you chose Swap', 'codex:strong:medium', 'auto']);
-  assert.throws(() => hub.answerModelSwap(session.id, hard.id, 'keep'), /no longer open/);
-
-  // No cooldown after a swap: an easy request on the strong model asks at once, and the next message without an answer
-  // keeps the model.
-  current = eligible.find(p => p.id === 'codex:strong:medium');
-  replies.push({ reply: 'Glad it helps.', difficulty: 'low', action: null });
-  await send('Thanks');
-  assert.equal(last().modelSwap?.status, 'pending', 'no cooldown: the easy request asks at once');
-  hub.data.modelSwapState.last.tasks = 3;
-  replies.push({ reply: 'Hello.', difficulty: 'low', action: null });
-  await send('Hello');
-  const easy = last().modelSwap;
-  assert.deepEqual([easy.status, easy.suggested.label, easy.gain], ['pending', 'cheap · low', 17]);
-  replies.push(answer('Noted.'));
-  await send('Next thing');
-  assert.deepEqual([easy.status, easy.outcome, hub.data.hubMode], ['answered', 'expired', 'codex:strong:medium']);
-  assert.equal(hub.data.hubSwapQuestion, undefined);
-  assert.equal(last().modelSwap, undefined, 'an unrated reply asks nothing');
-
-  // A model the user chose for Hub is never swapped.
-  current = eligible.find(p => p.id === 'codex:weak:medium');
-  hub.coordinatorChoice = async () => { hub.data.hubModeSource = 'manual'; return { ...current, source: 'manual', reason: 'Chosen.' }; };
-  replies.push({ reply: 'Plan.', difficulty: 'xhigh', action: null });
-  await send('Design the architecture');
-  assert.equal(last().modelSwap, undefined);
 });
 
 test('a tracked job that runs on the Hub is marked admitted before its first model call, so a crash cannot replay it', async t => {
@@ -2121,6 +2037,9 @@ test('Hub dispatches four configured reviewers in two background slots and waits
   const exported = require('../src/conversation-export.cjs').conversationMarkdown(session);
   assert.match(exported, /Project copy:/);
   assert.ok(receipts.every(item => exported.includes(item.workspaceCopy.workspace)));
+  const tuned = hub.data.agents[1];
+  await agents.saveAgent({ ...tuned, effortCap: 'low' }, null, { keepBatch: true });
+  assert.deepEqual([agents.profile(tuned.id).temporaryBatch, agents.profile(tuned.id).effortCap], [batchId, 'low'], 'a write_settings change keeps a batch worker temporary');
   const kept = await agents.saveAgent({ ...hub.data.agents[0] });
   assert.equal(kept.temporaryBatch, undefined, 'editing and saving keeps a batch worker as a permanent bot');
   assert.ok(agents.execution(kept.id).data.sessions.length);
@@ -2260,6 +2179,8 @@ test('host check failures override a positive model review without starting anot
   const jobId = chat.delegation.id;
   worker.runCheck = async (_session, _task, check) => worker.classifyExec(check, { exitCode: 1, stdout: 'Compiler failed.' }, 1);
   chat.tasks.at(-1).corrections = 1;
+  // Escalation (the same model at a higher effort) is covered elsewhere; here the failed check must end the task.
+  hub.data.settings.escalateFailedChecks = false; agents.sync(worker);
   assessments.push({ fulfilled: true, evidence: 'The worker claims success.', gaps: [] });
   worker.notification({ method: 'item/completed', params: { threadId: chat.threadId, turnId: chat.turnId,
     item: { id: randomUUID(), type: 'agentMessage', phase: 'final_answer', text: 'Everything built successfully.' } } });
@@ -2515,7 +2436,7 @@ test('Hub uses local structured inference for replies and never treats malformed
   const router = new SmartRouter(root, () => assert.fail('Local structured inference must not use the Responses backend'));
   t.after(() => router.close());
   // A strict reply has every field; Hub's rating of the request is one (null: unrated).
-  let reply = { ...answer('Hello from local Hub'), difficulty: null };
+  let reply = answer('Hello from local Hub');
   router.providers = { structured: async (choice, request, signal) => {
     assert.equal(choice.provider, 'local'); assert.equal(choice.effort, null);
     assert.ok(request.schema.properties.action.anyOf.some(s => s.properties?.tool.enum.includes('agent_work')));
@@ -2543,7 +2464,7 @@ test('Hub hands off structured arguments with Windows paths, quotes and pasted t
   const worker = agents.execution(session.hubWorker), work = agents.conversation(worker);
   assert.ok(work.delegation.task.includes(task + '\n\nOriginal request:'), work.delegation.task);
   assert.equal(work.workspace, session.workspace);
-  assert.equal(worker.data.settings.mode, 'auto'); assert.equal(work.access, session.access);
+  assert.equal(worker.data.settings.mode, 'autoeffort:codex:gpt-5.6-terra'); assert.equal(work.access, session.access);
   const variant = calls[0].request.schema.properties.action.anyOf.find(s => s.properties?.tool.enum.includes('agent_work'));
   assert.equal(variant.properties.arguments.type, 'object');
   assert.deepEqual(variant.properties.arguments.required, Object.keys(variant.properties.arguments.properties));
@@ -2716,7 +2637,7 @@ test('a new delegation to an explicitly selected model starts its own task goal'
 });
 
 
-test('Hub compare starts on request with one Auto model, keeps only the change different, restores edited checks, then applies the better run and keeps a rule that helped', async t => {
+test('Hub compare starts on request on Hub’s model, keeps only the change different, restores edited checks, then applies the better run and keeps a rule that helped', async t => {
   for (const target of ['bot', 'project', 'skill']) await t.test(target, async t => {
     const { root, hub, session, agents, replies, calls, send } = await setup(t);
     const project = projectFixture(root, session);
@@ -2736,12 +2657,18 @@ test('Hub compare starts on request with one Auto model, keeps only the change d
       fs.writeFileSync(path.join(candidate, 'check.cjs'), 'process.stdout.write("skill helper");');
       skillArgs = { skill: 'workflow', candidatePath: candidate };
     }
-    // No model named: Auto picks one for the request and both runs use it. The request itself is the approval.
+    // A named model on Auto effort (agent_models' default) runs at its default effort, the same for every run.
+    if (target === 'bot') {
+      const named = await hub.planComparison(session, { task: 'Create done.txt.', change, target, mode: 'autoeffort:codex:gpt-5.6-terra' });
+      assert.equal(named.args.mode, hub.autoEffortDefault('autoeffort:codex:gpt-5.6-terra').id);
+    }
+    // No model named: both runs use Hub's model at its default effort. The request itself is the approval.
     replies.push(action('compare', { task: 'Create done.txt.', change, target, ...skillArgs }));
     await send(`Compare creating done.txt with the instruction change "${change}"`);
     const record = Object.values(hub.data.comparisons)[0];
     assert.equal(record.state, 'running');
-    assert.equal(record.mode, agents.agentMode('terra-light'), 'the model the router picked, pinned for both runs');
+    assert.equal(record.mode, hub.autoEffortDefault(agents.hubAutoEffort()).id, 'Hub’s model at its default effort, pinned for both runs');
+    assert.equal(hub.resolveWorker(record.mode).model, hub.resolveWorker('terra-light').model);
     assert.equal(hub.data.agents.length, 2);
     const started = session.items.at(-1);
     assert.match(started.text, /^Started the comparison: 2 runs on .+, judged by Done check\. The card below updates as they finish\.$/);
@@ -2996,24 +2923,82 @@ test('history summaries on a CLI router run large chunks in parallel waves and m
   assert.equal(Controller.prototype.summaryCalls(history.slice(0, 1), 0, 1, { provider: 'openrouter' }) >= 4, true);
 });
 
-test('Hub changes to its strongest model when the message asks for a stronger one, and does the redo in its own chat', async t => {
+test('a message that asks for a stronger model moves Hub to its own model’s highest Hub effort, and Hub does the redo in its own chat', async t => {
   const { hub, session, calls, send } = await setup(t);
-  hub.data.settings.mode = 'auto';
   await send('Hello');
-  const eligible = hub.hubEligible();
-  assert.ok(eligible.length >= 2, 'the fixture offers several Hub models');
-  const rank = new Map(eligible.map((p, i) => [p.id, 10 + i * 10]));
-  hub.smartRouter.benchmarks = { catalog: workers => workers.map(w => ({ ...w, benchmarks: [{ source: 'aa-index', version: '4', harness: 'aa', score: rank.get(w.id) ?? 1 }] })) };
-  const top = eligible.at(-1);
+  const current = hub.resolveWorker(hub.data.hubMode);
+  const order = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+  const variants = hub.catalog().filter(p => p.worker && p.provider === current.provider && p.model === current.model && hub.available(p))
+    .sort((x, y) => order.indexOf(x.effort) - order.indexOf(y.effort));
+  assert.ok(variants.length >= 2, 'the fixture offers Hub’s model at several efforts');
+  Object.assign(hub.data, { hubMode: variants[0].id, hubModeSource: 'auto' });
+  hub.data.settings.mode = `autoeffort:${current.provider || 'codex'}:${current.model}`;
+  hub.data.settings.effortCap = 'max';
+  // Hub stays within its Low and Medium efforts: the highest of those.
+  const top = variants.filter(p => !p.effort || ['low', 'medium'].includes(p.effort)).at(-1);
+  assert.notEqual(top.id, variants[0].id, 'the fixture has a higher Hub effort to move to');
   hub.smartRouter.chooseHub = async () => assert.fail('a stronger-model request must not ask the router');
   const planningBefore = calls.length, bots = hub.agents.controllers.size;
+  assert.equal(hub.hubStrongerChoice('use higher effort and redo it')?.id, top.id, 'an effort request counts too');
   await send('use a smarter agent and redo it');
-  assert.equal(hub.data.hubMode, top.id, 'Hub moves to its strongest model');
-  assert.equal(session.routes.at(-1).id, top.id, 'the redo runs on that model in the Hub chat');
+  assert.equal(hub.data.hubMode, top.id, 'Hub moves to its model’s highest Hub effort');
+  assert.equal(session.routes.at(-1).id, top.id, 'the redo runs on it in the Hub chat');
   assert.equal(hub.agents.controllers.size, bots, 'no agent is started for it');
   assert.equal(calls.length, planningBefore, 'the planning call does not decide it');
-  hub.data.hubMode = eligible[0].id; hub.data.hubModeSource = 'auto';
-  hub.smartRouter.chooseHub = async () => eligible[0];
-  await send('thanks, what next?');
-  assert.notEqual(calls.at(-1).choice.id, top.id, 'an ordinary message does not change the Hub model');
+});
+
+test('Hub on Auto effort with a model that has no Low or Medium runs its lowest effort within the cap', async t => {
+  const { hub } = await setup(t);
+  const variants = ['high', 'xhigh'].map(effort => ({ id: `codex:deep:${effort}`, provider: 'codex', model: 'deep', effort, worker: true }));
+  Object.assign(hub, { ownVariants: () => variants, available: () => true, resolveWorker: () => variants[1] });
+  const choice = await hub.coordinatorChoice('autoeffort:codex:deep', new AbortController());
+  assert.equal(choice.id, 'codex:deep:high', 'not the model’s default effort');
+});
+
+test('Hub on legacy Auto with Jev gets no other provider’s router as its fallback when its Secondary model cannot run', async t => {
+  const { hub } = await setup(t);
+  Object.assign(hub.data.settings, { routing: 'jev', jevEnabled: true, secondaryModel: 'codex:missing:low' });
+  let given;
+  hub.smartRouter.chooseHub = async (eligible, provider, router) => { given = { provider, router }; return eligible[0]; };
+  await hub.coordinatorChoice('auto', new AbortController());
+  assert.deepEqual(given, { provider: 'jev', router: null });
+});
+
+test('Hub on legacy Auto with no router picks without calling one', async t => {
+  const { hub } = await setup(t);
+  hub.data.settings.router = 'off';
+  hub.smartRouter.chooseHub = async () => assert.fail('no router is called');
+  const eligible = hub.hubEligible();
+  const choice = await hub.coordinatorChoice('auto', new AbortController());
+  assert.equal(choice.id, (eligible.find(p => p.effort === 'medium') || eligible[0]).id);
+});
+
+test('Hub on Auto effort makes no router call: medium runs, a named low or medium effort is kept, a worker result keeps the last', async t => {
+  const { hub, session, send } = await setup(t);
+  await send('Hello');
+  await until(() => !hub.busy);
+  const current = hub.resolveWorker(hub.data.hubMode);
+  hub.data.settings.mode = `autoeffort:${current.provider || 'codex'}:${current.model}`;
+  hub.data.settings.effortCap = 'max';
+  const [low, medium] = hub.ownVariants().filter(p => ['low', 'medium'].includes(p.effort));
+  assert.ok(low && medium, 'the fixture offers Hub’s model at Low and Medium');
+  assert.notEqual(hub.routerKind(), 'off', 'the fixture has a router');
+  // 2026-11-04 (speed plan #4): one model call per Hub message.
+  hub.smartRouter.chooseHub = hub.smartRouter.choose = async () => assert.fail('Hub asks no router');
+  await send('What does this project do?');
+  await until(() => !hub.busy);
+  assert.equal(hub.data.hubMode, medium.id, 'medium by default');
+  assert.equal((await hub.coordinatorChoice(hub.data.settings.mode, new AbortController(), 'use low effort for chat', session)).id, low.id, 'low on request');
+  assert.equal((await hub.coordinatorChoice(hub.data.settings.mode, new AbortController(), '', session)).id, low.id, 'a worker result keeps the effort');
+  assert.equal((await hub.coordinatorChoice(hub.data.settings.mode, new AbortController(), 'Explain the plan', session)).id, medium.id, 'the next message is medium again');
+  // After Hub's model changes, a stronger-model request moves within the new model, not the one Hub last ran.
+  const other = hub.catalog().find(p => p.worker && hub.available(p) && p.model !== current.model && p.effort === 'medium');
+  assert.ok(other, 'the fixture offers another model');
+  assert.equal(hub.hubStrongerChoice('use a smarter model', `autoeffort:${other.provider || 'codex'}:${other.model}`)?.model, other.model);
+  // Jev as the router without a saved key routes with the Secondary model.
+  hub.data.settings.router = 'jev';
+  hub.smartRouter.jev = { configured: false };
+  assert.equal(hub.routerKind(), 'secondary');
+  hub.smartRouter.jev = { configured: true };
+  assert.equal(hub.routerKind(), 'jev');
 });

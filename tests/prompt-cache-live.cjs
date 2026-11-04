@@ -23,7 +23,7 @@ async function main() {
     let agents, timer;
     try {
       await hub.initialize();
-      Object.assign(hub.data.settings, { replySuggestions: false, chatScanModel: 'off', jevCompare: false, jevEnabled: false });
+      Object.assign(hub.data.settings, { replySuggestions: false, chatScanModel: 'off', jevEnabled: false });
       if (provider === 'cursor-cli' && hub.cursor.status.loggedIn) {
         await hub.discoverCursor();
         const model = hub.cursor.models.find(row => row.id === 'composer-2.5');

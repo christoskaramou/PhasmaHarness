@@ -119,6 +119,16 @@ test('HTTP connector tools are shared, validated, persisted and disabled central
   await manager.action(record.id, 'disconnect'); await assert.rejects(manager.call(record, 'echo', args, 'bot1', manager.directory), /disabled|changed/);
   assert.equal((await manager.discover()).tools.length, 0);
 });
+test('startup reconnects saved enabled connectors and reports unreachable ones', async t => {
+  const server = await remote(t), ids = [randomUUID(), randomUUID(), randomUUID()];
+  const manager = setup(t, encryption, { version: 1, defaultsVersion: 1, connectors: [
+    { id: ids[0], name: 'Up', transport: 'http', url: server.url },
+    { id: ids[1], name: 'Off', transport: 'http', url: server.url, enabled: false },
+    { id: ids[2], name: 'Down', transport: 'http', url: 'http://127.0.0.1:9/mcp' }] });
+  assert.deepEqual(manager.snapshot().map(record => record.state), ['disconnected', 'disabled', 'disconnected']);
+  await manager.connectEnabled();
+  assert.deepEqual(manager.snapshot().map(record => record.state), ['connected', 'disabled', 'error']);
+});
 test('bearer secrets stay encrypted and cannot follow a changed endpoint', async t => {
   const server = await remote(t, { bearer: 'private-fixture-token' }), manager = setup(t);
   const [saved] = await manager.save({ name: 'Private', transport: 'http', url: server.url, auth: 'bearer', token: 'private-fixture-token' });

@@ -68,10 +68,6 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
   handle('openFile', (id, target, agentId) => require('./workspace/linked-files.cjs').open(workspaceOf(id, agentId), target, linkShell?.() || null));
   handle('linkImage', (id, target, agentId) => require('./workspace/linked-files.cjs').image(workspaceOf(id, agentId), target, !linkShell?.()));
   handle('settings', (values, agentId) => { const snapshot = agents.settings(values, agentId); controller.warmRouter(); return snapshot; });
-  handle('benchmarkData', () => {
-    const workers = controller.catalog().filter(p => p.worker && p.enabled && controller.available(p));
-    return { data: controller.smartRouter.benchmarks.data, summary: controller.smartRouter.benchmarks.summary(workers) };
-  });
   handle('create', (workspace, access, agentId) => {
     return agents.conversation(agents.controller(agentId), true, workspace, access);
   });
@@ -149,8 +145,6 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
   // Settings > General > Dream now: a dream for the open chat's project, without the once-a-day wait.
   handle('dreamNow', id => agents.owner(id).dreamNow(id));
   handle('dismissSkillNotice', (id, noticeId) => agents.owner(id).dismissSkillNotice(id, noticeId));
-  // Swap or Keep current for an Auto bot's pending model question; sub-bot chats answer it too, like approvals.
-  handle('answerModelSwap', (id, promptId, choice) => agents.owner(id).answerModelSwap(id, promptId, choice));
   // Brings a project copy's own changes into the project it came from, after the user reviews the file list.
   handle('applyCopy', async workspace => {
     const preview = await agents.workspaces.changes(workspace);

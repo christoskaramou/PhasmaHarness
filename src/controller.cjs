@@ -21,6 +21,7 @@ const { EventEmitter } = require('node:events');
 const { CodexClient } = require('./providers/codex.cjs');
 const { PRESETS, ROUTER_PRESETS, route } = require('./routing/router.cjs');
 const { SmartRouter } = require('./routing/smart-router.cjs');
+const { parseAutoEffort, BOT_SETTINGS } = require('../ui/agent-state.js');
 const { MODEL: JEV_MODEL } = require('./providers/jev.cjs');
 const { TOOL: CONTEXT_TOOL } = require('./workspace/context-search.cjs');
 const { INSTRUCTIONS: HELPER_INSTRUCTIONS, TOOLS: HELPER_TOOLS, ToolHelpers } = require('./tools/tool-helpers.cjs');
@@ -128,8 +129,6 @@ class Controller extends EventEmitter {
     this.limits = new ProviderLimits(this.data.providerLimits, () => Date.now(), this.data.providerQuotas);
     this.lastSends = new Map();
     this.loadedModelConfigs = new Map();
-    // Opt-in Jev comparison log (set by the app) and the comparison in flight, if any.
-    this.jevCompare = null; this.jevComparing = null;
     // Local decision trace (set by the app; see src/trace.cjs).
     this.trace = NO_TRACE; this.startedAt = Date.now();
     this.log = NO_LOG; // replaced by the app's rotating log file
@@ -150,6 +149,9 @@ class Controller extends EventEmitter {
     // Large tool output is always captured as excerpts; the setting is no longer shown, so an old "off" is not kept.
     this.data.settings.largeResponses = true;
     if (!EFFORT_CAPS.includes(this.data.settings.effortCap)) this.data.settings.effortCap = DEFAULT_EFFORT_CAP;
+    // The Escalation model picked before it was removed dreamed too; it stays the Dream model.
+    const { escalationModel } = this.data.settings;
+    if (this.data.settings.dreamModel === undefined && escalationModel && escalationModel !== 'auto') this.data.settings.dreamModel = escalationModel;
     this.contextSearch = null;
     this.wikiStore = options.wikiStore || null;
     this.contextRequests = new Set();
@@ -188,7 +190,7 @@ class Controller extends EventEmitter {
       }
       session.queueSending = false;
       session.compacting = false;
-      // A model swap question ends with the app; its message was never sent, and says so ("Not sent: …").
+      // A model question saved by v0.3.31 (which asked before swapping models): its message was never sent, and says so.
       if (session.pendingMessage?.modelSwap) {
         delete session.pendingMessage.modelSwap;
         session.pendingMessage.error = 'The app closed during the model question. Send it again.';
@@ -236,9 +238,6 @@ class Controller extends EventEmitter {
         if (this.busy) {
           const session = this.session(this.busy);
           const submission = session.submission;
-          // A model swap question (controller/model-swaps.cjs) ends with the connection, as with Stop: its turn stops before
-          // sending, so a later answer cannot start a turn the chat no longer counts as running.
-          if (this.swapPrompts?.has(session.id)) { this.stopping.add(session.id); this.endModelSwap(session.id); }
           if (submission && submission.state !== 'completed' && submission.state !== 'unconfirmed')
             this.finishTurn(session, submission, { status: 'interrupted', error: message, reason: 'connection lost' });
           else if (!this.gate) { session.status = 'interrupted'; session.compacting = false; this.busy = null; }
@@ -307,7 +306,8 @@ class Controller extends EventEmitter {
     this.changed();
   }
 
-  get routingProvider() { return this.data.settings.jevEnabled === false && this.data.settings.routing === 'jev' ? 'smart' : this.data.settings.routing; }
+  // How this bot's router runs: Jev, or its Secondary model ('smart'). See routerKind.
+  get routingProvider() { return this.routerKind() === 'jev' ? 'jev' : 'smart'; }
 
   snapshot() {
     // Comparisons hold which run carries the change; the chat card gets a public view instead.
@@ -316,7 +316,6 @@ class Controller extends EventEmitter {
     const catalog = this.catalog();
     const plan = this.planPreset(catalog);
     return {
-      benchmarks: this.smartRouter.benchmarks?.summary(catalog.filter(p => p.worker && p.enabled && this.available(p))),
       cursor: { ...this.cursor.status, enabled: this.data.settings.cursorEnabled !== false },
       claude: { ...this.claude.status, enabled: !!this.data.settings.claudeEnabled, quotaAccountKey: this.claude.accountKey?.() || null },
       nativeCLIs: Object.fromEntries([...this.nativeCLIs].map(([id, backend]) => [id, {
@@ -324,13 +323,13 @@ class Controller extends EventEmitter {
       }])),
       codex: this.codex,
       cliUpdates: this.cliUpdates || {},
-      coordinator: this.isCoordinator(), hubMode: this.data.hubMode || null,
+      coordinator: this.isCoordinator(), hubMode: this.data.hubMode || null, routerKind: this.routerKindSaved(), secondaryId: this.secondaryId(), chatChecker: this.chatScanner()?.id || null,
       connectingProviders: [...new Set([...this.connectingProviders.keys(), ...(this.chatgptLoginPending ? ['codex'] : [])])],
       chatgptLoginPending: this.chatgptLoginPending,
       ...visibleData, settings: { ...this.data.settings, mode: plan ? 'auto' : this.data.settings.mode }, planRouting: plan, connection: this.connection, error: this.error, account: this.account, busy: this.busy,
       sessions: this.data.sessions.map(({ groupChatContext, coordinatorConversation, ...session }) => withoutImages({ ...session, background: this.background.get(session.id), tasks: (session.tasks || []).map(({ inputImages, ...task }) => task) })),
-      routing: this.routing, routingProvider: this.routingProvider, routerModel: this.routingProvider === 'jev' ? this.smartRouter.jev?.model || JEV_MODEL : this.routerChoices().find(p => p.id === this.data.settings.routerPreset)?.model || null,
-      jev: { configured: !!this.smartRouter.jev?.configured, keySaved: !!(this.smartRouter.jev?.keyStore?.configured ?? this.smartRouter.jev?.configured), enabled: this.data.settings.jevEnabled !== false, model: this.smartRouter.jev?.model || null, requestedModel: JEV_MODEL, compare: this.jevCompare?.summary() || null, health: this.smartRouter.jev?.health || null },
+      routing: this.routing, routingProvider: this.routingProvider, routerModel: this.routingProvider === 'jev' ? this.smartRouter.jev?.model || JEV_MODEL : this.secondaryPick()?.model || null,
+      jev: { configured: !!this.smartRouter.jev?.configured, keySaved: !!(this.smartRouter.jev?.keyStore?.configured ?? this.smartRouter.jev?.configured), enabled: this.data.settings.jevEnabled !== false, model: this.smartRouter.jev?.model || null, requestedModel: JEV_MODEL, health: this.smartRouter.jev?.health || null },
       helperCapabilities: {
         projectContext: { codex: true, responsesApi: true, claudeCli: true, cursorCli: true },
         jevToolRecommendations: { codex: true, responsesApi: true, claudeCli: 'codex-thread-mcp-catalog', cursorCli: 'codex-thread-mcp-catalog' },
@@ -461,6 +460,28 @@ class Controller extends EventEmitter {
       if (values.routerPreset !== (next.routerPreset || 'luna-light') && !this.available(this.routerChoices().find(p => p.id === values.routerPreset))) throw new Error('This router preset is unavailable on your account.');
       next.routerPreset = values.routerPreset;
     }
+    if (values.router !== undefined) {
+      if (!BOT_SETTINGS.router.includes(values.router)) throw new Error('Unknown router.');
+      next.router = values.router;
+    }
+    if (values.secondaryModel !== undefined) {
+      const choice = this.chatScanChoices().find(p => p.id === values.secondaryModel);
+      if (values.secondaryModel !== 'off' && !choice)
+        throw new Error('Unknown secondary model.');
+      if (choice && !this.available(choice))
+        throw new Error('This secondary model is unavailable on your account.');
+
+      next.secondaryModel = values.secondaryModel;
+    }
+    if (values.dreamModel !== undefined) {
+      const choice = this.catalog().find(p => p.worker && p.id === values.dreamModel);
+      if (values.dreamModel !== 'hub' && !choice)
+        throw new Error('Unknown dream model.');
+      if (choice && !this.available(choice))
+        throw new Error('This dream model is unavailable on your account.');
+
+      next.dreamModel = values.dreamModel;
+    }
     if (values.chatScanModel !== undefined) {
       const choice = this.chatScanChoices().find(p => p.id === values.chatScanModel);
       if (values.chatScanModel !== 'off' && !choice)
@@ -478,24 +499,6 @@ class Controller extends EventEmitter {
         throw new Error('Invalid on/off setting.');
 
       next[key] = values[key];
-    }
-    if (values.autoLowModel !== undefined) {
-      const choice = this.catalog().find(p => p.worker && p.id === values.autoLowModel);
-      if (values.autoLowModel !== 'auto' && !choice)
-        throw new Error('Unknown model for simple messages.');
-      if (choice && !this.available(choice))
-        throw new Error('This model for simple messages is unavailable on your account.');
-
-      next.autoLowModel = values.autoLowModel;
-    }
-    if (values.escalationModel !== undefined) {
-      const choice = this.catalog().find(p => p.worker && p.id === values.escalationModel);
-      if (values.escalationModel !== 'auto' && !choice)
-        throw new Error('Unknown escalation model.');
-      if (choice && !this.available(choice))
-        throw new Error('This escalation model is unavailable on your account.');
-
-      next.escalationModel = values.escalationModel;
     }
     if (values.fontScale !== undefined) {
       if (![85, 100, 115, 130, 150].includes(values.fontScale)) throw new Error('Invalid font scale.');
@@ -552,13 +555,6 @@ class Controller extends EventEmitter {
       if (this.busy && values.access !== next.access) throw new Error('Stop the current turn before changing access.');
       next.access = values.access;
     }
-    if (values.jevCompare !== undefined) {
-      if (typeof values.jevCompare !== 'boolean') throw new Error('Invalid Jev comparison setting.');
-      // Only turning it on needs a key; a saved "on" never blocks saving other settings (it is skipped without a key).
-      if (values.jevCompare && !next.jevCompare && !this.smartRouter.jev?.configured) throw new Error('Add a Jev API key and enable Jev in Providers first.');
-      next.jevCompare = values.jevCompare;
-      if (!values.jevCompare) this.jevComparing?.abort();
-    }
     if (values.jevImages !== undefined) {
       if (typeof values.jevImages !== 'boolean') throw new Error('Invalid Jev image assist setting.');
       if (values.jevImages && !this.smartRouter.jev?.configured) throw new Error('Add a Jev API key and enable Jev in Providers first.');
@@ -570,7 +566,7 @@ class Controller extends EventEmitter {
       next.contextRanking = values.contextRanking;
     }
     if (next.toolSelection !== this.data.settings.toolSelection || next.largeResponses !== this.data.settings.largeResponses) this.loaded.clear();
-    if (next.jevEnabled !== this.data.settings.jevEnabled) { this.jevComparing?.abort(); this.smartRouter.jev?.resetHealth?.(); }
+    if (next.jevEnabled !== this.data.settings.jevEnabled) this.smartRouter.jev?.resetHealth?.();
     const jevSwitchedOn = this.data.settings.jevEnabled === false && next.jevEnabled !== false;
     this.data.settings = next; this.save(); this.changed();
     if (jevSwitchedOn)
@@ -742,13 +738,23 @@ class Controller extends EventEmitter {
     return this.snapshot();
   }
 
+  // The mode a message runs. A message saved with the retired Auto (queued before the upgrade, or an old job) runs the
+  // bot's current model; a bot still on it with routing turned off runs Hub's model on Auto effort, not every model.
+  runMode(mode) {
+    const requested = mode || this.data.settings.mode;
+    if (requested !== 'auto') return requested;
+    if (this.data.settings.mode && this.data.settings.mode !== 'auto') return this.data.settings.mode;
+    return !this.isCoordinator() && this.routerTurnedOff() ? this.agents?.hubAutoEffort?.() || 'auto' : 'auto';
+  }
+
   async send({ id, text, mode, images = [], files = [], fileMessage = null, contextText = '', task = 'on', wikiTaskId = null, failover = false, agentReply = false, agentReplyCancelled = false, agentResult = null, agentMail = null, routineRun = null, started = null }) {
     if (!['auto', 'on', 'off'].includes(task)) throw new Error('Invalid task mode.');
     if (task === 'auto') task = 'on'; // Existing queued messages use the new default.
     if (this.blockedReason()) throw new Error(this.blockedReason());
     // Codex turns, Auto routing and Hub need Codex; a turn on Claude, Cursor or another provider does not wait for it (every
     // bot starts its own app-server, which can take tens of seconds after launch).
-    const chosenProvider = (mode || this.data.settings.mode) === 'auto' ? null : this.resolveWorker(mode || this.data.settings.mode)?.provider;
+    const early = this.runMode(mode);
+    const chosenProvider = early === 'auto' ? null : this.resolveWorker(early)?.provider;
     const withoutCodex = !this.isCoordinator() && !!chosenProvider && chosenProvider !== 'codex';
     if (this.connection !== 'ready' && !withoutCodex)
       throw new Error(this.error || 'Codex is still connecting.');
@@ -784,7 +790,7 @@ class Controller extends EventEmitter {
     }
     // A message that asks for a stronger model is done by Hub itself: its chat runs it as a tool turn on the strongest Hub
     // model, and no agent is started for it (agent tools are refused for that turn, see bridgeTool and helperToolCall).
-    const hubStronger = this.isCoordinator() && !agentReply && !routineRun && !wikiTaskId && !this.planPreset() ? this.hubStrongerChoice(text) : null;
+    const hubStronger = this.isCoordinator() && !agentReply && !routineRun && !wikiTaskId && !this.planPreset() ? this.hubStrongerChoice(text, mode || this.data.settings.mode) : null;
     if (hubStronger) { this.data.hubMode = hubStronger.id; this.data.hubModeSource = 'auto'; this.save(); mode = hubStronger.id; }
     if (this.busy || this.agents?.groupRuns.has(id)) {
       if (this.busy && this.busy !== id && !(this.isCoordinator() && (session.group || this.session(this.busy).group))) {
@@ -804,7 +810,7 @@ class Controller extends EventEmitter {
     session.queuePaused = false;
     session.activeTaskId = null;
     session.hubStronger = !!hubStronger;
-    const chosenMode = mode || this.data.settings.mode;
+    const chosenMode = this.runMode(mode);
     session.agentReplyCancelledActive = agentReplyCancelled === true;
     session.routineRunActive = routineRun?.occurrenceId || null;
     // Only a message the user sent counts as their own turn; results, mail, routine runs and wiki proposals do not.
@@ -818,13 +824,20 @@ class Controller extends EventEmitter {
     const assigned = !!session.delegation && this.agents?.executionText(session.delegation) === text;
     const originalRequest = assigned ? this.agents.requestFor(session.delegation) : null;
     const routingText = originalRequest?.text || text;
+    // Auto effort: the bot's router picks only the effort of its one model; with the router off, its default effort runs.
+    const autoEffort = !!parseAutoEffort(chosenMode);
+    // The user asked for an effort in this message: it runs, without the router, on the bot's model.
+    const askedEffort = !agentReply && !routineRun && !wikiTaskId && !this.planPreset() ? this.requestedEffort(text, chosenMode, session) : null;
+    const routes = !askedEffort && (chosenMode === 'auto' || (autoEffort && this.routerKind() !== 'off'));
     let selected = wikiWorker ? { ...wikiWorker, wikiTaskId, source: 'manual', reason: 'Wiki proposal using the original task worker.' }
-      : this.planPreset() || (chosenMode === 'auto' ? route(routingText) : { ...this.resolveWorker(chosenMode), source: 'manual', reason: 'Your manual selection.' });
-    if (chosenMode !== 'auto' && !selected?.model) throw new Error('Unknown model selection.');
+      : askedEffort ? { ...askedEffort, source: 'manual', reason: `You asked for ${askedEffort.effort} effort.` }
+      : this.planPreset() || (routes ? route(routingText) : { ...(autoEffort ? this.autoEffortDefault(chosenMode) : this.resolveWorker(chosenMode)), source: 'manual',
+        reason: autoEffort ? 'Auto effort, with this bot\'s router off: its model\'s default effort.' : 'Your manual selection.' });
+    if (!routes && !selected?.model) throw new Error('Unknown model selection.');
     if (this.planPreset() && !this.models.some(m => m.model === selected.model && m.supportedReasoningEfforts.some(e => e.reasoningEffort === selected.effort)))
       throw new Error('Terra light is not currently available on your account. Refresh your Codex login or restart the app.');
     const provider = this.routingProvider;
-    const useSmart = !this.planPreset() && chosenMode === 'auto';
+    const useSmart = !this.planPreset() && routes;
     const previousState = { status: session.status, error: session.error };
     this.turnSkillDirectories?.delete(id);
     this.busy = id; session.status = 'running'; session.error = null; session.turnId = null;
@@ -834,12 +847,17 @@ class Controller extends EventEmitter {
     session.agentReplyActive = agentReply === true;
     if (!agentReply && !failover) { session.agentDelegations = 0; session.agentMessages = 0; }
     const clientId = randomUUID();
-    // Only an Auto message may be re-sent to another provider when its provider hits a usage limit, and only once.
+    // Only a legacy Auto message may be re-sent to another provider when its provider hits a usage limit, and only once:
+    // Auto effort keeps the bot's one model, so it reports the limit like a set effort.
     this.lastSends.delete(id);
-    if (useSmart && !wikiTaskId) this.lastSends.set(id, { clientId, text, images, task, failover: failover === true,
+    if (useSmart && chosenMode === 'auto' && !wikiTaskId) this.lastSends.set(id, { clientId, text, images, task, failover: failover === true,
       ...(fileMessage ? { fileMessage } : {}), ...(agentReply ? { agentReply: true } : {}), ...(routineRun ? { routineRun } : {}) });
+    // The worker is told the effort change it was asked for is already done, so it does not answer that it cannot.
+    const effortNote = askedEffort ? `[Harness: this turn already runs at ${askedEffort.effort} effort, as the user asks below. The effort change is done; do not say you cannot change it.]
+
+` : '';
     session.pendingMessage = {
-      ...(contextText ? { contextText } : {}),
+      ...(contextText || effortNote ? { contextText: effortNote + contextText } : {}),
       id: clientId, clientId, type: 'userMessage', pending: true, createdAt: Date.now(),
       requestedMode: chosenMode,
       ...(fileMessage ? { fileMessage } : {}),
@@ -862,41 +880,40 @@ class Controller extends EventEmitter {
       this.markAdmitted(session);
 
       if (useSmart) {
-        let router = this.effectiveRouter();
+        const router = this.effectiveRouter();
         const smartReady = () => !!router && this.available(router);
-        if (provider === 'smart' && !smartReady()) throw new Error('The selected router model is disabled or unavailable. Choose an enabled router in Settings.');
+        // Routing on Auto effort may fall back to the default effort (below); legacy Auto cannot.
+        const report = !autoEffort && ((session.delegation && !session.delegation.delivered) || agentReply || this.agents?.budgets.forSession(session));
         this.routing = id; this.changed();
         // Only workers within the effort cap are offered, so Smart, Jev, escalation and failover all choose within it.
         // Workers of a provider at its usage limit are left out while another provider can take the message.
-        const routingCatalog = () => this.autoCatalog(images);
-        const context = { ...session, ...previousState, configuredChecks: this.data.settings.checks?.[session.workspace] || [], routingCatalog: routingCatalog(), routerChoice: router, attachedImageCount: images.length, attachedImages: this.jevImageAssist() ? images : [],
-          // The presets this project's checks proved per kind of work (src/setups.cjs).
-          provenSetups: this.provenSetupsFor(session.workspace), autoLowModel: this.data.settings.autoLowModel };
+        const routingCatalog = () => this.autoCatalog(images, autoEffort ? chosenMode : null);
+        const context = { ...session, ...previousState, configuredChecks: this.data.settings.checks?.[session.workspace] || [], routingCatalog: routingCatalog(), routerChoice: router, attachedImageCount: images.length, attachedImages: this.jevImageAssist() ? images : [] };
         // A fresh delegation is not forced onto the model of an older, possibly misinterpreted task.
         if (originalRequest && session.job?.originalRequestId !== originalRequest.id) context.job = null;
         const smart = async () => {
           try { return await this.smartRouter.choose(routingText, { ...context, routerChoice: router }, this.models, 'smart', router?.id); }
           catch (error) {
-            // The router's own provider hit its usage limit: record it and route once with another provider's router.
+            // The router's own provider hit its usage limit: record it. Another provider's router never takes its place
+            // (the user picked this one), so Auto effort runs its default effort and legacy Auto reports the limit.
             if (!error.limit || error.name === 'AbortError' || this.stopping.has(id)) throw error;
-            if ((session.delegation && !session.delegation.delivered) || agentReply || this.agents?.budgets.forSession(session)) {
+            if (report) {
               this.providerOutcome(session, error.limitProvider, null, clientId, { status: 'failed', limit: error.limit });
               throw error;
             }
             this.limits.mark(error.limitProvider, error.limit);
-            const next = this.effectiveRouter();
-            if (!next || next.id === router?.id || !this.available(next)) throw error;
-            router = next;
-            return this.smartRouter.choose(routingText, { ...context, routingCatalog: routingCatalog(), routerChoice: router }, this.models, 'smart', router.id);
+            throw error;
           }
         };
         try {
+          // The router may have gone while the send waited to start (acquire).
+          if (provider === 'smart' && !smartReady()) throw new Error('This bot has no router: pick its Secondary model or Jev as its router in its Edit dialog.');
           try { selected = provider === 'jev' ? await this.smartRouter.choose(routingText, context, this.models, provider, router?.id) : await smart(); }
           catch (error) {
             // Jev unavailable (down, timeout, key removed): route the same message with the smart router instead of failing.
             // A stop is never retried, and without a usable smart router the Jev error stands.
             if (provider !== 'jev' || error.name === 'AbortError' || this.stopping.has(id) || !smartReady()) throw error;
-            if (error.limit && ((session.delegation && !session.delegation.delivered) || agentReply || this.agents?.budgets.forSession(session))) {
+            if (error.limit && report) {
               this.providerOutcome(session, error.limitProvider || 'jev', null, clientId, { status: 'failed', limit: error.limit });
               throw error;
             }
@@ -907,7 +924,7 @@ class Controller extends EventEmitter {
           // Jev unsure of its own assessment (its least confident answer under 0.5, Jev's own low-confidence line): the smart
           // router assesses the message again and its choice stands; if that fails, Jev's does. Seen 2026-11-01: Jev rated
           // security audits "lookup, low" at confidence 0.13, so the model for simple messages ran them.
-          if (selected.source === 'jev' && selected.router?.confidence < JEV_UNSURE && smartReady()) {
+          if (!autoEffort && selected.source === 'jev' && selected.router?.confidence < JEV_UNSURE && smartReady()) {
             const jev = selected;
             try {
               selected = await smart();
@@ -919,22 +936,25 @@ class Controller extends EventEmitter {
               this.log.warn('Smart router second opinion failed; Jev\'s choice stands', { error: String(error.message).slice(0, 300) });
             }
           }
+        } catch (error) {
+          // Auto effort stays usable when routing fails (as Hub's does), a router's usage limit included: the model's default
+          // effort answers. A stop still fails the send.
+          if (!autoEffort || error.name === 'AbortError' || this.stopping.has(id)) throw error;
+          this.log.warn('Effort routing failed; using the default effort', { error: String(error.message).slice(0, 300) });
+          const note = `The router was unavailable (${String(error.message).slice(0, 160)}); the model's default effort runs.`;
+          selected = { ...this.autoEffortDefault(chosenMode), source: 'manual', routerFallback: note, reason: note };
         } finally { this.routing = null; this.warmRouter(); }
         selected = { ...selected, effortCap: this.data.settings.effortCap };
         if (this.stopping.has(id)) throw new Error('Turn was stopped before sending.');
-        // An Auto bot keeps its model unless a swap is worth its conversation, and asks before one (controller/model-swaps.cjs).
-        // Delegated tasks do not ask: nobody watches this chat for them, and a rated dispatch (Hub's agent_work, a bot's
-        // agent_delegate) already sent a task outside this model's reach to another worker.
-        if (this.agents && !failover && !wikiTaskId) {
-          selected = await this.modelSwapChoice(session, selected, routingCatalog(), !agentReply && !session.groupChatId && !assigned);
-          if (this.stopping.has(id)) throw new Error('Turn was stopped before sending.');
-          // Create a new bot: the message goes to a new top-level bot on the suggested model, and this bot sends nothing.
-          if (selected.modelSwap?.outcome === 'delegated') return await this.handToNewBot(session, selected, text, images, clientId);
-        }
+        // A simple message the user sent: the Secondary model may answer it at once (controller/direct-answer.cjs).
+        const direct = await this.directAnswer(session, { text, images, fileMessage, clientId, selected,
+          eligible: autoEffort && !selected.routerFallback && !wikiTaskId && !failover && !agentReply && !routineRun && !originalRequest && !session.group && !session.groupTurn &&
+            !(session.delegation && !session.delegation.delivered) });
+        if (direct) return direct;
+        if (this.stopping.has(id)) throw new Error('Turn was stopped before sending.');
       }
       if (!this.available(selected)) throw new Error('Selected model is disabled or not available.');
       if (images.length && selected.images === false && !this.jevImageAssist()) throw new Error('Enable image support for this model, or Jev image assist, before sending images.');
-      if (!failover && !this.planPreset()) this.compareWithJev(session, routingText, images, selected, previousState);
       if (failover) selected = { ...selected, failover: true }; // recorded on the route for the decision trace
       // One model per task: whether this message continues the current task (the router's sameTask; a manual pick
       // continues a task its worker reported as pending or waiting for input). The turn's end then updates the task
@@ -1739,8 +1759,6 @@ class Controller extends EventEmitter {
     session.queuePaused = true;
     if (budgetId) session.queuePauseBudgetId = budgetId;
     else delete session.queuePauseBudgetId;
-    // A pending model swap question: nothing has started, so ending the question stops the turn before sending.
-    if (this.swapPrompts?.has(session.id)) { this.stopping.add(session.id); this.endModelSwap(session.id); this.changed(); return; }
     if (this.coordinatorAbort) { this.stopping.add(session.id); this.coordinatorAbort.abort(); return; }
     // Waiting for a worker cleanup before a turn or its checks: nothing has started, so the waiter only has to see it.
     if (this.cleanupWait === session.id) { this.stopping.add(session.id); this.changed(); return; }
@@ -1960,11 +1978,9 @@ class Controller extends EventEmitter {
 
   close() {
     this.stopTestPools().catch(error => this.log?.error('Test pool cleanup failed', { message: error.message }));
-    this.jevComparing?.abort();
     this.claude.close(); this.cursor.close();
     for (const backend of this.nativeCLIs.values()) Promise.resolve(backend.close()).catch(error => this.log.error('Native CLI close failed', { message: error.message }));
     this.cancelHelpers();
-    for (const id of [...(this.swapPrompts?.keys() || [])]) { this.stopping.add(id); this.endModelSwap(id); }
     for (const abort of this.reflections || []) abort.abort();
     this.smartRouter.cancel();
     this.smartRouter.close?.();
@@ -1997,10 +2013,9 @@ for (const methods of [
   require('./controller/reflection.cjs'),
   require('./controller/trials.cjs'),
   require('./controller/chat-scan.cjs'),
-  require('./controller/setups.cjs'),
   require('./controller/dream.cjs'),
-  require('./controller/model-swaps.cjs'),
   require('./controller/cold-start.cjs'),
+  require('./controller/direct-answer.cjs'),
 ]) {
   for (const [name, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(methods))) {
     if (Object.hasOwn(Controller.prototype, name)) throw new Error(`Controller.${name} is defined twice.`);

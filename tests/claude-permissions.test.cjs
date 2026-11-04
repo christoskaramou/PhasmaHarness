@@ -507,3 +507,43 @@ test('Claude retains uncertainty when its process closes before acknowledging li
   await Promise.all([failedDelivery, failedRun]);
   assert.equal(input, null);
 });
+
+test('a finished worker turn keeps its Claude process for the chat’s next turn; other arguments start a fresh one', async () => {
+  const cli = new ClaudeCLI();
+  const started = [];
+  cli.start = args => {
+    const child = new EventEmitter();
+    child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+    child.exitCode = null; child.killed = false; child.pid = undefined;
+    child.kill = () => { child.killed = true; child.exitCode = 1; child.emit('close', 1); };
+    child.args = args; child.inputs = [];
+    let buffer = '';
+    child.stdin.on('data', d => {
+      buffer += d;
+      let end;
+      while ((end = buffer.indexOf('\n')) >= 0) {
+        const line = JSON.parse(buffer.slice(0, end)); buffer = buffer.slice(end + 1);
+        child.inputs.push(line);
+        if (line.type === 'user') {
+          child.stdout.write(JSON.stringify({ type: 'user', uuid: line.uuid, message: line.message }) + '\n');
+          child.stdout.write(JSON.stringify({ type: 'result', result: 'done', session_id: 'chat-session' }) + '\n');
+        }
+      }
+    });
+    child.stdin.on('finish', () => { child.ended = true; child.exitCode = 0; setImmediate(() => child.emit('close', 0)); });
+    started.push(child);
+    cli.children.add(child);
+    return child;
+  };
+  const turn = (prompt, extra = {}) => cli.run({ model: 'claude-sonnet-5', prompt, access: 'danger-full-access', onInput: () => {}, ...extra });
+  assert.equal((await turn('first')).session_id, 'chat-session');
+  assert.deepEqual([started.length, started[0].ended, cli.warmCount()], [1, undefined, 1], 'kept open and warm');
+  assert.equal((await turn('second', { resume: 'chat-session' })).result, 'done');
+  assert.equal(started.length, 1, 'the next turn reused it: no new process');
+  assert.deepEqual(started[0].inputs.filter(line => line.type === 'user').map(line => line.message.content[0].text), ['first', 'second']);
+  await turn('third', { resume: 'chat-session', effort: 'high' });
+  assert.equal(started.length, 2, 'another effort starts a fresh process');
+  assert.equal(started[0].killed, true, 'and the old one is stopped');
+  cli.close();
+  assert.deepEqual([started[1].killed, cli.warmCount()], [true, 0], 'closing stops the warm process');
+});

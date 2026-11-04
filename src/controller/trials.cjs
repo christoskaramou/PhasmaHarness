@@ -7,7 +7,6 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const trials = require('../trials.cjs');
 const chatScan = require('../chat-scan.cjs');
-const setups = require('../setups.cjs');
 
 const readText = file => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '');
 // Kept rules stay on Harness's side, beside the trial records; Harness passes them with every turn.
@@ -168,7 +167,7 @@ module.exports = {
   },
 
   undoRule(id, noticeId) {
-    const kinds = ['kept', 'rolledBack', 'trialStarted', 'noteAdded', 'noteForgotten', 'setupPreferred'];
+    const kinds = ['kept', 'rolledBack', 'trialStarted', 'noteAdded', 'noteForgotten'];
     const item = this.session(id).items.find(entry => entry.id === noticeId && kinds.includes(entry.ruleNotice?.kind));
     if (!item || item.ruleNotice.undoneAt)
       throw new Error('There is no rule change to undo here.');
@@ -182,8 +181,6 @@ module.exports = {
       chatScan.removeNote(root, noteId);
     else if (kind === 'noteForgotten')
       chatScan.restoreNote(root, item.ruleNotice.note);
-    else if (kind === 'setupPreferred')
-      setups.dropPreference(root, item.ruleNotice.setupKind, item.ruleNotice.preset);
     else
       this.undoTrial(root, ruleId);
 

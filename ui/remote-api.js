@@ -159,12 +159,12 @@
 
   const api = { remote: true };
   for (const method of ['bootstrap', 'saveAgent', 'renameHub', 'saveGroup', 'deleteAgent',
-    'browseWorkspace', 'settings', 'benchmarkData', 'create', 'permissions', 'load', 'image', 'rename',
+    'browseWorkspace', 'settings', 'create', 'permissions', 'load', 'image', 'rename',
     'archive', 'deleteSession', 'preview', 'send', 'stop', 'reviseJob', 'reconcileJob', 'jobBudget',
     'stopArtifactRun', 'artifactAction', 'stopDownloads', 'appInfo', 'runnerInfo', 'updateStatus', 'queuedMessage', 'backgroundTask', 'replySuggestion', 'suggestWiki', 'compact',
-    'clearConversation', 'acknowledgeTask', 'applyCopy', 'undoComparison', 'undoRule', 'dreamNow', 'dismissSkillNotice', 'answerModelSwap', 'proposeWiki', 'answer', 'answerConfirmation', 'renewModels', 'providerModels', 'openFile', 'linkImage', 'routineList'])
+    'clearConversation', 'acknowledgeTask', 'applyCopy', 'undoComparison', 'undoRule', 'dreamNow', 'dismissSkillNotice', 'proposeWiki', 'answer', 'answerConfirmation', 'renewModels', 'providerModels', 'openFile', 'linkImage', 'routineList'])
     api[method] = (...args) => call(method, args);
-  for (const method of ['benchmarkRefresh', 'benchmarkImport', 'benchmarkApply', 'benchmarkReset', 'nativeProviderAction',
+  for (const method of ['nativeProviderAction',
     'runnerAutostart', 'quitRunner', 'exportConversation', 'cursorLogin',
     'cursorRefresh', 'cursorLogout', 'claudeLogin', 'claudeRefresh', 'claudeLogout', 'connectChatGPT', 'logoutChatGPT',
     'installProvider', 'providerSettings', 'providerKey', 'localModel', 'jevSaveKey',

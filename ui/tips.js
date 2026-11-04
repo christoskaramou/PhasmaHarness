@@ -26,13 +26,13 @@
 
   // `fits`: shown first while true; `when`: shown at all only while true; `text` may depend on the setup. Every tip was
   // checked against the code (2026-10-21); keep them true when the feature they name changes.
-  const checkerOff = () => !state.settings.chatScanModel || state.settings.chatScanModel === 'off';
+  const checkerOff = () => !state.chatChecker;
   const TIPS = [
     // What fits this setup.
     { id: 'checker', fits: checkerOff,
-      text: 'Turn on the chat checker so Harness learns from your corrections: when you write "no, I meant…", it saves a rule or note for next time. Settings → General → Chat checker, reviser, escalator and rule finder model.' },
+      text: 'Turn on the chat checker so Harness learns from your corrections: when you write "no, I meant…", it saves a rule or note for next time. Pick a Secondary model in a bot’s Edit dialog; it checks that bot’s replies.' },
     { id: 'checks', fits: () => !projectChecks().length,
-      text: 'Add a check, a command that says whether the work is good, such as a build or the tests. Harness then verifies each task and learns which model fits each kind of work. Settings → Checks.' },
+      text: 'Add a check, a command that says whether the work is good, such as a build or the tests. Harness then verifies each task. Settings → Checks.' },
 
     // Getting started.
     { id: 'hub', text: () => `${hub()} is your main chat: ask it anything. It answers itself or hands the work to a bot, and tells you when the bot is done.` },
@@ -58,15 +58,13 @@
     { id: 'budgets', text: 'Task bots have no default time, attempt or token limits. Provider usage limits can still pause their work.' },
 
     // What Auto does.
-    { id: 'auto', text: 'Auto picks a model for every message to a bot: an economical one for simple asks, the strongest for hard ones, and the same one while you continue a task.' },
-    { id: 'routing-model', text: 'Auto\'s choice is made by the routing model, Settings → Routing → Routing model. A fast, cheap model there keeps routing quick.' },
+    { id: 'auto', text: 'Each bot runs one model. Pick Auto effort under Effort and its router picks how hard that model thinks for each message: low for simple asks, higher for hard ones.' },
+    { id: 'routing-model', text: 'A bot’s Router, in its Edit dialog, is Jev or its Secondary model. A fast, cheap Secondary model keeps routing quick.' },
     { id: 'jev-router', when: () => !!state.jev?.configured,
-      text: 'With your Jev key you can pick Jev as the routing model. If a Jev call fails, Harness routes that message with the normal router instead.' },
-    { id: 'effort', text: 'Settings → Routing → Effort cap limits how hard the models Harness picks think, Auto and escalations included; a lower cap saves usage. Models you pick by hand are not capped.' },
-    { id: 'auto-models', text: 'Auto only picks from the models ticked in Settings → Providers. Untick the ones you do not want it to use.' },
-    { id: 'usage-limit', text: 'When a provider hits its usage limit, Harness pauses that task for you to review, and new Auto messages use another provider until the limit resets.' },
-    { id: 'hub-model', text: () => `${hub()} itself runs on the one model set in its Edit dialog; picking per message is for bots.` },
-    { id: 'benchmarks', text: 'Settings → Benchmarks shows the measurements Auto uses to rank models. "Prepare refresh" sets up a bot to research newer numbers for you to review.' },
+      text: 'With your Jev key you can pick Jev as a bot’s Router in its Edit dialog. If a Jev call fails, its Secondary model routes that message instead.' },
+    { id: 'effort', text: 'Effort cap, in a bot’s Edit dialog, limits how hard Auto effort and escalations let its model think; a lower cap saves usage. An effort you pick by hand is not capped.' },
+    { id: 'usage-limit', text: 'When a provider hits its usage limit, Harness pauses that task for you to review until the limit resets.' },
+    { id: 'hub-model', text: () => `${hub()} runs on the model in its Edit dialog, with Auto effort or a set effort, like every bot.` },
 
     // Settings worth knowing.
     { id: 'tray', when: desktop,
@@ -89,8 +87,6 @@
       text: 'When a check fails, Harness asks the bot for one fix by itself before the task comes back to you.' },
     { id: 'read-only-checks', when: () => projectChecks().length > 0,
       text: 'Tick Read-only on checks that change nothing, so they also run when a bot has Ask access.' },
-    { id: 'proven', when: () => projectChecks().length > 0 || !checkerOff(),
-      text: 'Auto learns which model gets each kind of work right first time, by your checks or, without them, by how the chat checker reads your replies, and prefers it. A line in the chat tells you, with an Undo.' },
     { id: 'compare', when: () => projectChecks().length > 0,
       text: () => `Not sure a rule helps? Ask ${hub()} to compare: it runs the task twice, with and without the rule, and keeps the better result.` },
 

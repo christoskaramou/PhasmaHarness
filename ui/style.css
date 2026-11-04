@@ -417,15 +417,6 @@ h1 {
   color:var(--muted)
 }
 
-.banner {
-  padding:12px 32px;
-  background:var(--warning-bg);
-  color:var(--text);
-  font-size:calc(12px * var(--font-scale,1));
-  line-height:1.5;
-  border-bottom:1px solid var(--warning-border)
-}
-
 #conversation {
   overflow-y:auto;
   flex:1;
@@ -1495,38 +1486,10 @@ dialog.image-viewer[open] {
   flex:none
 }
 
-/* Auto's model swap question under a waiting message (renderModelSwap in app.js). */
-.model-swap {
-  border:1px solid var(--border-strong);
-  border-radius:10px;
-  padding:10px 12px;
-  display:grid;
-  gap:6px;
-  max-width:640px
-}
 
-.model-swap-options {
-  margin:0;
-  padding-left:18px;
-  display:grid;
-  gap:4px
-}
 
-.model-swap p {
-  margin:0
-}
 
-.model-swap-actions {
-  display:flex;
-  flex-wrap:wrap;
-  align-items:center;
-  gap:8px
-}
 
-.model-swap-actions .compact-action.primary {
-  background:var(--accent);
-  border-color:var(--accent)
-}
 
 .message-body,#prompt {
   font-size:calc(15px * var(--font-scale,1))
@@ -2002,30 +1965,10 @@ dialog.image-viewer[open] {
   color:var(--error)
 }
 
-#benchmark-preview {
-  white-space:pre-wrap;
-  overflow-wrap:anywhere;
-  font-size:calc(11px * var(--font-scale,1));
-  max-height:320px;
-  overflow:auto
-}
 
-#benchmark-sources p {
-  margin:3px 0
-}
 
-#panel-benchmarks a {
-  color:var(--accent)
-}
 
-#panel-benchmarks details {
-  margin:16px 0
-}
 
-#panel-benchmarks .dialog-footer {
-  border-top:1px solid var(--border);
-  justify-content:flex-end
-}
 
 #stop {
   width:calc(24px * var(--font-scale,1));
@@ -2376,7 +2319,7 @@ dialog.image-viewer[open] {
   white-space:pre-wrap
 }
 
-#panel-general label,#panel-routing label,#panel-tools label,#panel-checks > label {
+#panel-general label,#panel-tools label,#panel-checks > label {
   margin:14px 0
 }
 
@@ -2464,25 +2407,13 @@ dialog.image-viewer[open] {
   display:none
 }
 
+.hint.router-note.secondary-off {
+  font-weight:700
+}
+
 #jev-health {
   margin:10px 0 0;
   color:var(--text)
-}
-
-.effort-cap-control {
-  color:var(--text)
-}
-
-.effort-cap-control option {
-  color:var(--text)
-}
-
-#settings-effort-cap option {
-  color:var(--text)
-}
-
-.effort-cap-control.max-cap,#settings-effort-cap.max-cap,.effort-cap-control option[value="max"],#settings-effort-cap option[value="max"] {
-  color:var(--warning)
 }
 
 .composer-model {
@@ -2655,34 +2586,10 @@ select:focus-visible {
   font-weight:600
 }
 
-.benchmark-table-wrap {
-  overflow:auto;
-  max-height:280px;
-  margin-top:18px
-}
 
-.benchmark-table-wrap table {
-  width:100%;
-  border-collapse:collapse;
-  font-size:calc(11px * var(--font-scale,1))
-}
 
-.benchmark-table-wrap th,.benchmark-table-wrap td {
-  text-align:left;
-  padding:6px 8px;
-  border-bottom:1px solid var(--border);
-  vertical-align:top
-}
 
-.benchmark-table-wrap th {
-  position:sticky;
-  top:0;
-  background:var(--panel)
-}
 
-.benchmark-body>button,#benchmark-apply {
-  padding:5px 10px
-}
 
 .check-row {
   display:grid;
@@ -3066,6 +2973,11 @@ select:focus-visible {
 #agent-dialog input,#agent-dialog select,#hub-dialog input {
   width:100%;
   box-sizing:border-box
+}
+
+/* Hints stacked in an Edit dialog (the Secondary model's, then the saving note) keep a gap between them. */
+#agent-dialog .hint + .hint,#hub-dialog .hint + .hint {
+  margin-top:10px
 }
 
 #agent-dialog label,#hub-dialog label {
@@ -3995,6 +3907,11 @@ main > header {
   -webkit-app-region: drag;
 }
 
+.nav-buttons { display:flex; gap:2px; margin-left:auto; }
+.nav-buttons button { display:inline-flex; align-items:center; padding:4px; color:var(--muted); border-radius:5px; }
+.nav-buttons button:not(:disabled):hover { color:var(--text); background:var(--hover); }
+.nav-buttons button:disabled { opacity:.35; }
+
 .composer {
   --composer-control-size: 40px;
 }
@@ -4335,8 +4252,13 @@ main > header {
 .agent-working .agent-avatar i:nth-child(4) { animation-delay:-0.65s; }
 @keyframes agent-breathe { 0%, 100% { opacity:1; filter:grayscale(0); } 50% { opacity:.5; filter:grayscale(1); } }
 @keyframes agent-tile { 0%, 100% { scale:1; } 50% { scale:.7; } }
+/* A bot with a reply you have not seen: a soft accent aura around its icon that slowly swells and settles. */
+.agent-unread .agent-avatar { box-shadow:0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent), 0 0 10px 3px color-mix(in srgb, var(--accent) 45%, transparent);
+  animation:agent-aura 2.8s ease-in-out infinite; }
+@keyframes agent-aura { 0%, 100% { box-shadow:0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent), 0 0 8px 2px color-mix(in srgb, var(--accent) 35%, transparent); }
+  50% { box-shadow:0 0 0 2px color-mix(in srgb, var(--accent) 70%, transparent), 0 0 14px 5px color-mix(in srgb, var(--accent) 50%, transparent); } }
 @media(prefers-reduced-motion:reduce) {
-  .agent-working .agent-avatar, .agent-working .agent-avatar i { animation:none; }
+  .agent-working .agent-avatar, .agent-working .agent-avatar i, .agent-unread .agent-avatar { animation:none; }
 }
 
 /* A faint tint of a brighter amber than the warning colors, so it stands out without a heavy block. */

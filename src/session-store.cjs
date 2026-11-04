@@ -111,6 +111,12 @@ function difference(before, after) {
     removed: [...before.keys()].filter(key => !after.has(key)) };
 }
 
+// Re-encoding every message of every chat on each save took about 40 ms for a 37 MB store (measured 2026-11-04), on the
+// runner thread all bots share. A chat's messages are reused from the last save unless its message list was replaced;
+// its last TAIL messages and any new ones are always encoded again (streaming and status edits land there). An edit to
+// an older message in place is caught by a full pass at least every FULL_MS.
+const TAIL = 20, FULL_MS = 10000;
+
 class SessionStore {
   /** @param {string} filename @param {(error: unknown) => void} onCheckpointError */
   constructor(filename, onCheckpointError = () => {}) {
@@ -123,8 +129,9 @@ class SessionStore {
     this.records = 0;
     this.exists = fs.existsSync(filename);
     this.fields = new Map();
-    /** @type {Map<string, {fields: Map<string, string>, items: string[]}>} */
+    /** @type {Map<string, {fields: Map<string, string>, items: string[], list?: any[]}>} */
     this.sessions = new Map();
+    this.fullAt = 0;
     this.order = '';
   }
 
@@ -143,8 +150,9 @@ class SessionStore {
   remember(data) {
     this.fields = encodeFields(data, ['sessions', '_journalRevision']);
     this.sessions = new Map(data.sessions.map(session => [session.id, {
-      fields: encodeFields(session, ['items']), items: (session.items || []).map(item => JSON.stringify(item)),
+      fields: encodeFields(session, ['items']), items: (session.items || []).map(item => JSON.stringify(item)), list: session.items,
     }]));
+    this.fullAt = Date.now();
     this.order = JSON.stringify(data.sessions.map(session => session.id));
   }
 
@@ -157,9 +165,17 @@ class SessionStore {
     /** @type {SessionChange[]} */
     const sessions = [];
     const encoded = new Map();
+    const full = Date.now() - this.fullAt >= FULL_MS;
     for (const session of data.sessions) {
       const before = this.sessions.get(session.id);
-      const next = { fields: encodeFields(session, ['items']), items: (session.items || []).map(item => JSON.stringify(item)) };
+      const list = session.items || [];
+      let encodedItems;
+      if (!full && before?.list === session.items && session.items) {
+        const keep = Math.max(0, Math.min(before.items.length, list.length) - TAIL);
+        encodedItems = before.items.slice(0, keep);
+        for (let index = keep; index < list.length; index++) encodedItems.push(JSON.stringify(list[index]));
+      } else encodedItems = list.map(item => JSON.stringify(item));
+      const next = { fields: encodeFields(session, ['items']), items: encodedItems, list: session.items };
       encoded.set(session.id, next);
       const edit = difference(before?.fields || new Map(), next.fields);
       let start = 0;
@@ -193,6 +209,7 @@ class SessionStore {
     }
     this.revision++; this.bytes += Buffer.byteLength(text); this.records++;
     this.fields = fields; this.sessions = encoded; this.order = JSON.stringify(order);
+    if (full) this.fullAt = Date.now();
     // A checkpoint failure must not turn an acknowledged journal commit into a failed save.
     if (this.bytes >= 8 * 1024 * 1024 || this.records >= 1000) {
       try { this.checkpoint(data); } catch (error) { this.onCheckpointError(error); }
