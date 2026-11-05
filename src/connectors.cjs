@@ -271,7 +271,8 @@ class Connectors extends EventEmitter {
     const started = Date.now();
     try { return await this.callOnce(record, name, args, ...rest); }
     catch (error) {
-      this.log?.warn('Connector call failed', { connector: record?.name, tool: name, error: String(error?.message).slice(0, 300), ms: Date.now() - started });
+      // A call the caller cancelled (its signal aborted) is not a failure, so it is not logged.
+      if (!rest[2]?.aborted) this.log?.warn('Connector call failed', { connector: record?.name, tool: name, error: String(error?.message).slice(0, 300), ms: Date.now() - started });
       throw error;
     }
   }
