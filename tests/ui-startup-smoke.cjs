@@ -28,6 +28,8 @@ app.whenReady().then(async () => {
   ipcMain.handle('browseWorkspace', (_event, ...args) => { browseCalls.push(args); return { available: false, entries: [] }; });
   const linkedFiles = require('../src/workspace/linked-files.cjs');
   let browserAccessCall = false; // stands in for src/main.cjs's browserRequest check
+  // The runner answers routineList (src/runner-commands.cjs); this smoke's bots have no routines.
+  ipcMain.handle('routineList', () => []);
   ipcMain.handle('linkImage', (_event, _id, target) => linkedFiles.image(root, target, browserAccessCall));
   ipcMain.handle('openFile', (_event, _id, target) => linkedFiles.open(root, target,
     browserAccessCall ? null : { openPath: async () => '', showItemInFolder: () => {} }));
