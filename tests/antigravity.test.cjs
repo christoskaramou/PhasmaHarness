@@ -63,6 +63,7 @@ test('one native turn streams public text and generic helper events, keeps crede
   assert.equal(result.result, 'Hello world');
   assert.deepEqual(result.usage, { input_tokens: 10, output_tokens: 3, cache_read_input_tokens: 5 });
   assert.equal(result.cacheUsageUnknown, false);
+  assert.equal(result.contextWindow, 1048576, 'a Gemini model gets its published window from the built-in table');
   assert.equal(f.calls.length, 1);
   assert.match(f.calls[0].message.content, /Do the assignment.*Use your assigned tools.*Hello/s);
   assert.equal(f.calls[0].event, 'user');
@@ -187,4 +188,15 @@ test('the startup sweep removes only unchanged generated worker files left by a 
   fs.writeFileSync(path.join(directory, 'keep.md'), 'User configuration');
   sweepAgentFiles([cwd, cwd, null, path.join(cwd, 'missing')]);
   assert.deepEqual(fs.readdirSync(directory).sort(), [path.basename(changed), path.basename(renamed), 'keep.md'].sort());
+});
+
+test('Antigravity context table: published sizes by model family, none for an unknown family', () => {
+  const { contextWindow } = require('../src/providers/antigravity.cjs');
+  // Model IDs as listed by `agy models` on 2026-11-04.
+  assert.equal(contextWindow('gemini-3.8-flash-high'), 1048576);
+  assert.equal(contextWindow('claude-opus-4-6-thinking'), 200000);
+  assert.equal(contextWindow('claude-sonnet-4-6'), 200000);
+  assert.equal(contextWindow('gpt-oss-120b-medium'), 131072);
+  assert.equal(contextWindow('mystery-model'), undefined);
+  assert.equal(contextWindow(undefined), undefined);
 });

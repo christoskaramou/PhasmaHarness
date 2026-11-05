@@ -91,7 +91,9 @@ class MuseCLI {
         .map(model => ({ id: `native:muse:${model.modelId}`, model: model.modelId, profileId: profile,
           label: model.displayLabel || model.modelId, provider: 'native:muse', rank: 35, worker: true, router: true,
           efforts: (model.reasoningEffortVariants || []).map(variant => variant.tier).filter(Boolean),
-          effort: model.defaultReasoningEffort || null }));
+          effort: model.defaultReasoningEffort || null,
+          // The catalog's context limit (null when undeclared) is the model's window.
+          ...(Number.isSafeInteger(model.contextLimit) && model.contextLimit > 0 ? { contextWindow: model.contextLimit } : {}) }));
       // Muse names the credential in effect: the signed-in account, or a stored or environment API key.
       const credential = await this.call(host, 'account/read', {}).catch(() => null);
       const account = credential?.state === 'accountLogin' ? credential.label : ['apiKey', 'envKey'].includes(credential?.state) ? 'API key' : null;
@@ -273,7 +275,8 @@ class MuseCLI {
         Number.isSafeInteger(event.usage?.outputTokens) && event.usage.outputTokens >= 0);
       const usage = counts.length && counts.length === events.length ? counts.reduce((total, event) => ({ input_tokens: total.input_tokens + event.promptTokens,
         output_tokens: total.output_tokens + event.usage.outputTokens }), { input_tokens: 0, output_tokens: 0 }) : null;
-      return { session_id: session.sessionId, result: text, ...(usage ? { usage, cacheUsageUnknown: true } : {}) };
+      const contextWindow = this.models.find(model => model.model === options.model)?.contextWindow;
+      return { session_id: session.sessionId, result: text, ...(usage ? { usage, cacheUsageUnknown: true } : {}), ...(contextWindow ? { contextWindow } : {}) };
     } finally {
       try { if (host) await this.closeHost(host); }
       finally { this.active = false; }

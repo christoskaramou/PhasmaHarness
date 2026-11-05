@@ -35,7 +35,7 @@ If the repository has no pool, create one with `init`. Skip this for vendored or
    - Prefer the project's own test framework or an existing validation script, with arguments that target the case.
    - Otherwise put a script in `.testpool/tests/`.
    - Exit codes: 0 means pass, non-zero means fail, and 77 means skipped because a precondition is missing (for example an editor already owns a port, or the build output is absent). Print a one-line reason before a failure or a skip.
-   - Assert on the exact symptom you fixed, for example "rigs == alive creeps on every status line", not "the app did not crash".
+   - Assert on the exact symptom you fixed, for example "models == alive units on every status line", not "the app did not crash".
 2. **Keep it safe to run unattended:**
    - Never kill or modify programs the user has open.
    - Restore every file the test edits.
@@ -58,17 +58,17 @@ If the repository has no pool, create one with `init`. Skip this for vendored or
   },
   "tests": [
     {
-      "id": "creep-rigs-removed",
-      "name": "Dead creep models are removed",
-      "covers": "Native AthMatch deletes a creep's model once combat drops the creep; checks rigs == alive in the match log.",
-      "paths": ["Native/Scripts/**", "Phasma/Runtime/Code/Script/**"],
-      "command": "python3 .testpool/tests/ath_native_match.py",
-      "commandWindows": "py -3 .testpool\\tests\\ath_native_match.py",
+      "id": "removed-units-despawn",
+      "name": "Removed units leave the scene",
+      "covers": "The match deletes a unit's model once combat removes the unit; checks models == alive units in the match log.",
+      "paths": ["src/game/**", "src/scripting/**"],
+      "command": "python3 .testpool/tests/match_despawn.py",
+      "commandWindows": "py -3 .testpool\\tests\\match_despawn.py",
       "cost": "expensive",
       "timeoutSec": 240,
       "needs": ["engine-build"],
-      "requires": ["build/Release/PhasmaPlayer.exe"],
-      "origin": { "problem": "Dead creeps stayed on screen in the C++ match", "fix": "AthMatch deletes rigs missing from the live list", "date": "2026-09-25" }
+      "requires": ["build/Release/Game.exe"],
+      "origin": { "problem": "Dead units stayed on screen", "fix": "The match deletes models missing from the live list", "date": "2026-09-25" }
     }
   ]
 }

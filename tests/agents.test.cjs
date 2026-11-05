@@ -132,7 +132,7 @@ test('a direct answer closes its tracked task, starts no worker turn and frees t
   const auto = 'autoeffort:codex:gpt-5.6-terra';
   bot.smartRouter.choose = async () => ({ ...bot.autoEffortDefault(auto), source: 'model', reason: 'sized', sameTask: false,
     assessment: { difficulty: 'low', taskKind: 'general', workspaceRelevant: false, needsChecks: false, risk: 'low', uncertainty: 'low' } });
-  bot.smartRouter.complete = async request => ({ decision: request.schema?.properties?.handOff ? { handOff: false, answer: 'Yes.' } : { verdict: 'accept', findings: [] } });
+  bot.smartRouter.complete = async request => ({ decision: request.schema?.properties?.kind ? { kind: 'answer', text: 'Yes.' } : { verdict: 'accept', findings: [] } });
   const route = await bot.send({ id: chat.id, text: 'Is JSON a subset of YAML 1.2?', mode: auto, task: 'on' });
   assert.equal(route.directAnswer, true);
   assert.deepEqual([chat.tasks[0].state, chat.activeTaskId, bot.busy, chat.status], ['not-checked', null, null, 'completed']);

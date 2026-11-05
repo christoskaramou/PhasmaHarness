@@ -162,6 +162,8 @@ class DeepSeekCLI {
       context.text += event.content.text;
       context.onEvent({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: event.content.text } } });
     }
+    // dsh sends usage_update after each reply: tokens used and the model's window, `size` (checked 2026-11-04).
+    if (event.sessionUpdate === 'usage_update' && Number.isSafeInteger(event.size) && event.size > 0) context.contextWindow = event.size;
     if (event.sessionUpdate === 'tool_call') {
       context.calls.set(event.toolCallId, { title: event.title, rawInput: event.rawInput });
       context.onEvent({ type: 'assistant', message: { content: [
@@ -219,7 +221,7 @@ class DeepSeekCLI {
       }
 
       if (result.stopReason !== 'end_turn') throw new Error(result.stopReason === 'cancelled' ? 'DeepSeek Harness stopped.' : `DeepSeek Harness turn ended without completion: ${result.stopReason}`);
-      return { result: context.text, session_id: session.sessionId,
+      return { result: context.text, session_id: session.sessionId, ...(context.contextWindow ? { contextWindow: context.contextWindow } : {}),
         ...(options.schema ? { structured_output: structuredResponse(context.text, options.schema) } : {}) };
     } catch (error) {
       // Invalid JSON ends a completed turn; Main's repair continues that in-memory session.

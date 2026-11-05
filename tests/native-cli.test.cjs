@@ -132,6 +132,14 @@ test('native structured routing selects its runtime and cannot fall back to Clau
     { provider: 'native:deepseek', model: 'model-a' }, new AbortController()), /provider is unavailable/);
 });
 
+test('a native CLI context window is kept on the chat, even without usage', async t => {
+  const { controller, backend, root } = await controllerFixture(t, true);
+  backend.run = async options => { options.onEvent?.({ type: 'system', session_id: 'native-session' }); return { result: 'Native reply', contextWindow: 1000000 }; };
+  const session = controller.create(root, 'read-only');
+  await controller.send({ id: session.id, text: 'hello', mode: 'native:deepseek:model-a', task: 'off' });
+  assert.equal(session.usage.modelContextWindow, 1000000);
+});
+
 test('an idle worker with a large context starts a fresh session from a summary instead of resuming', async t => {
   const { controller, calls, root } = await controllerFixture(t, true);
   const summaries = [], pendingDuring = [];
@@ -142,12 +150,13 @@ test('an idle worker with a large context starts a fresh session from a summary 
   };
   const logs = []; controller.log = { info: (message, data) => logs.push({ message, data }), warn() {}, error() {} };
   // A picked Secondary model writes the summary (the old router no longer stands in).
-  Object.assign(controller.data.settings, { coldStartMinutes: 30, coldStartTokens: 1000, secondaryModel: controller.data.settings.routerPreset });
+  Object.assign(controller.data.settings, { coldStartMinutes: 30, coldStartPercent: 1, secondaryModel: controller.data.settings.routerPreset });
+  controller.quickReply = () => Promise.resolve(null); // this test counts summary calls
   const session = controller.create(root, 'read-only');
   const send = text => controller.send({ id: session.id, text, mode: 'native:deepseek:model-a', task: 'off' });
   const runs = () => calls.filter(call => typeof call === 'object');
   const idle = minutes => { session['native:deepseekTurnEndedAt'] = Date.now() - minutes * 60000; };
-  for (let i = 0; i < 6; i++) await send(`Question ${i} ` + 'x'.repeat(1000));
+  for (let i = 0; i < 6; i++) await send(`Question ${i} ` + 'x'.repeat(3000));
   assert.ok(runs().slice(1).every(call => call.resume === 'native-session'), 'recent turns resume');
 
   idle(20); await send('Warm follow-up');
@@ -206,10 +215,10 @@ test('an idle worker with a large context starts a fresh session from a summary 
 
   controller.data.settings.coldStartMinutes = 0; idle(600); const before = summaries.length; await send('Turned off');
   assert.equal(runs().at(-1).resume, 'native-session'); assert.equal(summaries.length, before);
-  controller.data.settings.coldStartMinutes = 30; controller.data.settings.coldStartTokens = 10000000; idle(600); await send('Small context');
+  controller.data.settings.coldStartMinutes = 30; controller.data.settings.coldStartPercent = 99; idle(600); await send('Small context');
   assert.equal(runs().at(-1).resume, 'native-session', 'below the context size it resumes');
   assert.throws(() => controller.settings({ coldStartMinutes: -1 }), /0 to 10080/);
-  assert.throws(() => controller.settings({ coldStartTokens: 5 }), /1,000 to 10,000,000/);
+  assert.throws(() => controller.settings({ coldStartPercent: 100 }), /0 to 99%/);
 });
 
 test('a native worker with connectors and helper tools gets the connector note once', async t => {

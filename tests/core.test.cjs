@@ -109,7 +109,7 @@ test('task tracking does not inject a checklist; optional proposals stay advisor
   assert.equal(session.items.find(i => i.clientId === user.clientId).content[0].text, original);
 });
 
-async function setup(t, { secondary = true } = {}) {
+async function setup(t, { secondary = true, quick = false } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'phasma-harness-test-'));
   const fake = new Fake();
   const smartRouter = { calls: [], cancel() { }, close() { }, jev: null, async choose() { throw new Error('unexpected route'); } };
@@ -121,6 +121,8 @@ async function setup(t, { secondary = true } = {}) {
   // The user picked a Secondary model (the old router no longer stands in for an unsaved one), so messages route.
   // secondary: false leaves it unsaved (the chat checker picked before Secondary models, if any, stands in).
   if (secondary) controller.data.settings.secondaryModel = controller.data.settings.routerPreset;
+  // Tests that count model calls run without quick replies (controller/direct-answer.cjs); quick: true keeps them.
+  if (!quick) controller.quickReply = () => Promise.resolve(null);
   t.after(() => { controller.close(); fs.rmSync(directory, { recursive: true, force: true }); });
   return { controller, fake, smartRouter };
 }
@@ -2573,51 +2575,49 @@ test('an effort the user asks for runs without the router, on the bot’s model,
   assert.equal(controller.requestedEffort('the effort was fine', 'autoeffort:codex:gpt-5.6-sol', session), null);
 });
 
-test('a simple message is answered directly by the Secondary model; anything else, or a hand-off, goes to the worker', async t => {
-  const { controller, fake, smartRouter } = await setup(t);
+test('a quick reply from the Secondary model answers at once with no worker, or shows a note while the worker starts', async t => {
+  const { controller, fake, smartRouter } = await setup(t, { quick: true });
   const auto = 'autoeffort:codex:gpt-5.6-terra';
   const secondary = controller.secondaryPick();
-  const simple = { difficulty: 'low', taskKind: 'general', workspaceRelevant: false, needsChecks: false, risk: 'low', uncertainty: 'low' };
-  let assessment = simple, reply = { handOff: false, answer: 'Paris.' };
+  let reply = { kind: 'answer', text: 'Paris.' };
   const asked = [];
-  smartRouter.choose = async () => ({ ...controller.autoEffortDefault(auto), source: 'model', reason: 'sized', sameTask: false, assessment });
+  smartRouter.choose = async () => ({ ...controller.autoEffortDefault(auto), source: 'model', reason: 'sized', sameTask: false, assessment: { difficulty: 'low' } });
   smartRouter.complete = async (request, choice) => {
-    if (request.schema?.properties?.handOff) { asked.push({ choice: choice.id, prompt: JSON.parse(request.prompt) }); return { decision: reply }; }
+    if (request.schema?.properties?.kind) { asked.push({ choice: choice.id, prompt: JSON.parse(request.prompt) }); return { decision: reply }; }
     return { decision: { verdict: 'accept', findings: [] } };
   };
   const session = controller.create();
   const route = await controller.send({ id: session.id, text: 'What is the capital of France?', mode: auto, task: 'on' });
-  assert.equal(fake.turnIds.length, 0, 'no worker turn');
-  assert.deepEqual([route.directAnswer, route.id, asked[0].choice], [true, secondary.id, secondary.id], 'the Secondary model answered');
-  assert.equal(asked[0].prompt.message, 'What is the capital of France?');
+  assert.equal(fake.turnIds.length, 0, 'answered: the worker never starts');
+  assert.deepEqual([route.directAnswer, asked[0].choice], [true, secondary.id]);
   assert.deepEqual(session.items.slice(-2).map(item => [item.type, item.text || item.content?.[0]?.text]),
     [['userMessage', 'What is the capital of France?'], ['agentMessage', 'Paris.']]);
-  assert.match(session.items.at(-1).routeLabel, /direct answer$/);
+  assert.match(session.items.at(-1).routeLabel, /quick answer$/);
   assert.deepEqual([session.pendingMessage, session.status, controller.busy], [null, 'completed', null]);
 
-  // The worker's next turn sees the exchange (Codex reads it from the direct context).
-  assessment = { ...simple, taskKind: 'mechanical' };
+  // Not answerable: the note shows right after the message and the worker runs; its next turn sees the earlier answer.
+  reply = { kind: 'ack', text: 'Looking at a.js to rename that.' };
   await controller.send({ id: session.id, text: 'Rename count to total in a.js', mode: auto, task: 'off' });
-  assert.equal(fake.turnIds.length, 1, 'not general chat: the worker takes it, without asking the Secondary model');
-  assert.equal(asked.length, 1);
+  assert.equal(fake.turnIds.length, 1, 'the worker runs');
+  const at = session.items.findIndex(item => item.content?.[0]?.text === 'Rename count to total in a.js');
+  assert.deepEqual([session.items[at + 1].text, session.items[at + 1].quickReply], ['Looking at a.js to rename that.', true], 'the note follows the message');
   assert.match(fake.calls.findLast(call => call.method === 'turn/start').params.input[0].text, /capital of France[\s\S]*Paris\./);
   complete(controller, session, fake.turnIds.at(-1)); await flush();
 
-  // The Secondary model hands it off, or a task is in progress ("ok continue"): the worker takes it.
-  assessment = simple; reply = { handOff: true, answer: 'Probably.' }; // a hand-off wins even with an answer
-  await controller.send({ id: session.id, text: 'Is that right?', mode: auto, task: 'off' });
-  assert.deepEqual([fake.turnIds.length, asked.length], [2, 2], 'a hand-off goes to the worker');
-  complete(controller, session, fake.turnIds.at(-1)); await flush();
-  reply = { handOff: false, answer: 'Sure.' };
-  session.job = { ...(session.job || {}), status: 'pending' };
-  await controller.send({ id: session.id, text: 'ok continue', mode: auto, task: 'off' });
-  assert.deepEqual([fake.turnIds.length, asked.length], [3, 2], 'a task in progress takes it, unasked');
-  complete(controller, session, fake.turnIds.at(-1)); await flush();
-  session.job = null;
-
-  // A set effort, or no Secondary model, never answers directly.
+  // Attachments force a note, never an answer; a set effort gets quick replies too; a failure just runs the worker.
+  reply = { kind: 'answer', text: 'Sure.' };
+  await controller.send({ id: session.id, text: 'Look at this', images: ['data:image/png;base64,AA'], mode: auto, task: 'off' }).catch(() => {});
+  assert.notEqual(session.items.at(-1).routeLabel?.endsWith('quick answer'), true, 'no answer with an attachment');
+  if (controller.busy) { complete(controller, session, fake.turnIds.at(-1)); await flush(); }
+  const turns = fake.turnIds.length;
+  let timeout;
+  smartRouter.complete = async request => { if (request.schema?.properties?.kind) { timeout = request.timeoutMs; throw new Error('down'); } return { decision: { verdict: 'accept', findings: [] } }; };
+  // A note left from a turn that never committed it (an app restart) does not show up under a later message.
+  session.pendingAck = { text: 'Stale note.', label: 'Old' };
   await controller.send({ id: session.id, text: 'What is 2 + 2?', mode: 'terra-light', task: 'off' });
-  assert.deepEqual([fake.turnIds.length, asked.length], [4, 2], 'a set effort is not routed');
+  assert.equal(fake.turnIds.length, turns + 1, 'a failed quick reply leaves it to the worker');
+  assert.equal(timeout, 8000, 'the worker waits at most 8 s for the quick reply');
+  assert.equal(session.items.some(item => item.text === 'Stale note.'), false, 'the leftover note is dropped');
   complete(controller, session, fake.turnIds.at(-1)); await flush();
 });
 
@@ -3855,7 +3855,7 @@ test('Send now cannot resume through an unconfirmed cleanup block', async t => {
   assert.equal(session.queueSending, false);
 });
 
-test('cold start: 15 idle minutes by default, and a context over 300,000 tokens starts fresh without waiting', async t => {
+test('cold start: 30 idle minutes and 60% of the context window by default, and a large context never starts fresh without idling', async t => {
   const { controller, fake, smartRouter } = await setup(t);
   let summaries = 0;
   smartRouter.complete = async () => { summaries++; return { decision: { summary: 'S' }, usage: { inputTokens: 1, cachedInputTokens: 0, outputTokens: 1 } }; };
@@ -3866,18 +3866,20 @@ test('cold start: 15 idle minutes by default, and a context over 300,000 tokens 
     complete(controller, session, fake.turnIds.at(-1));
   }
   const worker = controller.resolveWorker('terra-light');
-  const cold = async (tokens, idleMinutes) => {
-    session.usage = { last: { inputTokens: tokens, cachedInputTokens: 0, outputTokens: 1 } };
+  const cold = async (tokens, idleMinutes, window = 1000000) => {
+    session.usage = { last: { inputTokens: tokens, cachedInputTokens: 0, outputTokens: 1 }, modelContextWindow: window };
     session.codexTurnEndedAt = Date.now() - idleMinutes * 60000;
     session.coldSummary = ''; session.coldSummaryThrough = null; session.threadId = 'thread-test';
     return controller.coldStart(session, worker, 'codex', 'next', new AbortController()).catch(() => null);
   };
-  await cold(150000, 10); assert.equal(summaries, 0, 'under 15 idle minutes, under the limit: it resumes');
-  await cold(150000, 20); assert.equal(summaries, 1, 'the default idle time is 15 minutes');
-  await cold(320000, 1); assert.equal(summaries, 2, 'over 300,000 tokens: fresh at once');
-  assert.match(session.pendingColdStep?.lines[0] || session.items.findLast(item => item.coldStart)?.lines[0] || '', /over the 300,000 limit/);
+  await cold(700000, 25); assert.equal(summaries, 0, 'under 30 idle minutes: it resumes');
+  await cold(500000, 35); assert.equal(summaries, 0, 'idle but under 60% of a 1,000,000 window: it resumes');
+  await cold(700000, 35); assert.equal(summaries, 1, 'idle 30 minutes and over 60% of the window');
+  await cold(130000, 35, null); assert.equal(summaries, 2, 'no reported window: 200,000 is assumed');
+  assert.match(session.pendingColdStep?.lines[0] || session.items.findLast(item => item.coldStart)?.lines[0] || '', /60% of its 200,000-token window, assumed/);
+  await cold(900000, 1); assert.equal(summaries, 2, 'a huge context without idling resumes; the CLI compacts it');
   controller.data.settings.coldStartMinutes = 0;
-  await cold(320000, 1); assert.equal(summaries, 2, '0 still turns cold starts off');
+  await cold(900000, 90); assert.equal(summaries, 2, '0 still turns cold starts off');
 });
 
 test('an idle, large Codex chat moves to a new thread with a summary and keeps its earlier chat visible', async t => {
@@ -3885,7 +3887,7 @@ test('an idle, large Codex chat moves to a new thread with a summary and keeps i
   const summaries = [];
   smartRouter.complete = async request => { summaries.push(JSON.parse(request.prompt)); return { decision: { summary: 'CODEX-SUMMARY' }, usage: { inputTokens: 200, cachedInputTokens: 0, outputTokens: 20 } }; };
   const logs = []; controller.log = { info: (message, data) => logs.push({ message, data }), warn() {}, error() {} };
-  Object.assign(controller.data.settings, { coldStartMinutes: 60, coldStartTokens: 100000 });
+  Object.assign(controller.data.settings, { coldStartMinutes: 60, coldStartPercent: 50 });
   const session = controller.create();
   for (let i = 0; i < 6; i++) {
     await controller.send({ id: session.id, text: `Question ${i}`, mode: 'terra-light', task: 'off' });
@@ -3947,7 +3949,7 @@ test('reply suggestions and cold-start summaries use only the Secondary model th
   await controller.replySuggestion(session.id, { force: true });
   assert.equal(controller.resolveWorker(used[1])?.model, 'gpt-5.6-terra', 'the chat’s own model, not another provider');
   // A cold start at that limit writes no summary; once the limit clears, the Secondary model writes it.
-  Object.assign(controller.data.settings, { coldStartMinutes: 1, coldStartTokens: 10 });
+  Object.assign(controller.data.settings, { coldStartMinutes: 1, coldStartPercent: 0 });
   const idle = controller.create();
   Object.assign(idle, { threadId: 'thread-idle', codexTurnEndedAt: Date.now() - 600000, usage: { last: { inputTokens: 5000 } } });
   for (let i = 0; i < 12; i++) idle.items.push({ id: `m${i}`, type: i % 2 ? 'agentMessage' : 'userMessage', phase: 'final_answer', text: `Message ${i}`, content: [{ type: 'text', text: `Message ${i}` }] });

@@ -216,3 +216,13 @@ test('Muse answers a Hub or routing reply read-only with the schema in its promp
   await tooled.backend.refresh();
   assert.equal(tooled.backend.models[0].router, true, 'Muse models can be the routing model too');
 });
+
+test('Muse returns the model catalog context limit as the context window', async t => {
+  // Live 2026-11-04: model/list gave contextLimit 1007997 for every Muse model.
+  const { backend } = await fixture(t, { contextLimit: 1007997 });
+  await backend.refresh();
+  assert.equal((await backend.run(runOptions())).contextWindow, 1007997);
+  const undeclared = await fixture(t, { contextLimit: null });
+  await undeclared.backend.refresh();
+  assert.equal(Object.hasOwn(await undeclared.backend.run(runOptions()), 'contextWindow'), false, 'no window when the catalog declares none');
+});

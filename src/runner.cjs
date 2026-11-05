@@ -52,6 +52,7 @@ async function createRunner({ app, data = app?.getPath('userData'), safeStorage,
   controller.trace = new DecisionLog(path.join(log.directory, 'decisions.jsonl'));
   const jevKey = new JevKey(path.join(data, 'jev-key.enc'), safeStorage);
   const connectors = new Connectors(data, safeStorage);
+  connectors.log = log;
   const jevReported = { model: null };
   const configure = async worker => {
     worker.connectors = connectors;

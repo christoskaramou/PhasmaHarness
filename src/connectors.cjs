@@ -234,7 +234,7 @@ class Connectors extends EventEmitter {
         const validator = new AjvJsonSchemaValidator();
         entry.validators = new Map(entry.tools.map(tool => [tool.name, validator.getValidator(tool.inputSchema)]));
         if (this.closing || entry.abort.signal.aborted || this.connections.get(key) !== entry || this.record(record.id) !== record) throw new Error('Connector changed while connecting.');
-        this.status.set(record.id, { state: 'connected', toolCount: entry.tools.length }); this.changed(); return entry;
+        this.status.set(record.id, { state: 'connected', toolCount: entry.tools.length, toolNames: entry.tools.map(tool => tool.name) }); this.changed(); return entry;
       } catch (error) {
         if (this.connections.get(key) === entry) this.connections.delete(key);
         let cleanupError;
@@ -266,7 +266,16 @@ class Connectors extends EventEmitter {
     if (typeof id !== 'string' || id.length > 290 || id[36] !== '/' || !UUID.test(id.slice(0, 36))) throw new Error('Discover the connector tool before calling it.');
     return { record: this.record(id.slice(0, 36)), name: id.slice(37) };
   }
-  async call(record, name, args, owner, workspace, signal, current = () => true) {
+  // Each failed call is logged (connector, tool, error, time taken) so recurring timeouts show in harness.log (2026-11-05).
+  async call(record, name, args, ...rest) {
+    const started = Date.now();
+    try { return await this.callOnce(record, name, args, ...rest); }
+    catch (error) {
+      this.log?.warn('Connector call failed', { connector: record?.name, tool: name, error: String(error?.message).slice(0, 300), ms: Date.now() - started });
+      throw error;
+    }
+  }
+  async callOnce(record, name, args, owner, workspace, signal, current = () => true) {
     if (!object(args) || Buffer.byteLength(JSON.stringify(args)) > 65536) throw new Error('Connector arguments must be an object under 64 KB.');
     await this.reload();
     if (signal?.aborted || !current()) throw new Error('Connector call stopped.');

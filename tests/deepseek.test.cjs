@@ -194,6 +194,7 @@ test('DeepSeek streams public text and tools, hides thoughts, keeps a warm sessi
   const result = await backend.run({ ...runOptions(), onEvent: event => events.push(event) });
   assert.equal(result.result, 'Hello world');
   assert.equal(Object.hasOwn(result, 'usage'), false);
+  assert.equal(result.contextWindow, 100, 'usage_update size is the context window');
   assert.doesNotMatch(JSON.stringify(events), /PRIVATE_REASONING/);
   assert.equal(events.find(event => event.type === 'assistant').message.content[0].name, 'read_file');
   assert.equal(events.find(event => event.type === 'user').message.content[0].is_error, false);

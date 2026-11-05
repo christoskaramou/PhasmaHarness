@@ -44,7 +44,7 @@ done
 
 [ "$mode" = headless ] || [ ${#service_args[@]} -eq 0 ] || fail "--origin, --port and --data are for --headless."
 
-for file in package.json package-lock.json src/main.cjs src/server.cjs tools/fetch.cjs tools/manifest.json \
+for file in package.json package-lock.json src/main.cjs src/server.cjs tools/fetch.cjs tools/install-summary.cjs tools/manifest.json \
   tools/linux-service.cjs benchmarks/snapshot.json skills/large-responses/scripts/output.cjs ui/icon-512.png; do
   [ -e "$folder/$file" ] || fail "Missing $file. Use a complete checkout or the whole source archive, then run this inside it."
 done
@@ -100,7 +100,10 @@ install_node() {
   node_ok || fail "Node.js was installed but does not run. Check $node_dir."
 }
 
-node_ok || install_node
+# Statuses for the version report (tools/install-summary.cjs).
+node_status=present git_status=present
+if node_ok; then echo "Skipped Node.js: $(node --version) is already installed."; else install_node; node_status=installed; fi
+echo "Skipped Git: $(git --version | sed 's/^git version //') is already installed."
 cd "$folder"
 export npm_config_cache="$folder/installers/npm-cache"
 export ELECTRON_CACHE="$folder/installers/electron-cache"
@@ -115,6 +118,7 @@ if [ "$mode" = headless ]; then
   echo 'Installing locked app dependencies and bundled tools (RTK, ripgrep)...'
   npm ci --omit=dev --no-audit --no-fund || fail "App dependency or bundled tool installation failed. Check the output above."
   check_images
+  node tools/install-summary.cjs report "node=$node_status" "git=$git_status" mode=headless
   echo 'Installing the runner service...'
   node tools/linux-service.cjs "${service_args[@]}" || fail "The service setup stopped. Check the message above."
   echo "From Settings > Providers (CLIs on this machine), install and sign in to $providers"
@@ -225,6 +229,7 @@ echo 'Installing bundled tools (RTK, ripgrep)...'
 node tools/fetch.cjs || fail "Bundled tool download or SHA256 check failed. Check the error above, then rerun."
 node skills/large-responses/scripts/output.cjs read package.json --count 1 >/dev/null || fail "Bundled large-response helper failed its smoke check."
 echo 'Installing Electron runtime...'
+electron_status="$(node tools/install-summary.cjs electron-cache)"
 node node_modules/electron/install.js || fail "Electron runtime download failed. Check the error above (network or proxy), then rerun."
 [ -x "$electron" ] || fail "Electron was not downloaded. Check npm and network settings, then rerun."
 
@@ -257,6 +262,7 @@ Terminal=false
 Categories=Development;
 EOF
 
+node tools/install-summary.cjs report "node=$node_status" "git=$git_status" "electron=$electron_status" mode=desktop
 echo "Setup complete. Start it from your app menu or with: $launcher"
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;

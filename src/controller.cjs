@@ -508,14 +508,14 @@ class Controller extends EventEmitter {
       if (typeof values.replySuggestions !== 'boolean') throw new Error('Invalid reply suggestions setting.');
       next.replySuggestions = values.replySuggestions;
     }
-    // Cold start (controller/cold-start.cjs): idle minutes (0 turns it off) and the context size, in tokens, that it needs.
+    // Cold start (controller/cold-start.cjs): idle minutes (0 turns it off) and the share of the model's context window it needs.
     if (values.coldStartMinutes !== undefined) {
       if (!Number.isInteger(values.coldStartMinutes) || values.coldStartMinutes < 0 || values.coldStartMinutes > 10080) throw new Error('Cold start idle time must be 0 to 10080 minutes.');
       next.coldStartMinutes = values.coldStartMinutes;
     }
-    if (values.coldStartTokens !== undefined) {
-      if (!Number.isInteger(values.coldStartTokens) || values.coldStartTokens < 1000 || values.coldStartTokens > 10000000) throw new Error('Cold start context size must be 1,000 to 10,000,000 tokens.');
-      next.coldStartTokens = values.coldStartTokens;
+    if (values.coldStartPercent !== undefined) {
+      if (!Number.isInteger(values.coldStartPercent) || values.coldStartPercent < 0 || values.coldStartPercent > 99) throw new Error('Cold start context must be 0 to 99% of the context window.');
+      next.coldStartPercent = values.coldStartPercent;
     }
     if (values.showTips !== undefined) {
       if (typeof values.showTips !== 'boolean')
@@ -866,6 +866,10 @@ class Controller extends EventEmitter {
       content: [{ type: 'text', text }, ...images.map(url => ({ type: 'image', url }))]
     };
     this.changed();
+    // A quick reply from the Secondary model starts now, alongside routing (controller/direct-answer.cjs).
+    const quick = this.quickReply(session, { text, images, fileMessage, mode: chosenMode,
+      eligible: session.userTurn && !failover && !wikiTaskId && !routineRun && !agentReply && !originalRequest && !session.group && !session.groupTurn && !session.groupChatId &&
+        !(session.delegation && !session.delegation.delivered) && !this.planPreset() });
     // The working tree before this task, so the chat checker sees only its changes (checkResponse); taken while Auto routes it.
     const checking = this.chatScanner() && this.data.settings.checkResponses !== false;
     const baseline = !wikiTaskId && shouldTrack(task) && checking ? this.taskBaseline(session.workspace) : null;
@@ -946,13 +950,14 @@ class Controller extends EventEmitter {
         } finally { this.routing = null; this.warmRouter(); }
         selected = { ...selected, effortCap: this.data.settings.effortCap };
         if (this.stopping.has(id)) throw new Error('Turn was stopped before sending.');
-        // A simple message the user sent: the Secondary model may answer it at once (controller/direct-answer.cjs).
-        const direct = await this.directAnswer(session, { text, images, fileMessage, clientId, selected,
-          eligible: autoEffort && !selected.routerFallback && !wikiTaskId && !failover && !agentReply && !routineRun && !originalRequest && !session.group && !session.groupTurn &&
-            !(session.delegation && !session.delegation.delivered) });
-        if (direct) return direct;
-        if (this.stopping.has(id)) throw new Error('Turn was stopped before sending.');
       }
+      // The quick reply ran alongside routing: a full answer ends the message here and no worker starts.
+      const quickResult = await quick;
+      if (quickResult?.kind === 'answer') {
+        const done = this.finishQuickAnswer(session, { text, clientId, quick: quickResult, selected });
+        if (done) return done;
+      }
+      if (this.stopping.has(id)) throw new Error('Turn was stopped before sending.');
       if (!this.available(selected)) throw new Error('Selected model is disabled or not available.');
       if (images.length && selected.images === false && !this.jevImageAssist()) throw new Error('Enable image support for this model, or Jev image assist, before sending images.');
       if (failover) selected = { ...selected, failover: true }; // recorded on the route for the decision trace
@@ -1028,6 +1033,7 @@ class Controller extends EventEmitter {
         ...(task?.corrections > 0 ? { routeLabel: 'Router' } : {}),
       });
       session.pendingMessage = null;
+      this.commitQuickAck(session);
       // The cold start row goes after the message it ran for and before the reply.
       session.pendingColdStep = null; if (cold?.step) session.items.push(cold.step);
       session.routes.push({ ...selected, access: permissions.id, at: Date.now(), messageId: clientId,
@@ -1066,6 +1072,7 @@ class Controller extends EventEmitter {
     const id = session.id;
     this.log.warn('Send failed', { session: id, error: String(error.message).slice(0, 300) });
     if (session.pendingMessage) session.pendingMessage.error = error.message;
+    delete session.pendingAck;
     const owned = submission && session.submission === submission;
     if (owned && submission.state === 'completed') { error.turnFailed = true; throw error; }
     if ((!owned || !submission.turnId) && !/timed out/.test(error.message) && clientId) {
@@ -1212,6 +1219,7 @@ class Controller extends EventEmitter {
       handoff(session.items.filter(item => item.id !== clientId && item.clientId !== clientId), undefined, numbered) + contextText, text) : undefined;
     if (!session.items.some(i => i.type === 'userMessage')) session.title = text.trim().replace(/\s+/g, ' ').slice(0, 65);
     session.items.push({ ...session.pendingMessage, pending: false, localOnly: true }); session.pendingMessage = null;
+    this.commitQuickAck(session);
     // The cold start row goes after the message it ran for and before the reply.
     session.pendingColdStep = null; if (cold?.step) session.items.push(cold.step);
     const setup = this.runSetup(session, selected, session.agentReplyCancelledActive ? 'read-only' : session.access, task);
@@ -1378,16 +1386,18 @@ class Controller extends EventEmitter {
         countCalls();
       }
 
-      // The context window of the model that did the most input work (background helper models are smaller).
+      // The context window of the model that did the most input work (background helper models are smaller). Other CLIs
+      // return the window as result.contextWindow (DeepSeek, Muse, Cursor); Antigravity reports none.
       const main = Object.values(result.modelUsage || {}).filter(m => Number.isFinite(m?.contextWindow))
         .sort((a, b) => ((b.inputTokens || 0) + (b.cacheReadInputTokens || 0)) - ((a.inputTokens || 0) + (a.cacheReadInputTokens || 0)))[0];
+      const window = main?.contextWindow ?? result.contextWindow;
       session.usage = calls.size ? {
         total: session.usage.total,
         ...(lastUsage ? { last: lastUsage } : {}),
-        ...(main ? { modelContextWindow: main.contextWindow } : {}),
+        ...(window ? { modelContextWindow: window } : {}),
         ...(result.usageIncomplete || session.usage.incomplete ? { incomplete: true } : {}),
         ...(result.cacheUsageUnknown || session.usage.cacheUnknown ? { cacheUnknown: true } : {}),
-      } : { ...session.usage, incomplete: true };
+      } : { ...session.usage, ...(window ? { modelContextWindow: window } : {}), incomplete: true };
       // turnUsage holds the whole turn (every model call in it, subagents included) for the decision trace and the job
       // budget; `last` above is only its final call. A provider that reports no usage (Cursor) keeps it unknown, never zero.
       const route = session.routes.find(item => item.messageId === clientId);

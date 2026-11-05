@@ -75,6 +75,13 @@ function agentFile(cwd, helpers) {
   } };
 }
 
+// Antigravity reports no context window (checked live 2026-11-04: not in ACP, print-mode JSON or `agy models`), so its
+// models' published sizes stand in. ponytail: matched by family prefix (gemini-3.8-flash-high, claude-opus-4-6-thinking,
+// gpt-oss-120b-medium as listed by `agy models` 2026-11-04); unknown families get none and cold start assumes 200,000.
+// Update this table when Antigravity adds a family with another size.
+const CONTEXT_WINDOWS = [[/^gemini-/, 1048576], [/^claude-/, 200000], [/^gpt-oss-/, 131072]];
+const contextWindow = model => CONTEXT_WINDOWS.find(([family]) => family.test(model || ''))?.[1];
+
 function usageCounts(usage) {
   if (!usage || !['input_tokens', 'output_tokens'].every(key => Number.isSafeInteger(usage[key]) && usage[key] >= 0)) return null;
   // Antigravity counts cached input separately and includes thinking in output already.
@@ -231,7 +238,9 @@ class AntigravityCLI {
             // Resumed-session counters may include older turns; keep usage unknown until verified.
             const usage = !options.resume && result.num_turns === 1 ? usageCounts(result.usage) : null;
             onEvent({ type: 'assistant', message: { content: [{ type: 'text', text: result.response }] } });
-            finish(null, { result: result.response, session_id: sessionId, ...(usage ? { usage } : {}), cacheUsageUnknown: !usage || result.usage.cache_read_tokens === undefined });
+            const window = contextWindow(options.model);
+            finish(null, { result: result.response, session_id: sessionId, ...(usage ? { usage } : {}), ...(window ? { contextWindow: window } : {}),
+              cacheUsageUnknown: !usage || result.usage.cache_read_tokens === undefined });
           } else throw new Error('Unsupported Antigravity stream event. Update the adapter before continuing.');
         };
         host.child.stdout.on('data', text => {
@@ -261,4 +270,4 @@ class AntigravityCLI {
   close() { return Promise.all([...this.hosts].map(host => this.closeHost(host))); }
 }
 
-module.exports = { AntigravityCLI, sweepAgentFiles, googleAccount };
+module.exports = { AntigravityCLI, sweepAgentFiles, googleAccount, contextWindow };

@@ -717,12 +717,6 @@ function chatSessions(session) {
   return [session].filter(Boolean);
 }
 function basename(value) { return value?.split(/[\\/]/).filter(Boolean).at(-1) || 'Choose a folder'; }
-// The instant status line (the user's speed plan, 2026-11-04): Harness, not a model, shows it the moment a message is
-// sent, while routing and the work start; the reply replaces it. One phrase per message, so it does not flicker.
-const ACK_PHRASES = ['On it…', 'Let me look at it…', 'Looking into it…', 'Checking now…', 'Give me a moment…'];
-function ackPhrase(id) {
-  return ACK_PHRASES[[...String(id || '')].reduce((sum, char) => sum + char.charCodeAt(0), 0) % ACK_PHRASES.length];
-}
 function routerName(value, effort) {
   if (value?.startsWith('jev-')) return `Jev ${value.slice(4)}`;
   if (!value) return 'Router';
@@ -2366,7 +2360,7 @@ function render() {
   $('#turn-error').hidden = !turnError;
   renderModelFetching();
   $('#working-text').textContent = (session?.groupTurn ? `${session.groupTurn.round > 1 ? `Round ${session.groupTurn.round} · ` : ''}${session.groupTurn.name} ${session.groupTurn.state === 'needs-input' ? 'needs your input' : session.groupTurn.state === 'waiting' ? 'is waiting to reply' : 'is replying'}…` : '') || session?.waitingForAgent || (session?.compacting ? 'Compacting conversation context…' : state.routing === selectedId && state.routing
-    ? ackPhrase(session?.pendingMessage?.id) : `${session?.routes.at(-1)?.label || 'Codex CLI'} ${backgroundWait(session) || 'is working'}…`);
+    ? '' : `${session?.routes.at(-1)?.label || 'Codex CLI'} ${backgroundWait(session) || 'is working'}…`);
   const usage = session?.usage;
   const total = usage?.total;
   const { contextWindow, contextTokens, contextKnown } = contextUsage(session);
@@ -3158,7 +3152,9 @@ function renderMessages(session) {
       if (item.pending || (selected && !['manual', 'hub-auto'].includes(selected.source))) {
         const row = element('div', 'routing-row');
         entry.routeNode = row; node.after(row);
-        if (item.pending) row.append(element('p', 'routing-status', item.error ? `Not sent: ${item.error}` : state.planRouting ? state.planRouting.reason : ackPhrase(item.id)));
+        if (item.pending && !item.error && session.pendingAck) row.append(element('div', 'message-bubble quick-reply', session.pendingAck.text));
+        // No stock phrase while it routes (removed 2026-11-04 at the user's request): the quick reply is the first word.
+        else if (item.pending && (item.error || state.planRouting)) row.append(element('p', 'routing-status', item.error ? `Not sent: ${item.error}` : state.planRouting.reason));
       }
       if (selected && selected.source !== 'manual' && selected.source !== 'hub-auto') {
         const details = element('details', 'activity');
@@ -3168,7 +3164,7 @@ function renderMessages(session) {
           : selected.source === 'model' ? routerName(meter?.model, meter?.effort)
           : selected.source === 'fallback' ? 'Fallback routing'
           : 'Local routing';
-        details.append(element('summary', '', selected.directAnswer ? `${chooser} answered directly` : `${chooser} selected ${selected.label}`), element('p', '', `${selected.directAnswer ? 'Jev selected itself using available context; no worker call. Confidence is uncalibrated.' : selected.reason}${cost}`));
+        details.append(element('summary', '', selected.directAnswer ? 'Secondary model answered directly' : `${chooser} selected ${selected.label}`), element('p', '', selected.directAnswer ? `${selected.reason} No worker call.` : `${selected.reason}${cost}`));
         if (meter?.provider === 'typesafe' && meter.estimatedCostUsd !== undefined) {
           details.append(element('p', '', `TypeSafe estimate: $${meter.estimatedCostUsd.toFixed(6)} · ${meter.usage.inputTokens.toLocaleString()} input tokens`));
           details.append(element('p', '', `Jev distribution confidence: ${(meter.confidence * 100).toFixed(0)}%. This is not a measured probability of choosing the right worker.`));
@@ -3263,7 +3259,13 @@ async function updatePreview() {
   if (!prompt.trim()) {
     const selected = state?.presets.find(p => p.id === currentMode()), auto = autoEffortLabel(currentMode());
     $('#route-preview').replaceChildren(element('span', 'route-dot'), element('strong', '', selected?.label || auto || 'Auto'),
-      element('span', '', selected ? 'Your manual selection.' : auto ? 'The effort is picked when you send.' : 'Task context is checked when you send.'));
+      ...(auto ? [] : [element('span', '', selected ? 'Your manual selection.' : 'Task context is checked when you send.')]));
+    return;
+  }
+  // Auto effort: the effort is picked when the message is sent, so typing shows the model on Auto effort, not a guess.
+  const auto = autoEffortLabel(currentMode());
+  if (auto) {
+    $('#route-preview').replaceChildren(element('span', 'route-dot'), element('strong', '', auto));
     return;
   }
   try {
@@ -3962,8 +3964,8 @@ $('#settings').onclick = async () => {
   $('#settings-jev-images').value = state.settings.jevImages !== false && state.jev?.configured ? 'on' : 'off';
   $('#settings-jev-images').disabled = !state.jev?.configured;
   $('#settings-reply-suggestions').value = state.settings.replySuggestions === false ? 'off' : 'on';
-  $('#settings-cold-start-minutes').value = state.settings.coldStartMinutes ?? 15;
-  $('#settings-cold-start-tokens').value = state.settings.coldStartTokens ?? 100000;
+  $('#settings-cold-start-minutes').value = state.settings.coldStartMinutes ?? 30;
+  $('#settings-cold-start-percent').value = state.settings.coldStartPercent ?? 60;
   $('#settings-show-tips').value = state.settings.showTips === false ? 'off' : 'on';
   for (const [id, key] of Object.entries(ON_SWITCHES))
     $(`#${id}`).value = state.settings[key] === false ? 'off' : 'on';
@@ -4208,7 +4210,7 @@ const settingsFields = {
   'settings-context': 'contextRanking', 'settings-tools': 'toolSelection',
   'settings-jev-images': 'jevImages',
   'settings-reply-suggestions': 'replySuggestions', 'settings-show-tips': 'showTips',
-  'settings-cold-start-minutes': 'coldStartMinutes', 'settings-cold-start-tokens': 'coldStartTokens',
+  'settings-cold-start-minutes': 'coldStartMinutes', 'settings-cold-start-percent': 'coldStartPercent',
   'settings-dream-model': 'dreamModel', 'settings-dream-effort': 'dreamModel',
 };
 $('#settings-form').addEventListener('input', clearSaved);

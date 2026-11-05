@@ -44,6 +44,8 @@ async function main() {
   fs.mkdirSync(BIN, { recursive: true });
   let stamp = {};
   try { stamp = JSON.parse(fs.readFileSync(STAMP, 'utf8')); } catch {}
+  // What this run did, for the installer's version report (tools/install-summary.cjs).
+  const run = {};
   for (const [name, tool] of Object.entries(MANIFEST)) {
     const build = tool.builds[platform];
     if (!build) throw new Error(`No pinned ${name} build for ${platform}. Supported: ${Object.keys(tool.builds).join(', ')}.`);
@@ -53,9 +55,14 @@ async function main() {
       await install(name, build, target);
       stamp[name] = build.sha256;
       fs.writeFileSync(STAMP, JSON.stringify(stamp, null, 2));
+      run[name] = 'installed';
+    } else {
+      console.log(`Skipped ${name} ${tool.version}: already installed and verified.`);
+      run[name] = 'skipped';
     }
     execFileSync(target, ['--version'], { stdio: 'ignore', windowsHide: true });
   }
+  fs.writeFileSync(path.join(BIN, 'last-install.json'), JSON.stringify(run, null, 2));
   console.log(`Bundled tools ready in ${BIN}`);
 }
 

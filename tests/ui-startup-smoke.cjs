@@ -943,9 +943,17 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript("providerCaps('claude-cli').steer"), false);
   assert.equal(await window.webContents.executeJavaScript("providerCaps(undefined).steer"), true);
   console.log('Claude per-effort model rows and provider capabilities passed');
-  // The instant status line: one of Harness's own phrases, the same for a message on every render, never a model's words.
-  assert.deepEqual(await window.webContents.executeJavaScript(`[ACK_PHRASES.includes(ackPhrase('message-1')), ackPhrase('message-1') === ackPhrase('message-1'),
-    new Set(['a', 'b', 'c', 'd', 'e', 'f'].map(ackPhrase)).size > 1]`), [true, true, true]);
+  // Auto effort: the preview names the model on Auto effort while typing, with no extra hint and no guessed effort.
+  assert.deepEqual(await window.webContents.executeJavaScript(`(async () => {
+    const saved = state.settings.mode, group = presetGroups().find(g => g.variants.length > 1);
+    state.settings.mode = HarnessAgentState.autoEffortMode(group.provider, group.variants[0].model); showMode(state.settings.mode);
+    $('#prompt').value = 'fix the build'; await updatePreview();
+    const shown = [...$('#route-preview').children].map(child => child.textContent);
+    $('#prompt').value = ''; state.settings.mode = saved; showMode(saved); await updatePreview();
+    return [shown.length, shown[1].endsWith('Auto effort')];
+  })()`), [2, true]);
+  // No stock "On it…" phrase while a message routes; the quick reply is the first word.
+  assert.equal(await window.webContents.executeJavaScript("typeof ackPhrase"), 'undefined');
   // Every model is offered to the Hub and to workers alike, Muse and Antigravity included (2026-10-31: no untested blocks).
   assert.deepEqual(await window.webContents.executeJavaScript(`(() => {
     const saved = [state.coordinator, state.presets];

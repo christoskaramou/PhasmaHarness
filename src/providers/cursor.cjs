@@ -12,6 +12,12 @@ const { invalidResponse } = require('./structured.cjs');
 
 const stop = stopTree;
 
+// Cursor names a model's context option "300k", "272k" or "1m"; null for anything else.
+const contextSize = value => {
+  const match = /^(\d+(?:\.\d+)?)([km])$/i.exec(typeof value === 'string' ? value : '');
+  return match ? Math.round(Number(match[1]) * (match[2].toLowerCase() === 'm' ? 1000000 : 1000)) : null;
+};
+
 function launchCursor(args, cwd) {
   if (process.platform === 'win32') {
     const script = path.join(process.env.LOCALAPPDATA || path.join(require('node:os').homedir(), 'AppData', 'Local'), 'cursor-agent', 'cursor-agent.ps1');
@@ -289,16 +295,24 @@ class CursorCLI {
       const config = JSON.stringify([picker ? parameters : null, setEffort ? effort : null]);
       if (applied.config !== config) {
         // Other saved parameters of the model (e.g. context, fast), then the reasoning level.
+        // Each answer lists the session's options; its "context" value is the window in effect (checked 2026-11-04).
+        let reported = null;
+        const note = updated => { reported = contextSize((updated?.configOptions || []).find(o => o?.id === 'context')?.currentValue) ?? reported; };
         if (picker) for (const p of parameters) {
           if (typeof p?.id === 'string' && typeof p.value === 'string' && p.id !== effortOption)
-            await rpc.call('session/set_config_option', { sessionId, configId: p.id, value: p.value });
+            note(await rpc.call('session/set_config_option', { sessionId, configId: p.id, value: p.value }));
         }
         if (setEffort) {
           const updated = await rpc.call('session/set_config_option', { sessionId, configId: effortOption, value: effort });
+          note(updated);
           const current = (updated?.configOptions || []).find(o => o?.id === effortOption);
           if (current?.currentValue !== effort) throw new Error(`Cursor did not apply ${effortOption}=${effort} for ${model}.`);
         }
         applied.config = config;
+        // Otherwise a saved variant ID (claude-opus-5-5[context=300k,…]), else the model's first context option, which is
+        // Cursor's default. Models without the option (Auto, some older ones) report no window.
+        applied.contextWindow = reported ?? contextSize(/[[,]context=([^,\]]+)/.exec(model)?.[1])
+          ?? contextSize(this.models.find(m => m.id === model)?.parameters?.context?.[0]);
       }
       if (applied.mode !== mode) {
         await rpc.call('session/set_mode', { sessionId, modeId: mode });
@@ -366,7 +380,7 @@ class CursorCLI {
       const limit = cursorLimitText(output);
       if (limit) throw Object.assign(new Error(`Cursor: ${limit}.`), { limit: { until: null, reason: `Cursor: ${limit}.` } });
       keep = true;
-      return { result: output, session_id: sessionId };
+      return { result: output, session_id: sessionId, ...(applied.contextWindow ? { contextWindow: applied.contextWindow } : {}) };
     } catch (error) { throw toolError || error; }
     finally {
       signal?.removeEventListener('abort', abort);

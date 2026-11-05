@@ -1453,6 +1453,12 @@ dialog.image-viewer[open] {
   font-size:calc(11px * var(--font-scale,1))
 }
 
+.routing-row .quick-reply {
+  font-size:calc(14px * var(--font-scale,1));
+  line-height:1.8;
+  color:var(--text)
+}
+
 .routing-row .activity {
   margin:0;
   border:0;
@@ -2099,6 +2105,11 @@ dialog.image-viewer[open] {
 .connector-actions > summary::-webkit-details-marker { display:none; }
 .connector-actions[open] { grid-column:1 / -1; grid-row:auto; border-top:1px solid var(--border); padding-top:8px; }
 .connector-actions[open] > summary { position:absolute; right:20px; top:18px; }
+/* Open actions leave column 2: keep the status badge clear of the ⋯. */
+.connector-card:has(> .connector-actions[open]) > .connector-heading { padding-right:30px; }
+.connector-tools-more { grid-column:1; margin:0 0 0 42px; }
+.connector-tools-more > summary { cursor:pointer; font-size:calc(11px * var(--font-scale, 1)); }
+.connector-tools-more > .connector-tools { margin:4px 0 0; }
 .connector-actions button { padding:6px 10px; margin:4px 6px 0 0; font-size:calc(12px * var(--font-scale, 1)); }
 #connector-editor { border-top: 1px solid var(--border); margin-top: 20px; padding-top: 16px; }
 #connector-editor label { display: flex; flex-direction: column; align-items: stretch; gap: 7px; margin: 14px 0; }
@@ -2408,6 +2419,10 @@ dialog.image-viewer[open] {
 }
 
 .hint.router-note.secondary-off {
+  font-weight:700
+}
+
+.hint.secondary-suggestion {
   font-weight:700
 }
 

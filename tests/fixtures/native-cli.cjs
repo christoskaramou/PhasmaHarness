@@ -115,7 +115,7 @@ async function museFixture(t, options = {}) {
           serverInfo: { name: 'muse', version: '1.4.10' }, experimentalApi: true, grantedCapabilities: ['sessionMcp'],
           sessionDurability: 'durable', sandboxAvailability: options.sandbox || 'available' };
         if (request.method === 'model/list') result = { profileId: options.catalogProfile || null, models: options.authError ? [] : [{ modelId: 'model-a', providerId: 'meta', profileId: options.catalogProfile || null,
-          displayLabel: 'Muse A', reasoningEffortVariants: [{ tier: 'high', label: 'High' }] }] };
+          displayLabel: 'Muse A', reasoningEffortVariants: [{ tier: 'high', label: 'High' }], ...(options.contextLimit !== undefined ? { contextLimit: options.contextLimit } : {}) }] };
         if (request.method === 'account/read') result = options.account || { state: 'loggedOut', credentialRequired: true };
         if (request.method === 'permissionProfile/list') result = { profiles: [':read-only', ':ask-me', ':unrestricted'].map(profileId => ({ profileId, available: true })) };
         if (request.method === 'session/start' || request.method === 'session/resume') {

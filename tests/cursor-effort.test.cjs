@@ -11,14 +11,15 @@ const LISTED = { models: [
   { value: 'composer-2.5', name: 'Composer 2.5', configOptions: [] },
 ] };
 
-function fake(cursor, { list = LISTED, applied } = {}) {
+function fake(cursor, { list = LISTED, applied, context } = {}) {
   const calls = [];
   cursor.connect = () => ({ call: async (method, params) => {
     calls.push({ method, params });
     if (method === 'initialize') return { agentCapabilities: {} };
     if (method === 'session/new') return { sessionId: 's1', models: { availableModels: [{ modelId: 'grok-4.7', name: 'Grok 4.7' }] } };
     if (method === 'cursor/list_available_models') { if (list instanceof Error) throw list; return list; }
-    if (method === 'session/set_config_option') return { configOptions: [{ id: params.configId, category: 'thought_level', currentValue: applied ?? params.value }] };
+    if (method === 'session/set_config_option') return { configOptions: [{ id: params.configId, category: 'thought_level', currentValue: applied ?? params.value },
+      ...(params.configId === 'context' || !context ? [] : [{ id: 'context', category: 'model_config', currentValue: context }])] };
     if (method === 'session/prompt') return { stopReason: 'end_turn' };
     return {};
   }, close() {} });
@@ -71,4 +72,20 @@ test('Cursor run applies a variant\'s other saved parameters before the reasonin
     parameters: [{ id: 'context', value: '256k' }, { id: 'fast', value: 'true' }], prompt: 'x', access: 'read-only' });
   assert.deepEqual(calls.filter(c => c.method === 'session/set_config_option').map(c => [c.params.configId, c.params.value]),
     [['context', '256k'], ['fast', 'true'], ['reasoning_effort', 'high']]);
+});
+
+test('Cursor returns the context window in effect: the reported option, a saved variant, else the first listed option', async () => {
+  // Live 2026-11-04: each model lists its context option ("300k", "1m"; the first is the default) and set_config_option
+  // answers with the session's options, the context's currentValue included.
+  const list = { models: [{ value: 'claude-opus-5-5', name: 'Opus', configOptions: [
+    { id: 'context', category: 'model_config', options: [{ value: '300k' }, { value: '1m' }] },
+    { id: 'effort', category: 'thought_level', options: [{ value: 'low' }, { value: 'high' }] }] }, { value: 'composer-2.5', name: 'Composer', configOptions: [] }] };
+  const cursor = new CursorCLI();
+  fake(cursor, { list }); await cursor.discover();
+  const run = async (options, fixture = {}) => { fake(cursor, { list, ...fixture }); return (await cursor.run({ prompt: 'x', access: 'read-only', parameterized: true, ...options })).contextWindow; };
+  assert.equal(await run({ model: 'claude-opus-5-5', parameters: [{ id: 'context', value: '1m' }] }), 1000000);
+  assert.equal(await run({ model: 'claude-opus-5-5', effort: 'high', effortOption: 'effort' }, { context: '1m' }), 1000000, 'the value Cursor reports wins');
+  assert.equal(await run({ model: 'claude-opus-5-5' }), 300000, 'the first listed option is the default');
+  assert.equal(await run({ model: 'gpt-5.5[context=272k,fast=false]', parameterized: false }), 272000, 'a saved variant ID');
+  assert.equal(await run({ model: 'composer-2.5' }), undefined, 'no context option: no window');
 });

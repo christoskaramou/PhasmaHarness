@@ -19,6 +19,13 @@ var HarnessConnectors = (() => {
       const detail = document.createElement('p'); detail.className = 'hint';
       detail.textContent = record.error || `${record.transport === 'http' ? 'Remote MCP' : 'Local MCP'}${record.toolCount !== undefined ? ` · ${record.toolCount} ${record.toolCount === 1 ? 'tool' : 'tools'}` : ''} · ${record.confirmCalls ? 'Confirm each call' : 'Allowed for Full access'}`;
       card.append(detail);
+      // The connector's tools, by name (the user's request 2026-11-05).
+      // Up to 8 show inline; a longer list folds behind "Show all N tools" so a big connector does not fill the card.
+      if (record.toolNames?.length) {
+        const names = document.createElement('p'); names.className = 'hint connector-tools'; names.textContent = record.toolNames.join(' · ');
+        if (record.toolNames.length <= 8) card.append(names);
+        else { const more = document.createElement('details'); more.className = 'connector-tools-more'; const label = document.createElement('summary'); label.className = 'hint'; label.textContent = `Show all ${record.toolNames.length} tools`; more.append(label, names); card.append(more); }
+      }
       const actions = document.createElement('details'); actions.className = 'connector-actions';
       const toggle = document.createElement('summary'); toggle.textContent = '⋯'; toggle.setAttribute('aria-label', `Actions for ${record.name}`); actions.append(toggle);
       actions.append(button('Edit', () => edit(record)), button(record.state === 'connected' || record.state === 'connecting' ? 'Disconnect' : 'Connect', () => act(record, record.state === 'connected' || record.state === 'connecting' ? 'disconnect' : 'connect')));

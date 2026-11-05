@@ -23,19 +23,22 @@ try {
         if (-not (Get-Command $command -ErrorAction SilentlyContinue)) { return $false }
         try { & $command @probe *> $null; return $LASTEXITCODE -eq 0 } catch { return $false }
     }
+    # Each program's status for the version report: present (skipped), installed or updated.
+    $status = @{}
     function Ensure-Program($command, $package, $probe = @('--version')) {
-        if (Test-Program $command $probe) { return }
+        if (Test-Program $command $probe) { Write-Host "Skipped $package`: already installed."; return 'present' }
         if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
             throw 'Install Microsoft App Installer (winget) from Microsoft Store, then run this script again.'
         }
         Write-Host "Installing $package..."
-        & winget.exe install --id $package --exact --source winget --accept-source-agreements --accept-package-agreements
+        & winget.exe install --id $package --exact --source winget --accept-source-agreements --accept-package-agreements | Out-Host  # shown, not returned as the status
         if ($LASTEXITCODE -ne 0) { throw "Installation of $package failed (exit $LASTEXITCODE)." }
         Refresh-Path
         if (-not (Test-Program $command $probe)) { throw "$package installed but $command is missing, shadowed, or not working. Check PATH and rerun." }
+        return 'installed'
     }
-    Ensure-Program node.exe OpenJS.NodeJS.LTS
-    Ensure-Program git.exe Git.Git
+    $status.node = Ensure-Program node.exe OpenJS.NodeJS.LTS
+    $status.git = Ensure-Program git.exe Git.Git
     & node.exe -e "if(Number(process.versions.node.split('.')[0])<22)process.exit(1)"
     if ($LASTEXITCODE -ne 0) {
         Write-Host 'Updating Node.js to the current LTS...'
@@ -44,6 +47,7 @@ try {
         Refresh-Path
         & node.exe -e "if(Number(process.versions.node.split('.')[0])<22)process.exit(1)"
         if ($LASTEXITCODE -ne 0) { throw 'An older Node.js still takes priority on PATH. Restart Windows and run this installer again.' }
+        $status.node = 'updated'
     }
     if (-not (Get-Command npm.cmd -ErrorAction SilentlyContinue)) { throw 'npm is missing. Repair the Node.js installation, then rerun this installer.' }
     . (Join-Path $folder 'src\install-preflight.ps1')
@@ -64,6 +68,7 @@ try {
     Write-Host 'Installing Electron runtime...'
     $electronInstaller = Join-Path $folder 'node_modules\electron\install.js'
     if (-not (Test-Path -LiteralPath $electronInstaller)) { throw 'Electron package is missing after npm ci. Check npm output above.' }
+    $status.electron = (& node.exe (Join-Path $folder 'tools\install-summary.cjs') electron-cache)
     & node.exe $electronInstaller
     if ($LASTEXITCODE -ne 0) { throw 'Electron runtime download failed. Check the download error above (network, proxy or antivirus), then rerun.' }
     $electron = Join-Path $folder 'node_modules\electron\dist\electron.exe'
@@ -78,6 +83,7 @@ try {
         $shortcut.IconLocation = (Join-Path $folder 'ui\icon.ico') + ',0'
         $shortcut.Save()
     }
+    & node.exe (Join-Path $folder 'tools\install-summary.cjs') report "node=$($status.node)" "git=$($status.git)" "electron=$($status.electron)" mode=desktop
     Write-Host 'Harness tools (project context, bots, connectors, images, settings) come from a local MCP server the app starts itself: Codex, Claude, Cursor and the native CLIs connect to it, and API models get the same tools inside Harness. Nothing to set up.'
     Write-Host 'Setup complete. From Settings > Providers, install and sign in to Codex, Claude, Cursor, DeepSeek, Muse or Antigravity, or add an API provider (OpenRouter, LM Studio or any OpenAI-compatible endpoint); any one of these is enough. Jev is optional: its key adds Jev routing and Jev image assist. The app is in your Start menu and on your Desktop; keep this app folder in place.'
     Start-Process -FilePath (Join-Path $env:WINDIR 'System32\wscript.exe') -ArgumentList ('"' + (Join-Path $folder 'Launch Phasma Harness.vbs') + '"') -WindowStyle Hidden
