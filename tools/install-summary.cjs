@@ -52,7 +52,7 @@ function report(args) {
   // npm ci always reinstalls every locked package, so none are skipped; the headless runner leaves out dev packages.
   const total = Object.keys(lock?.packages || {}).filter(key => key.startsWith('node_modules/'));
   const present = total.filter(key => fs.existsSync(path.join(ROOT, key)));
-  lines.push(`  App packages: ${present.length} of ${total.length} in the lockfile installed from it${present.length < total.length ? `, ${total.length - present.length} skipped (builds for other platforms, or dev packages)` : ''}`);
+  lines.push(`  App packages: ${present.length} of ${total.length} in the lockfile installed from it${present.length < total.length ? `, ${total.length - present.length} skipped (${headless ? 'builds for other platforms, or dev packages' : 'builds for other platforms'})` : ''}`);
   for (const [group, list] of [['App libraries', pkg.dependencies], ['Developer packages', pkg.devDependencies]]) {
     const entries = Object.keys(list || {}).map(name => [name, installedVersion(name)]);
     const installed = entries.filter(([, version]) => version).map(([name, version]) => `${name} ${version}`);

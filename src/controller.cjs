@@ -1387,7 +1387,7 @@ class Controller extends EventEmitter {
       }
 
       // The context window of the model that did the most input work (background helper models are smaller). Other CLIs
-      // return the window as result.contextWindow (DeepSeek, Muse, Cursor); Antigravity reports none.
+      // return the window as result.contextWindow (DeepSeek, Muse, Cursor; Antigravity from its built-in family list).
       const main = Object.values(result.modelUsage || {}).filter(m => Number.isFinite(m?.contextWindow))
         .sort((a, b) => ((b.inputTokens || 0) + (b.cacheReadInputTokens || 0)) - ((a.inputTokens || 0) + (a.cacheReadInputTokens || 0)))[0];
       const window = main?.contextWindow ?? result.contextWindow;
