@@ -2317,15 +2317,17 @@ function render() {
   $('#welcome').hidden = chatSessions(session).some(chat => chat.items.length || chat.pendingMessage);
   renderSendButton();
   $('#message-queue').replaceChildren();
-  // The worker's queue only: messages the Secondary model reads or holds are in the chat (renderMessages), and join this
-  // queue, with Send now, Edit and Remove, only when it is off, fails or times out (2026-11-06, the user).
-  for (const message of (session?.queue || []).filter(message => !message.agentReply && !message.sending && !message.secondary)) {
+  // The user's queued messages, also those the Secondary model reads or holds (2026-11-06, the user: they are the user's,
+  // not its queue). Only the steps it split off show in the chat instead (renderMessages).
+  for (const message of (session?.queue || []).filter(message => !message.agentReply && !message.sending && !message.step)) {
     const revise = session.delegation && !session.delegation.delivered && !session.delegation.cancelled;
     const row = element('div', 'queued-message');
     const text = element('span', '', `${message.waiting ? 'Waiting' : message.error ? 'Paused' : message.triage ? 'Reading' : 'Queued'}: ${message.text}${message.images.length ? ` (${message.images.length} images)` : ''}`);
     text.title = message.waiting ? 'Claude has this message and takes it after its current step.' : message.triage ? 'The Secondary model is reading this message.' : message.error || message.text;
-    // The Secondary model's note on a message it holds: when it runs, or its question (controller/direct-answer.cjs).
+    // The Secondary model's note on a message it holds (when it runs, or its question) and its reply, which goes into the
+    // chat with the message when it runs (controller/direct-answer.cjs).
     if (message.note) text.append(element('small', 'queued-note', message.note));
+    if (message.ack?.text) text.append(element('small', 'queued-note', message.ack.text));
     row.append(text);
     for (const [action, label] of [[(state.busy && !session.groupTurn) || revise ? 'steer' : 'send', 'Send now'], ['edit', '✎'], ['remove', '×']]) {
       const button = element('button', 'compact-action', label);
@@ -2335,8 +2337,11 @@ function render() {
       if (action === 'edit') button.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15Z"/></svg>';
       if (action === 'remove') button.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>';
       button.setAttribute('aria-label', action === 'remove' ? 'Remove queued message' : action === 'edit' ? 'Edit queued message' : label);
-      button.disabled = (action === 'steer' && (revise && !['queued', 'running'].includes(session.delegation.state))) || !!session.queueSending || (action !== 'steer' && message.waiting) || (action !== 'remove' && (message.uncertain || (action !== 'edit' && (!ready || (state.busy && (state.busy !== selectedId || (!revise && ((!session.turnId && providerCaps(session.activeProvider).steer && !state.coordinator) || session.compacting))))))));
-      button.title = action !== 'steer' && message.waiting ? 'Claude already has this message'
+      // Send now waits while the Secondary model reads the message (queuedMessage refuses it meanwhile).
+      button.disabled = (['steer', 'send'].includes(action) && message.triage) ||
+        (action === 'steer' && (revise && !['queued', 'running'].includes(session.delegation.state))) || !!session.queueSending || (action !== 'steer' && message.waiting) || (action !== 'remove' && (message.uncertain || (action !== 'edit' && (!ready || (state.busy && (state.busy !== selectedId || (!revise && ((!session.turnId && providerCaps(session.activeProvider).steer && !state.coordinator) || session.compacting))))))));
+      button.title = ['steer', 'send'].includes(action) && message.triage ? 'The Secondary model is still reading this message'
+        : action !== 'steer' && message.waiting ? 'Claude already has this message'
         : action === 'edit' ? 'Move back to the composer to edit and resend'
         : action === 'send' && session.groupTurn ? 'Stop the current group reply, then send this message'
         : action === 'steer' && !revise ? sendNowTitle(session.activeProvider)
@@ -3027,8 +3032,8 @@ document.addEventListener('visibilitychange', refreshMessageTimes);
 // What a chat shows with Hide tool and helper steps on: the conversation itself.
 const CHAT_ITEM_TYPES = new Set(['userMessage', 'agentMessage', 'plan', 'agentResult', 'agentArtifact']);
 
-// A queue action: Send now, Edit or Remove on a queued message, Remove on one the Secondary model holds, or Send again and
-// Edit on one that ended without running. Edit moves the message into the composer.
+// A queue action: Send now, Edit or Remove on a queued message, Remove on a step the Secondary model split off, or Send
+// again and Edit on one that ended without running. Edit moves the message into the composer.
 async function queueAction(sessionId, messageId, action) {
   try {
     if (action === 'edit' && ($('#prompt').value.trim() || attachedImages().length || attachedFiles().length || readingImages || submitting)) throw new Error('Send or clear your current draft before editing a queued message.');
@@ -3044,10 +3049,11 @@ async function queueAction(sessionId, messageId, action) {
   } catch (error) { notify(error); }
 }
 
-// The Secondary model's queue, shown in the chat after the conversation as the user's messages with their status: the
-// messages it reads or holds that the worker does not have yet (controller/direct-answer.cjs heldMessages).
+// The Secondary model's own queue, shown in the chat after the conversation with their status: the steps it split a request
+// into (controller/direct-answer.cjs queueSteps). The user's own messages stay in the worker's queue, with Send now, Edit
+// and Remove, whatever it decided for them (2026-11-06, the user: "i said the message was mine!!! not the secondary queued").
 function secondaryQueued(chat) {
-  return (chat.queue || []).filter(message => message.secondary && !message.sending && !message.waiting && !message.agentReply).map(message => ({
+  return (chat.queue || []).filter(message => message.step && !message.sending && !message.waiting && !message.agentReply).map(message => ({
     id: `queued-${message.id}`, type: 'userMessage', createdAt: message.createdAt, ...(message.fileMessage ? { fileMessage: message.fileMessage } : {}),
     content: [{ type: 'text', text: message.text }, ...(message.images || []).map(url => ({ type: 'image', url }))],
     queued: { id: message.id, reply: message.ack?.text || null,
@@ -3167,8 +3173,8 @@ function renderMessages(session) {
       };
       node.replaceChildren(bubble, actions);
       if (item.groupSpeaker) { label.classList.add('group-speaker'); node.prepend(label); }
-      // In the Secondary model's queue: its status and Remove. Ended without running (Stop, dropped, a restart): Send again
-      // and Edit, until it is sent again.
+      // A step in the Secondary model's queue: its status and Remove. Ended without running (Stop, dropped, a restart): Send
+      // again and Edit, until it is sent again.
       if (user && (item.queued || item.queueState)) {
         node.classList.add(item.queued ? 'queued' : 'ended');
         actions.prepend(element('span', 'queue-state', item.queued ? item.queued.status : item.queueLabel));

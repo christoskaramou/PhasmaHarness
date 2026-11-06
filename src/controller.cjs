@@ -1603,9 +1603,11 @@ class Controller extends EventEmitter {
       // An effort the Secondary model read in this message (readQueued): the running turn cannot change its effort, so it
       // stops and the message starts a new turn at that effort, which continues the stopped work (2026-11-06, the user:
       // "stop, change effort"). Send now on a message held for after the turn does the same.
-      if (['steer', 'live'].includes(action) && message.effort && !this.isCoordinator())
+      if (['steer', 'live'].includes(action) && message.effort && !this.isCoordinator()) {
+        if (action === 'steer') this.sentNow(message);
         await this.restartWithMessage(session, this.effortMessage(message, true), activeTask);
-      else if ((action === 'steer' || action === 'live') && this.liveInput && !this.isCoordinator() && !message.agentReply && !message.wikiTaskId && !message.routineRun) {
+      } else if ((action === 'steer' || action === 'live') && this.liveInput && !this.isCoordinator() && !message.agentReply && !message.wikiTaskId && !message.routineRun) {
+        if (action === 'steer') this.sentNow(message);
         this.lastSends.delete(session.id);
         // Send now applies within the turn where the provider can (liveSteer); otherwise it joins the provider's own queue.
         // Once the provider holds the message (Claude takes it after its current step), it shows as waiting with Send
@@ -1621,18 +1623,21 @@ class Controller extends EventEmitter {
           this.save();
           this.changed();
         };
-        await this.liveInput({ ...message, ...this.forModel(session, session.routes?.at(-1), message.text, message.images) }, { steer: action === 'steer' && !!this.liveInputCaps?.liveSteer, written });
+        const sent = this.forModel(session, session.routes?.at(-1), message.text, message.images);
+        await this.liveInput({ ...message, ...sent, text: this.stepNote(session, message) + sent.text }, { steer: action === 'steer' && !!this.liveInputCaps?.liveSteer, written });
         this.recordLiveMessage(session, message, activeTask);
       } else if (action === 'steer' && session.activeProvider === 'claude-cli' && !this.isCoordinator()) {
         // Claude without live input is finishing its turn; a restart would drop its saved session. The message sends next.
         return;
       } else if (action === 'steer' && (!capabilities(session.activeProvider).steer || this.isCoordinator())) {
+        this.sentNow(message);
         await this.restartWithMessage(session, message, activeTask);
       } else if (action === 'steer') {
+        this.sentNow(message);
         const sent = this.forModel(session, session.routes?.at(-1), message.text, message.images);
         await this.client.call('turn/steer', {
           threadId: session.threadId, expectedTurnId: turnId, clientUserMessageId: message.id,
-          input: [{ type: 'text', text: sent.text, text_elements: [] }, ...sent.images.map(url => ({ type: 'image', url }))],
+          input: [{ type: 'text', text: this.stepNote(session, message) + sent.text, text_elements: [] }, ...sent.images.map(url => ({ type: 'image', url }))],
         });
         if (!session.items.some(i => i.clientId === message.id)) {
           session.items.push({
@@ -1793,7 +1798,8 @@ class Controller extends EventEmitter {
     if (this.busy) throw new Error('The previous turn has not stopped. Message remains queued.');
     if (this.stopGeneration !== generation) throw new Error('Send now was cancelled by Stop.');
     if (this.blockedReason()) throw new Error(this.blockedReason());
-    await this.send({ ...message, id: session.id });
+    // Steps the Secondary model split off that still wait stay their own turns (stepNote).
+    await this.send({ ...message, contextText: this.stepNote(session, message) + (message.contextText || ''), id: session.id });
   }
 
   // Claude Code's own /compact on the resumed Claude session; the visible chat stays as is.

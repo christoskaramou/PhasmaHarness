@@ -2742,10 +2742,12 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('selectAgent(' + JSON.stringify(background[0].worker.agentId) + ')');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector(".queue-steer").textContent'), 'Send now');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector(".queue-steer").disabled'), false);
-  // The Secondary model's queue shows in the chat, not the worker's queue: its status, its reply and Remove. A message that
-  // ended without running (Stop) shows Send again and Edit (2026-11-06, the user).
-  background[0].chat.queue.push({ id: 'ui-held', text: 'Then update the README.', images: [], secondary: true, hold: true, note: 'Runs after this turn.',
-    ack: { text: 'README after this turn.', label: 'Haiku' } });
+  // The user's messages the Secondary model holds or reads stay in the queue, with its note and reply and Send now, Edit and
+  // Remove (Send now waits while it reads); only the steps it split off show in the chat, with Remove. A message that ended
+  // without running (Stop) shows Send again and Edit (2026-11-06, the user: "i said the message was mine!!!").
+  background[0].chat.queue.push({ id: 'ui-held', text: 'Then update the README.', images: [], secondary: true, triaged: true, hold: true, note: 'Runs after this turn.',
+    ack: { text: 'README after this turn.', label: 'Haiku' } }, { id: 'ui-reading', text: 'Also check b.js.', images: [], secondary: true, triage: true },
+  { id: 'ui-step', text: 'Step 2 of 2: Run the tests.', images: [], secondary: true, triaged: true, step: true });
   const stoppedItem = { id: 'ui-stopped', clientId: 'ui-stopped', type: 'userMessage', localOnly: true, createdAt: Date.now(), queueState: 'stopped',
     queueLabel: 'Stopped', resend: { text: 'Add a changelog.', images: [], mode: 'auto', task: 'on' }, content: [{ type: 'text', text: 'Add a changelog.' }] };
   background[0].chat.items.push(stoppedItem);
@@ -2754,21 +2756,27 @@ app.whenReady().then(async () => {
   ipcMain.handle('queuedMessage', (_event, ...args) => { queueCalls.push(args); });
   await publish();
   const secondaryView = await window.webContents.executeJavaScript(`(() => {
-    const held = document.querySelector('#messages .message.queued'), ended = document.querySelector('#messages .message.ended');
-    return { workerQueue: [...document.querySelectorAll('#message-queue .queued-message')].map(row => row.textContent),
-      held: held && [held.textContent.includes('Then update the README.'), held.querySelector('.queue-state').textContent, !!held.querySelector('.queue-remove'),
-        held.nextElementSibling?.textContent, getComputedStyle(held.querySelector('.message-actions')).opacity],
+    const held = [...document.querySelectorAll('#messages .message.queued')], ended = document.querySelector('#messages .message.ended');
+    return { workerQueue: [...document.querySelectorAll('#message-queue .queued-message')].map(row => [row.querySelector('span').textContent,
+      [...row.querySelectorAll('button')].map(button => button.getAttribute('aria-label') + (button.disabled ? ' (disabled)' : ''))]),
+      held: held.map(node => [node.textContent.includes('Step 2 of 2: Run the tests.'), node.querySelector('.queue-state').textContent,
+        [...node.querySelectorAll('.message-actions button')].filter(button => button.className.includes('queue-')).map(button => button.textContent),
+        getComputedStyle(node.querySelector('.message-actions')).opacity]),
       ended: ended && [ended.querySelector('.queue-state').textContent, !!ended.querySelector('.queue-again'), !!ended.querySelector('.queue-edit'), !!ended.querySelector('.queue-remove')] };
   })()`);
-  assert.equal(secondaryView.workerQueue.length, 1);
-  assert.match(secondaryView.workerQueue[0], /Use blue\./);
-  assert.deepEqual(secondaryView.held, [true, 'Queued · runs after this turn', true, 'README after this turn.', '1']);
+  const queueButtons = ['Send now', 'Edit queued message', 'Remove queued message'];
+  assert.deepEqual(secondaryView.workerQueue, [['Queued: Use blue.', queueButtons],
+    ['Queued: Then update the README.Runs after this turn.README after this turn.', queueButtons],
+    ['Reading: Also check b.js.', ['Send now (disabled)', ...queueButtons.slice(1)]]]);
+  assert.deepEqual(secondaryView.held, [[true, 'Queued · runs after this turn', ['Remove'], '1']]);
   assert.deepEqual(secondaryView.ended, ['Stopped', true, true, false]);
-  await window.webContents.executeJavaScript(`document.querySelector('#messages .message.ended .queue-again').click(); document.querySelector('#messages .message.queued .queue-remove').click()`);
-  for (let i = 0; i < 100 && queueCalls.length < 2; i++) await new Promise(resolve => setTimeout(resolve, 20));
-  assert.deepEqual(queueCalls.map(([, messageId, action]) => [messageId, action]), [['ui-stopped', 'again'], ['ui-held', 'remove']]);
+  // Send now on the user's held message, while its bot works, goes into the running turn; Remove takes a step out.
+  await window.webContents.executeJavaScript(`document.querySelector('#messages .message.ended .queue-again').click();
+    document.querySelectorAll('#message-queue .queued-message')[1].querySelector('.queue-steer').click(); document.querySelector('#messages .message.queued .queue-remove').click()`);
+  for (let i = 0; i < 100 && queueCalls.length < 3; i++) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(queueCalls.map(([, messageId, action]) => [messageId, action]), [['ui-stopped', 'again'], ['ui-held', 'steer'], ['ui-step', 'remove']]);
   ipcMain.removeHandler('queuedMessage');
-  background[0].chat.queue = background[0].chat.queue.filter(message => message.id !== 'ui-held');
+  background[0].chat.queue = background[0].chat.queue.filter(message => !['ui-held', 'ui-reading', 'ui-step'].includes(message.id));
   background[0].chat.items = background[0].chat.items.filter(item => item !== stoppedItem);
   // Settings > General > Hide tool and helper steps: only the conversation shows; steps stay in the activity log.
   const stepItem = { id: 'ui-hidden-step', type: 'commandExecution', status: 'completed', command: 'npm run hidden-step', aggregatedOutput: 'ok', exitCode: 0 };

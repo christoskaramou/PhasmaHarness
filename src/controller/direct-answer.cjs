@@ -283,6 +283,22 @@ module.exports = {
     this.save(); this.changed();
   },
 
+  // A message passed into a running turn, or run at once, while steps it split off wait in the queue: the worker answers
+  // it and goes on with only the step it was on (2026-11-06: after Send now, the worker also did the waiting steps, which
+  // then ran again as their own turns).
+  stepNote(session, message) {
+    const waiting = (session.queue || []).filter(item => item.step && item !== message);
+    if (!waiting.length) return '';
+    return `[Harness: these steps of the user's request wait in the queue and run as their own turns, so do not do them now: ${waiting.map(item => item.text).join(' ')} ` +
+      'Answer the message below, then go on with only the step you were on.]\n\n';
+  },
+
+  // Send now on a message the Secondary model held for after the turn: its reply said the message waits, which no longer
+  // holds (2026-11-06, the user), so Harness says so instead. Not for its own effort restart, which has its own reply.
+  sentNow(message) {
+    if (message.hold && message.ack && !message.restart) message.ack = { text: 'Sent now instead of after this turn.', label: 'Harness' };
+  },
+
   // A stop sent to Hub: its turn and the bots it started stop, as with the Stop button (agents.stop); their queues pause.
   async stopFromHub(session, { text, images = [], fileMessage = null, read }) {
     const started = this.agents?.pendingJobs().filter(({ job }) => job.source === session.id || job.owner === session.id).length || 0;

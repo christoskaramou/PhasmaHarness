@@ -2805,6 +2805,37 @@ test('the Secondary model decides how work reaches the worker: split into turns,
   complete(controller, session, fake.turnIds.at(-1)); await flush();
 });
 
+test('Send now on a message the Secondary model holds passes it into the running turn: waiting steps stay their own turns, and its reply is reworded', async t => {
+  // 2026-11-06, the user: a message of theirs the Secondary model holds stays in their queue, with Send now, Edit and Remove.
+  // Live, after Send now the worker also did the waiting steps, which then ran again, and the reply still said it waits.
+  const { controller, fake, smartRouter } = await setup(t, { quick: true });
+  smartRouter.complete = async request => {
+    if (!request.schema?.properties?.kind) return { decision: { verdict: 'accept', findings: [] } };
+    const split = JSON.parse(request.prompt).message === 'plan, build';
+    return { decision: { kind: 'ack', text: split ? 'On it.' : 'README after this turn.', stop: false, effort: 'none', when: 'now',
+      steps: split ? ['Plan it.', 'Build it.'] : [], deliver: 'after', drop: [] } };
+  };
+  const session = controller.create();
+  const lastInput = () => fake.calls.findLast(call => call.method === 'turn/start').params.input[0].text;
+  await controller.send({ id: session.id, text: 'plan, build', mode: 'terra-light', task: 'off' });
+  const first = fake.turnIds.at(-1);
+  await controller.send({ id: session.id, text: 'then update the README', mode: 'terra-light', task: 'off' });
+  await until(() => session.queue.some(message => message.hold));
+  await controller.queuedMessage(session.id, session.queue.find(message => message.hold).id, 'steer');
+  // The worker is told the waiting step is not for now; the chat shows the message as sent.
+  assert.match(fake.calls.find(call => call.method === 'turn/steer').params.input[0].text,
+    /^\[Harness: these steps [^\]]*do not do them now: Step 2 of 2: Build it\. Answer the message below, then go on with only the step you were on\.\]\n\nthen update the README$/);
+  const at = session.items.findIndex(item => item.content?.[0]?.text === 'then update the README');
+  assert.deepEqual([session.items[at + 1]?.text, session.items[at + 1]?.routeLabel], ['Sent now instead of after this turn.', 'Harness · quick reply']);
+  assert.deepEqual(session.queue.map(message => message.text), ['Step 2 of 2: Build it.']);
+  // The step still runs as its own turn.
+  complete(controller, session, first);
+  await until(() => fake.turnIds.at(-1) !== first);
+  assert.match(lastInput(), /Step 2 of 2: Build it\./);
+  complete(controller, session, fake.turnIds.at(-1)); await flush();
+  assert.equal(session.queue.length, 0);
+});
+
 test('a bot’s activity log is written as its chat changes, and chats can hide tool and helper steps', async t => {
   // 2026-11-06, the user: a log of everything per bot, and a General option to show only the conversation.
   const { controller, fake } = await setup(t);
