@@ -747,7 +747,7 @@ class Controller extends EventEmitter {
     return !this.isCoordinator() && this.routerTurnedOff() ? this.agents?.hubAutoEffort?.() || 'auto' : 'auto';
   }
 
-  async send({ id, text, mode, images = [], files = [], fileMessage = null, contextText = '', task = 'on', wikiTaskId = null, failover = false, agentReply = false, agentReplyCancelled = false, agentResult = null, agentMail = null, routineRun = null, started = null }) {
+  async send({ id, text, mode, images = [], files = [], fileMessage = null, contextText = '', task = 'on', wikiTaskId = null, failover = false, agentReply = false, agentReplyCancelled = false, agentResult = null, agentMail = null, routineRun = null, started = null, effort = null, triaged = false, ack = null }) {
     if (!['auto', 'on', 'off'].includes(task)) throw new Error('Invalid task mode.');
     if (task === 'auto') task = 'on'; // Existing queued messages use the new default.
     if (this.blockedReason()) throw new Error(this.blockedReason());
@@ -798,12 +798,18 @@ class Controller extends EventEmitter {
       }
       if ((session.queue?.length || 0) >= 10) throw new Error('The queue is full (10 messages).');
       session.queuePaused = false;
-      (session.queue ||= []).push({ id: randomUUID(), text, images, mode: mode || this.data.settings.mode, task, agentReply, agentReplyCancelled,
+      const entry = { id: randomUUID(), text, images, mode: mode || this.data.settings.mode, task, agentReply, agentReplyCancelled,
         ...(fileMessage ? { fileMessage } : {}), ...(contextText ? { contextText } : {}),
         ...(session.delegation && !session.delegation.delivered ? { assignmentRevision: session.delegation.revision || 1 } : {}),
         ...(agentResult ? { agentResult } : {}), ...(agentMail ? { agentMail } : {}), ...(wikiTaskId ? { wikiTaskId } : {}),
-        ...(routineRun ? { routineRun } : {}) });
+        ...(routineRun ? { routineRun } : {}) };
+      // The bot's Secondary model reads a message sent mid-turn before the worker gets it (controller/direct-answer.cjs).
+      const read = this.busy === id && !this.isCoordinator() && !agentReply && !agentResult && !agentMail && !routineRun && !wikiTaskId &&
+        !session.group && !session.groupChatId && !(session.delegation && !session.delegation.delivered) && !this.planPreset() && !!this.secondaryPick();
+      if (read) entry.triage = true;
+      (session.queue ||= []).push(entry);
       this.save(); this.changed();
+      if (read) this.readQueued(session, entry).catch(error => this.log.warn('Reading a queued message failed', { error: String(error?.message).slice(0, 300) }));
       this.flushLiveQueue(session);
       return { queued: true };
     }
@@ -826,8 +832,9 @@ class Controller extends EventEmitter {
     const routingText = originalRequest?.text || text;
     // Auto effort: the bot's router picks only the effort of its one model; with the router off, its default effort runs.
     const autoEffort = !!parseAutoEffort(chosenMode);
-    // The user asked for an effort in this message: it runs, without the router, on the bot's model.
-    const askedEffort = !agentReply && !routineRun && !wikiTaskId && !this.planPreset() ? this.requestedEffort(text, chosenMode, session) : null;
+    // An effort the Secondary model read in this message while a turn ran (readQueued): it runs, without the router, on the
+    // bot's model. A fresh message's effort request is read alongside routing (below).
+    const askedEffort = effort && !agentReply && !routineRun && !wikiTaskId && !this.planPreset() ? this.effortVariant(effort, chosenMode, session) : null;
     const routes = !askedEffort && (chosenMode === 'auto' || (autoEffort && this.routerKind() !== 'off'));
     let selected = wikiWorker ? { ...wikiWorker, wikiTaskId, source: 'manual', reason: 'Wiki proposal using the original task worker.' }
       : askedEffort ? { ...askedEffort, source: 'manual', reason: `You asked for ${askedEffort.effort} effort.` }
@@ -853,9 +860,7 @@ class Controller extends EventEmitter {
     if (useSmart && chosenMode === 'auto' && !wikiTaskId) this.lastSends.set(id, { clientId, text, images, task, failover: failover === true,
       ...(fileMessage ? { fileMessage } : {}), ...(agentReply ? { agentReply: true } : {}), ...(routineRun ? { routineRun } : {}) });
     // The worker is told the effort change it was asked for is already done, so it does not answer that it cannot.
-    const effortNote = askedEffort ? `[Harness: this turn already runs at ${askedEffort.effort} effort, as the user asks below. The effort change is done; do not say you cannot change it.]
-
-` : '';
+    const effortNote = askedEffort ? this.effortNote(askedEffort.effort) : '';
     session.pendingMessage = {
       ...(contextText || effortNote ? { contextText: effortNote + contextText } : {}),
       id: clientId, clientId, type: 'userMessage', pending: true, createdAt: Date.now(),
@@ -868,8 +873,10 @@ class Controller extends EventEmitter {
     this.changed();
     // A quick reply from the Secondary model starts now, alongside routing (controller/direct-answer.cjs).
     const quick = this.quickReply(session, { text, images, fileMessage, mode: chosenMode,
-      eligible: session.userTurn && !failover && !wikiTaskId && !routineRun && !agentReply && !originalRequest && !session.group && !session.groupTurn && !session.groupChatId &&
+      eligible: session.userTurn && !failover && !triaged && !wikiTaskId && !routineRun && !agentReply && !originalRequest && !session.group && !session.groupTurn && !session.groupChatId &&
         !(session.delegation && !session.delegation.delivered) && !this.planPreset() });
+    // The Secondary model already read a message sent mid-turn; its note shows under the message (commitQuickAck).
+    if (ack) { session.pendingAck = ack; this.changed(); }
     // The working tree before this task, so the chat checker sees only its changes (checkResponse); taken while Auto routes it.
     const checking = this.chatScanner() && this.data.settings.checkResponses !== false;
     const baseline = !wikiTaskId && shouldTrack(task) && checking ? this.taskBaseline(session.workspace) : null;
@@ -953,6 +960,15 @@ class Controller extends EventEmitter {
       }
       // The quick reply ran alongside routing: a full answer ends the message here and no worker starts.
       const quickResult = await quick;
+      // The Secondary model read an effort request ("use xhigh effort for this"): the turn runs at it on the bot's model,
+      // whatever the router picked, and the worker is told (2026-11-06: the Secondary model acts on what the user sends).
+      const readEffort = !askedEffort && quickResult?.effort ? this.effortVariant(quickResult.effort, chosenMode, session) : null;
+      if (readEffort) {
+        selected = { ...readEffort, source: 'manual', reason: `You asked for ${readEffort.effort} effort.`, effortCap: this.data.settings.effortCap };
+        if (session.pendingMessage) session.pendingMessage.contextText = this.effortNote(readEffort.effort) + (session.pendingMessage.contextText || '');
+      }
+      // A request of several parts the Secondary model split into worker turns: this one does the first (queueSteps).
+      if (quickResult?.kind === 'ack' && quickResult.steps?.length > 1) this.queueSteps(session, { text, steps: quickResult.steps, mode: chosenMode, task });
       if (quickResult?.kind === 'answer') {
         const done = this.finishQuickAnswer(session, { text, clientId, quick: quickResult, selected });
         if (done) return done;
@@ -1123,7 +1139,8 @@ class Controller extends EventEmitter {
   }
 
   workerInstructions(session, provider) {
-    return workerInstructions(this.skillDirectories(session)) + this.projectContextInstructions(session, provider) + (this.agents?.instructions(this, session) || '') + (session.groupChatInstructions || '');
+    return workerInstructions(this.skillDirectories(session)) + this.projectContextInstructions(session, provider) + (this.agents?.instructions(this, session) || '') + (session.groupChatInstructions || '') +
+      this.secondaryInstructions();
   }
 
   skillDirectories(session) {
@@ -1516,7 +1533,12 @@ class Controller extends EventEmitter {
     let released = false;
     try {
       this.save(); this.changed();
-      if ((action === 'steer' || action === 'live') && this.liveInput && !this.isCoordinator() && !message.agentReply && !message.wikiTaskId && !message.routineRun) {
+      // An effort the Secondary model read in this message (readQueued): the running turn cannot change its effort, so it
+      // stops and the message starts a new turn at that effort, which continues the stopped work (2026-11-06, the user:
+      // "stop, change effort"). Send now on a message held for after the turn does the same.
+      if (['steer', 'live'].includes(action) && message.effort && !this.isCoordinator())
+        await this.restartWithMessage(session, this.effortMessage(message, true), activeTask);
+      else if ((action === 'steer' || action === 'live') && this.liveInput && !this.isCoordinator() && !message.agentReply && !message.wikiTaskId && !message.routineRun) {
         this.lastSends.delete(session.id);
         // Send now applies within the turn where the provider can (liveSteer); otherwise it joins the provider's own queue.
         // Once the provider holds the message (Claude takes it after its current step), it shows as waiting with Send
@@ -1555,7 +1577,7 @@ class Controller extends EventEmitter {
         // direct send; a failure before that still returns it to the queue.
         let started;
         const begun = new Promise(resolve => { started = resolve; });
-        await Promise.race([this.send({ ...message, id, started }), begun]);
+        await Promise.race([this.send({ ...this.effortMessage(message, false), id, started }), begun]);
       }
       session.queue = session.queue.filter(m => m !== message);
     } catch (error) {
@@ -1571,11 +1593,21 @@ class Controller extends EventEmitter {
     }
   }
 
+  // A message the Secondary model passes to the running worker now (readQueued): Claude, Muse and API models take it after
+  // their current step, Codex as a steer; other providers can only take it by interrupting, so it runs after the turn.
+  deliverNow(session, message) {
+    this.changed();
+    if (this.liveInput && this.liveInputCaps?.liveQueue) return this.flushLiveQueue(session);
+    if (capabilities(session.activeProvider).steer && !this.isCoordinator() && this.activeTurns.get(session.id))
+      this.queuedMessage(session.id, message.id, 'steer').catch(error => this.log.warn('Passing a message to the worker failed', { error: String(error?.message).slice(0, 300) }));
+  }
+
   flushLiveQueue(session) {
     if (!this.liveInput || !this.liveInputCaps?.liveQueue || this.busy !== session.id || session.queueSending || session.queuePaused ||
         session.compacting || this.stopping.has(session.id) || session.delegation || this.isCoordinator()) return;
     const message = session.queue?.[0];
-    if (!message || message.waiting || message.error || message.uncertain || message.agentReply || message.routineRun || message.wikiTaskId ||
+    // Not while the Secondary model reads it, nor once it holds it for the next turn at another effort (readQueued).
+    if (!message || message.waiting || message.error || message.uncertain || message.agentReply || message.routineRun || message.wikiTaskId || message.triage || message.hold ||
         (message.mode && message.mode !== this.liveInputMode)) return;
     this.queuedMessage(session.id, message.id, 'live').catch(() => {});
   }

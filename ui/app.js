@@ -2315,8 +2315,10 @@ function render() {
   for (const message of (session?.queue || []).filter(message => !message.agentReply && !message.sending)) {
     const revise = session.delegation && !session.delegation.delivered && !session.delegation.cancelled;
     const row = element('div', 'queued-message');
-    const text = element('span', '', `${message.waiting ? 'Waiting' : message.error ? 'Paused' : 'Queued'}: ${message.text}${message.images.length ? ` (${message.images.length} images)` : ''}`);
-    text.title = message.waiting ? 'Claude has this message and takes it after its current step.' : message.error || message.text;
+    const text = element('span', '', `${message.waiting ? 'Waiting' : message.error ? 'Paused' : message.triage ? 'Reading' : 'Queued'}: ${message.text}${message.images.length ? ` (${message.images.length} images)` : ''}`);
+    text.title = message.waiting ? 'Claude has this message and takes it after its current step.' : message.triage ? 'The Secondary model is reading this message.' : message.error || message.text;
+    // The Secondary model's note on a message it holds: when it runs, or its question (controller/direct-answer.cjs).
+    if (message.note) text.append(element('small', 'queued-note', message.note));
     row.append(text);
     for (const [action, label] of [[(state.busy && !session.groupTurn) || revise ? 'steer' : 'send', 'Send now'], ['edit', '✎'], ['remove', '×']]) {
       const button = element('button', 'compact-action', label);

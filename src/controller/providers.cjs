@@ -432,10 +432,16 @@ module.exports = {
   // An effort the user asked for in their message ("use higher effort", "use high effort"), on the model the bot runs:
   // a named level runs that level, never above the cap; "higher", "more", "max" or "highest" runs the highest within the
   // cap (the user's pick, 2026-11-04). The router is not asked, and a continuing task moves to it too. Null otherwise.
+  // Hub reads its messages this way; a bot's Secondary model reads them instead (controller/direct-answer.cjs).
   requestedEffort(text, mode, session, { more = false } = {}) {
     const asked = askedEffort(text);
     // more: only "higher", "more", "max" (Hub, whose messages name efforts for the workers it starts).
     if (!asked || (more && asked !== 'top')) return null;
+    return this.effortVariant(asked, mode, session);
+  },
+
+  // The bot's model at the effort asked for ('low' … 'xhigh', or 'top': the highest within the cap), or null.
+  effortVariant(asked, mode, session) {
     const last = (session?.routes || []).findLast(route => !route.directAnswer && route.model);
     const base = parseAutoEffort(mode) || (mode === 'auto' ? last : this.resolveWorker(mode));
     if (!base?.model) return null;

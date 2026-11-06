@@ -1917,6 +1917,14 @@ dialog.image-viewer[open] {
   text-overflow:ellipsis
 }
 
+.queued-message .queued-note {
+  display:block;
+  margin-top:2px;
+  white-space:normal;
+  color:var(--muted);
+  font-size:calc(11px * var(--font-scale,1))
+}
+
 .queued-message button {
   flex-shrink:0;
   display:inline-flex;

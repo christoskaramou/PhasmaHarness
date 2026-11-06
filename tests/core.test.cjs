@@ -122,7 +122,7 @@ async function setup(t, { secondary = true, quick = false } = {}) {
   // secondary: false leaves it unsaved (the chat checker picked before Secondary models, if any, stands in).
   if (secondary) controller.data.settings.secondaryModel = controller.data.settings.routerPreset;
   // Tests that count model calls run without quick replies (controller/direct-answer.cjs); quick: true keeps them.
-  if (!quick) controller.quickReply = () => Promise.resolve(null);
+  if (!quick) controller.readMessage = () => Promise.resolve(null);
   t.after(() => { controller.close(); fs.rmSync(directory, { recursive: true, force: true }); });
   return { controller, fake, smartRouter };
 }
@@ -2547,14 +2547,17 @@ test('a saved Claude router alias keeps its family when that family is discovere
   assert.equal(controller.data.settings.routerPreset, 'claude-cli:claude-haiku-4-5');
 });
 
-test('an effort the user asks for runs without the router, on the bot’s model, within the cap; a continuing task moves to it', async t => {
-  const { controller, fake, smartRouter } = await setup(t);
+test('an effort the Secondary model reads in a message runs on the bot’s model, within the cap; without one, the bot says it cannot', async t => {
+  const { controller, fake, smartRouter } = await setup(t, { quick: true });
   controller.data.settings.effortCap = 'max';
   const variants = controller.ownVariants('autoeffort:codex:gpt-5.6-sol');
   assert.ok(variants.length > 2, 'the fixture has several efforts');
   const top = variants.at(-1).effort, low = variants[0];
-  const asked = [];
-  smartRouter.choose = async () => { asked.push('router'); return { ...low, source: 'model', reason: 'sized', sameTask: true, assessment: { difficulty: 'low' } }; };
+  smartRouter.choose = async () => ({ ...low, source: 'model', reason: 'sized', sameTask: true, assessment: { difficulty: 'low' } });
+  const efforts = { 'im not surprised, use higher effort and make graphics better': 'higher', 'use high effort for this one': 'high', 'set effort to xhigh and redo it': 'xhigh' };
+  smartRouter.complete = async request => request.schema?.properties?.kind
+    ? { decision: { kind: 'answer', text: 'Sure.', stop: false, effort: efforts[JSON.parse(request.prompt).message] || 'none', when: 'now' } }
+    : { decision: { verdict: 'accept', findings: [] } };
   const session = controller.create();
   // 2026-11-04: "im not surprised, use higher effort and make graphics better" ran on the same low effort.
   for (const [mode, text, effort] of [
@@ -2569,10 +2572,17 @@ test('an effort the user asks for runs without the router, on the bot’s model,
     assert.match(fake.calls.findLast(call => call.method === 'turn/start').params.input[0].text, new RegExp(`already runs at ${effort} effort`), 'the worker is told');
     complete(controller, session, fake.turnIds.at(-1)); await flush();
   }
-  assert.deepEqual(asked, [], 'the router is not asked');
   controller.data.settings.effortCap = 'medium';
-  assert.equal(controller.requestedEffort('use max effort', 'autoeffort:codex:gpt-5.6-sol', session).effort, 'medium', 'never above the cap');
-  assert.equal(controller.requestedEffort('the effort was fine', 'autoeffort:codex:gpt-5.6-sol', session), null);
+  assert.equal(controller.effortVariant('top', 'autoeffort:codex:gpt-5.6-sol', session).effort, 'medium', 'never above the cap');
+
+  // Without a Secondary model nothing reads it: the effort stays, and the bot is told to say it cannot do that alone.
+  controller.data.settings.secondaryModel = 'off';
+  await controller.send({ id: session.id, text: 'use high effort for this one', mode: low.id, task: 'off' });
+  assert.equal(session.routes.at(-1).effort, low.effort);
+  assert.match(controller.workerInstructions(session, 'codex'), /cannot do that alone[\s\S]*Secondary model in this bot's Edit dialog/);
+  complete(controller, session, fake.turnIds.at(-1)); await flush();
+  controller.data.settings.secondaryModel = controller.data.settings.routerPreset;
+  assert.doesNotMatch(controller.workerInstructions(session, 'codex'), /cannot do that alone/);
 });
 
 test('a quick reply from the Secondary model answers at once with no worker, or shows a note while the worker starts', async t => {
@@ -2618,6 +2628,130 @@ test('a quick reply from the Secondary model answers at once with no worker, or 
   assert.equal(fake.turnIds.length, turns + 1, 'a failed quick reply leaves it to the worker');
   assert.equal(timeout, 8000, 'the worker waits at most 8 s for the quick reply');
   assert.equal(session.items.some(item => item.text === 'Stale note.'), false, 'the leftover note is dropped');
+  complete(controller, session, fake.turnIds.at(-1)); await flush();
+});
+
+test('the Secondary model reads messages sent during a turn: stop, effort now, after the turn, or it asks which', async t => {
+  // 2026-11-06: "stop and go xhigh effort" went into the running turn, which said it could not change its effort. The
+  // user's design: the Secondary model reads every message and acts on it at once.
+  const { controller, fake, smartRouter } = await setup(t, { quick: true });
+  const reads = { 'stop and go high effort': { stop: true, effort: 'high', when: 'now' }, 'after you are done, change effort to high': { effort: 'high', when: 'after' },
+    'change effort to high': { effort: 'high', when: 'unsure' }, 'now': { effort: 'high', when: 'now' }, 'stop': { stop: true } };
+  const prompts = [];
+  smartRouter.complete = async request => {
+    if (!request.schema?.properties?.kind) return { decision: { verdict: 'accept', findings: [] } };
+    const prompt = JSON.parse(request.prompt); prompts.push(prompt);
+    return { decision: { kind: 'ack', text: 'On it.', stop: false, effort: 'none', when: 'now', ...reads[prompt.message] } };
+  };
+  const session = controller.create();
+  const turn = async text => { await controller.send({ id: session.id, text, mode: 'terra-light', task: 'off' }); return fake.turnIds.at(-1); };
+  const queue = text => controller.send({ id: session.id, text, mode: 'terra-light', task: 'off' });
+  const interrupts = () => fake.calls.filter(call => call.method === 'turn/interrupt').length;
+  const lastInput = () => fake.calls.findLast(call => call.method === 'turn/start').params.input[0].text;
+  let first = await turn('first');
+  assert.notEqual(session.routes.at(-1).effort, 'high');
+
+  // "stop and go high effort": the turn stops, and the message continues the work at high.
+  let before = interrupts();
+  await queue('stop and go high effort');
+  assert.equal(session.queue[0].triage, true, 'held while the Secondary model reads it');
+  await until(() => interrupts() > before);
+  complete(controller, session, first);
+  await until(() => fake.turnIds.at(-1) !== first);
+  assert.equal(prompts.at(-1).workerRunning, true);
+  assert.equal(fake.calls.some(call => call.method === 'turn/steer'), false, 'not steered into the running turn');
+  assert.equal(session.routes.at(-1).effort, 'high');
+  assert.match(lastInput(), /already runs at high effort[\s\S]*Continue its work where it stopped[\s\S]*stop and go high effort/);
+  const at = session.items.findLastIndex(item => item.type === 'userMessage');
+  assert.deepEqual([session.items[at].content[0].text, session.items[at + 1]?.text], ['stop and go high effort', 'Stopping and continuing at high effort.']);
+  complete(controller, session, fake.turnIds.at(-1)); await flush();
+
+  // "After you're done…": not passed to the running turn, which finishes; the message starts the next turn at high.
+  const third = await turn('third'); before = interrupts();
+  await queue('after you are done, change effort to high');
+  await until(() => session.queue[0]?.hold);
+  assert.equal(session.queue[0].note, 'Runs after this turn at high effort.');
+  const live = [];
+  Object.assign(controller, { liveInput: async message => { live.push(message.text); }, liveInputCaps: { liveQueue: true }, liveInputMode: 'terra-light' });
+  controller.flushLiveQueue(session); await flush();
+  Object.assign(controller, { liveInput: null, liveInputCaps: null, liveInputMode: null });
+  assert.deepEqual([live, interrupts()], [[], before], 'not sent into the running turn, which is not stopped');
+  const readCount = prompts.length;
+  complete(controller, session, third);
+  await until(() => fake.turnIds.at(-1) !== third);
+  assert.equal(session.routes.at(-1).effort, 'high');
+  assert.match(lastInput(), /waited for the last turn to finish[\s\S]*after you are done/);
+  assert.equal(prompts.length, readCount, 'not read again when it is sent');
+  complete(controller, session, fake.turnIds.at(-1)); await flush();
+
+  // "change effort to high": it asks now or after this turn; "now" answers it, and the turn restarts at high.
+  first = await turn('fourth'); before = interrupts();
+  await queue('change effort to high');
+  await until(() => session.effortQuestion);
+  assert.match(session.queue[0].note, /now, which stops the current work, or after this turn/);
+  await queue('now');
+  await until(() => interrupts() > before);
+  assert.match(prompts.at(-1).pendingQuestion, /or after this turn/);
+  complete(controller, session, first);
+  await until(() => fake.turnIds.at(-1) !== first);
+  assert.equal(session.routes.at(-1).effort, 'high');
+  assert.ok(session.items.some(item => item.text === 'Switching to high effort now.'));
+  complete(controller, session, fake.turnIds.at(-1)); await flush();
+
+  // "stop": the turn stops and nothing else starts.
+  first = await turn('fifth'); before = interrupts();
+  const turns = fake.turnIds.length;
+  await queue('stop');
+  await until(() => interrupts() > before);
+  complete(controller, session, first); await flush();
+  assert.deepEqual([session.queue.length, fake.turnIds.length], [0, turns]);
+  assert.equal(session.items.at(-1).text, 'Stopped.');
+
+  // Without a Secondary model, a message sent during a turn waits for the worker as before.
+  controller.data.settings.secondaryModel = 'off';
+  session.queuePaused = false;
+  await turn('sixth');
+  await queue('stop and go high effort');
+  assert.equal(session.queue[0].triage, undefined);
+  complete(controller, session, fake.turnIds.at(-1)); await flush();
+});
+
+test('the Secondary model decides how work reaches the worker: split into turns, now during a turn, or after it', async t => {
+  // 2026-11-06, the user: "it's up to the secondary model how and when to queue work to the worker model".
+  const { controller, fake, smartRouter } = await setup(t, { quick: true });
+  const reads = { 'do a review, run the tests, then commit': { steps: ['Review the changes.', 'Run the tests.', 'Commit the changes.'] },
+    'also check b.js': { deliver: 'now' }, 'then update the README': { deliver: 'after' } };
+  smartRouter.complete = async request => {
+    if (!request.schema?.properties?.kind) return { decision: { verdict: 'accept', findings: [] } };
+    const { message } = JSON.parse(request.prompt);
+    return { decision: { kind: 'ack', text: 'On it.', stop: false, effort: 'none', when: 'now', steps: [], deliver: 'now', ...reads[message] } };
+  };
+  const session = controller.create();
+  const lastInput = () => fake.calls.findLast(call => call.method === 'turn/start').params.input[0].text;
+
+  // Three parts, three turns: this one does step 1, steps 2 and 3 wait at the front of the queue, already read.
+  await controller.send({ id: session.id, text: 'do a review, run the tests, then commit', mode: 'terra-light', task: 'off' });
+  assert.match(lastInput(), /split the message below into 3 turns\. Do only step 1 now: Review the changes\.[\s\S]*do a review, run the tests, then commit/);
+  assert.deepEqual(session.queue.map(m => m.text), ['Step 2 of 3: Run the tests.', 'Step 3 of 3: Commit the changes.']);
+
+  // During it, "also check b.js" goes to the worker now (Codex: a steer); "then update the README" waits for the turn.
+  await controller.send({ id: session.id, text: 'also check b.js', mode: 'terra-light', task: 'off' });
+  await until(() => fake.calls.some(call => call.method === 'turn/steer'));
+  assert.match(fake.calls.find(call => call.method === 'turn/steer').params.input[0].text, /also check b\.js/);
+  await controller.send({ id: session.id, text: 'then update the README', mode: 'terra-light', task: 'off' });
+  await until(() => session.queue.at(-1)?.hold);
+  assert.equal(session.queue.at(-1).note, 'Runs after this turn.');
+  assert.equal(fake.calls.filter(call => call.method === 'turn/steer').length, 1, 'not passed to the running turn');
+
+  // The steps then run in order, as their own turns, before the held message.
+  for (const text of ['Step 2 of 3: Run the tests.', 'Step 3 of 3: Commit the changes.', 'then update the README']) {
+    const previous = fake.turnIds.at(-1);
+    complete(controller, session, previous);
+    await until(() => fake.turnIds.at(-1) !== previous);
+    assert.ok(lastInput().includes(text), text);
+  }
+  assert.match(fake.calls.filter(call => call.method === 'turn/start').at(-3).params.input[0].text, /step 2 of 3 of the user's request/);
+  assert.equal(session.queue.length, 0);
   complete(controller, session, fake.turnIds.at(-1)); await flush();
 });
 
