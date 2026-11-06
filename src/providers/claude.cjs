@@ -587,7 +587,8 @@ function handoff(items, maxLength = 1000000, images = null) {
     const number = images?.get(item.id)?.[(item.content || []).filter(c => c.type === 'image').indexOf(part)];
     return number ? `[Image ${number} attached]` : '[Earlier image attachment]';
   };
-  const messages = items.filter(i => i.type === 'userMessage' || (i.type === 'agentMessage' && i.phase !== 'commentary')).map(i => ({
+  // A message that ended without running (Stop, dropped by the Secondary model: queueState) was never a request.
+  const messages = items.filter(i => (i.type === 'userMessage' && !i.queueState) || (i.type === 'agentMessage' && i.phase !== 'commentary')).map(i => ({
     role: i.type === 'userMessage' ? 'user' : 'assistant',
     text: i.type === 'userMessage' ? (i.contextText || '') + (i.content || []).map(c => c.type === 'text' ? c.text : imageText(i, c)).join('\n') : stripTaskStatus(i.text),
   }));

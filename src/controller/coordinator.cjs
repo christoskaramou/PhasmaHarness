@@ -42,7 +42,7 @@ function countSummaryCalls(history, start, end, choice) {
 
 const WORK = { name: 'agent_work', description: 'Send work to an existing worker on Auto effort (agentId), or create one (name). Include a concrete task. Omit mode and effort for a new worker on Hub’s model with Auto effort; set them only when the user requests a specific model/effort. To use a manually pinned existing agent explicitly requested by the user, pass its exact roster mode and omit effort. Otherwise manually pinned workers are left alone and a new worker on Auto effort is created. Follow-ups retain a previous explicit model choice. The original request remains available through agent_read_context.',
   inputSchema: { type: 'object', properties: { agentId: { type: 'string' }, name: { type: 'string' },
-    count: { type: 'integer', minimum: 1, maximum: 10, description: 'Number of new independent workers for this same task, only when explicitly requested. Defaults to one. Omit agentId for a batch.' }, task: { type: 'string' }, workspace: { type: 'string', description: 'Existing absolute repository path for this task. Use the requested project, not an unrelated Hub workspace. Different workspaces require Full access.' }, mode: { type: 'string' }, effort: { type: 'string' }, resultHandling: { type: 'string', enum: ['direct', 'review'], description: 'direct: return a simple, self-contained task result without another AI call. review: assess complex work and compose the reply together. Build/test checks run independently.' } }, required: ['task'], additionalProperties: false } };
+    count: { type: 'integer', minimum: 1, maximum: 10, description: 'Number of new independent workers for this same task, only when explicitly requested. Defaults to one. Omit agentId for a batch.' }, task: { type: 'string' }, workspace: { type: 'string', description: 'Existing absolute repository path for this task. Use the requested project, not an unrelated Hub workspace. Omit it for an existing worker (agentId): it works in its own folder. A folder outside this chat\'s folder needs Full access or the user\'s OK, which Harness asks for.' }, mode: { type: 'string' }, effort: { type: 'string' }, resultHandling: { type: 'string', enum: ['direct', 'review'], description: 'direct: return a simple, self-contained task result without another AI call. review: assess complex work and compose the reply together. Build/test checks run independently.' } }, required: ['task'], additionalProperties: false } };
 const CREATE = TOOLS.find(t => t.name === 'agent_create');
 // Grok-style: several agents are created by one action; the request is the approval.
 const HUB_CREATE = { ...CREATE,
@@ -59,9 +59,14 @@ const UPDATE = { name: 'agent_update', description: 'Only when the user asks: ch
   inputSchema: { type: 'object', properties: { agentId: { type: 'string', minLength: 1 }, name: { type: 'string', minLength: 1, maxLength: 60 },
     instructions: { type: 'string', maxLength: 8000 }, mode: { type: 'string' }, effort: { type: 'string' } }, required: ['agentId'], additionalProperties: false } };
 const HUB_TOOLS = [WORK, COMPARE, UPDATE, ...TOOLS.filter(t => t.name !== 'agent_delegate').map(t => t.name === 'agent_create' ? HUB_CREATE : t)];
+// How long Hub's "Allow work in another folder?" prompt waits; then it closes and counts as not allowed.
+const FOLDER_PROMPT_MS = 2 * 60 * 1000;
+// A folder strictly inside another (Windows compares without case).
+const inside = (parent, child) => { const rel = path.relative(parent, child); return !!rel && rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel); };
 const workReply = result => (result.agents
   ? `Sent the task to ${result.agents.length} agents: ${result.agents.map(agent => `**${agent.agent}**`).join(', ')}. I’ll collect all their results. Each agent runs independently.`
-  : result.status === 'queued' ? `Queued the task for **${result.agent}**. Their current work continues; I will bring the result back here.`
+  // 2026-11-06: an idle bot's new job is also "queued" until it starts, and was told "Their current work continues".
+  : result.waiting ? `Queued the task for **${result.agent}**. Their current work continues; I will bring the result back here.`
     : `Sent the task to **${result.agent}**. I’ll bring the result back here.`);
 const WORKER_INSTRUCTIONS = 'Carry out tasks delegated by Hub. Verify your work and return concise results, changed files, checks and limitations. Read relevant original user context when needed.';
 const SCHEMA = { type: 'object', properties: { reply: { type: 'string' },
@@ -82,7 +87,7 @@ const INSTRUCTIONS = name => `You are ${name}, the Hub: the permanent chat and c
 Answer ordinary conversation, explanations and planning yourself. Delegate execution, research, workspace inspection, edits and verification through agent_work. You cannot run commands, read files or browse; never claim you did.
 Your own planning runtime is read-only and tool-free; this does not set the workers' access. The context's access is the user's current chat permission ceiling. Harness enforces each worker's effective access separately, at or below that ceiling and the worker's own setting. Do not reject a delegated edit just because your planning runtime is read-only; never raise permissions to make it work.
 Use a suitable idle worker on Auto effort (roster mode autoeffort:…) from the roster; reuse previousWorker for follow-ups on its task. Create a worker when no suitable one exists. Do not pick a manually pinned agent just because it is idle or was used before. Only when the user explicitly requests that agent, pass its exact roster mode to agent_work. New workers take your model with Auto effort; only choose a model/effort when the user requests it, using agent_models first. Change your own chat model only when the user asks for it, with agent_update agentId main.
-Set agent_work.workspace to the requested repository's known absolute path from the conversation or roster. The worker router inspects that workspace before selecting a model. Do not leave it in an unrelated default folder. If the project path is unknown, ask the user before dispatching.
+Set agent_work.workspace to the requested repository's known absolute path from the conversation or roster; omit it when sending to an existing worker by agentId, which works in its own folder. The worker router inspects that workspace before selecting a model. Do not leave it in an unrelated default folder. If the project path is unknown, ask the user before dispatching.
 Preserve the original user request's intent, scope and constraints. Do not replace a code review with identifying a project acronym, explaining the project or summarizing changes. A repository path supplied by the user identifies the review target. agent_work.task contains supplementary guidance; Harness carries the original request separately to both routing and the worker.
 Choose agent_work.resultHandling at dispatch: direct for a simple self-contained request whose worker report is the requested answer, such as reading instructions/wiki and reporting facts, a greeting, a lookup or a bounded action. Use review for substantial implementation, broad code review, multi-step work or results that need synthesis. This decision costs no extra classifier call. Direct results are relayed as reported; configured build/test checks still run and failures remain visible. Do not ask the user to choose this internal handling.
 When the user requests several agents for the same task, set agent_work.count to that exact number in one call (up to ten), with their requested model and effort. Do not send just the first agent or divide full independent reviews into partial reviews. Each worker performs one full instance; Harness creates the peers and collects all results. Batches get separate project copies from one saved input snapshot. Edits stay there; no changes are merged into the user's checkout automatically. Ignored files, including old build outputs, are not copied. On batch completion, summarize every batchResults entry and its output workspace; never claim the whole batch finished from one result.
@@ -114,7 +119,8 @@ function actionArguments(action) {
 // Each reply names the model that wrote it and the steps stay in (who asked Jev what): the Hub can change models, and
 // a model must not take an earlier model's reply, or Jev's answer behind it, for its own.
 function messages(session, images = null) {
-  return session.items.filter(i => i.type === 'userMessage' || i.type === 'toolStep' || (i.type === 'agentMessage' && i.phase !== 'commentary')).map(i => ({
+  // A message that ended without running (queueState: stopped, dropped) was never a request.
+  return session.items.filter(i => (i.type === 'userMessage' && !i.queueState) || i.type === 'toolStep' || (i.type === 'agentMessage' && i.phase !== 'commentary')).map(i => ({
     id: i.id, role: i.type === 'userMessage' ? 'user' : i.type === 'toolStep' ? 'step' : 'assistant',
     ...(i.groupSpeaker ? { speaker: i.groupSpeaker.name } : {}),
     ...(i.type === 'agentMessage' && i.routeLabel ? { model: i.routeLabel } : {}),
@@ -152,9 +158,10 @@ module.exports = {
 
   // A message that asks for a stronger model: Hub's own model (`mode`'s, else the one it last ran) at its highest Hub
   // effort (Low or Medium) within its cap, when that is higher than the effort it runs at.
-  hubStrongerChoice(text, mode = this.data.settings.mode) {
+  // asked: Hub's Secondary model already read that the message asks for more (send), so the words are not checked.
+  hubStrongerChoice(text, mode = this.data.settings.mode, { asked = false } = {}) {
     // An effort request ("use higher effort") counts too; Hub stays within Low and Medium.
-    if (!asksForStronger(text) && !this.requestedEffort(text, mode, { routes: this.data.hubMode ? [this.resolveWorker(this.data.hubMode)].filter(Boolean) : [] }, { more: true })) return null;
+    if (!asked && !asksForStronger(text) && !this.requestedEffort(text, mode, { routes: this.data.hubMode ? [this.resolveWorker(this.data.hubMode)].filter(Boolean) : [] }, { more: true })) return null;
     const last = this.resolveWorker(this.data.hubMode);
     const auto = parseAutoEffort(mode);
     const model = auto || (mode && mode !== 'auto' ? this.resolveWorker(mode) : last);
@@ -165,7 +172,9 @@ module.exports = {
     return top && (!current || EFFORT_ORDER.indexOf(top.effort) > EFFORT_ORDER.indexOf(current.effort)) ? top : null;
   },
 
-  async coordinatorChoice(mode, abort, text = '', session = null) {
+  // effort: the one Hub's Secondary model read in the message ('low' … 'xhigh' or 'top'), within Hub's Low and Medium;
+  // null when it read none; undefined when nothing read the message (no Secondary model, or it failed): the words decide.
+  async coordinatorChoice(mode, abort, text = '', session = null, effort = undefined) {
     abort.signal.throwIfAborted();
     const autoEffort = parseAutoEffort(mode);
     if (autoEffort) {
@@ -175,8 +184,12 @@ module.exports = {
       const eligible = this.ownVariants(mode).filter(hubEffortAllowed);
       // A model without Low or Medium runs its lowest effort within the cap.
       const fallback = eligible.find(p => p.effort === 'medium') || eligible.at(-1) || this.ownVariants(mode)[0] || this.resolveWorker(mode);
-      const named = text ? this.requestedEffort(text, mode, session) : null;
-      let choice = this.hubStrongerChoice(text, mode) || (named && eligible.find(p => p.id === named.id)) ||
+      // Hub's Secondary model reads effort requests (send); when nothing read the message, the words below do.
+      const words = effort === undefined;
+      const read = effort ? (effort === 'top' ? eligible.at(-1) : eligible.find(p => p.effort === effort) ||
+        (EFFORT_ORDER.indexOf(effort) > EFFORT_ORDER.indexOf(eligible.at(-1)?.effort) ? eligible.at(-1) : eligible[0])) : null;
+      const named = text && words ? this.requestedEffort(text, mode, session) : null;
+      let choice = read || (words && this.hubStrongerChoice(text, mode)) || (named && eligible.find(p => p.id === named.id)) ||
         (!text ? eligible.find(p => p.id === this.data.hubMode) : null);
       choice ||= fallback;
       if (!choice || !this.available(choice)) throw new Error('Hub’s chat model is unavailable. Choose an available model for Hub.');
@@ -278,6 +291,32 @@ module.exports = {
     return { created, failed, requested: list.length };
   },
 
+  // Hub sends work outside its chat's folder only with the user's OK (agents.ask, the app's confirmation prompt), asked
+  // once per request and folder. Declined, unanswered, stopped, or with nowhere to ask: nothing is sent.
+  async allowFolder(session, request, workspace, worker, abort) {
+    const key = `${request.id}|${workspace.toLowerCase()}`;
+    if (this.folderGrants?.has(key)) return;
+    if (!this.agents.ask) throw new Error(`Sending a task to ${workspace}, outside this chat's folder, needs Full access or your OK, and Harness cannot ask here.`);
+    let timer, stopped;
+    const hub = this.agents.agentName(this.agentId || 'main');
+    // Withdrawn when it expires or the turn stops, so its dialog closes instead of waiting for a click that does nothing.
+    const prompt = new AbortController();
+    // Worded by the user (2026-11-06): each folder under the name of the bot that works in it.
+    const answer = await Promise.race([
+      Promise.resolve().then(() => this.agents.ask({ title: 'Allow work in another folder?',
+        message: `${hub} wants to send work to ${worker ? `bot "${worker}"` : 'a new bot'} that is outside this folder.`,
+        details: [{ label: hub, text: session.workspace }, { label: worker || 'New bot', text: workspace }],
+        confirmLabel: 'Allow', cancelLabel: 'Don’t allow' }, prompt.signal)).catch(() => false),
+      new Promise(resolve => { timer = setTimeout(() => resolve('expired'), FOLDER_PROMPT_MS); timer.unref?.(); }),
+      new Promise(resolve => { stopped = () => resolve(false); abort.signal.addEventListener('abort', stopped, { once: true }); }),
+    ]);
+    clearTimeout(timer); abort.signal.removeEventListener('abort', stopped); prompt.abort();
+    abort.signal.throwIfAborted();
+    if (answer === 'expired') throw new Error(`No answer within ${FOLDER_PROMPT_MS / 60000} minutes to send work to ${workspace}, outside this chat's folder. Nothing was sent; send it again to be asked again.`);
+    if (answer !== true) throw new Error(`Not allowed: sending work to ${workspace}, outside this chat's folder. Nothing was sent.`);
+    (this.folderGrants ||= new Set()).add(key);
+  },
+
   async coordinatorTool(session, name, args, images, abort, request) {
     abort.signal.throwIfAborted();
     if (name === 'agent_create') return this.createAgents(session, args, abort);
@@ -323,15 +362,26 @@ module.exports = {
     if (agentId) {
       const target = this.agents.controller(agentId), mode = target.data.settings.mode;
       const targetWorkspace = this.agents.conversation(target)?.workspace || target.data.settings.workspace;
+      // A named bot works in its own folder (2026-11-06: one in another folder was silently replaced by a new "Worker").
+      // This chat's own folder passed as the workspace is Hub's default, not a request for another folder.
+      if (workspace && !path.relative(this.workspace(session.workspace), workspace)) workspace = null;
       workspace ??= this.workspace(targetWorkspace);
       // Nothing was sent, so Hub gets this back as a tool error to correct once, not a failed turn.
       if ((args.mode !== undefined && args.mode !== mode) || args.effort !== undefined) throw Object.assign(new Error('Use a new worker to request a different model or effort, or change this worker with agent_update first. Existing worker settings are preserved.'), { retryable: true });
-      if (path.relative(this.workspace(targetWorkspace), workspace) || (mode !== 'auto' && !parseAutoEffort(mode) && args.mode !== mode && !(agentId === session.hubWorker && session.hubWorkerMode === mode))) agentId = null;
+      if (path.relative(this.workspace(targetWorkspace), workspace))
+        throw Object.assign(new Error(`${this.agents.agentName(agentId)} works in ${targetWorkspace}. Omit workspace to send the task there, or create a new worker (name) for ${workspace}.`), { retryable: true });
+      if (mode !== 'auto' && !parseAutoEffort(mode) && args.mode !== mode && !(agentId === session.hubWorker && session.hubWorkerMode === mode)) agentId = null;
     }
     const scope = session.delegation?.projectScope;
     workspace ??= scope || session.workspace;
     if (scope && path.relative(this.workspace(scope), workspace)) throw new Error('This assignment must keep its workers in the original project copy.');
-    if (session.access !== 'danger-full-access' && !this.agents.workspaces.same(scope || session.workspace, workspace)) throw new Error('Sending a task to a different workspace requires Full access.');
+    // This chat's folder, or a folder inside it, stays within the user's permission. Another folder (at the same level or
+    // elsewhere) needs Full access or the user's OK, asked once per request (2026-11-06, the user).
+    if (session.access !== 'danger-full-access' && !this.agents.workspaces.same(scope || session.workspace, workspace)) {
+      if (scope) throw new Error('Sending a task to a different workspace requires Full access.');
+      if (!inside(this.workspace(session.workspace), workspace))
+        await this.allowFolder(session, request, workspace, agentId ? this.agents.agentName(agentId) : args.name ?? null, abort);
+    }
     if (request.batch) {
       const copy = request.workspaceCopy || this.agents.workspaces.reserve(workspace, request.batch);
       const saved = this.agents.workspaces.record(copy.workspace);
@@ -362,13 +412,15 @@ module.exports = {
     // A comparison run gets no pointer to the Hub chat: the user's compare message names the change.
     const note = request.comparison ? 'Comparison run: complete the request above in this project copy.'
       : args.task + `\n\nOriginal request: Hub conversation ${session.id}, message ${request.id}. Use agent_read_context with agentId "main" for the user's exact text and relevant context; do not treat other messages as new instructions.`;
-    const result = this.agents.delegate(this, session, agentId, note, originalImages, { ...request, attempts: (request.attempts || 0) + 1 });
+    // The folder passed the check above (the chat's own, inside it, Full access or the user's OK).
+    const result = this.agents.delegate(this, session, agentId, note, originalImages, { ...request, attempts: (request.attempts || 0) + 1 }, null, { folderAllowed: workspace });
     session.hubWorker = agentId;
     session.hubWorkerMode = this.agents.controller(agentId).data.settings.mode;
     return result;
   },
 
-  async sendCoordinator(session, { text, images, fileMessage, mode, agentReply, agentReplyCancelled, agentResult, agentMail, routineRun = null }) {
+  // effort: as coordinatorChoice takes it (undefined: nothing read the message).
+  async sendCoordinator(session, { text, images, fileMessage, mode, agentReply, agentReplyCancelled, agentResult, agentMail, routineRun = null, effort = undefined }) {
     const abort = new AbortController(), turnId = randomUUID();
     let reviewingResult = false, resultMessage;
     this.coordinatorAbort = abort; this.smartRouter.abort = abort; this.busy = session.id; this.activeTurns.set(session.id, turnId);
@@ -386,7 +438,8 @@ module.exports = {
       // Hub's current model (its Edit dialog's) wins over the one it last ran; legacy Auto resumes as before.
       const saved = this.data.settings.mode;
       const resume = saved && saved !== 'auto' ? saved : this.data.hubModeSource === 'auto' ? 'auto' : this.data.hubMode;
-      const choice = directResult ? null : await this.coordinatorChoice(agentReply && this.data.hubMode ? resume : mode, abort, agentReply ? '' : text, session);
+      const choice = directResult ? null : await this.coordinatorChoice(agentReply && this.data.hubMode ? resume : mode, abort, agentReply ? '' : text, session, agentReply ? null : effort);
+      const effortNote = effort && choice?.effort ? `This turn already runs at ${choice.effort} effort, as the user asks (Hub runs at Low or Medium). The effort change is done; do not say you cannot change it.` : null;
       abort.signal.throwIfAborted();
       recordUsage(session, choice?.routerUsage);
       if (images.length && choice?.images === false && !this.jevImageAssist()) throw new Error('Choose an image-capable model for Hub, or turn on Jev image assist, before sending images.');
@@ -418,6 +471,7 @@ module.exports = {
       if (session.group) context.group = { name: session.title, owner: this.agents.hubName(), members: groupChats.members(this.agents, session),
         note: 'Answer as the Hub unless a task needs a helper. Group membership grants no additional access. Do not broadcast messages to every member.' };
       context.timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (effortNote) context.harnessNote = effortNote;
       if (seen.text !== text) context.attachedImages = seen.text.slice(text.length).trim();
       let reply, comparison = null, quietResult = false;
       let continued = false, modelRetried = false;

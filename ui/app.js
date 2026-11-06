@@ -2312,7 +2312,9 @@ function render() {
   $('#welcome').hidden = chatSessions(session).some(chat => chat.items.length || chat.pendingMessage);
   renderSendButton();
   $('#message-queue').replaceChildren();
-  for (const message of (session?.queue || []).filter(message => !message.agentReply && !message.sending)) {
+  // The worker's queue only: messages the Secondary model reads or holds are in the chat (renderMessages), and join this
+  // queue, with Send now, Edit and Remove, only when it is off, fails or times out (2026-11-06, the user).
+  for (const message of (session?.queue || []).filter(message => !message.agentReply && !message.sending && !message.secondary)) {
     const revise = session.delegation && !session.delegation.delivered && !session.delegation.cancelled;
     const row = element('div', 'queued-message');
     const text = element('span', '', `${message.waiting ? 'Waiting' : message.error ? 'Paused' : message.triage ? 'Reading' : 'Queued'}: ${message.text}${message.images.length ? ` (${message.images.length} images)` : ''}`);
@@ -2334,21 +2336,7 @@ function render() {
         : action === 'send' && session.groupTurn ? 'Stop the current group reply, then send this message'
         : action === 'steer' && !revise ? sendNowTitle(session.activeProvider)
           : button.getAttribute('aria-label');
-      button.onclick = async () => {
-        try {
-          if (action === 'edit' && ($('#prompt').value.trim() || attachedImages().length || attachedFiles().length || readingImages || submitting)) throw new Error('Send or clear your current draft before editing a queued message.');
-          const edited = await api.queuedMessage(session.id, message.id, action);
-          if (action === 'edit') {
-            const attachment = HarnessFiles.unpack(edited.text, edited.fileMessage);
-            drafts.set(session.id, attachment?.displayText || edited.text); imageDrafts.set(session.id, edited.images);
-            fileDrafts.set(session.id, attachment?.files || []);
-            if (selectedId === session.id) {
-              $('#prompt').value = attachment?.displayText || edited.text; showMode(edited.mode);
-              renderImages(); updatePreview(); $('#prompt').focus();
-            }
-          }
-        } catch (error) { notify(error); }
-      };
+      button.onclick = () => queueAction(session.id, message.id, action);
       row.append(button);
     }
     $('#message-queue').append(row);
@@ -3031,6 +3019,34 @@ function refreshMessageTimes() {
 setInterval(refreshMessageTimes, 30000);
 document.addEventListener('visibilitychange', refreshMessageTimes);
 
+// A queue action: Send now, Edit or Remove on a queued message, Remove on one the Secondary model holds, or Send again and
+// Edit on one that ended without running. Edit moves the message into the composer.
+async function queueAction(sessionId, messageId, action) {
+  try {
+    if (action === 'edit' && ($('#prompt').value.trim() || attachedImages().length || attachedFiles().length || readingImages || submitting)) throw new Error('Send or clear your current draft before editing a queued message.');
+    const edited = await api.queuedMessage(sessionId, messageId, action);
+    if (action !== 'edit') return;
+    const attachment = HarnessFiles.unpack(edited.text, edited.fileMessage);
+    drafts.set(sessionId, attachment?.displayText || edited.text); imageDrafts.set(sessionId, edited.images);
+    fileDrafts.set(sessionId, attachment?.files || []);
+    if (selectedId === sessionId) {
+      $('#prompt').value = attachment?.displayText || edited.text; showMode(edited.mode);
+      renderImages(); updatePreview(); $('#prompt').focus();
+    }
+  } catch (error) { notify(error); }
+}
+
+// The Secondary model's queue, shown in the chat after the conversation as the user's messages with their status: the
+// messages it reads or holds that the worker does not have yet (controller/direct-answer.cjs heldMessages).
+function secondaryQueued(chat) {
+  return (chat.queue || []).filter(message => message.secondary && !message.sending && !message.waiting && !message.agentReply).map(message => ({
+    id: `queued-${message.id}`, type: 'userMessage', createdAt: message.createdAt, ...(message.fileMessage ? { fileMessage: message.fileMessage } : {}),
+    content: [{ type: 'text', text: message.text }, ...(message.images || []).map(url => ({ type: 'image', url }))],
+    queued: { id: message.id, reply: message.ack?.text || null,
+      status: message.triage ? 'Reading…' : message.error ? `Not sent: ${message.error}` : message.note && message.hold && (message.effort || message.hubEffort) ? message.note : 'Queued · runs after this turn' },
+  }));
+}
+
 function renderMessages(session) {
   const container = $('#conversation');
   // A different bot's chat opens at its end, whatever the old chat's scroll position was.
@@ -3041,7 +3057,8 @@ function renderMessages(session) {
   const chats = chatSessions(session);
   const entries = chats.flatMap(chat => {
     let at = chat.created || 0;
-    return [...chat.items, ...(chat.pendingMessage ? [chat.pendingMessage] : []), ...(chat.pendingMessage && chat.pendingColdStep ? [chat.pendingColdStep] : [])].map(item => {
+    return [...chat.items, ...(chat.pendingMessage ? [chat.pendingMessage] : []), ...(chat.pendingMessage && chat.pendingColdStep ? [chat.pendingColdStep] : []),
+      ...secondaryQueued(chat)].map(item => {
       at = Math.max(at, item.createdAt || 0);
       return { item, session: chat, at };
     });
@@ -3139,6 +3156,21 @@ function renderMessages(session) {
       };
       node.replaceChildren(bubble, actions);
       if (item.groupSpeaker) { label.classList.add('group-speaker'); node.prepend(label); }
+      // In the Secondary model's queue: its status and Remove. Ended without running (Stop, dropped, a restart): Send again
+      // and Edit, until it is sent again.
+      if (user && (item.queued || item.queueState)) {
+        node.classList.add(item.queued ? 'queued' : 'ended');
+        actions.prepend(element('span', 'queue-state', item.queued ? item.queued.status : item.queueLabel));
+        const buttons = item.queued ? [['remove', 'Remove', item.queued.id]] : item.resent ? [] : [['again', 'Send again', item.id], ['edit', 'Edit', item.id]];
+        for (const [action, text, id] of buttons) {
+          const button = element('button', 'compact-action', text);
+          button.type = 'button';
+          button.classList.add(`queue-${action}`);
+          button.setAttribute('aria-label', `${text} this message`);
+          button.onclick = () => queueAction(session.id, id, action);
+          actions.append(button);
+        }
+      }
       if (user && batch) node.append(renderBatchReport(batch, batchOpened));
       if (item.hubComparison) node.append(renderComparison(item.hubComparison, session.id, comparisonOpened));
       if (user) {
@@ -3157,6 +3189,12 @@ function renderMessages(session) {
         if (item.pending && !item.error && session.pendingAck) row.append(element('div', 'message-bubble quick-reply', session.pendingAck.text));
         // No stock phrase while it routes (removed 2026-11-04 at the user's request): the quick reply is the first word.
         else if (item.pending && (item.error || state.planRouting)) row.append(element('p', 'routing-status', item.error ? `Not sent: ${item.error}` : state.planRouting.reason));
+      }
+      // The Secondary model's reply to a message it holds, shown under it until the message runs.
+      if (item.queued?.reply) {
+        const row = element('div', 'routing-row');
+        entry.routeNode = row; node.after(row);
+        row.append(element('div', 'message-bubble quick-reply', item.queued.reply));
       }
       if (selected && selected.source !== 'manual' && selected.source !== 'hub-auto') {
         const details = element('details', 'activity');
@@ -4580,7 +4618,8 @@ function renderProviders() {
   const groups = [
     { id: 'codex', title: 'Codex CLI / ChatGPT', models: catalog.filter(m => !m.provider || m.provider === 'codex'), gated: !state.account },
     { id: 'claude-cli', title: 'Claude CLI', models: catalog.filter(m => m.provider === 'claude-cli'), gated: !claudeInUse() },
-    { id: 'cursor-cli', title: 'Cursor CLI', models: catalog.filter(m => m.provider === 'cursor-cli'), gated: !cursorInUse(), discover: true },
+    // A model's "Fast off" entry is enabled with the model, so it has no toggle of its own.
+    { id: 'cursor-cli', title: 'Cursor CLI', models: catalog.filter(m => m.provider === 'cursor-cli' && !m.fastOff), gated: !cursorInUse(), discover: true },
     ...Object.entries(state.nativeCLIs || {}).map(([id, native]) => ({ id, title: native.label,
       models: catalog.filter(model => model.provider === id), gated: !native.loggedIn || native.enabled === false })),
     // API providers run in Harness's own agent loop; their models come from the endpoint's /models list.

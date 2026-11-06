@@ -2,6 +2,7 @@ const { readSessionData } = require('../src/session-store.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { structuredResponse } = require('../src/providers/structured.cjs');
+const { handoff } = require('../src/providers/claude.cjs');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -2643,7 +2644,7 @@ test('the Secondary model reads messages sent during a turn: stop, effort now, a
     if (!request.schema?.properties?.kind) return { decision: { verdict: 'accept', findings: [] } };
     const prompt = JSON.parse(request.prompt); prompts.push(prompt);
     // The real schema check runs: 0.3.33 shipped a schema word it rejects (maxItems), so every read failed.
-    const decision = { kind: 'ack', text: 'On it.', stop: false, effort: 'none', when: 'now', steps: [], deliver: 'now', ...reads[prompt.message] };
+    const decision = { kind: 'ack', text: 'On it.', stop: false, effort: 'none', when: 'now', steps: [], deliver: 'now', drop: [], ...reads[prompt.message] };
     return { decision: structuredResponse(decision, request.schema) };
   };
   const session = controller.create();
@@ -2755,6 +2756,77 @@ test('the Secondary model decides how work reaches the worker: split into turns,
   }
   assert.match(fake.calls.filter(call => call.method === 'turn/start').at(-3).params.input[0].text, /step 2 of 3 of the user's request/);
   assert.equal(session.queue.length, 0);
+  complete(controller, session, fake.turnIds.at(-1)); await flush();
+});
+
+test('the Secondary model keeps its own queue: it always replies, drops what you cancel, and Stop or a restart leave Send again and Edit', async t => {
+  // 2026-11-06, the user: the Secondary model's queue is not the worker's (Send now, Edit, Remove, only when it is off,
+  // fails or times out); it shows in the chat with Remove, it controls it, and Stop ends it, leaving Send again and Edit.
+  const { controller, fake, smartRouter } = await setup(t, { quick: true });
+  const reads = { 'then update the README': { deliver: 'after', text: 'README after this turn.' }, 'then add a changelog': { deliver: 'after', text: 'Changelog next.' },
+    'also check b.js': { deliver: 'now', text: 'Passing that on now.' }, 'forget the README': { drop: ['q1'], text: 'Dropped the README update.' } };
+  let fail = false;
+  smartRouter.complete = async request => {
+    if (!request.schema?.properties?.kind) return { decision: { verdict: 'accept', findings: [] } };
+    if (fail) throw new Error('The model took too long to respond.');
+    const { message } = JSON.parse(request.prompt);
+    const decision = { kind: 'ack', text: 'On it.', stop: false, effort: 'none', when: 'now', steps: [], deliver: 'now', drop: [], ...reads[message] };
+    return { decision: structuredResponse(decision, request.schema) };
+  };
+  const session = controller.create();
+  const send = text => controller.send({ id: session.id, text, mode: 'terra-light', task: 'off' });
+  const held = text => session.queue.find(message => message.text === text && message.hold);
+  await send('first');
+
+  // Held for after the turn: its queue, not the worker's, with its reply.
+  await send('then update the README');
+  await until(() => held('then update the README'));
+  assert.deepEqual([held('then update the README').secondary, held('then update the README').ack.text], [true, 'README after this turn.']);
+  // Passed on now: its reply follows the message in the chat.
+  await send('also check b.js');
+  await until(() => session.items.some(item => item.text === 'Passing that on now.'));
+  const passed = session.items.findIndex(item => item.text === 'Passing that on now.');
+  assert.equal(session.items[passed - 1].content[0].text, 'also check b.js');
+
+  // It drops what a message cancels: the message stays in the chat, marked, with Send again and Edit.
+  await send('forget the README');
+  await until(() => session.items.some(item => item.queueState === 'dropped'));
+  const dropped = session.items.find(item => item.queueState === 'dropped');
+  assert.deepEqual([dropped.content[0].text, dropped.queueLabel, !!held('then update the README')], ['then update the README', 'Dropped by the Secondary model', false]);
+  assert.equal((await controller.queuedMessage(session.id, dropped.id, 'edit')).text, 'then update the README');
+  await controller.queuedMessage(session.id, dropped.id, 'again');
+  assert.equal(dropped.resent, true);
+  await until(() => held('then update the README'));
+  await assert.rejects(controller.queuedMessage(session.id, dropped.id, 'again'), /no longer available/);
+
+  // Stop ends everything it holds; each stays in the chat with Send again and Edit, and never reaches a worker as history.
+  await send('then add a changelog');
+  await until(() => held('then add a changelog'));
+  controller.stopSecondaryQueue(session.id);
+  assert.equal(session.queue.length, 0);
+  assert.deepEqual(session.items.filter(item => item.queueState === 'stopped').map(item => [item.content[0].text, item.queueLabel]),
+    [['then update the README', 'Stopped'], ['then add a changelog', 'Stopped']]);
+  assert.doesNotMatch(handoff(session.items), /then add a changelog/);
+  assert.match(handoff(session.items), /also check b\.js/);
+
+  // A failed or late read hands the message to the worker's queue, with Send now, Edit and Remove.
+  fail = true;
+  await send('then run lint');
+  await until(() => session.queue.some(message => message.text === 'then run lint' && !message.triage));
+  assert.equal(session.queue.find(message => message.text === 'then run lint').secondary, undefined);
+
+  // An app restart ends what it holds the same way, so nothing starts by itself.
+  fail = false;
+  await send('then add a changelog');
+  await until(() => held('then add a changelog'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'phasma-harness-test-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(directory, 'state.json'), JSON.stringify(controller.data));
+  const reopened = new Controller(path.join(directory, 'state.json'), directory, new Fake(), { cancel() {}, close() {} });
+  t.after(() => reopened.close());
+  const restarted = reopened.data.sessions.find(item => item.id === session.id);
+  assert.deepEqual(restarted.queue.map(message => message.text), ['then run lint'], 'the worker queue is kept');
+  assert.equal(restarted.items.at(-1).queueLabel, 'Interrupted: the app closed');
   complete(controller, session, fake.turnIds.at(-1)); await flush();
 });
 
@@ -2963,7 +3035,9 @@ test('older Cursor variant entries fold into one entry per base model; no duplic
 
   const ids = controller.catalog().filter(p => p.provider === 'cursor-cli').map(p => p.id);
   assert.equal(new Set(ids).size, ids.length, 'no duplicate worker IDs');
-  assert.deepEqual(ids.filter(id => id.startsWith('cursor-cli:grok-4.7')), ['cursor-cli:grok-4.7:low', 'cursor-cli:grok-4.7:medium', 'cursor-cli:grok-4.7:high', 'cursor-cli:grok-4.7:xhigh']);
+  assert.deepEqual(ids.filter(id => id.startsWith('cursor-cli:grok-4.7:')), ['cursor-cli:grok-4.7:low', 'cursor-cli:grok-4.7:medium', 'cursor-cli:grok-4.7:high', 'cursor-cli:grok-4.7:xhigh']);
+  // Fast mode is on by default; each model is listed again with it off (2026-11-06, the user).
+  assert.deepEqual(ids.filter(id => id.startsWith('cursor-cli:grok-4.7+nofast:')), ['cursor-cli:grok-4.7+nofast:low', 'cursor-cli:grok-4.7+nofast:medium', 'cursor-cli:grok-4.7+nofast:high', 'cursor-cli:grok-4.7+nofast:xhigh']);
   const high = controller.catalog().find(p => p.id === 'cursor-cli:grok-4.6:high');
   assert.deepEqual([high.model, high.parameterized, high.effortOption, high.parameters], ['grok-4.6', true, 'effort', [{ id: 'fast', value: 'true' }]]);
   assert.equal(controller.catalog().find(p => p.id === 'cursor-cli:composer-2.5:default').parameterized, true);

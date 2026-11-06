@@ -75,6 +75,19 @@ function drop(sessionId) {
   return entry;
 }
 
+// A structured one-off (the Secondary model's quick replies, routing and checks) never resumes, so its next session is made
+// ready ahead instead: process, initialize, session/new, model, parameters and mode, before the message exists. Measured
+// 2026-11-06 on Grok 4.7: a cold one-off took 12-33 s, over the quick reply's 8 s. One spare per bot, at most three across
+// bots, each for 10 minutes. Oldest first.
+const SPARES = new Map();
+function dropSpare(owner) {
+  const entry = SPARES.get(owner);
+  if (!entry) return null;
+  clearTimeout(entry.timer);
+  SPARES.delete(owner);
+  return entry;
+}
+
 class CursorCLI {
   constructor(launch = launchCursor) { this.launch = launch; this.children = new Set(); this.status = { installed: null, loggedIn: false }; this.models = []; }
   park(sessionId, entry) {
@@ -87,7 +100,25 @@ class CursorCLI {
   }
   unpark(sessionId) { return WARM.get(sessionId)?.owner === this ? drop(sessionId) : null; }
   warmCount() { return [...WARM.values()].filter(entry => entry.owner === this).length; }
-  closeWarm() { for (const [id, entry] of [...WARM]) if (entry.owner === this) drop(id)?.rpc.close(); }
+  closeWarm() { for (const [id, entry] of [...WARM]) if (entry.owner === this) drop(id)?.rpc.close(); dropSpare(this)?.rpc.close(); }
+  keepSpare(entry) {
+    dropSpare(this)?.rpc.close();
+    entry.timer = setTimeout(() => dropSpare(this)?.rpc.close(), 10 * 60 * 1000);
+    entry.timer.unref?.();
+    SPARES.set(this, entry);
+    while (SPARES.size > 3) dropSpare(SPARES.keys().next().value)?.rpc.close();
+  }
+  takeSpare(sig) {
+    const entry = SPARES.get(this);
+    return entry && entry.sig === sig && entry.rpc.open?.() !== false ? dropSpare(this) : null;
+  }
+  // Readies the session the next structured one-off with these options starts from. Never throws.
+  prepare(options) {
+    if (this.preparing || this.loginPending) return this.preparing;
+    this.preparing = this.run({ ...options, schema: options.schema || {}, prompt: '', prepareOnly: true }).catch(() => null)
+      .finally(() => { this.preparing = null; });
+    return this.preparing;
+  }
   start(args, cwd) {
     const child = this.launch(args, cwd); this.children.add(child);
     child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8'); child.stdin.on('error', () => {});
@@ -200,7 +231,13 @@ class CursorCLI {
     signal?.addEventListener('abort', close, { once: true }); if (signal?.aborted) close();
     return { call, close, child, cwd, open: () => !closed, notify: (method, params) => write({ method, params }) };
   }
-  async run({ cwd, model, effort, effortOption, parameterized, parameters = [], prompt, images = [], resume, access, signal, onEvent = () => {}, onActivity, approve = async () => false, schema, schemaInHistory = false, helpers, onInput, instructions = WORKER_INSTRUCTIONS }) {
+  async run({ cwd, model, effort, effortOption, parameterized, parameters = [], prompt, images = [], resume, access, signal, onEvent = () => {}, onActivity, approve = async () => false, schema, schemaInHistory = false, helpers, onInput, instructions = WORKER_INSTRUCTIONS, spare = false, prepareOnly = false }) {
+    // A model's "Fast off" entry (grok-4.7+nofast, providers.cjs) is that model with Cursor's fast option off.
+    if (typeof model === 'string' && model.endsWith('+nofast')) {
+      model = model.slice(0, -'+nofast'.length);
+      parameters = [...parameters.filter(p => p?.id !== 'fast'), { id: 'fast', value: 'false' }];
+      parameterized = true;
+    }
     // Models from cursor/list_available_models are base names with separate parameters: Cursor accepts them, and their
     // reasoning option, only from a client that declares the parameterized model picker.
     const setEffort = typeof effort === 'string' && effort && typeof effortOption === 'string' && effortOption;
@@ -212,13 +249,15 @@ class CursorCLI {
     const mcpServers = (!schema && helpers?.cursorServers) ? helpers.cursorServers : [];
     const key = JSON.stringify([cwd, !!schema, !!picker, mcpServers]);
     const mode = schema || access === 'read-only' ? 'ask' : 'agent';
-    const parked = resume ? this.unpark(resume) : null;
+    // A one-off starts from this bot's ready session when it was readied with the same options (prepare).
+    const sig = schema && !resume ? JSON.stringify([key, model, picker ? parameters : null, setEffort ? effort : null]) : null;
+    const parked = resume ? this.unpark(resume) : sig ? this.takeSpare(sig) : null;
     let reused = parked?.key === key && parked.rpc.open?.() !== false ? parked : null;
     if (parked && !reused) parked.rpc.close();
     if (reused) {
       // The prompt call has no time limit, so a parked process must first answer a bounded call; a silent one is replaced.
       try {
-        await reused.rpc.call('session/set_mode', { sessionId: resume, modeId: mode }, 20000);
+        await reused.rpc.call('session/set_mode', { sessionId: reused.sessionId || resume, modeId: mode }, 20000);
         reused.applied.mode = mode;
       } catch {
         reused.rpc.close();
@@ -228,7 +267,7 @@ class CursorCLI {
     const rpc = reused?.rpc || this.connect({ cwd, model, noTools: !!schema,
       onUpdate: p => rpc.route.onUpdate(p), onRequest: (method, p) => rpc.route.onRequest(method, p) });
     const applied = reused?.applied || {};
-    let init = reused?.init, keep = false;
+    let init = reused?.init, keep = false, spared = false;
     // Stop closes this turn's connection, new or reused; a parked connection answers no one.
     const abort = () => rpc.close();
     signal?.addEventListener('abort', abort, { once: true });
@@ -279,7 +318,7 @@ class CursorCLI {
       if (images.length && !init.agentCapabilities?.promptCapabilities?.image) throw new Error('Cursor CLI did not advertise image support.');
       // Authentication is completed by the official login command, never token extraction.
       // Classifiers keep an empty MCP list. Workers get the bundled helper MCP via session mcpServers.
-      if (reused) sessionId = resume;
+      if (reused) sessionId = reused.sessionId || resume;
       else {
         const s = await rpc.call(resume ? 'session/load' : 'session/new', { ...(resume ? { sessionId: resume } : {}), cwd: rpc.cwd || cwd, mcpServers });
         if (resume && s.sessionId && s.sessionId !== resume) throw new Error('Cursor loaded a different conversation. No message was sent.');
@@ -317,6 +356,12 @@ class CursorCLI {
       if (applied.mode !== mode) {
         await rpc.call('session/set_mode', { sessionId, modeId: mode });
         applied.mode = mode;
+      }
+      if (prepareOnly) {
+        if (signal?.aborted || rpc.open?.() === false) return null;
+        this.keepSpare({ rpc, key, sig, sessionId, init, applied });
+        spared = true;
+        return null;
       }
       prompting = true;
       const helperNote = (!schema && helpers?.instructions) ? '\n\nApp helper note (not Cursor system policy):' + helpers.instructions : '';
@@ -387,7 +432,9 @@ class CursorCLI {
       // After its turn a connection approves nothing; only a structured one-off (never resumed) is not kept.
       rpc.route = { onUpdate: () => {}, onRequest: async () => ({ outcome: 'cancelled' }) };
       if (keep && (resume || !schema) && !signal?.aborted && rpc.open?.() !== false) this.park(sessionId, { rpc, key, init, applied });
-      else rpc.close();
+      else if (!spared) rpc.close();
+      // Its session was used once; the next one-off of these options starts from a new ready one.
+      if (sig && spare && !prepareOnly) this.prepare({ cwd, model, effort, effortOption, parameterized, parameters, schema });
       if (toolError && rpc.child && (await stopTree(rpc.child)).length) throw new Error('Cursor review process cleanup is not confirmed.');
     }
   }

@@ -241,6 +241,10 @@ const imagesKey = images => {
   return hash.digest('hex');
 };
 
+// Cursor takes the selected effort as its reasoning option, beside the model's other saved parameters (e.g. fast).
+const cursorOptions = (choice, effort) => ({ parameterized: choice.parameterized, parameters: choice.parameters,
+  ...(effort && choice.effortOption ? { effort, effortOption: choice.effortOption } : {}) });
+
 class SmartRouter {
   constructor(directory, createClient = cwd => new CodexClient(cwd), timeoutMs = 180000, inspect = collectWorkspace) {
     this.directory = directory; this.createClient = createClient; this.timeoutMs = timeoutMs; this.inspect = inspect; this.abort = null;
@@ -289,7 +293,13 @@ class SmartRouter {
   }
 
   // Starts app-server and runs one throwaway thread/start (no turn, no model call) so the first route skips cold startup.
+  // Cursor: the Secondary model's next one-off starts from a ready session, and its one-offs keep one ready (cursor.prepare).
   async warm(choice) {
+    if (choice?.provider === 'cursor-cli' && choice.model && this.cursor?.prepare) {
+      this.spareId = choice.id;
+      fs.mkdirSync(this.directory, { recursive: true });
+      return this.cursor.prepare({ cwd: this.directory, model: choice.model, ...cursorOptions(choice, choice.effort) });
+    }
     if (this.abort || this.connection?.warmed || !choice?.model || isCLI(choice.provider)) return;
     fs.mkdirSync(this.directory, { recursive: true });
     const connection = this.connect(), client = connection.client;
@@ -414,7 +424,7 @@ class SmartRouter {
       const run = resume => runtime.run({ cwd: this.directory, model, schema,
         resume, persistSession: !!conversation, schemaInHistory: !!resume,
         ...((choice.provider === 'claude-cli' || choice.provider.startsWith('native:')) && effort ? { effort } : {}),
-        ...(choice.provider === 'cursor-cli' ? { parameterized: choice.parameterized, parameters: choice.parameters, ...(effort && choice.effortOption ? { effort, effortOption: choice.effortOption } : {}) } : {}),
+        ...(choice.provider === 'cursor-cli' ? { ...cursorOptions(choice, effort), spare: !conversation && choice.id === this.spareId } : {}),
         signal: abort.signal, onActivity,
         onEvent: event => {
           if (event.session_id) sessionId = event.session_id;

@@ -38,3 +38,21 @@ test('closing, reloading or losing the renderer cancels pending confirmations', 
   assert.equal(await confirmation.ask({}), false);
   assert.equal(sent.length, 0);
 });
+test('a question withdrawn by its asker resolves as not accepted and closes its dialog; a late answer changes nothing', async () => {
+  // 2026-11-06: Hub's "Allow work in another folder?" expired after 2 minutes but stayed open, so a later Allow did nothing.
+  const { confirmation, sent } = setup();
+  const asker = new AbortController();
+  const result = confirmation.ask({ title: 'Allow work in another folder?' }, asker.signal);
+  const id = sent[0].options.id;
+  asker.abort();
+  assert.equal(await result, false);
+  assert.deepEqual(sent[1], { channel: 'confirmationClosed', options: id });
+  confirmation.answer(id, true);
+  const answered = new AbortController();
+  const kept = confirmation.ask({ title: 'Again?' }, answered.signal);
+  confirmation.answer(sent[2].options.id, true);
+  answered.abort();
+  assert.equal(await kept, true);
+  assert.equal(sent.length, 3, 'an answered question is not withdrawn');
+  assert.equal(await confirmation.ask({}, AbortSignal.abort()), false);
+});

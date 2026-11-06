@@ -1361,7 +1361,10 @@ class Agents extends EventEmitter {
     if (current && this.wouldCycle(source.id, current.id)) throw new Error('Circular agent task chains are not allowed.');
     const ancestors = resuming ? [] : [...(source.delegation && !source.delegation.delivered ? source.delegation.ancestors || [this.owner(source.delegation.source).agentId] : []), sourceController.agentId];
     if (ancestors.includes(agentId)) throw new Error('Circular agent task chains are not allowed.');
-    if (source.access !== 'danger-full-access' && !this.workspaces.same(workspace, source.delegation?.projectScope || source.workspace)) throw new Error('Sending a task to a different workspace requires Full access.');
+    // options.folderAllowed: Hub already allowed this folder (inside its chat's folder, or the user's OK: coordinatorTool).
+    if (source.access !== 'danger-full-access' && !this.workspaces.same(workspace, source.delegation?.projectScope || source.workspace) &&
+        !(options.folderAllowed && sourceController === this.primary && this.workspaces.same(workspace, options.folderAllowed)))
+      throw new Error('Sending a task to a different workspace requires Full access.');
     if (!resuming) this.checkDelegationCapacity(sourceController, source);
     else if (this.pendingJobs().length >= 10) throw new Error('The agent task queue is full.');
     const access = ACCESS_MODES[Math.min(...[...(resuming ? [resumeTask.access] : []), source.access, visible?.access || foreground.data.settings.access,
@@ -1418,7 +1421,8 @@ class Agents extends EventEmitter {
       job.error = 'Accepted and saved; starting is waiting for coordination: ' + error.message;
       target.log.warn('Accepted assignment start is pending', { jobId: job.id, error: error.message });
     }
-    return { jobId: job.id, sessionId: session.id, agent: profile?.name || this.hubName(), status: occupied ? 'queued' : session.delegation.state, note: 'Accepted and saved. The result returns to the requesting conversation; queued assignments wait for the current work to finish.' };
+    // waiting: behind the bot's current work. A new job's state is also "queued" until it starts, so status alone does not say.
+    return { jobId: job.id, sessionId: session.id, agent: profile?.name || this.hubName(), status: occupied ? 'queued' : session.delegation.state, waiting: occupied, note: 'Accepted and saved. The result returns to the requesting conversation; queued assignments wait for the current work to finish.' };
   }
 
   deliver(controller, session) {

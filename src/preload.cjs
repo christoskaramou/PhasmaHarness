@@ -36,6 +36,12 @@ api.onConfirmation = callback => {
   ipcRenderer.on('confirmation', listener);
   return () => ipcRenderer.removeListener('confirmation', listener);
 };
+// A question the main process withdrew (it expired, or its work stopped): its dialog closes unanswered.
+api.onConfirmationClosed = callback => {
+  const listener = (_event, id) => callback(id);
+  ipcRenderer.on('confirmationClosed', listener);
+  return () => ipcRenderer.removeListener('confirmationClosed', listener);
+};
 api.queuedMessage = (...args) => ipcRenderer.invoke('queuedMessage', ...args);
 api.backgroundTask = (...args) => ipcRenderer.invoke('backgroundTask', ...args);
 api.replySuggestion = id => ipcRenderer.invoke('replySuggestion', id);

@@ -22,9 +22,16 @@ document.addEventListener('keydown', event => {
 }, true);
 
 let confirmationQueue = Promise.resolve();
+// Questions from the main process by id: an open one's dialog, and ones withdrawn before their turn to show.
+const openConfirmations = new Map(), withdrawnConfirmations = new Set();
 function confirmAction(options) {
   const result = confirmationQueue.then(() => new Promise(resolve => {
+    if (withdrawnConfirmations.delete(options.id)) { resolve(false); return; }
     const dialog = document.createElement('dialog');
+    if (options.id !== undefined) {
+      openConfirmations.set(options.id, dialog);
+      dialog.addEventListener('close', () => openConfirmations.delete(options.id), { once: true });
+    }
     dialog.className = 'confirmation-dialog';
     dialog.setAttribute('aria-labelledby', 'confirmation-heading');
     dialog.setAttribute('aria-describedby', 'confirmation-description');
@@ -80,4 +87,9 @@ document.addEventListener('focusin', event => {
 
 window.router?.onConfirmation(options => {
   confirmAction(options).then(accepted => window.router.answerConfirmation(options.id, accepted)).catch(console.error);
+});
+window.router?.onConfirmationClosed?.(id => {
+  const dialog = openConfirmations.get(id);
+  if (dialog) dialog.close();
+  else withdrawnConfirmations.add(id);
 });

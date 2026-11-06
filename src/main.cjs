@@ -206,7 +206,7 @@ async function start() {
     updateWindowAppearance();
   });
   const localConfirmation = confirmations(window);
-  const confirmation = { ask: options => browserRequest.getStore()?.ask(options) || localConfirmation.ask(options),
+  const confirmation = { ask: (options, signal) => browserRequest.getStore()?.ask(options) || localConfirmation.ask(options, signal),
     answer: (...args) => localConfirmation.answer(...args) };
   registerRunnerCommands(handle, { runner, ask: options => confirmation.ask(options),
     openFolder: folder => shell.openPath(folder), stopDownloads: () => browserAccess?.stopDownloads(),
@@ -463,6 +463,8 @@ async function start() {
     if (!['https:', 'http:'].includes(url.protocol)) throw new Error('Only web links can be opened.');
     await shell.openExternal(url.href);
   });
+  // Hub asks before sending work outside its chat's folder (controller/coordinator.cjs allowFolder).
+  agents.ask = (options, signal) => confirmation.ask(options, signal);
   agents.settingsTools.host = {
     ask: options => confirmation.ask(options),
     read: name => {

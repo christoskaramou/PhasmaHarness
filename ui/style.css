@@ -2021,6 +2021,23 @@ dialog.image-viewer[open] {
   pointer-events:auto;
 }
 
+/* The Secondary model's queue, and messages that ended without running: their status and buttons always show. */
+.message.queued > .message-actions,
+.message.ended > .message-actions {
+  opacity:1;
+  pointer-events:auto;
+}
+
+.message.queued > .message-bubble,
+.message.ended > .message-bubble {
+  opacity:.7;
+}
+
+.message .queue-state {
+  color:var(--muted);
+  font-size:calc(11px * var(--font-scale,1));
+}
+
 .message:focus-visible {
   outline:2px solid var(--border-strong);
   outline-offset:3px;

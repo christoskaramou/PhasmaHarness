@@ -201,10 +201,19 @@ module.exports = {
       const entry = { ...saved, images: true };
       const found = (this.cursor.models || []).find(m => m.id === entry.model);
       const base = entry.parameterized || found?.parameterized ? { ...entry, parameterized: true, parameters: entry.cursorParameters || [] } : entry;
-      if (!found?.efforts?.length) return [base];
-      return found.efforts.map((effort, i) => ({ ...base, baseId: entry.id, id: `cursor-cli:${found.id}:${effort}`,
+      const plain = !found?.efforts?.length ? [base] : found.efforts.map((effort, i) => ({ ...base, baseId: entry.id, id: `cursor-cli:${found.id}:${effort}`,
         effort, effortOption: found.effortOption, preferred: effort === entry.cursorEffort,
         label: `${entry.label} · ${found.effortNames?.[effort] || effort}`, modelLabel: entry.label, rank: entry.rank + i / 100 }));
+      // Where Cursor offers fast mode it is on by default (the user, 2026-11-06), and every model selection can turn it off:
+      // the model is listed again without it (grok-4.7+nofast, "Grok 4.7 · Fast off"), which cursor.cjs runs as the model
+      // with fast=false. That entry is enabled with its model and listed after it, so old saved IDs resolve to fast mode.
+      const offered = ['true', 'false'].every(value => found?.parameters?.fast?.includes(value));
+      if (!offered) return plain;
+      const fast = (p, value) => [...(p.parameters || []).filter(q => q?.id !== 'fast'), { id: 'fast', value }];
+      return [...plain.map(p => ({ ...p, parameters: fast(p, 'true') })),
+        ...plain.map(p => ({ ...p, id: `cursor-cli:${found.id}+nofast:${p.effort || 'default'}`, model: `${found.id}+nofast`, fastOff: true,
+          parameters: fast(p, 'false'), aliases: [], baseId: entry.id, rank: p.rank + 0.001, modelLabel: `${entry.label} · Fast off`,
+          label: p.effort ? `${entry.label} · Fast off · ${found.effortNames?.[p.effort] || p.effort}` : `${entry.label} · Fast off` }))];
     });
   },
 
@@ -342,9 +351,10 @@ module.exports = {
   },
 
   warmRouter() {
-    if (this.routingProvider === 'jev' || this.connection !== 'ready' || !this.smartRouter.warm || this.planPreset()) return;
+    if (this.connection !== 'ready' || !this.smartRouter.warm || this.planPreset()) return;
     const choice = this.secondaryPick();
-    if (choice) this.smartRouter.warm(choice);
+    // Quick replies use the Secondary model whatever the router, so a Cursor one is kept ready even while Jev routes.
+    if (choice && (this.routingProvider !== 'jev' || choice.provider === 'cursor-cli')) this.smartRouter.warm(choice);
   },
 
   // Claude IDs come from discovery (claude-cli:<resolved model>), so there is no fixed alias to fall back to.

@@ -14,7 +14,8 @@ const { stripTaskStatus } = require('../routing/task-state.cjs');
 const COLD_START_MINUTES = 30, COLD_START_PERCENT = 60, WINDOW = 200000, KEEP = 4;
 
 const chatMessages = items => items
-  .filter(item => item.type === 'userMessage' || (item.type === 'agentMessage' && item.phase !== 'commentary'))
+  // A message that ended without running (queueState: stopped, dropped) was never a request.
+  .filter(item => (item.type === 'userMessage' && !item.queueState) || (item.type === 'agentMessage' && item.phase !== 'commentary'))
   .map(item => ({ id: item.id, role: item.type === 'userMessage' ? 'user' : 'assistant',
     text: item.type === 'userMessage' ? (item.contextText || '') + (item.content || []).filter(part => part.type === 'text').map(part => part.text).join('\n')
       : stripTaskStatus(item.text || '') }));

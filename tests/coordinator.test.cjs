@@ -246,13 +246,22 @@ class Client extends EventEmitter {
 }
 async function setup(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-hub-'));
-  const calls = [], replies = [], assessments = [];
+  // reads: what the Secondary model reads in a message (controller/direct-answer.cjs), by its text. An unscripted read
+  // fails, so Hub's words decide as without one, and the replies scripted for Hub are not used up.
+  const calls = [], replies = [], assessments = [], reads = {};
   const factory = (file, cwd, options) => {
     const c = new Controller(file, cwd, new Client(), {
       cancel() {}, close() {},
       async choose() { return { id: 'terra-light', model: 'gpt-5.6-terra', effort: 'low', provider: 'codex', source: 'smart', needsChecks: false }; },
       async chooseHub(workers) { return workers.find(p => p.effort === 'low') || workers[0]; },
       async complete(request, choice, abort) {
+        if (request.schema.properties.drop) {
+          const read = reads[JSON.parse(request.prompt).message];
+          if (!read) throw new Error('No scripted read.');
+          calls.push({ request, choice, abort, read: true });
+          const decision = { kind: 'ack', text: 'On it.', stop: false, effort: 'none', when: 'now', steps: [], deliver: 'now', drop: [], ...read };
+          return { decision: structuredResponse(decision, request.schema) };
+        }
         calls.push({ request, choice, abort });
         const decision = request.schema.properties.summary ? { summary: 'User intent and pending work retained.' }
           : request.schema.properties.reflection ? { reflection: 'keep', rule: '', moment: '', reason: 'Fixture.' }
@@ -286,7 +295,7 @@ async function setup(t) {
     fs.rmSync(root, { recursive: true, force: true });
   });
   const send = text => hub.send({ id: session.id, text });
-  return { root, hub, session, agents, calls, replies, assessments, send };
+  return { root, hub, session, agents, calls, replies, assessments, reads, send };
 }
 async function until(check, timeout = 5000) {
   const end = Date.now() + timeout;
@@ -805,6 +814,8 @@ test('direct group replies queue per member and load fresh, isolated group histo
   let releaseMain;
   const complete = hub.smartRouter.complete;
   hub.smartRouter.complete = async (...args) => {
+    // Hub's own reply waits; the Secondary model's read before it (controller/direct-answer.cjs) does not.
+    if (args[0].schema.properties.drop) return complete(...args);
     await new Promise(resolve => { releaseMain = resolve; });
     return complete(...args);
   };
@@ -1817,7 +1828,9 @@ test('Hub management preserves access checks and rejects unsupported tools and s
   }
   await assert.rejects(hub.queuedMessage(session.id, 'queued', 'steer'), /no longer available/);
   let release;
-  hub.smartRouter.complete = () => new Promise(resolve => { release = resolve; });
+  // Hub's own call waits; the Secondary model's read before it (controller/direct-answer.cjs) does not.
+  const complete = hub.smartRouter.complete;
+  hub.smartRouter.complete = (request, ...rest) => request.schema.properties.drop ? complete(request, ...rest) : new Promise(resolve => { release = resolve; });
   const pending = send('Create another worker');
   await until(() => release);
   await hub.stop();
@@ -1876,9 +1889,13 @@ test('Hub compacts older context without removing visible history and retains th
 test('Hub starts reviews in the requested repository and enforces workspace access before creating agents', async t => {
   const { hub, session, agents, replies, send, root } = await setup(t);
   const target = path.join(root, 'project'); fs.mkdirSync(target);
+  // A folder outside the chat's folder needs Full access or the user's OK (none can be asked here); one inside it does
+  // not (the next test).
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-outside-'));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
   for (const access of ['read-only', 'workspace-write']) {
     session.access = access;
-    replies.push(action('agent_work', { name: 'Reviewer', task: 'Review the project', workspace: target }));
+    replies.push(action('agent_work', { name: 'Reviewer', task: 'Review the project', workspace: outside }));
     await assert.rejects(send('Review the other project'), /Full access/);
     assert.equal(hub.data.agents.length, 0);
   }
@@ -1890,7 +1907,9 @@ test('Hub starts reviews in the requested repository and enforces workspace acce
     worker.smartRouter.choose = async (text, context) => { inspected.push(context.workspace); return { id: 'terra-light', model: 'gpt-5.6-terra', effort: 'low', provider: 'codex', source: 'smart', needsChecks: false }; };
     worker.submitWorker = async () => {};
   };
-  replies.push(action('agent_work', { agentId: wrong.id, name: 'Reviewer', task: 'Review the project', workspace: target }));
+  // A named agent in another folder is never silently replaced: Hub is told, and creates the reviewer there itself.
+  replies.push(action('agent_work', { agentId: wrong.id, name: 'Reviewer', task: 'Review the project', workspace: target }),
+    action('agent_work', { name: 'Reviewer', task: 'Review the project', workspace: target }));
   await send('Review the other project');
   await until(() => inspected.length > 0);
   assert.deepEqual(inspected, [fs.realpathSync(target)]);
@@ -3001,4 +3020,133 @@ test('Hub on Auto effort makes no router call: medium runs, a named low or mediu
   assert.equal(hub.routerKind(), 'secondary');
   hub.smartRouter.jev = { configured: true };
   assert.equal(hub.routerKind(), 'jev');
+});
+
+test('Hub’s Secondary model reads its messages: efforts follow the read, a stop stops Hub and the bots it started, Stop ends a message it reads', async t => {
+  // 2026-11-06, the user: the Secondary model reads every message, Hub's too, and a stop on Hub stops the bots it started.
+  const { hub, session, agents, calls, replies, reads, send } = await setup(t);
+  await send('Hello');
+  await until(() => !hub.busy);
+  const current = hub.resolveWorker(hub.data.hubMode);
+  hub.data.settings.mode = `autoeffort:${current.provider || 'codex'}:${current.model}`;
+  hub.data.settings.effortCap = 'max';
+  const [low, medium] = hub.ownVariants().filter(p => ['low', 'medium'].includes(p.effort));
+  const planning = () => calls.filter(call => !call.read).length;
+
+  // The effort it reads runs, and once it read the message, the words alone do not decide.
+  reads['quick one, keep it light'] = { effort: 'low' };
+  await send('quick one, keep it light'); await until(() => !hub.busy);
+  assert.equal(hub.data.hubMode, low.id);
+  reads['use low effort for chat'] = { effort: 'none' };
+  await send('use low effort for chat'); await until(() => !hub.busy);
+  assert.equal(hub.data.hubMode, medium.id, 'what it read decides');
+
+  // While Hub works, a message is read in its queue: it waits for the turn, then runs at that effort, not read again.
+  const complete = hub.smartRouter.complete;
+  let releaseHub;
+  hub.smartRouter.complete = async (request, ...rest) => {
+    if (request.schema.properties.action && !releaseHub) await new Promise(resolve => { releaseHub = resolve; });
+    return complete(request, ...rest);
+  };
+  const busyTurn = send('what is in the README?');
+  await until(() => releaseHub);
+  reads['after that, keep it light'] = { effort: 'low' };
+  assert.deepEqual(await send('after that, keep it light'), { queued: true });
+  await until(() => session.queue[0]?.triaged);
+  assert.deepEqual([session.queue[0].secondary, session.queue[0].hubEffort, session.queue[0].note], [true, 'low', 'Runs after this turn at low effort.']);
+  const readsBefore = calls.filter(call => call.read).length;
+  releaseHub(); await busyTurn;
+  await until(() => !session.queue.length && !hub.busy);
+  assert.equal(hub.data.hubMode, low.id);
+  assert.equal(calls.filter(call => call.read).length, readsBefore, 'not read again when it runs');
+  hub.smartRouter.complete = complete;
+
+  // Stop while it reads: the message ends in the chat as Stopped, with Send again and Edit, and Hub never answers it.
+  let releaseRead;
+  hub.smartRouter.complete = (request, ...rest) => request.schema.properties.drop ? new Promise(resolve => { releaseRead = resolve; }) : complete(request, ...rest);
+  const before = planning();
+  const reading = send('summarize the repo');
+  await until(() => releaseRead);
+  await hub.stop();
+  releaseRead({ decision: { kind: 'ack', text: 'On it.', stop: false, effort: 'none', when: 'now', steps: [], deliver: 'now', drop: [] } });
+  assert.deepEqual(await reading, { stopped: true });
+  assert.deepEqual([planning(), hub.busy, session.items.at(-1).queueState, session.items.at(-1).content[0].text], [before, null, 'stopped', 'summarize the repo']);
+  hub.smartRouter.complete = complete;
+
+  // A stop it reads stops Hub and the bots it started.
+  replies.push(action('agent_work', { name: 'Worker', task: 'Say hello.' }));
+  await send('Ask Worker to say hello.');
+  const worker = agents.execution(session.hubWorker);
+  await until(() => worker.activeTurns.size > 0);
+  reads['stop everything'] = { stop: true };
+  await send('stop everything');
+  await until(() => worker.client.calls.some(call => call.method === 'turn/interrupt'));
+  await until(() => session.items.some(item => /^Stopped.*1 assignment it started\.$/.test(item.text || '')));
+
+  // "Higher" (or a stronger model) runs Hub's own redo turn at its highest Hub effort; no agent starts for it.
+  await until(() => !hub.busy);
+  Object.assign(hub.data, { hubMode: low.id, hubModeSource: 'auto' });
+  reads['do it properly this time'] = { effort: 'higher' };
+  const bots = agents.controllers.size, planned = planning();
+  await send('do it properly this time');
+  assert.deepEqual([hub.data.hubMode, session.routes.at(-1).id, agents.controllers.size, planning()], [medium.id, medium.id, bots, planned]);
+});
+
+test('Hub sends work to a named bot in its own folder: inside the chat’s folder at once, elsewhere only with the user’s OK, never a silent new bot', async t => {
+  // 2026-11-06: Hub named Speedtest (in a subfolder) with Hub's own folder as the workspace, and a new "Worker" was
+  // silently created instead. The user: ask for permission when the folder is at the same level or not a subfolder.
+  const { root, hub, session, agents, replies, send } = await setup(t);
+  const innerDir = path.join(root, 'inner'); fs.mkdirSync(innerDir);
+  const outerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-outer-'));
+  t.after(() => fs.rmSync(outerDir, { recursive: true, force: true }));
+  const mode = 'autoeffort:codex:gpt-5.6-terra';
+  const inner = await agents.saveAgent({ name: 'Inner', instructions: '', workspace: innerDir, access: 'workspace-write', mode });
+  const outer = await agents.saveAgent({ name: 'Outer', instructions: '', workspace: outerDir, access: 'workspace-write', mode });
+  const asked = [];
+  let allow = false;
+  agents.ask = async options => { asked.push(options); return allow; };
+  const names = () => hub.data.agents.map(agent => agent.name).sort();
+
+  // Inside the chat's folder: sent at once, even with Hub's own folder passed as the workspace.
+  replies.push(action('agent_work', { agentId: inner.id, workspace: root, task: 'Say hi.' }));
+  await send('Ask Inner to say hi.');
+  assert.deepEqual([session.hubWorker, asked.length, names()], [inner.id, 0, ['Inner', 'Outer']]);
+  // An idle bot starts it, so Hub does not say its current work continues; a busy one queues it behind that work.
+  assert.match(session.items.at(-1).text, /^Sent the task to \*\*Inner\*\*\./);
+  replies.push(action('agent_work', { agentId: inner.id, task: 'Say bye.' }));
+  await send('Ask Inner to say bye too.');
+  assert.match(session.items.at(-1).text, /^Queued the task for \*\*Inner\*\*\. Their current work continues/);
+
+  // Another folder: the user is asked. Declined: nothing is sent and no bot is created.
+  replies.push(action('agent_work', { agentId: outer.id, task: 'Say hi.' }));
+  await assert.rejects(send('Ask Outer to say hi.'), /Not allowed: sending work to .*outside this chat's folder/);
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0].message, `${agents.agentName('main')} wants to send work to bot "Outer" that is outside this folder.`);
+  assert.deepEqual(asked[0].details.map(detail => detail.label), [agents.agentName('main'), 'Outer']);
+  assert.equal(asked[0].details[0].text, session.workspace);
+  assert.match(asked[0].details[1].text, new RegExp(path.basename(outerDir)));
+  assert.deepEqual(names(), ['Inner', 'Outer']);
+  // Allowed: sent to Outer.
+  allow = true;
+  replies.push(action('agent_work', { agentId: outer.id, task: 'Say hi.' }));
+  await send('Ask Outer to say hi, please.');
+  assert.deepEqual([session.hubWorker, asked.length, names()], [outer.id, 2, ['Inner', 'Outer']]);
+
+  // A named bot with a folder it does not work in: Hub is told and corrects it; no new bot is made.
+  replies.push(action('agent_work', { agentId: inner.id, workspace: outerDir, task: 'Say hi.' }), answer('Inner works in its own folder; tell me which one you want.'));
+  await send('Ask Inner to say hi in the outer folder.');
+  assert.deepEqual(names(), ['Inner', 'Outer']);
+  assert.match(session.items.at(-1).text, /Inner works in its own folder/);
+
+  // Stop while it asks: the question is withdrawn, so its dialog closes rather than wait for a click that does nothing.
+  let withdrawn;
+  agents.ask = (options, signal) => { withdrawn = signal; return new Promise(() => {}); };
+  replies.push(action('agent_work', { agentId: outer.id, task: 'Say hello.' }));
+  const waiting = send('Ask Outer to say hello.');
+  await until(() => withdrawn);
+  assert.equal(withdrawn.aborted, false);
+  await hub.stop();
+  await waiting.catch(() => {});
+  assert.equal(withdrawn.aborted, true);
+  assert.equal(hub.busy, null);
 });

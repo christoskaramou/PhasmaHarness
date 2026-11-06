@@ -112,6 +112,8 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
   });
   handle('stop', id => {
     for (const request of preparing) if (!id || request.id === id) request.abort.abort();
+    // The Stop button also stops what the Secondary model holds for later turns; those stay in the chat (Send again, Edit).
+    if (id) agents.owner(id).stopSecondaryQueue?.(id);
     return agents.stop(id);
   });
   handle('reviseJob', args => agents.reviseUserJob(args));

@@ -188,6 +188,9 @@ class Controller extends EventEmitter {
         delete message.sending;
         delete message.waiting;
       }
+      // What the Secondary model held stops with the app; it stays in the chat with Send again and Edit, so nothing starts
+      // by itself after a restart (direct-answer.cjs).
+      this.endQueued(session, (session.queue || []).filter(message => message.secondary && !message.uncertain), 'interrupted', 'the app closed');
       session.queueSending = false;
       session.compacting = false;
       // A model question saved by v0.3.31 (which asked before swapping models): its message was never sent, and says so.
@@ -747,7 +750,7 @@ class Controller extends EventEmitter {
     return !this.isCoordinator() && this.routerTurnedOff() ? this.agents?.hubAutoEffort?.() || 'auto' : 'auto';
   }
 
-  async send({ id, text, mode, images = [], files = [], fileMessage = null, contextText = '', task = 'on', wikiTaskId = null, failover = false, agentReply = false, agentReplyCancelled = false, agentResult = null, agentMail = null, routineRun = null, started = null, effort = null, triaged = false, ack = null }) {
+  async send({ id, text, mode, images = [], files = [], fileMessage = null, contextText = '', task = 'on', wikiTaskId = null, failover = false, agentReply = false, agentReplyCancelled = false, agentResult = null, agentMail = null, routineRun = null, started = null, effort = null, triaged = false, ack = null, hubEffort = null }) {
     if (!['auto', 'on', 'off'].includes(task)) throw new Error('Invalid task mode.');
     if (task === 'auto') task = 'on'; // Existing queued messages use the new default.
     if (this.blockedReason()) throw new Error(this.blockedReason());
@@ -790,7 +793,37 @@ class Controller extends EventEmitter {
     }
     // A message that asks for a stronger model is done by Hub itself: its chat runs it as a tool turn on the strongest Hub
     // model, and no agent is started for it (agent tools are refused for that turn, see bridgeTool and helperToolCall).
-    const hubStronger = this.isCoordinator() && !agentReply && !routineRun && !wikiTaskId && !this.planPreset() ? this.hubStrongerChoice(text, mode || this.data.settings.mode) : null;
+    // Hub's Secondary model reads its messages first (2026-11-06, the user): a stop stops Hub and the bots it started
+    // (stopFromHub); "higher", "more", "max" or a stronger model runs that tool turn; a named effort is Hub's (Low or
+    // Medium). Hub counts as busy meanwhile, so another message queues (and is read there, readQueued). Without a read (no
+    // Secondary model, or it failed), Hub's words decide as before.
+    const hubReads = this.isCoordinator() && !agentReply && !routineRun && !wikiTaskId && !this.planPreset() && !agentResult && !agentMail && !session.group && !!this.secondaryPick();
+    let hubRead = null;
+    if (hubReads && !failover && !triaged && !this.busy && !this.agents?.groupRuns.has(id)) {
+      const generation = this.stopGeneration || 0;
+      this.busy = id; this.readAbort = new AbortController();
+      // Shown at once, with Hub working (and Stop), while it reads; Hub's turn then records the message itself.
+      session.pendingMessage = { id: randomUUID(), type: 'userMessage', pending: true, createdAt: Date.now(), ...(fileMessage ? { fileMessage } : {}),
+        content: [{ type: 'text', text }, ...images.map(url => ({ type: 'image', url }))] };
+      this.changed();
+      try { hubRead = await this.readMessage(session, { text, mode: mode || this.data.settings.mode, attached: images.length || fileMessage, running: false, abort: this.readAbort }); }
+      finally { this.readAbort = null; session.pendingMessage = null; if (this.busy === id) this.busy = null; }
+      // Stop while it read: the message ends there, in the chat with Send again and Edit, and Hub's turn never starts.
+      if ((this.stopGeneration || 0) !== generation) {
+        this.stopping.delete(id);
+        session.status = 'interrupted';
+        this.endQueued(session, [{ id: randomUUID(), text, images, mode, task, ...(fileMessage ? { fileMessage } : {}), createdAt: Date.now() }], 'stopped');
+        this.save(); this.changed();
+        return { stopped: true };
+      }
+      if (hubRead?.drop.length) { this.endQueued(session, hubRead.drop, 'dropped'); this.save(); this.changed(); }
+      if (hubRead?.stop) return this.stopFromHub(session, { text, images, fileMessage, read: hubRead });
+    }
+    // The effort it read (or held the message with), null for none; undefined when nothing read it, so the words decide.
+    const hubAsked = !this.isCoordinator() ? undefined : hubRead ? hubRead.effort : triaged ? hubEffort ?? null : undefined;
+    const hubStronger = this.isCoordinator() && !agentReply && !routineRun && !wikiTaskId && !this.planPreset()
+      ? hubAsked === undefined ? this.hubStrongerChoice(text, mode || this.data.settings.mode)
+        : hubAsked === 'top' ? this.hubStrongerChoice(text, mode || this.data.settings.mode, { asked: true }) : null : null;
     if (hubStronger) { this.data.hubMode = hubStronger.id; this.data.hubModeSource = 'auto'; this.save(); mode = hubStronger.id; }
     if (this.busy || this.agents?.groupRuns.has(id)) {
       if (this.busy && this.busy !== id && !(this.isCoordinator() && (session.group || this.session(this.busy).group))) {
@@ -804,9 +837,10 @@ class Controller extends EventEmitter {
         ...(agentResult ? { agentResult } : {}), ...(agentMail ? { agentMail } : {}), ...(wikiTaskId ? { wikiTaskId } : {}),
         ...(routineRun ? { routineRun } : {}) };
       // The bot's Secondary model reads a message sent mid-turn before the worker gets it (controller/direct-answer.cjs).
-      const read = this.busy === id && !this.isCoordinator() && !agentReply && !agentResult && !agentMail && !routineRun && !wikiTaskId &&
+      const read = this.busy === id && !agentReply && !agentResult && !agentMail && !routineRun && !wikiTaskId &&
         !session.group && !session.groupChatId && !(session.delegation && !session.delegation.delivered) && !this.planPreset() && !!this.secondaryPick();
-      if (read) entry.triage = true;
+      // Its queue from then on (heldMessages); a failed or late read hands it to the worker's queue (readQueued).
+      if (read) Object.assign(entry, { triage: true, secondary: true, createdAt: Date.now() });
       (session.queue ||= []).push(entry);
       this.save(); this.changed();
       if (read) this.readQueued(session, entry).catch(error => this.log.warn('Reading a queued message failed', { error: String(error?.message).slice(0, 300) }));
@@ -826,7 +860,8 @@ class Controller extends EventEmitter {
     // failover re-send is the same message again, not a reaction.
     if (session.userTurn && !failover)
       this.scanAfterUserTurn(session, text);
-    if (this.isCoordinator() && !hubStronger) return this.sendCoordinator(session, { text, images, fileMessage, mode: chosenMode, agentReply, agentReplyCancelled, agentResult, agentMail, routineRun });
+    if (this.isCoordinator() && !hubStronger)
+      return this.sendCoordinator(session, { text, images, fileMessage, mode: chosenMode, agentReply, agentReplyCancelled, agentResult, agentMail, routineRun, effort: hubAsked });
     const assigned = !!session.delegation && this.agents?.executionText(session.delegation) === text;
     const originalRequest = assigned ? this.agents.requestFor(session.delegation) : null;
     const routingText = originalRequest?.text || text;
@@ -1489,6 +1524,9 @@ class Controller extends EventEmitter {
   async queuedMessage(id, messageId, action) {
     const session = this.session(id);
     const message = session.queue?.find(m => m.id === messageId);
+    // A message the Secondary model held that ended without running stays in the chat: Send again or Edit.
+    const ended = !message && session.items.find(item => item.id === messageId && item.queueState && !item.resent);
+    if (ended) return this.stoppedMessage(session, ended, action);
     if (!message || session.queueSending) throw new Error('This queued message is no longer available.');
     if (message.waiting) {
       // The provider already holds it and answers after its current step; Send now asks it to take the message at once.
@@ -1567,10 +1605,15 @@ class Controller extends EventEmitter {
           threadId: session.threadId, expectedTurnId: turnId, clientUserMessageId: message.id,
           input: [{ type: 'text', text: sent.text, text_elements: [] }, ...sent.images.map(url => ({ type: 'image', url }))],
         });
-        if (!session.items.some(i => i.clientId === message.id)) session.items.push({
-          id: message.id, clientId: message.id, type: 'userMessage', createdAt: Date.now(),
-          content: [{ type: 'text', text: message.text }, ...message.images.map(url => ({ type: 'image', url }))],
-        });
+        if (!session.items.some(i => i.clientId === message.id)) {
+          session.items.push({
+            id: message.id, clientId: message.id, type: 'userMessage', createdAt: Date.now(),
+            content: [{ type: 'text', text: message.text }, ...message.images.map(url => ({ type: 'image', url }))],
+          });
+          // The Secondary model's reply to it, when it passed it on (readQueued).
+          if (message.ack) session.items.push({ id: randomUUID(), type: 'agentMessage', phase: 'final_answer', text: message.ack.text, quickReply: true,
+            routeLabel: `${message.ack.label} · quick reply`, localOnly: true, createdAt: Date.now() });
+        }
         if (activeTask?.state === 'running') activeTask.amendments.push({ id: message.id, text: message.text });
       } else {
         // A CLI turn runs inside send(), so the queue is released once this message has started the turn, as after a
@@ -1583,6 +1626,8 @@ class Controller extends EventEmitter {
     } catch (error) {
       message.error = error.message;
       message.uncertain = /timed out|closed|disconnect/i.test(error.message);
+      // One the Secondary model held leaves its queue for the chat, with Send again and Edit (unless delivery is unsure).
+      if (message.secondary && !message.uncertain) this.endQueued(session, [message], 'interrupted', error.message);
       throw error;
     } finally {
       delete message.sending;
@@ -1693,11 +1738,16 @@ class Controller extends EventEmitter {
   }
 
   recordLiveMessage(session, message, task) {
-    if (!session.items.some(item => item.clientId === message.id)) session.items.push({
-      id: message.id, clientId: message.id, type: 'userMessage', localOnly: true, createdAt: Date.now(),
-      ...(message.fileMessage ? { fileMessage: message.fileMessage } : {}),
-      content: [{ type: 'text', text: message.text }, ...message.images.map(url => ({ type: 'image', url }))],
-    });
+    if (!session.items.some(item => item.clientId === message.id)) {
+      session.items.push({
+        id: message.id, clientId: message.id, type: 'userMessage', localOnly: true, createdAt: Date.now(),
+        ...(message.fileMessage ? { fileMessage: message.fileMessage } : {}),
+        content: [{ type: 'text', text: message.text }, ...message.images.map(url => ({ type: 'image', url }))],
+      });
+      // The Secondary model's reply to it (readQueued) follows it in the chat.
+      if (message.ack) session.items.push({ id: randomUUID(), type: 'agentMessage', phase: 'final_answer', text: message.ack.text, quickReply: true,
+        routeLabel: `${message.ack.label} · quick reply`, localOnly: true, createdAt: Date.now() });
+    }
     if (task?.state === 'running') task.amendments.push({ id: message.id, text: message.text });
   }
 
@@ -1797,6 +1847,7 @@ class Controller extends EventEmitter {
     this.stopGeneration = (this.stopGeneration || 0) + 1;
     if (!this.busy) return;
     this.modelPreparation?.abort();
+    this.readAbort?.abort(); // Hub's Secondary model reading a message (send)
     const session = this.session(this.busy);
     session.queuePaused = true;
     if (budgetId) session.queuePauseBudgetId = budgetId;
