@@ -48,7 +48,8 @@ const NO_SECONDARY = '\n\nChanging your effort or model, or stopping you mid-tur
   'When the user asks you to change your effort or model, say you cannot do that alone and that they can turn on the Secondary model in this bot\'s Edit dialog.';
 
 // The worker waits for the quick reply (a full answer means it never runs), so a slow call gives up early.
-const QUICK_TIMEOUT_MS = 8000;
+// 2026-11-06 (the user): 12 s, up from 8 s, which Haiku through Claude Code sometimes ran over.
+const QUICK_TIMEOUT_MS = 12000;
 const FINAL = new Set(['passed', 'failed', 'blocked', 'not-checked', 'cancelled']);
 
 const visibleText = item => item.type === 'userMessage'

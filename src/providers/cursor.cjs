@@ -77,7 +77,7 @@ function drop(sessionId) {
 
 // A structured one-off (the Secondary model's quick replies, routing and checks) never resumes, so its next session is made
 // ready ahead instead: process, initialize, session/new, model, parameters and mode, before the message exists. Measured
-// 2026-11-06 on Grok 4.7: a cold one-off took 12-33 s, over the quick reply's 8 s. One spare per bot, at most three across
+// 2026-11-06 on Grok 4.7: a cold one-off took 12-33 s, over the quick reply's limit (8 s then, 12 s now). One spare per bot, at most three across
 // bots, each for 10 minutes. Oldest first.
 const SPARES = new Map();
 function dropSpare(owner) {

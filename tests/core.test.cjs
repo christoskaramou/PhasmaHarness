@@ -2628,7 +2628,7 @@ test('a quick reply from the Secondary model answers at once with no worker, or 
   session.pendingAck = { text: 'Stale note.', label: 'Old' };
   await controller.send({ id: session.id, text: 'What is 2 + 2?', mode: 'terra-light', task: 'off' });
   assert.equal(fake.turnIds.length, turns + 1, 'a failed quick reply leaves it to the worker');
-  assert.equal(timeout, 8000, 'the worker waits at most 8 s for the quick reply');
+  assert.equal(timeout, 12000, 'the worker waits at most 12 s for the quick reply');
   assert.equal(session.items.some(item => item.text === 'Stale note.'), false, 'the leftover note is dropped');
   complete(controller, session, fake.turnIds.at(-1)); await flush();
 });
