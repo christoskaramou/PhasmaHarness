@@ -1,6 +1,7 @@
 const { readSessionData } = require('../src/session-store.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { structuredResponse } = require('../src/providers/structured.cjs');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -2641,7 +2642,9 @@ test('the Secondary model reads messages sent during a turn: stop, effort now, a
   smartRouter.complete = async request => {
     if (!request.schema?.properties?.kind) return { decision: { verdict: 'accept', findings: [] } };
     const prompt = JSON.parse(request.prompt); prompts.push(prompt);
-    return { decision: { kind: 'ack', text: 'On it.', stop: false, effort: 'none', when: 'now', ...reads[prompt.message] } };
+    // The real schema check runs: 0.3.33 shipped a schema word it rejects (maxItems), so every read failed.
+    const decision = { kind: 'ack', text: 'On it.', stop: false, effort: 'none', when: 'now', steps: [], deliver: 'now', ...reads[prompt.message] };
+    return { decision: structuredResponse(decision, request.schema) };
   };
   const session = controller.create();
   const turn = async text => { await controller.send({ id: session.id, text, mode: 'terra-light', task: 'off' }); return fake.turnIds.at(-1); };

@@ -32,7 +32,7 @@ const INSTRUCTIONS = 'You are the fast first voice of a coding assistant bot. Re
   'work that should wait until the current turn ends. When the worker is not running, "now".';
 const SCHEMA = { type: 'object', properties: { kind: { type: 'string', enum: ['answer', 'ack'] }, text: { type: 'string', maxLength: 4000 },
   stop: { type: 'boolean' }, effort: { type: 'string', enum: ['none', 'low', 'medium', 'high', 'xhigh', 'higher'] },
-  when: { type: 'string', enum: ['now', 'after', 'unsure'] }, steps: { type: 'array', items: { type: 'string', maxLength: 500 }, maxItems: 5 },
+  when: { type: 'string', enum: ['now', 'after', 'unsure'] }, steps: { type: 'array', items: { type: 'string', maxLength: 500 } },
   deliver: { type: 'string', enum: ['now', 'after'] } },
   required: ['kind', 'text', 'stop', 'effort', 'when', 'steps', 'deliver'], additionalProperties: false };
 
