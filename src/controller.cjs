@@ -1555,6 +1555,8 @@ class Controller extends EventEmitter {
     const ended = !message && session.items.find(item => item.id === messageId && item.queueState && !item.resent);
     if (ended) return this.stoppedMessage(session, ended, action);
     if (!message || session.queueSending) throw new Error('This queued message is no longer available.');
+    // Never sent while the Secondary model reads it: its read decides first, then the queue goes on (readQueued).
+    if (message.triage && ['send', 'steer', 'live'].includes(action)) throw new Error('The Secondary model is still reading this message.');
     if (message.waiting) {
       // The provider already holds it and answers after its current step; Send now asks it to take the message at once.
       if (action !== 'steer' || !this.liveInput)

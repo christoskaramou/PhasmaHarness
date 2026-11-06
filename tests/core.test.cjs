@@ -2720,6 +2720,52 @@ test('the Secondary model reads messages sent during a turn: stop, effort now, a
   complete(controller, session, fake.turnIds.at(-1)); await flush();
 });
 
+test('a message the Secondary model still reads when the turn ends waits for the read, which still decides', async t => {
+  // 2026-11-06, the user: the Secondary model's queue "will send the message either way". The turn ended while it read,
+  // and the queue sent the message unread: a message it answered still ran, and one it passed on was read again.
+  const { controller, fake, smartRouter } = await setup(t, { quick: true });
+  const pending = new Map(); let reads = 0;
+  smartRouter.complete = request => {
+    if (!request.schema?.properties?.kind) return Promise.resolve({ decision: { verdict: 'accept', findings: [] } });
+    const prompt = JSON.parse(request.prompt); reads++;
+    const decision = { kind: 'ack', text: 'On it.', stop: false, effort: 'none', when: 'now', steps: [], deliver: 'now', drop: [] };
+    if (!prompt.workerRunning) return Promise.resolve({ decision });
+    return new Promise(resolve => pending.set(prompt.message, extra => resolve({ decision: { ...decision, ...extra } })));
+  };
+  const session = controller.create();
+  const send = text => controller.send({ id: session.id, text, mode: 'terra-light', task: 'off' });
+  const lastInput = () => fake.calls.findLast(call => call.method === 'turn/start').params.input[0].text;
+
+  // One it answers: not sent while it reads, and its answer is the reply; no turn starts.
+  await send('first');
+  let turn = fake.turnIds.at(-1);
+  await send('what is 2 + 2?');
+  await until(() => pending.has('what is 2 + 2?'));
+  complete(controller, session, turn); await flush();
+  assert.equal(fake.turnIds.at(-1), turn, 'not sent while it is read');
+  pending.get('what is 2 + 2?')({ kind: 'answer', text: '4.' });
+  await until(() => session.items.some(item => item.text === '4.'));
+  await flush();
+  assert.deepEqual([fake.turnIds.at(-1), session.queue.length], [turn, 0], 'answered: the worker never gets it');
+
+  // One it passes on: it runs as the next turn, once, with its reply, and is not read again.
+  await send('second');
+  turn = fake.turnIds.at(-1);
+  await send('also check b.js');
+  await until(() => pending.has('also check b.js'));
+  complete(controller, session, turn); await flush();
+  assert.equal(fake.turnIds.at(-1), turn, 'not sent while it is read');
+  const before = reads;
+  pending.get('also check b.js')({ text: 'Checking b.js next.' });
+  await until(() => fake.turnIds.at(-1) !== turn);
+  assert.match(lastInput(), /also check b\.js/);
+  assert.equal(reads, before, 'not read again when it runs');
+  assert.ok(session.items.some(item => item.text === 'Checking b.js next.'));
+  assert.equal(fake.calls.some(call => call.method === 'turn/steer'), false);
+  complete(controller, session, fake.turnIds.at(-1)); await flush();
+  assert.equal(session.queue.length, 0);
+});
+
 test('the Secondary model decides how work reaches the worker: split into turns, now during a turn, or after it', async t => {
   // 2026-11-06, the user: "it's up to the secondary model how and when to queue work to the worker model".
   const { controller, fake, smartRouter } = await setup(t, { quick: true });

@@ -138,11 +138,21 @@ module.exports = {
     try { read = await this.readMessage(session, { text: message.text, mode: message.mode, attached: message.images?.length || message.fileMessage, running: true, question, except: message }); }
     finally { delete message.triage; }
     if (!read) delete message.secondary;
-    const queued = session.queue?.includes(message) && this.busy === session.id && !this.stopping.has(session.id);
-    if (!read || !queued) { this.save(); this.changed(); this.flushLiveQueue(session); return; }
+    // Removed meanwhile (Stop, Remove, a drop): nothing is left to send.
+    if (!session.queue?.includes(message)) { this.save(); this.changed(); return; }
+    // 2026-11-06 (the user: the Secondary model's queue "will send the message either way"): the turn may end while it
+    // reads. The queue waits for the read (queuedMessage), which still decides: an answer is done, and the rest runs as the
+    // next turn as read, not read again; the queue goes on once it is applied.
+    const running = this.busy === session.id && !this.stopping.has(session.id);
+    try { return await this.applyQueuedRead(session, message, read, question, running); }
+    finally { if (!running) this.settle(session); }
+  },
+
+  async applyQueuedRead(session, message, read, question, running) {
+    if (!read) { this.save(); this.changed(); this.flushLiveQueue(session); return; }
     if (read.drop.length) this.endQueued(session, read.drop, 'dropped');
     const label = read.answerer.label || read.answerer.model;
-    const running = session.routes?.at(-1);
+    const route = session.routes?.at(-1);
     // Hub: a stop stops its turn and the bots it started; the rest waits in its queue for the turn, as Hub takes nothing
     // mid-turn, and runs at the effort read (its turns are short), without being read again (send: triaged).
     if (this.isCoordinator()) {
@@ -165,8 +175,10 @@ module.exports = {
         localOnly: true, createdAt: Date.now() });
       this.save(); this.changed();
     };
-    // Stops the turn and sends the message as a new one at that effort (queuedMessage, restartWithMessage).
+    // Stops the turn and sends the message as a new one at that effort (queuedMessage, restartWithMessage). Once the turn
+    // has ended, it runs as the next one at that effort.
     const restart = (held, effort) => {
+      if (!running) return hold(held, effort, `Runs next at ${effort} effort.`, `Continuing at ${effort} effort.`);
       Object.assign(held, { restart: true, effort, triaged: true, ack: { text: `Stopping and continuing at ${effort} effort.`, label } });
       return this.queuedMessage(session.id, held.id, 'steer').catch(error => {
         delete held.restart; this.log.warn('Effort restart failed', { error: String(error?.message).slice(0, 300) });
@@ -187,15 +199,16 @@ module.exports = {
       return hold(held, held.effort, `Runs after this turn at ${held.effort} effort.`);
     }
     const wanted = read.effort ? this.effortVariant(read.effort, this.runMode(message.mode), session) : null;
-    const changes = !!wanted && wanted.effort !== running?.effort;
+    const changes = !!wanted && wanted.effort !== route?.effort;
     if (read.stop) {
       if (changes) return restart(message, wanted.effort);
       // A stop stops what it holds too, like the Stop button; they stay in the chat with Send again and Edit.
-      consume(wanted ? `Stopped. It already runs at ${running?.effort} effort.` : 'Stopped.');
+      consume(wanted ? `Stopped. It already runs at ${route?.effort} effort.` : 'Stopped.');
       this.endQueued(session, this.heldMessages(session), 'stopped'); this.save(); this.changed();
-      return this.stopTurn(session);
+      return running ? this.stopTurn(session) : undefined;
     }
-    if (changes && read.when === 'now') return restart(message, wanted.effort);
+    // With the turn ended there is nothing to ask now or after about.
+    if (changes && (read.when === 'now' || !running)) return restart(message, wanted.effort);
     if (changes && read.when === 'after') return hold(message, wanted.effort, `Runs after this turn at ${wanted.effort} effort.`, read.text);
     if (changes) {
       const text = `Change to ${wanted.effort} effort now, which stops the current work, or after this turn? Reply "now" or "after".`;
@@ -206,9 +219,10 @@ module.exports = {
     // Separate work waits for the next turn; the rest reaches the worker during its turn (deliverNow). Either way its
     // reply goes into the chat with the message.
     if (read.deliver === 'after') return hold(message, null, 'Runs after this turn.', read.text);
-    message.ack = { text: read.text, label };
+    // Read already: a provider that takes nothing mid-turn runs it after the turn without reading it again (send: triaged).
+    Object.assign(message, { triaged: true, ack: { text: read.text, label } });
     this.save();
-    this.deliverNow(session, message);
+    if (running) this.deliverNow(session, message); else this.changed();
   },
 
   // The Secondary model's queue: the messages it reads or holds that the worker does not have yet (held for a later turn,
