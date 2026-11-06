@@ -65,6 +65,19 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
   handle('browseWorkspace', (id, action, relative, kind, agentId) => require('./workspace/workspace-browser.cjs').browse(
     workspaceOf(id, agentId), action, relative, kind));
   // Without a desktop shell (browser access, headless hosts) a link returns its workspace file for the page to show.
+  // A bot's activity log (src/activity-log.cjs) in the default viewer; desktop only (not in remote.cjs REMOTE_METHODS).
+  handle('openActivityLog', async agentId => {
+    if (agentId !== 'main' && !agents.profile(agentId)) throw new Error('Unknown bot.');
+    const directory = agents.primary.log?.directory;
+    if (!directory || !openFolder) throw new Error('The activity log is unavailable here.');
+    const { activityLog } = require('./activity-log.cjs');
+    const log = activityLog(require('node:path').join(directory, 'activity'));
+    const file = log.file(agentId, agents.agentName(agentId));
+    log.append(file, '', agents.agentName(agentId));
+    const error = await openFolder(file);
+    if (error) throw new Error(`Could not open the activity log: ${error}`);
+    return file;
+  });
   handle('openFile', (id, target, agentId) => require('./workspace/linked-files.cjs').open(workspaceOf(id, agentId), target, linkShell?.() || null));
   handle('linkImage', (id, target, agentId) => require('./workspace/linked-files.cjs').image(workspaceOf(id, agentId), target, !linkShell?.()));
   handle('settings', (values, agentId) => { const snapshot = agents.settings(values, agentId); controller.warmRouter(); return snapshot; });

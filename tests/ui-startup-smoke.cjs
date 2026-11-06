@@ -21,6 +21,8 @@ const deadline = setTimeout(() => { console.error(`UI smoke timed out during ${p
 app.whenReady().then(async () => {
   phase = 'renderer startup';
   const controller = new Controller(path.join(root, 'sessions.json'), root);
+  // Tool and helper steps are hidden by default; these checks look at them, so they show (the default is checked later).
+  controller.data.settings.hideSteps = false;
   const documents = new (require('../src/documents.cjs').DocumentReader)();
   ipcMain.handle('readDocument', (_event, value) => documents.read(value));
   ipcMain.handle('bootstrap', () => controller.snapshot());
@@ -1938,14 +1940,13 @@ app.whenReady().then(async () => {
       inBounds: box.left >= 0 && box.top >= 0 && box.right <= innerWidth && box.bottom <= innerHeight };
   })()`);
   assert.equal(menuView.open, true);
-  assert.deepEqual(menuView.labels, ['Open', 'Notifications', 'Edit', 'Delete']);
+  assert.deepEqual(menuView.labels, ['Open', 'Notifications', 'Open activity log', 'Edit', 'Delete']);
   assert.equal(menuView.color, await window.webContents.executeJavaScript('getComputedStyle(document.querySelector("#delete-confirm")).color'),
     'Delete retains the theme danger color');
   assert.equal(menuView.inBounds, true, 'menu stays visible near window edges');
   assert.equal(await window.webContents.executeJavaScript('document.activeElement === document.querySelector("#agent-menu")'), true);
-  await window.webContents.executeJavaScript('document.querySelector("#agent-menu").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })); true');
-  await window.webContents.executeJavaScript('document.querySelector("#agent-menu").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })); true');
-  await window.webContents.executeJavaScript('document.querySelector("#agent-menu").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })); true');
+  for (let step = 0; step < 4; step++)
+    await window.webContents.executeJavaScript('document.querySelector("#agent-menu").dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })); true');
   assert.equal(await window.webContents.executeJavaScript('document.activeElement.textContent'), 'Edit');
   await window.webContents.executeJavaScript('document.querySelector("#agent-menu").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); true');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#agent-dialog").open'), false, 'Enter does not activate menu buttons');
@@ -2265,7 +2266,7 @@ app.whenReady().then(async () => {
     nested: true,
     composer: [true, 'Read only: Researcher gives this bot its work.', true, true, true],
     modelCommand: "This bot follows Researcher's model and settings.",
-    card: ['open', 'alerts', 'delete'],
+    card: ['open', 'alerts', 'log', 'delete'],
     deleteNote: [false, 'The bots it made go with it: Reviewer.'],
   }, 'a sub-bot is nested, read only, not editable, and deleted with its creator');
   // They show only while their creator or one of them is selected; the creator counts them.
@@ -2769,6 +2770,19 @@ app.whenReady().then(async () => {
   ipcMain.removeHandler('queuedMessage');
   background[0].chat.queue = background[0].chat.queue.filter(message => message.id !== 'ui-held');
   background[0].chat.items = background[0].chat.items.filter(item => item !== stoppedItem);
+  // Settings > General > Hide tool and helper steps: only the conversation shows; steps stay in the activity log.
+  const stepItem = { id: 'ui-hidden-step', type: 'commandExecution', status: 'completed', command: 'npm run hidden-step', aggregatedOutput: 'ok', exitCode: 0 };
+  const replyItem = { id: 'ui-visible-reply', type: 'agentMessage', phase: 'final_answer', text: 'Visible reply.' };
+  background[0].chat.items.push(stepItem, replyItem);
+  const chatText = () => window.webContents.executeJavaScript('document.querySelector("#messages").textContent');
+  await publish();
+  assert.match(await chatText(), /npm run hidden-step[\s\S]*Visible reply\./, 'turned off, steps show');
+  for (const c of agents.allControllers()) delete c.data.settings.hideSteps;
+  await publish();
+  assert.doesNotMatch(await chatText(), /npm run hidden-step/, 'hidden by default');
+  assert.match(await chatText(), /Visible reply\./);
+  for (const c of agents.allControllers()) c.data.settings.hideSteps = false;
+  background[0].chat.items = background[0].chat.items.filter(item => item !== stepItem && item !== replyItem);
   await publish();
   assert.match(await window.webContents.executeJavaScript('document.querySelector("#messages").textContent'), /Assignment update from You · Received · revision 2/);
   updateReceipt.amendment.state = 'applied';

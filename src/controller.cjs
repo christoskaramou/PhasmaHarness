@@ -16,6 +16,7 @@ const { ClaudeCLI, handoff } = require('./providers/claude.cjs');
 const { CAPABILITIES, API: API_CAPABILITIES, capabilities, isCLI } = require('./providers/capabilities.cjs');
 const { ProviderLimits } = require('./providers/limits.cjs');
 const { NO_LOG } = require('./log.cjs');
+const { activityLog } = require('./activity-log.cjs');
 const { NO_TRACE } = require('./trace.cjs');
 const { EventEmitter } = require('node:events');
 const { CodexClient } = require('./providers/codex.cjs');
@@ -368,6 +369,16 @@ class Controller extends EventEmitter {
     this.stateRevision = (this.stateRevision || 0) + 1;
     this.sharedRevision = this.stateRevision;
     this.store.save(this.data);
+    this.captureActivity();
+  }
+
+  // Every chat change is saved, so the bot's activity log takes what settled since (activity-log.cjs); a bot starting
+  // writes its log too (agents.initializeController), with its whole chat the first time. Only with the app's log folder
+  // (none in tests or before it is known).
+  captureActivity() {
+    if (!this.log?.directory) return;
+    try { activityLog(path.join(this.log.directory, 'activity')).capture(this); }
+    catch { /* the activity log never breaks a save */ }
   }
 
   // Cursor edit results saved before compactDiff held whole files and were re-encoded on every save and state update.
@@ -525,6 +536,11 @@ class Controller extends EventEmitter {
         throw new Error('Invalid tips setting.');
 
       next.showTips = values.showTips;
+    }
+    // Chats show only the conversation; tool calls and helper steps still go to each bot's activity log.
+    if (values.hideSteps !== undefined) {
+      if (typeof values.hideSteps !== 'boolean') throw new Error('Invalid setting for hiding tool and helper steps.');
+      next.hideSteps = values.hideSteps;
     }
     if (values.toolSelection !== undefined || values.largeResponses !== undefined) {
       if (this.busy && ((values.toolSelection !== undefined && values.toolSelection !== next.toolSelection) ||
@@ -1508,9 +1524,20 @@ class Controller extends EventEmitter {
     if (!session || this.blockedReason() || session.queueSending || this.connection !== 'ready' || session.queuePaused) return;
     setImmediate(() => {
       if (this.agents?.groupRuns.has(session.id) || this.blockedReason() || session.queueSending || this.connection !== 'ready' || session.queuePaused || !this.data.sessions.includes(session)) return;
-      const next = session.queue?.find(message => !message.agentReply) ||
+      let next = session.queue?.find(message => !message.agentReply) ||
         session.queue?.find(message => this.canReceiveQueued(session, message));
       if (!next || next.error) return;
+      // A step the Secondary model split off waits while the last turn asks the user something ([task: needs-input]);
+      // the user's answer runs first, and the steps go on after it (2026-11-06: step 2 ran past an open question).
+      const waits = !!next.step && session.job?.status === 'needs-input';
+      if (!!next.waitingAnswer !== waits) {
+        for (const message of session.queue.filter(item => item.step)) { if (waits) message.waitingAnswer = true; else delete message.waitingAnswer; }
+        this.save(); this.changed(session);
+      }
+      if (waits) {
+        next = session.queue.find(message => !message.agentReply && !message.step);
+        if (!next || next.error) return;
+      }
       if (this.busy) {
         if (!session.group || this.busy === session.id) return;
         try { if (!groupChats.directRecipients(this.agents, session, next)) return; }
@@ -1651,8 +1678,9 @@ class Controller extends EventEmitter {
     if (!this.liveInput || !this.liveInputCaps?.liveQueue || this.busy !== session.id || session.queueSending || session.queuePaused ||
         session.compacting || this.stopping.has(session.id) || session.delegation || this.isCoordinator()) return;
     const message = session.queue?.[0];
-    // Not while the Secondary model reads it, nor once it holds it for the next turn at another effort (readQueued).
-    if (!message || message.waiting || message.error || message.uncertain || message.agentReply || message.routineRun || message.wikiTaskId || message.triage || message.hold ||
+    // Not while the Secondary model reads it, nor once it holds it for the next turn at another effort (readQueued), nor
+    // a step it split off: each runs as its own turn (2026-11-06: steps 2 and 3 were passed into step 1's running turn).
+    if (!message || message.waiting || message.error || message.uncertain || message.agentReply || message.routineRun || message.wikiTaskId || message.triage || message.hold || message.step ||
         (message.mode && message.mode !== this.liveInputMode)) return;
     this.queuedMessage(session.id, message.id, 'live').catch(() => {});
   }

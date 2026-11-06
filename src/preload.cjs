@@ -31,6 +31,7 @@ api.onVoice = callback => {
 api.deleteAgent = id => ipcRenderer.invoke('deleteAgent', id);
 api.clearConversation = (agentId, groupId) => ipcRenderer.invoke('clearConversation', agentId, groupId);
 api.answerConfirmation = (id, accepted) => ipcRenderer.invoke('answerConfirmation', id, accepted);
+api.openActivityLog = agentId => ipcRenderer.invoke('openActivityLog', agentId);
 api.onConfirmation = callback => {
   const listener = (_event, options) => callback(options);
   ipcRenderer.on('confirmation', listener);

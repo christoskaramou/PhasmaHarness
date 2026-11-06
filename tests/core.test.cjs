@@ -2759,6 +2759,65 @@ test('the Secondary model decides how work reaches the worker: split into turns,
   complete(controller, session, fake.turnIds.at(-1)); await flush();
 });
 
+test('a bot’s activity log is written as its chat changes, and chats can hide tool and helper steps', async t => {
+  // 2026-11-06, the user: a log of everything per bot, and a General option to show only the conversation.
+  const { controller, fake } = await setup(t);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-activity-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  controller.log = { directory, info() {}, warn() {}, error() {}, tail: () => [] };
+  const session = controller.create();
+  controller.save();
+  await controller.send({ id: session.id, text: 'hello log', mode: 'terra-light', task: 'off' });
+  controller.notification({ method: 'item/completed', params: { threadId: session.threadId, turnId: fake.turnIds.at(-1), item: { id: 'a-log', type: 'agentMessage', phase: 'final_answer', text: 'Logged reply.' } } });
+  complete(controller, session, fake.turnIds.at(-1)); await flush();
+  controller.flushSave(); // the throttled save that follows the turn's last change
+  const text = fs.readFileSync(path.join(directory, 'activity', 'Hub-main.log'), 'utf8');
+  assert.match(text, /You:\n {4}hello log/);
+  assert.match(text, /Route [^\n]*\(manual\)/);
+  assert.match(text, /Hub[^\n]*:\n {4}Logged reply\./);
+  controller.settings({ hideSteps: true });
+  assert.equal(controller.data.settings.hideSteps, true);
+  assert.throws(() => controller.settings({ hideSteps: 'yes' }), /Invalid setting for hiding/);
+});
+
+test('split steps run as their own turns: never passed into a running turn, and they wait while the last turn asks the user', async t => {
+  // 2026-11-06: steps 2 and 3 were passed into step 1's running turn, and a step started while step 1 asked the user.
+  const { controller, fake, smartRouter } = await setup(t, { quick: true });
+  smartRouter.complete = async request => {
+    if (!request.schema?.properties?.kind) return { decision: { verdict: 'accept', findings: [] } };
+    const { message } = JSON.parse(request.prompt);
+    return { decision: { kind: 'ack', text: 'On it.', stop: false, effort: 'none', when: 'now', steps: message === 'plan, build' ? ['Plan it.', 'Build it.'] : [], deliver: 'now', drop: [] } };
+  };
+  const session = controller.create();
+  const lastInput = () => fake.calls.findLast(call => call.method === 'turn/start').params.input[0].text;
+  const reply = (turn, text) => {
+    controller.notification({ method: 'item/completed', params: { threadId: session.threadId, turnId: turn, item: { id: `a-${turn}`, type: 'agentMessage', phase: 'final_answer', text } } });
+    complete(controller, session, turn);
+  };
+  await controller.send({ id: session.id, text: 'plan, build', mode: 'terra-light', task: 'off' });
+  const first = fake.turnIds.at(-1);
+  // Not passed into the running turn, though the provider takes messages mid-turn.
+  const live = [];
+  Object.assign(controller, { liveInput: async message => { live.push(message.text); }, liveInputCaps: { liveQueue: true }, liveInputMode: 'terra-light' });
+  controller.flushLiveQueue(session); await flush();
+  Object.assign(controller, { liveInput: null, liveInputCaps: null, liveInputMode: null });
+  assert.deepEqual(live, []);
+  // Step 1 ends asking the user: step 2 waits, and the user's answer runs first.
+  reply(first, 'Which folder?\n\n[task: needs-input]');
+  await flush();
+  assert.deepEqual([fake.turnIds.at(-1), session.queue[0].waitingAnswer], [first, true], 'step 2 did not start');
+  await controller.send({ id: session.id, text: 'the src folder', mode: 'terra-light', task: 'off' });
+  const answer = fake.turnIds.at(-1);
+  assert.notEqual(answer, first);
+  assert.match(lastInput(), /the src folder/);
+  // Answered: the step goes on.
+  reply(answer, 'Planned.\n\n[task: done]');
+  await until(() => fake.turnIds.at(-1) !== answer);
+  assert.match(lastInput(), /Step 2 of 2: Build it\./);
+  assert.equal(session.queue.length, 0);
+  complete(controller, session, fake.turnIds.at(-1)); await flush();
+});
+
 test('the Secondary model keeps its own queue: it always replies, drops what you cancel, and Stop or a restart leave Send again and Edit', async t => {
   // 2026-11-06, the user: the Secondary model's queue is not the worker's (Send now, Edit, Remove, only when it is off,
   // fails or times out); it shows in the chat with Remove, it controls it, and Stop ends it, leaving Send again and Edit.

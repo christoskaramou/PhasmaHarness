@@ -760,6 +760,7 @@ class Agents extends EventEmitter {
   }
 
   async initialize() {
+    this.primary.captureActivity?.(); // Hub's activity log, its chat written once (activity-log.cjs)
     await Promise.all([...this.allControllers()].filter(c => c !== this.primary).map(c => this.initializeController(c)));
     try {
       this.migrateAutoModes();
@@ -784,6 +785,7 @@ class Agents extends EventEmitter {
       try {
         this.sync(controller);
         await this.configure(controller);
+        controller.captureActivity?.(); // every bot has its activity log, its chat written once (activity-log.cjs)
         if (controller.smartRouter.jev) controller.smartRouter.jev.accountRequest = controller.smartRouter.accountRequest;
         if (!this.closing) await controller.initialize(this.primary.connection === 'connecting' ? null : this.primary);
       } catch (error) {
@@ -922,7 +924,7 @@ class Agents extends EventEmitter {
     // so changing them never waits for agents to stop.
     const local = Object.keys(values).every(key => ['workspace', 'mode', 'access', 'replySuggestions', 'chatScanModel', 'checkResponses',
       'checkerRevise', 'checkerEscalate', 'scanReplies', 'escalateFailedChecks', 'dream', 'dreamModel', 'secondaryModel', 'router', 'effortCap', 'showTips',
-      'coldStartMinutes', 'coldStartPercent'].includes(key));
+      'hideSteps', 'coldStartMinutes', 'coldStartPercent'].includes(key));
     if (!local && this.busy) throw new Error('Stop all agents before changing shared settings.');
     if (agentId !== 'main' && ['router', 'secondaryModel', 'effortCap'].some(key => values[key] !== undefined))
       throw new Error('Change a bot’s Router, Secondary model and Effort cap in its Edit dialog.');
@@ -940,7 +942,7 @@ class Agents extends EventEmitter {
       if (!c.busy) this.sync(c);
       // A busy agent keeps its turn's settings; reply suggestions and tips only affect the window, so they apply at once.
       else {
-        for (const key of ['replySuggestions', 'showTips', 'coldStartMinutes', 'coldStartPercent']) {
+        for (const key of ['replySuggestions', 'showTips', 'hideSteps', 'coldStartMinutes', 'coldStartPercent']) {
           if (values[key] !== undefined)
             c.data.settings[key] = this.primary.data.settings[key];
         }

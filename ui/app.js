@@ -1458,6 +1458,11 @@ async function agentAction(event) {
   if (event.target.closest('.agent-bell') || button.dataset.action === 'alerts') return openBotAlerts(id, button);
   try {
     if (button.dataset.action === 'edit') return id === 'main' ? editHub(profile) : editAgent(profile);
+    // The bot's activity log: every chat message, tool call and helper step (src/activity-log.cjs).
+    if (button.dataset.action === 'log') {
+      if (!api.openActivityLog) throw new Error('Open the activity log in the desktop app.');
+      return await api.openActivityLog(id);
+    }
     if (button.dataset.action === 'delete') {
       window.getSelection()?.removeAllRanges();
       delete $('#delete-dialog').dataset.groupId;
@@ -1528,7 +1533,7 @@ function agentContextMenu(event) {
       .map(button => ({ action: button.dataset.action, disabled: button.disabled }));
   closeAgentMenu();
   agentMenuOpener = entry.matches('button') ? entry : entry.querySelector('button[data-agent]');
-  const labels = { open: 'Open', alerts: 'Notifications', rename: 'Rename', edit: 'Edit', stop: 'Stop', delete: 'Delete' };
+  const labels = { open: 'Open', alerts: 'Notifications', log: 'Open activity log', rename: 'Rename', edit: 'Edit', stop: 'Stop', delete: 'Delete' };
   agentMenu.replaceChildren(...actions.map(({ action, disabled }) => {
     const item = element('button', 'agent-menu-item', labels[action]);
     item.type = 'button'; item.tabIndex = -1; item.setAttribute('role', 'menuitem');
@@ -1958,7 +1963,7 @@ function renderAgents() {
       (row.batchIdle ? 'Batch worker · Edit and save to keep this bot.' : row.status === 'Starting' ? 'Connecting providers in the background…' : 'Ready for a new task'));
     activity.title = activity.textContent;
     const actions = element('div', 'agent-card-actions');
-    actions.append(button('Open', row, 'open', switching), button('Notifications', row, 'alerts'));
+    actions.append(button('Open', row, 'open', switching), button('Notifications', row, 'alerts'), button('Activity log', row, 'log'));
     if (row.id === 'main')
       actions.append(button('Edit', row, 'edit'));
     else if (isSubBot(row))
@@ -3019,6 +3024,9 @@ function refreshMessageTimes() {
 setInterval(refreshMessageTimes, 30000);
 document.addEventListener('visibilitychange', refreshMessageTimes);
 
+// What a chat shows with Hide tool and helper steps on: the conversation itself.
+const CHAT_ITEM_TYPES = new Set(['userMessage', 'agentMessage', 'plan', 'agentResult', 'agentArtifact']);
+
 // A queue action: Send now, Edit or Remove on a queued message, Remove on one the Secondary model holds, or Send again and
 // Edit on one that ended without running. Edit moves the message into the composer.
 async function queueAction(sessionId, messageId, action) {
@@ -3043,7 +3051,7 @@ function secondaryQueued(chat) {
     id: `queued-${message.id}`, type: 'userMessage', createdAt: message.createdAt, ...(message.fileMessage ? { fileMessage: message.fileMessage } : {}),
     content: [{ type: 'text', text: message.text }, ...(message.images || []).map(url => ({ type: 'image', url }))],
     queued: { id: message.id, reply: message.ack?.text || null,
-      status: message.triage ? 'Reading…' : message.error ? `Not sent: ${message.error}` : message.note && message.hold && (message.effort || message.hubEffort) ? message.note : 'Queued · runs after this turn' },
+      status: message.triage ? 'Reading…' : message.error ? `Not sent: ${message.error}` : message.waitingAnswer ? 'Waits for your answer' : message.note && message.hold && (message.effort || message.hubEffort) ? message.note : 'Queued · runs after this turn' },
   }));
 }
 
@@ -3064,10 +3072,13 @@ function renderMessages(session) {
     });
   });
   if (chats.length > 1) entries.sort((a, b) => a.at - b.at);
+  // Settings > General > Hide tool and helper steps: only the conversation shows; the rest stays in the activity log.
+  const hideSteps = state.settings.hideSteps !== false; // on by default (2026-11-06, the user)
   for (const { item, session } of entries) {
     const maintenance = (session.routes || []).filter(route => route.wikiMaintenanceTaskId);
     // bellOnly: a notification (e.g. the test pool's passed and skipped tests) listed in the bot's bell, not the chat.
     if (item.internal || item.agentReply || item.bellOnly || maintenance.some(route => route.messageId === (item.clientId || item.id) || (route.turnId && route.turnId === item.turnId))) continue;
+    if (hideSteps && !CHAT_ITEM_TYPES.has(item.type)) continue;
     ids.add(item.id);
     let entry = messageNodes.get(item.id);
     const selected = item.type === 'userMessage' ? session.routes.find(r => r.messageId === (item.clientId || item.id)) : null;
@@ -3075,7 +3086,7 @@ function renderMessages(session) {
     const who = item.type === 'userMessage' ? item.routineRun ? routine : 'You' : writer(item, session);
     // A comparison's batch report is replaced by its comparison card.
     const batch = item.hubBatch && !item.comparisonId && fleetState?.batchReports?.[item.hubBatch.id];
-    const signature = JSON.stringify([item, selected, who, batch]);
+    const signature = JSON.stringify([item, selected, who, batch, hideSteps]);
     if (entry?.signature === signature) continue;
     if (!entry) {
       const node = document.createElement('div');
@@ -3183,7 +3194,7 @@ function renderMessages(session) {
         });
       }
       entry.routeNode?.remove(); entry.routeNode = null;
-      if (item.pending || (selected && !['manual', 'hub-auto'].includes(selected.source))) {
+      if (item.pending || (selected && !['manual', 'hub-auto'].includes(selected.source) && !hideSteps)) {
         const row = element('div', 'routing-row');
         entry.routeNode = row; node.after(row);
         if (item.pending && !item.error && session.pendingAck) row.append(element('div', 'message-bubble quick-reply', session.pendingAck.text));
@@ -3196,7 +3207,7 @@ function renderMessages(session) {
         entry.routeNode = row; node.after(row);
         row.append(element('div', 'message-bubble quick-reply', item.queued.reply));
       }
-      if (selected && selected.source !== 'manual' && selected.source !== 'hub-auto') {
+      if (selected && selected.source !== 'manual' && selected.source !== 'hub-auto' && !hideSteps) {
         const details = element('details', 'activity');
         const meter = selected.router;
         const cost = meter ? ` · ${meter.skipped ? 'local preflight · no model call' : routerName(meter.model, meter.effort)} · ${(meter.durationMs / 1000).toFixed(1)}s${Number.isFinite(meter.usage?.totalTokens) ? ` · ${meter.usage.totalTokens.toLocaleString()} router tokens` : ''}` : ' · no model call';
@@ -4004,6 +4015,7 @@ $('#settings').onclick = async () => {
   $('#settings-jev-images').value = state.settings.jevImages !== false && state.jev?.configured ? 'on' : 'off';
   $('#settings-jev-images').disabled = !state.jev?.configured;
   $('#settings-reply-suggestions').value = state.settings.replySuggestions === false ? 'off' : 'on';
+  $('#settings-hide-steps').value = state.settings.hideSteps === false ? 'off' : 'on';
   $('#settings-cold-start-minutes').value = state.settings.coldStartMinutes ?? 30;
   $('#settings-cold-start-percent').value = state.settings.coldStartPercent ?? 60;
   $('#settings-show-tips').value = state.settings.showTips === false ? 'off' : 'on';
@@ -4249,7 +4261,7 @@ const settingsFields = {
   ...ON_SWITCHES,
   'settings-context': 'contextRanking', 'settings-tools': 'toolSelection',
   'settings-jev-images': 'jevImages',
-  'settings-reply-suggestions': 'replySuggestions', 'settings-show-tips': 'showTips',
+  'settings-reply-suggestions': 'replySuggestions', 'settings-show-tips': 'showTips', 'settings-hide-steps': 'hideSteps',
   'settings-cold-start-minutes': 'coldStartMinutes', 'settings-cold-start-percent': 'coldStartPercent',
   'settings-dream-model': 'dreamModel', 'settings-dream-effort': 'dreamModel',
 };
@@ -4257,7 +4269,7 @@ $('#settings-form').addEventListener('input', clearSaved);
 $('#settings-form').addEventListener('change', event => {
   const control = event.target, key = settingsFields[control.id];
   if (!key) return;
-  const toggle = ['jevImages', 'replySuggestions', 'showTips', ...Object.values(ON_SWITCHES)].includes(key);
+  const toggle = ['jevImages', 'replySuggestions', 'showTips', 'hideSteps', ...Object.values(ON_SWITCHES)].includes(key);
   const value = toggle ? control.value === 'on' : control.type === 'number' ? Number(control.value)
     : key === 'dreamModel' ? modelEffortChoice($('#settings-dream-model'), $('#settings-dream-effort'), state.presets) : control.value;
   saveSetting(control, key, value);
