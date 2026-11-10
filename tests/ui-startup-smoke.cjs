@@ -39,6 +39,8 @@ app.whenReady().then(async () => {
   ipcMain.handle('preview', () => { previews++; return { label: 'Auto', reason: 'Smoke test' }; });
   const imageRequests = [];
   ipcMain.handle('image', (_event, ...args) => { imageRequests.push(args); return 'data:image/jpeg;base64,/9j/4AAQ'; });
+  const stepRequests = [];
+  ipcMain.handle('stepDetail', (_event, ...args) => { stepRequests.push(args); return { arguments: { command: 'npm test' }, result: [{ type: 'text', text: 'all 12 passed' }] }; });
   ipcMain.handle('setAppearance', () => {});
   ipcMain.handle('replySuggestion', () => null);
   const sent = [];
@@ -681,6 +683,26 @@ app.whenReady().then(async () => {
     titles: ['Jev reads image 1', 'Grok 4.7 · Extra High · agents_list', 'claude-sonnet-5-5 · low reads image 1'], closed: [true, true, true],
     opened: 'Is there an error message visible? → Jev: yes (0.99)\nAsked by Grok 4.7 · Extra High · 264 ms', sameAsCommands: true });
   console.log('Turn steps are activity rows like other calls ("Jev reads image 1" opens to Jev\'s answer) between the message and the reply passed');
+  // A tool step arrives as its summary; its input and output are read when its card is opened (2026-11-10: they were 35 MB
+  // of the user's 64 MB state, too much for browser access). A step that carries them shows them without asking.
+  const toolSteps = await window.webContents.executeJavaScript(`(async () => {
+    current().items.push({ id: 'tool-lazy', type: 'mcpToolCall', server: 'Claude CLI', tool: 'Bash', status: 'completed', subject: 'Run the tests' },
+      { id: 'tool-inline', type: 'mcpToolCall', server: 'Claude CLI', tool: 'Read', status: 'completed', arguments: { file_path: 'a.txt' }, result: 'file text' });
+    render();
+    const [lazy, inline] = [...document.querySelectorAll('#messages > * > details.activity')].slice(-2);
+    const closed = lazy.querySelector('pre').textContent;
+    lazy.open = true;
+    for (let i = 0; i < 200 && !lazy.querySelector('pre').textContent; i++) await new Promise(resolve => setTimeout(resolve, 10));
+    lazy.open = false; lazy.open = true;
+    await new Promise(resolve => setTimeout(resolve, 50));
+    return { titles: [lazy, inline].map(row => row.querySelector('summary').textContent), closed, opened: lazy.querySelector('pre').textContent,
+      inline: inline.querySelector('pre').textContent };
+  })()`);
+  await window.webContents.executeJavaScript('current().items.splice(-2); render(); true');
+  assert.deepEqual(toolSteps, { titles: ['Claude CLI · Bash · completed', 'Claude CLI · Read · completed'], closed: '',
+    opened: JSON.stringify([{ type: 'text', text: 'all 12 passed' }], null, 2), inline: '"file text"' });
+  assert.deepEqual(stepRequests.map(request => request[1]), ['tool-lazy'], 'the step is read once, when it is first opened');
+  console.log('A tool step reads its input and output when its card is opened passed');
   console.log('Text/code file snapshots, binary rejection, safe collapsed display, recall and failed-send preservation passed');
   deadline.refresh(); phase = 'document attachments';
   const documentFixtures = require('./fixtures/documents.cjs');

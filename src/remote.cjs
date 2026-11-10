@@ -6,13 +6,9 @@ const { pipeline } = require('node:stream/promises');
 const { promisify } = require('node:util');
 const zlib = require('node:zlib');
 const { randomBytes, randomUUID, createHmac, timingSafeEqual } = require('node:crypto');
-const { trimFleet } = require('../ui/agent-state.js');
+const { stateStream } = require('../ui/agent-state.js');
 
 const gzip = promisify(zlib.gzip);
-// A browser gets everything at least this often, as the desktop window does every 5 s: it repairs a chat whose edit did
-// not move its bot's revision. Rarely here: at 60 s it was about 1 MB compressed per connection per minute on the user's
-// phone (2026-10-26), and opening or reloading the page always starts with everything.
-const FULL_STATE_MS = 10 * 60000;
 
 const MAX_BODY = 16 * 1024 * 1024;
 const MAX_EVENT = 32 * 1024 * 1024;
@@ -20,7 +16,7 @@ const SESSION_MS = 30 * 24 * 60 * 60 * 1000;
 const CLIENT_ID = /^[a-f0-9-]{36}$/;
 const REMOTE_METHODS = new Set([
   'bootstrap', 'saveAgent', 'renameHub', 'saveGroup', 'deleteAgent',
-  'browseWorkspace', 'settings', 'create', 'permissions', 'load', 'image', 'rename', 'archive',
+  'browseWorkspace', 'settings', 'create', 'permissions', 'load', 'image', 'stepDetail', 'rename', 'archive',
   'deleteSession', 'preview', 'send', 'stop', 'reviseJob', 'reconcileJob', 'jobBudget',
   'stopArtifactRun', 'artifactAction', 'artifactDownload', 'stopDownloads', 'appInfo', 'runnerInfo', 'updateStatus', 'queuedMessage', 'backgroundTask', 'replySuggestion', 'suggestWiki', 'compact',
   'clearConversation', 'acknowledgeTask', 'applyCopy', 'undoComparison', 'undoRule', 'dreamNow', 'dismissSkillNotice', 'proposeWiki', 'answer', 'readDocument', 'answerConfirmation',
@@ -256,7 +252,22 @@ class RemoteRunner {
     let result;
     try { result = await this.invoke(value.method, value.args, options => this.ask(client, options)); }
     catch (error) { throw failure(400, error.message || 'Runner command failed.'); }
-    return this.json(res, 200, { result: result ?? null });
+    return this.json(res, 200, { result: this.reply(this.clients.get(client), value, result) ?? null });
+  }
+
+  // A command's snapshot as this browser gets it: only the chats that changed since its last pushed state (stateStream).
+  // Whole snapshots here were 64 MB on the user's data (2026-11-10), over MAX_EVENT, so every action failed on the phone.
+  // A page with no event stream gets no chats: its stream starts with everything, and it drops a reply it cannot place.
+  // bootstrap(true) is a page that lost its copies: everything goes again through its stream, which keeps the order.
+  reply(client, { method, args }, result) {
+    const trim = state => client ? client.stream.reply(state) : { stateBase: -1 };
+    if (method === 'bootstrap' && args[0] === true && client) {
+      client.stream.reset();
+      this.sendState(client, result);
+      return { stateBase: -1 };
+    }
+
+    return result?.agentStates ? trim(result) : result?.state?.agentStates ? { ...result, state: trim(result.state) } : result;
   }
 
   async prepareDownload(req, res, session, args) {
@@ -335,12 +346,12 @@ class RemoteRunner {
     const previous = this.clients.get(key);
     if (!previous && this.clients.size >= 8) throw failure(429, 'Too many connected browser views.');
     if (previous) this.disconnect(key, previous);
-    // The first state is complete and records what this browser holds; later ones carry only the bots that changed.
-    const sent = new Map();
-    const initial = this.event('state', trimFleet(this.snapshot(), sent, true));
+    // The first state is complete and records what this browser holds; later ones carry only the chats that changed.
+    const stream = stateStream();
+    const initial = this.event('state', stream.push(this.snapshot()));
     // A gzip stream flushed after every event: compressed, yet each update still arrives at once.
     const out = res.acceptsGzip ? zlib.createGzip({ flush: zlib.constants.Z_SYNC_FLUSH }) : res;
-    const client = { key, res, out, expires: session.expires, blocked: false, latest: new Map(), sent, fullAt: Date.now(), pendingState: null };
+    const client = { key, res, out, expires: session.expires, blocked: false, latest: new Map(), stream, pendingState: null };
     this.clients.set(key, client);
     res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', Connection: 'keep-alive', 'X-Accel-Buffering': 'no',
       ...(out === res ? {} : { 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' }) });
@@ -378,7 +389,7 @@ class RemoteRunner {
     this.write(client, initial);
   }
 
-  // Only the bots whose chats changed since this browser's last state (trimFleet), and everything every FULL_STATE_MS.
+  // Only the chats that changed since this browser's last state, and everything every FULL_STATE_MS (stateStream).
   // While the browser is behind, only the newest state waits, trimmed when it is written: trimming records what was sent,
   // so a state replaced before sending would leave the browser holding chats it never got.
   sendState(client, value) {
@@ -387,10 +398,7 @@ class RemoteRunner {
       return;
     }
 
-    const full = Date.now() - client.fullAt >= FULL_STATE_MS;
-    if (full)
-      client.fullAt = Date.now();
-    this.write(client, this.event('state', trimFleet(value, client.sent, full)));
+    this.write(client, this.event('state', client.stream.push(value)));
   }
 
   event(type, value) {

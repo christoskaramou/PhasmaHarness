@@ -82,6 +82,46 @@ var HarnessAgentState = (() => {
     return trimmed;
   }
 
+  // What one receiver (the desktop window, or one browser connection) has been sent.
+  // push(): the next state of its stream, numbered (stateSeq). Only the chats that changed go, and everything every
+  // FULL_STATE_MS, which repairs a chat whose edit did not move its bot's revision. That was every 5 s for the window:
+  // 64 MB and a 0.2 s freeze each time on the user's 16 bots (2026-11-10). At 60 s it cost a phone about 1 MB a minute
+  // (2026-10-26).
+  // reply(): a command's answer. The same trimming, but not recorded as sent, because a page may never apply a reply;
+  // stateBase names the push it builds on (acceptState). A full state as every reply was 64 MB per bot switch or send.
+  // Numbers start at the clock and are shared by every stream, so a reply from before a reconnect or a restart never
+  // matches a later push.
+  const FULL_STATE_MS = 10 * 60000;
+  let lastSeq = Date.now();
+  function stateStream() {
+    let sent = new Map(), seq = 0, fullAt = Date.now();
+    return {
+      /** @param {any} state */
+      push(state) {
+        const full = Date.now() - fullAt >= FULL_STATE_MS;
+        if (full) fullAt = Date.now();
+        seq = ++lastSeq;
+        return { ...trimFleet(state, sent, full), stateSeq: seq };
+      },
+      /** @param {any} state */
+      reply: state => ({ ...trimFleet(state, new Map(sent), false), stateBase: seq }),
+      // The receiver holds nothing (a page load, or it asked for everything): the next push carries every chat.
+      reset() { sent = new Map(); },
+      get started() { return sent.size > 0; },
+    };
+  }
+
+  // The window side of stateStream. A push always applies. A reply is dropped (false) when a later push was applied
+  // first, since it would put older chats over newer ones and that push carries everything the reply does, and when the
+  // page holds nothing yet. A reply ahead of the page (a browser whose stream lags) applies: the pushes on their way
+  // follow it. applied: { seq } of this page.
+  /** @param {any} next @param {{seq?: number}} applied */
+  function acceptState(next, applied) {
+    if (next?.stateBase !== undefined) return applied.seq !== undefined && next.stateBase >= applied.seq;
+    if (next?.stateSeq !== undefined) applied.seq = next.stateSeq;
+    return true;
+  }
+
   // The window side: a context marked sessionsKept reuses the chats it already holds, and one with sessionIds fills the
   // chats it was not sent from them. Null means one is missing (after a reload, say), so the caller asks for a full state.
   /** @param {any} next @param {any} previous */
@@ -105,6 +145,6 @@ var HarnessAgentState = (() => {
     return next;
   }
 
-  return { INHERITED, AUTO_EFFORT, autoEffortMode, parseAutoEffort, BOT_SETTINGS, isSubBot, inheritedSource, backgroundView, trimFleet, keepSessions };
+  return { INHERITED, AUTO_EFFORT, autoEffortMode, parseAutoEffort, BOT_SETTINGS, isSubBot, inheritedSource, backgroundView, trimFleet, keepSessions, stateStream, acceptState, FULL_STATE_MS };
 })();
 if (typeof module !== 'undefined') module.exports = HarnessAgentState;

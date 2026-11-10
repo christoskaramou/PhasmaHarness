@@ -324,7 +324,8 @@ test('independent browser commands and state streams preserve asynchronous Stop 
   });
   const token = await f.pair(), client = randomUUID();
   const events = await stream(f, token, client); t.after(() => events.close());
-  assert.deepEqual(await events.next(), { type: 'state', value: { jobs: ['kept'] } });
+  const first = await events.next();
+  assert.deepEqual([first.type, first.value.jobs, typeof first.value.stateSeq], ['state', ['kept'], 'number']);
   const work = f.call(token, client, 'send', [{ id: 'chat', text: 'long job' }]);
   f.remote.broadcast('state', { jobs: ['active'], receipt: 'durable' });
   assert.equal((await events.next()).value.receipt, 'durable');
@@ -366,6 +367,39 @@ test('a browser gets only the bots whose chats changed, and one that falls behin
     'a change made while behind is not lost to the state that replaced it');
 });
 
+// 2026-11-10: every action's reply carried the whole fleet, 64 MB on the user's data and over the 32 MB limit, so the
+// phone could neither load the history nor act on it.
+test('a command reply carries only the chats that changed since the last pushed state, without counting them as sent', async t => {
+  const chat = (id, count) => ({ id, status: 'idle', items: Array.from({ length: count }, (_, i) => ({ id: `${id}-${i}` })) });
+  const bot = (revision, chatId, count) => ({ stateRevision: revision, sessions: [chat(chatId, count)] });
+  let current = { agentStates: { a: bot(1, 'a1', 2), b: bot(1, 'b1', 3) }, settings: {} };
+  const f = await fixture(t, async () => current);
+  f.remote.snapshot = () => current;
+  const token = await f.pair(), client = randomUUID();
+  const result = async (method, args) => (await (await f.call(token, client, method, args)).json()).result;
+  assert.deepEqual(await result('load', ['a1']), { stateBase: -1 }, 'a page with no event stream gets no chats');
+  const events = await stream(f, token, client); t.after(() => events.close());
+  const first = (await events.next()).value;
+
+  current = { agentStates: { a: bot(2, 'a1', 3), b: bot(1, 'b1', 3) }, settings: {} };
+  const reply = await result('load', ['a1']);
+  assert.equal(reply.stateBase, first.stateSeq, 'the reply names the pushed state it builds on');
+  assert.equal(reply.agentStates.a.sessions[0].items.length, 3, 'the changed bot comes in full');
+  assert.deepEqual([reply.agentStates.b.sessionsKept, reply.agentStates.b.sessions], [true, undefined], 'the unchanged one is left out');
+  const nested = await f.remote.reply([...f.remote.clients.values()][0], { method: 'clearConversation', args: [] }, { cleared: true, state: current });
+  assert.deepEqual([nested.cleared, nested.state.stateBase, nested.state.agentStates.b.sessionsKept], [true, first.stateSeq, true]);
+  f.remote.broadcast('state', current);
+  const next = (await events.next()).value;
+  assert.equal(next.agentStates.a.sessions?.[0].items.length, 3, 'the next pushed state still carries what the reply held');
+  assert.ok(next.stateSeq > first.stateSeq);
+
+  // A page that lost its copies asks for everything; it comes through the stream, in order with the other states.
+  assert.deepEqual(await result('bootstrap', [true]), { stateBase: -1 });
+  const full = (await events.next()).value;
+  assert.deepEqual([full.agentStates.a.sessions?.length, full.agentStates.b.sessions?.length], [1, 1]);
+  assert.ok(full.stateSeq > next.stateSeq);
+});
+
 test('the update stream, replies and UI files are gzip-compressed for a browser that accepts it, and plain otherwise', async t => {
   const f = await fixture(t, async () => ({ history: 'y'.repeat(5000) }));
   const token = await f.pair(), client = randomUUID();
@@ -381,7 +415,7 @@ test('the update stream, replies and UI files are gzip-compressed for a browser 
     let received = '';
     decoded.on('data', chunk => { received += chunk; if (received.includes('\n\n')) resolve(received); });
   });
-  assert.match(text, /^event: state\ndata: \{"jobs":\["kept"\]\}\n\n/, 'each event arrives at once, not held for a full gzip block');
+  assert.match(text, /^event: state\ndata: \{"jobs":\["kept"\],"stateSeq":\d+\}\n\n/, 'each event arrives at once, not held for a full gzip block');
 
   const compressed = await f.request('/api/call', { client, method: 'bootstrap', args: [] }, token, { 'Accept-Encoding': 'gzip' });
   assert.equal(compressed.headers.get('content-encoding'), 'gzip');

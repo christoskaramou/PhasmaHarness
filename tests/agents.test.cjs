@@ -170,15 +170,24 @@ test('state snapshots omit inline images, keep their counts and serve each image
   await bot.send({ id: chat.id, text: 'And this.', images: [queued], mode: 'terra-light', task: 'on' });
   const item = chat.items.find(entry => entry.type === 'userMessage' && entry.content.some(part => part.type === 'image'));
   assert.equal(chat.queue[0].images[0], queued);
-  chat.items.push({ id: 'tool-image', type: 'mcpToolCall', status: 'completed', result: [
+  chat.items.push({ id: 'tool-image', type: 'mcpToolCall', status: 'completed', arguments: { description: 'Take a\n  screenshot', command: 'shot --all' }, result: [
     { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'Q0ND'.repeat(1000) } },
     { type: 'image', mimeType: 'image/png', data: 'RERE'.repeat(1000) }, { type: 'text', data: 'plain tool text' }] });
   const snapshot = agents.snapshot(), text = JSON.stringify(snapshot);
   assert.equal(text.includes('QUFB'), false);
   assert.equal(text.includes('QkJC'), false);
   assert.equal(text.includes('Q0ND') || text.includes('RERE'), false, 'tool-result images stay on the runner');
-  assert.match(text, /plain tool text/);
   const view = snapshot.agentStates[bot.agentId].sessions.find(session => session.id === chat.id);
+  // 2026-11-10: tool steps' input and output were 35 MB of the user's 64 MB state, which no longer fit browser access.
+  assert.deepEqual(JSON.parse(JSON.stringify(view.items.find(entry => entry.id === 'tool-image'))),
+    { id: 'tool-image', type: 'mcpToolCall', status: 'completed', subject: 'Take a screenshot' }, 'a tool step travels as its summary');
+  assert.equal(text.includes('plain tool text') || text.includes('shot --all'), false);
+  const step = bot.stepDetail(chat.id, 'tool-image');
+  assert.deepEqual(step.arguments, { description: 'Take a\n  screenshot', command: 'shot --all' }, 'opening the step reads its input and output');
+  assert.match(JSON.stringify(step.result), /plain tool text/);
+  assert.equal(/Q0ND|RERE/.test(JSON.stringify(step)), false, 'tool-result images stay on the runner there too');
+  assert.equal(chat.items.at(-1).result.length, 3, 'the stored step is untouched');
+  assert.throws(() => bot.stepDetail(chat.id, item.id), /no longer available/);
   assert.deepEqual(view.items.find(entry => entry.id === item.id).content.filter(part => part.type === 'image'), [{ type: 'image', url: null }]);
   assert.deepEqual(view.queue[0].images, [null]);
   assert.equal(item.content.find(part => part.type === 'image').url, image);

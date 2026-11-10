@@ -92,6 +92,10 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
     if (typeof id !== 'string' || !id) throw new Error('Invalid image request.');
     return agents.owner(id).image(id, itemId, index);
   });
+  handle('stepDetail', (id, itemId) => {
+    if (typeof id !== 'string' || !id) throw new Error('Invalid step request.');
+    return agents.owner(id).stepDetail(id, itemId);
+  });
   handle('rename', (id, title) => agents.owner(id).rename(id, title));
   handle('archive', id => agents.owner(id).archive(id));
   handle('deleteSession', id => agents.owner(id).deleteSession(id));

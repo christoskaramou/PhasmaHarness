@@ -779,10 +779,14 @@ function showImage(image, url, sessionId, itemId, index) {
 }
 
 var reportedSettingsChanges = new Set();
+var appliedState;
 function applyState(next) {
-  // Updates leave out the chats of bots that did not change; this window keeps its copies, or reloads when it has none.
+  // A command's reply older than the state shown is dropped; the updates carry what it held (acceptState).
+  if (!HarnessAgentState.acceptState(next, appliedState ||= {})) return;
+  // Updates leave out the chats that did not change; this window keeps its copies, or asks for everything when it has none.
+  // A reply naming chats this page was not sent yet is dropped instead: the updates on their way bring them.
   const complete = HarnessAgentState.keepSessions(next, fleetState);
-  if (!complete) { api.bootstrap().then(applyState).catch(notify); return; }
+  if (!complete) { if (next?.stateBase === undefined) api.bootstrap(true).then(applyState).catch(notify); return; }
   next = complete;
   reportedSettingsChanges ||= new Set();
   for (const change of next.settingsChanges || []) {
@@ -1652,8 +1656,9 @@ botAlerts.popover.addEventListener('toggle', event => { if (event.newState === '
 // "Bash · Run the tests" rather than "Claude CLI · Bash · completed": what the call worked on, from its input.
 // Colour shows success; the status is spelled out only when the call did not succeed.
 function toolAlertTitle(item, level) {
+  // The state carries a step's subject in place of its input (Controller.snapshot); a step with its input shows as before.
   const input = item.arguments && typeof item.arguments === 'object' ? item.arguments : {};
-  const subject = ['description', 'command', 'file_path', 'path', 'pattern', 'url', 'query', 'prompt']
+  const subject = item.subject || ['description', 'command', 'file_path', 'path', 'pattern', 'url', 'query', 'prompt']
     .map(name => input[name]).find(value => typeof value === 'string' && value.trim());
   const status = level === 'info' ? '' : ` · ${item.status === 'declined' ? 'declined' : 'failed'}`;
   return `${item.tool}${subject ? ' · ' + subject.replace(/\s+/g, ' ').trim().slice(0, 200) : ''}${status}`;
@@ -3236,22 +3241,36 @@ function renderMessages(session) {
     } else {
       const opened = node.querySelector('details')?.open || false;
       const details = element('details', 'activity'); details.open = opened;
-      let title = item.type, detail = '';
+      let title = item.type, detail = '', readDetail = null;
       if (item.type === 'commandExecution') { title = `${item.status === 'inProgress' ? 'Running' : item.exitCode ? 'Failed' : 'Ran'} · ${item.command}`; detail = item.aggregatedOutput || 'Waiting for output…'; }
       if (item.type === 'fileChange') { title = `${item.status === 'inProgress' ? 'Editing' : 'Changed'} ${item.changes.length} file${item.changes.length === 1 ? '' : 's'}`; detail = item.changes.map(c => c.path + '\n' + (c.diff || '')).join('\n\n'); }
       if (item.type === 'mcpToolCall') {
         title = `${item.server} · ${item.tool} · ${item.status}`;
         // Cursor sends no output for some steps (a read of a larger file): show what the step worked on instead of [].
-        const noOutput = !item.error && (item.result == null || (Array.isArray(item.result) && !item.result.length));
-        detail = noOutput ? JSON.stringify(item.arguments || {}, null, 2) + (item.status === 'completed' ? `\n\n${item.server} reported no output for this step.` : '')
-          : JSON.stringify(item.error || item.result, null, 2);
+        const text = step => {
+          const noOutput = !item.error && (step.result == null || (Array.isArray(step.result) && !step.result.length));
+          return noOutput ? JSON.stringify(step.arguments || {}, null, 2) + (item.status === 'completed' ? `\n\n${item.server} reported no output for this step.` : '')
+            : JSON.stringify(item.error || step.result, null, 2);
+        };
+        // The state leaves a step's input and output out (most of a long chat's bytes); they are read when it is opened.
+        if (item.error || item.arguments !== undefined || item.result !== undefined) detail = text(item);
+        else readDetail = () => api.stepDetail(session.id, item.id).then(text);
       }
       if (item.type === 'dynamicToolCall') { title = `${item.tool} · ${item.status}`; detail = JSON.stringify(item.contentItems || item.arguments, null, 2); }
       if (item.type === 'webSearch') { title = `Web search · ${item.query || item.action?.query || ''}`; detail = JSON.stringify(item.action || {}, null, 2); }
       if (item.type === 'contextCompaction') title = 'Conversation context compacted';
       // A step of a turn (Controller.recordStep): "Jev reads image 1", opening to its question and Jev's answer.
       if (item.type === 'toolStep') { title = item.title; detail = (item.lines || []).join('\n'); }
-      details.append(element('summary', '', title), element('pre', '', detail)); node.replaceChildren(details);
+      const output = element('pre', '', detail);
+      details.append(element('summary', '', title), output); node.replaceChildren(details);
+      if (readDetail) {
+        const read = () => {
+          if (!details.open || !readDetail) return;
+          const reading = readDetail; readDetail = null;
+          reading().then(text => { output.textContent = text; }, error => { output.textContent = `Could not read this step: ${error.message}`; readDetail = reading; });
+        };
+        details.addEventListener('toggle', read); read();
+      }
     }
   }
   let previousNode = null;
@@ -4524,7 +4543,8 @@ api.onTray?.(request => {
   if (request?.action === 'settings') $('#settings').onclick();
   else if (request?.action === 'bot' && state?.agents?.some(agent => agent.id === request.id)) selectAgent(request.id).catch(notify);
 });
-api.bootstrap().then(applyState).catch(notify);
+// This page holds nothing yet, so the window asks for every chat; a browser's event stream starts with them.
+api.bootstrap(!api.remote).then(applyState).catch(notify);
 
 
 

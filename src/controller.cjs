@@ -43,6 +43,28 @@ const { CONTEXT_INSTRUCTIONS, ACCESS_MODES, sameEffort, DEFAULT_ROUTER, sessionA
 const groupChats = require('./group-chats.cjs');
 const { normalizedUsage } = require('./job-budgets.cjs');
 
+// A chat item as the window's state carries it: without inline images, and a tool step as its tool, status, error and
+// what it worked on (the bell's and the card's title). A step's input and output stay here until its card is opened
+// (stepDetail): on the user's 16 bots they were 35 MB of the 45 MB of chat items in every full state (2026-11-10), which
+// put the state over browser access's 32 MB limit.
+// ponytail: tool steps only (Claude, Cursor and API tools); Codex command output and file diffs still travel whole
+// (0.3 MB in those stores). Give them the same summary if they grow.
+// Every bot's snapshot runs on each window update, so a step's subject is worked out once per input object (a later
+// input is a new object); working it out each time took 4 ms of an update on those stores.
+const STEP_SUBJECTS = ['description', 'command', 'file_path', 'path', 'pattern', 'url', 'query', 'prompt'];
+const stepSubjects = new WeakMap();
+function stateItem(item) {
+  if (item.type !== 'mcpToolCall') return withoutImages(item);
+  const input = item.arguments && typeof item.arguments === 'object' ? item.arguments : null;
+  let subject = input ? stepSubjects.get(input) : '';
+  if (subject === undefined) {
+    const text = STEP_SUBJECTS.map(name => input[name]).find(value => typeof value === 'string' && value.trim());
+    subject = text ? text.slice(0, 2000).replace(/\s+/g, ' ').trim().slice(0, 200) : '';
+    stepSubjects.set(input, subject);
+  }
+  return { ...item, arguments: undefined, result: undefined, subject: subject || undefined };
+}
+
 // Token counts summed over model calls; an unknown cached count stays unknown.
 function sumUsage(counts) {
   return counts.reduce((sum, item) => ({
@@ -331,7 +353,9 @@ class Controller extends EventEmitter {
       connectingProviders: [...new Set([...this.connectingProviders.keys(), ...(this.chatgptLoginPending ? ['codex'] : [])])],
       chatgptLoginPending: this.chatgptLoginPending,
       ...visibleData, settings: { ...this.data.settings, mode: plan ? 'auto' : this.data.settings.mode }, planRouting: plan, connection: this.connection, error: this.error, account: this.account, busy: this.busy,
-      sessions: this.data.sessions.map(({ groupChatContext, coordinatorConversation, ...session }) => withoutImages({ ...session, background: this.background.get(session.id), tasks: (session.tasks || []).map(({ inputImages, ...task }) => task) })),
+      sessions: this.data.sessions.map(({ groupChatContext, coordinatorConversation, items, ...session }) => ({
+        ...withoutImages({ ...session, background: this.background.get(session.id), tasks: (session.tasks || []).map(({ inputImages, ...task }) => task) }),
+        items: (items || []).map(stateItem) })),
       routing: this.routing, routingProvider: this.routingProvider, routerModel: this.routingProvider === 'jev' ? this.smartRouter.jev?.model || JEV_MODEL : this.secondaryPick()?.model || null,
       jev: { configured: !!this.smartRouter.jev?.configured, keySaved: !!(this.smartRouter.jev?.keyStore?.configured ?? this.smartRouter.jev?.configured), enabled: this.data.settings.jevEnabled !== false, model: this.smartRouter.jev?.model || null, requestedModel: JEV_MODEL, health: this.smartRouter.jev?.health || null },
       helperCapabilities: {
@@ -450,6 +474,13 @@ class Controller extends EventEmitter {
     const part = item?.content?.filter(part => part.type === 'image')[index];
     if (typeof part?.url !== 'string' || !part.url.startsWith('data:image/')) throw new Error('This image is no longer available.');
     return part.url;
+  }
+
+  // A tool step's input and output, which the state leaves out (stateItem); inline images stay out, as in the state.
+  stepDetail(id, itemId) {
+    const item = typeof itemId === 'string' ? this.session(id).items.find(entry => entry.id === itemId && entry.type === 'mcpToolCall') : null;
+    if (!item) throw new Error('This step is no longer available.');
+    return withoutImages({ arguments: item.arguments, result: item.result });
   }
 
   workspace(value) {

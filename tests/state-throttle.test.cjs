@@ -119,6 +119,54 @@ test('a change confined to one chat resends only that chat, and the window fills
   assert.equal(shared.agentStates.main.sessions.length, 3);
 });
 
+// 2026-11-10: the window got every bot's chats every 5 s and with every command's reply, 64 MB each on the user's data.
+test('a state stream sends everything once and then only changes; a reply is not counted as sent and applies only on its own push', t => {
+  const { stateStream, acceptState, keepSessions, FULL_STATE_MS } = require('../ui/agent-state.js');
+  t.mock.timers.enable({ apis: ['Date'], now: 1000 });
+  const chat = (id, text) => ({ id, status: 'idle', items: [{ id: id + '-item', type: 'agentMessage', text }] });
+  const fleet = (a, b) => ({ agentStates: { a: { stateRevision: a, sessions: [chat('a1', 'a' + a)] }, b: { stateRevision: b, sessions: [chat('b1', 'b' + b)] } } });
+  const texts = () => [page.agentStates.a.sessions[0].items[0].text, page.agentStates.b.sessions[0].items[0].text];
+  const stream = stateStream(), applied = {};
+  let page = null;
+  const apply = sent => {
+    const next = structuredClone(sent);
+    if (!acceptState(next, applied)) return false;
+    page = keepSessions(next, page);
+    return true;
+  };
+  assert.equal(stream.started, false);
+  const first = stream.push(fleet(1, 1));
+  assert.ok(first.agentStates.a.sessions && first.agentStates.b.sessions && stream.started, 'the first state is complete');
+  apply(first);
+  t.mock.timers.tick(6000);
+  const idle = stream.push(fleet(1, 1));
+  assert.deepEqual([idle.agentStates.a.sessionsKept, idle.agentStates.b.sessionsKept], [true, true], 'nothing is sent again after 5 s');
+  apply(idle);
+
+  const reply = stream.reply(fleet(2, 1));
+  assert.equal(reply.stateBase, idle.stateSeq, 'a reply names the push it builds on');
+  assert.deepEqual([reply.agentStates.a.sessions[0].items[0].text, reply.agentStates.b.sessionsKept], ['a2', true]);
+  const push = stream.push(fleet(3, 1));
+  assert.equal(push.agentStates.a.sessions?.[0].items[0].text, 'a3', 'what a reply carried is not counted as sent');
+  // The page applied the newer push first: the older reply is dropped, not put over the newer chats.
+  assert.equal(apply(push), true);
+  assert.equal(apply(reply), false);
+  assert.deepEqual(texts(), ['a3', 'b1']);
+  assert.equal(apply(stream.reply(fleet(4, 1))), true, 'a reply built on the push the page shows applies');
+  assert.deepEqual(texts(), ['a4', 'b1']);
+  assert.equal(acceptState({ sessions: [] }, applied), true, 'a state with no number applies as before');
+  assert.equal(acceptState({ stateBase: -1 }, applied), false, 'a reply for a page with no stream is dropped');
+  assert.equal(acceptState({ stateBase: applied.seq + 1 }, applied), true, 'a reply ahead of a lagging page applies; its pushes follow');
+  assert.equal(acceptState({ stateBase: applied.seq }, {}), false, 'a page that holds nothing waits for its first state');
+
+  t.mock.timers.tick(FULL_STATE_MS);
+  assert.ok(stream.push(fleet(4, 1)).agentStates.b.sessions, 'everything goes again after FULL_STATE_MS, as a repair');
+  assert.equal(stream.push(fleet(4, 1)).agentStates.b.sessionsKept, true);
+  stream.reset();
+  assert.equal(stream.started, false);
+  assert.ok(stream.push(fleet(4, 1)).agentStates.b.sessions, 'a page that holds nothing gets everything');
+});
+
 test('changed(session) marks one chat, changed() and save() mark them all, and the throttled save marks nothing new', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-chat-revision-'));
   const controller = new Controller(path.join(directory, 'sessions.json'), directory, new EventEmitter(), { cancel() {}, close() {}, jev: null });

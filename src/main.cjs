@@ -34,7 +34,7 @@ const { RemoteRunner } = require('./remote.cjs');
 const { registerRunnerCommands, assertRunnerOpen } = require('./runner-commands.cjs');
 const { RemoteSettings } = require('./remote-settings.cjs');
 const { microphoneAllowed } = require('./dictation.cjs');
-const { trimFleet } = require('../ui/agent-state.js');
+const { stateStream } = require('../ui/agent-state.js');
 
 // Workers and helpers inherit this, so bundled rtk/rg win over any system copies.
 process.env.PATH = path.join(__dirname, '..', 'tools', 'bin') + path.delimiter + process.env.PATH;
@@ -157,20 +157,21 @@ async function start() {
     openBot: id => { if (!window.isDestroyed()) window.webContents.send('tray', { action: 'bot', id }); },
     onError: error => log.error('Runner settings failed', { message: error.message }),
   });
-  // Each update used to carry every bot's chats (6 MB on the user's data). The window now gets only the bots that changed,
-  // and everything every 5 s or after a reload, so an edit that skipped changed()/save() still shows within 5 s.
-  const sentChats = new Map();
-  let fullAt = 0;
-  window.webContents.on('did-finish-load', () => sentChats.clear());
+  // Each update used to carry every bot's chats (6 MB on the user's data in October, 64 MB in November). The window now
+  // gets only the chats that changed, in updates and in command replies alike, and everything when its page starts
+  // (bootstrap(true)) and every 10 minutes (stateStream, ui/agent-state.js).
+  const windowState = stateStream();
   agents.on('state', state => {
     desktop.refresh();
-    if (!window.isDestroyed()) {
-      const full = Date.now() - fullAt >= 5000;
-      if (full) fullAt = Date.now();
-      window.webContents.send('state', trimFleet(state, sentChats, full));
-    }
+    if (!window.isDestroyed()) window.webContents.send('state', windowState.push(state));
     browserAccess?.broadcast('state', state);
   });
+  // A command's snapshot as the window gets it. bootstrap(true) is a page that holds nothing, so it starts the stream again.
+  const windowReply = (name, args, result) => {
+    if (name === 'bootstrap' && (args[0] === true || !windowState.started)) { windowState.reset(); return windowState.push(result); }
+    return result?.agentStates ? windowState.reply(result)
+      : result?.state?.agentStates ? { ...result, state: windowState.reply(result.state) } : result;
+  };
   const sharedChanges = new Set(['cursorLogin', 'cursorRefresh', 'cursorLogout', 'claudeLogin', 'claudeRefresh', 'claudeLogout', 'connectChatGPT', 'logoutChatGPT', 'installProvider', 'providerSettings', 'providerKey', 'nativeProviderAction', 'jevSaveKey', 'jevRemoveKey', 'jevTest', 'checks']);
   const connectionActions = { connectChatGPT: 'codex', claudeLogin: 'claude-cli', claudeRefresh: 'claude-cli', cursorLogin: 'cursor-cli', cursorRefresh: 'cursor-cli', jevTest: 'jev' };
   const commands = new Map();
@@ -191,9 +192,9 @@ async function start() {
   };
   const handle = (name, fn) => {
     commands.set(name, fn);
-    ipcMain.handle(name, (event, ...args) => {
+    ipcMain.handle(name, async (event, ...args) => {
       if (event.sender !== window.webContents || event.senderFrame?.url !== rendererURL) throw new Error('Untrusted caller.');
-      return invoke(name, args);
+      return windowReply(name, args, await invoke(name, args));
     });
   };
   handle('runnerInfo', () => desktop.info());
