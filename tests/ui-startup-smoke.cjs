@@ -2299,6 +2299,11 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('selectAgent(' + JSON.stringify(researcher.id) + ')');
   assert.deepEqual(await listed(), [true, '1'], 'shown while its creator is selected');
   // A working sub-bot animates its creator's icon too; the creator's own status is unchanged (2026-11-10, the user).
+  // Hosted Windows runners report reduced motion, which turns this animation off, so motion is allowed for this check.
+  window.webContents.debugger.attach('1.3');
+  await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+    features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }],
+  });
   const creatorIcon = await window.webContents.executeJavaScript(`(async () => {
     const id = ${JSON.stringify(reviewer.id)}, saved = fleetState.agentStates[id];
     const row = bot => document.querySelector('#agent-list .agent-nav[data-agent="' + bot + '"]');
@@ -2323,6 +2328,10 @@ app.whenReady().then(async () => {
     renderAgents();
     return { busy, spin, keepsTurn, idle: look().map(([animated]) => animated) };
   })()`);
+  await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', {
+    features: [{ name: 'prefers-reduced-motion', value: '' }],
+  });
+  window.webContents.debugger.detach();
   assert.deepEqual(creatorIcon, { busy: [[true, 'Researcher · Ready · a bot under it is working'], [true, 'Reviewer · Working'],
     [false, `${agents.primary.data.agents[2].name} · Ready`]], spin: ['agent-spin', '5s'], keepsTurn: true, idle: [false, false, false] });
   // Work a bot does for another bot shows in its chat: a sub-bot's always, read only; another bot's while the job is open,
