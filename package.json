@@ -1,7 +1,7 @@
 {
   "name": "phasma-harness",
   "productName": "Phasma Harness",
-  "version": "0.3.37",
+  "version": "0.4.0",
   "private": true,
   "description": "A local desktop client for Codex, Claude Code, and Cursor.",
   "author": "Christos Karamoustos",
