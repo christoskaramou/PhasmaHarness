@@ -351,6 +351,51 @@ test('an interrupted direct task and its helpers stay held for review after rest
   assert.equal(restored.budgets.held(restored.findJob(child.jobId).job), true);
 });
 
+// 2026-11-10: a creator's "resume" notes to two sub-bots whose jobs a usage limit and a restart had interrupted stayed
+// queued after the jobs were stopped. The paused, read-only chats never ran or cleared them, and Delete refused for good.
+test('stopping a sub-bot drops the bot messages about its job, so it can be deleted; a restart clears ones already left', async t => {
+  const { agents, primary, add, factory, workspace } = await setup(t);
+  const creator = await add('Projects'), chat = agents.conversation(creator, true);
+  const note = (target, session, jobId, id) => agents.acceptMessage(creator, chat, target, session,
+    { id, type: 'agentMail', localOnly: true, createdAt: Date.now(), fromAgentId: creator.agentId, fromSessionId: chat.id,
+      fromName: 'Projects', toAgentId: target.agentId, kind: 'note', replyTo: null, jobId, text: 'Continue it; do not start over.' });
+  const subBot = async name => {
+    const profile = await agents.saveAgent({ name, instructions: 'Help.', workspace, access: 'workspace-write', mode: 'terra-light', createdBy: creator.agentId });
+    await agents.initializeController(agents.controller(profile.id));
+    const execution = agents.execution(profile.id);
+    await agents.initializeController(execution);
+    const accepted = agents.delegate(creator, chat, profile.id, 'Generate the furniture.');
+    const work = execution.session(accepted.sessionId);
+    await until(() => execution.activeTurns.has(work.id));
+    return { profile, execution, work, accepted };
+  };
+  const view = await subBot('View');
+  note(view.execution, view.work, view.accepted.jobId, 'resume-note');
+  view.work.queuePaused = true;
+  assert.throws(() => agents.requireIdle(agents.controller(view.profile.id)), /Finish|Stop|queued/);
+  await agents.stop(view.accepted.jobId);
+  await until(() => view.work.delegation.delivered);
+  assert.equal(view.work.delegation.cancelled, true);
+  assert.deepEqual(view.work.queue, [], 'the note about the stopped job is dropped');
+  assert.ok(view.work.items.some(item => item.id === 'resume-note'), 'it stays in the chat history');
+  await agents.deleteAgent(view.profile.id);
+  assert.equal(agents.profile(view.profile.id), undefined, 'the sub-bot can be deleted');
+
+  // Saved before the fix: a stopped job's chat still holds its note. The next start drops it, and only that one.
+  const tripo = await subBot('Tripo');
+  await agents.stop(tripo.accepted.jobId);
+  await until(() => tripo.work.delegation.delivered);
+  tripo.work.queue = [{ id: 'old-note', images: [], mode: 'terra-light', task: 'off', agentReply: true, agentMail: { messageId: 'old-note', jobId: tripo.accepted.jobId }, text: 'Continue.' },
+    { id: 'user-message', images: [], mode: 'terra-light', task: 'off', text: 'Mine.' }];
+  tripo.execution.save(); creator.save(); primary.save();
+  const root = factory(primary.filename, workspace);
+  const restored = new Agents(root, async () => {}, factory);
+  t.after(() => { restored.closing = true; restored.budgets.close(); for (const c of restored.allControllers()) c.close(); });
+  assert.deepEqual(restored.owner(tripo.work.id).session(tripo.work.id).queue.map(message => message.id), ['user-message']);
+  assert.deepEqual(readSessionData(tripo.execution.filename).sessions.find(session => session.id === tripo.work.id).queue.map(message => message.id),
+    ['user-message'], 'the repair is saved');
+});
+
 test('host check facts reach the owner and exports without letting worker prose or reuse certify another job', async t => {
   const { agents, primary, workspace, addWorker } = await setup(t);
   const owner = primary.create(); owner.queuePaused = true;

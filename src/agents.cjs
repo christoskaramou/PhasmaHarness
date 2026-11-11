@@ -103,7 +103,9 @@ class Agents extends EventEmitter {
       }
     }
     // Only a never-submitted assignment from a contained runner can resume automatically.
+    const repaired = new Set();
     for (const controller of this.allControllers()) for (const session of controller.data.sessions) {
+      if (this.dropEndedMail(session)) repaired.add(controller);
       // A tracked job that was still waiting for a background slot never reached a provider. Undo the start the
       // controller load marked as interrupted (and its unchecked task) so the job resumes as never started.
       for (const job of [session.delegation, ...(session.delegationQueue || [])]) {
@@ -145,7 +147,7 @@ class Agents extends EventEmitter {
     }
     this.migrateConversations();
     this.routines = new Routines(this);
-    for (const controller of this.allControllers()) if (controller.data.sessions.some(session =>
+    for (const controller of this.allControllers()) if (repaired.has(controller) || controller.data.sessions.some(session =>
       [session.delegation, ...(session.delegationQueue || [])].some(job => job?.recovery))) controller.save();
   }
 
@@ -1497,7 +1499,25 @@ class Agents extends EventEmitter {
       if (!source.queuePaused) sourceController.settle(source);
     }
     this.retainDelegatedChat(controller, session);
-    job.state = session.status; job.delivered = true; delete job.deliveryError; controller.save();
+    job.state = session.status; job.delivered = true; delete job.deliveryError;
+    this.dropEndedMail(session);
+    controller.save();
+  }
+
+  // Bot messages about an assignment that ended without finishing (stopped, interrupted, failed) can never run: its chat
+  // stays paused, and a sub-bot's chat is read only, so nobody could clear them and the bot could not be deleted
+  // (2026-11-10: ToppleView and ToppleTripo kept their creator's resume notes after their jobs were stopped). The message
+  // stays in the chat's history. A finished job's chat is not paused, so messages about it still run. Messages sent after
+  // a job ends go to the bot's own chat (conversation()), not this one.
+  dropEndedMail(session) {
+    const job = session.delegation;
+    if (!job?.delivered || (job.state === 'completed' && !job.cancelled)) return false;
+    const ended = message => message?.agentMail?.jobId === job.id;
+    const before = session.queue?.length || 0;
+    if (before) session.queue = session.queue.filter(message => !ended(message));
+    let dropped = before - (session.queue?.length || 0);
+    for (const item of session.items) if (ended(item.pendingReply)) { delete item.pendingReply; item.notified = true; dropped++; }
+    return dropped > 0;
   }
 
   flushReplies(controller, session) {
@@ -2036,8 +2056,7 @@ class Agents extends EventEmitter {
     if ((current?.queue?.length || 0) >= 10 || pending.length >= 10) throw new Error('The agent mailbox is full.');
     const session = current || this.conversation(target, true);
     const jobId = args.jobId || question?.jobId || (source.delegation && !source.delegation.delivered ? source.delegation.id
-      : session.delegation?.source === source.id ? session.delegation.id : session.delegationQueue?.find(job => job.source === source.id && !job.delivered)?.id || null);
-    const mail = { id, type: 'agentMail', localOnly: true, createdAt: Date.now(), fromAgentId: controller.agentId, fromSessionId: source.id,
+      : session.delegation?.source === source.id ? session.delegation.id : session.delegationQueue?.find(job => job.source === source.id && !job.delivered)?.id || null);    const mail = { id, type: 'agentMail', localOnly: true, createdAt: Date.now(), fromAgentId: controller.agentId, fromSessionId: source.id,
       fromName: this.agentName(controller.agentId), toAgentId: target.agentId, kind, replyTo: args.replyTo || null, jobId, text: args.text };
     return this.acceptMessage(controller, source, target, session, mail);
   }
