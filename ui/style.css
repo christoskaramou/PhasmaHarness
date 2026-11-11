@@ -4282,23 +4282,23 @@ main > header {
 #bot-alerts .bot-alerts-head h3 { margin:2px 4px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
 #bot-alerts .bot-alerts-actions { display:flex; flex:none; gap:6px; }
 
-/* A working bot: its avatar breathes on a slow sine between full and faint grey, and its preview shimmers. */
-/* A working bot: its avatar fades to grey and back on a smooth wave, and its four tiles swell in turn. The tiles use the
-   individual scale property so their fixed rotations still apply. */
-.agent-working .agent-avatar { animation:agent-breathe 2.6s ease-in-out infinite; }
-.agent-working .agent-avatar i { animation:agent-tile 2.6s ease-in-out infinite; }
-.agent-working .agent-avatar i:nth-child(2) { animation-delay:-1.95s; }
-.agent-working .agent-avatar i:nth-child(3) { animation-delay:-1.3s; }
-.agent-working .agent-avatar i:nth-child(4) { animation-delay:-0.65s; }
-@keyframes agent-breathe { 0%, 100% { opacity:1; filter:grayscale(0); } 50% { opacity:.5; filter:grayscale(1); } }
-@keyframes agent-tile { 0%, 100% { scale:1; } 50% { scale:.7; } }
+/* A working bot: its mosaic turns a quarter at a time, an eased 0.45 s turn and then a 0.8 s rest, one full turn every
+   5 s (SPIN_MS in ui/app.js), in full colour. Stepped rather than a constant whirl, so it is easy to spot and calm to sit
+   next to (the user asked for a spin, 2026-11-11). --spin-delay puts every working icon on one shared clock: a sidebar
+   re-render does not restart its turn, and several working bots turn together. */
+.agent-working .agent-avatar { animation:agent-spin 5s cubic-bezier(.65, 0, .35, 1) var(--spin-delay, 0s) infinite; }
+@keyframes agent-spin {
+  0%, 16% { rotate:0deg; } 25%, 41% { rotate:90deg; } 50%, 66% { rotate:180deg; } 75%, 91% { rotate:270deg; } 100% { rotate:360deg; }
+}
 /* A bot with a reply you have not seen: a soft accent aura around its icon that slowly swells and settles. */
 .agent-unread .agent-avatar { box-shadow:0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent), 0 0 10px 3px color-mix(in srgb, var(--accent) 45%, transparent);
   animation:agent-aura 2.8s ease-in-out infinite; }
+/* Unread while a bot under it works: both. */
+.agent-working.agent-unread .agent-avatar { animation:agent-spin 5s cubic-bezier(.65, 0, .35, 1) var(--spin-delay, 0s) infinite, agent-aura 2.8s ease-in-out infinite; }
 @keyframes agent-aura { 0%, 100% { box-shadow:0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent), 0 0 8px 2px color-mix(in srgb, var(--accent) 35%, transparent); }
   50% { box-shadow:0 0 0 2px color-mix(in srgb, var(--accent) 70%, transparent), 0 0 14px 5px color-mix(in srgb, var(--accent) 50%, transparent); } }
 @media(prefers-reduced-motion:reduce) {
-  .agent-working .agent-avatar, .agent-working .agent-avatar i, .agent-unread .agent-avatar { animation:none; }
+  .agent-working .agent-avatar, .agent-unread .agent-avatar { animation:none; }
 }
 
 /* A faint tint of a brighter amber than the warning colors, so it stands out without a heavy block. */

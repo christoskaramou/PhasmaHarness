@@ -2298,6 +2298,33 @@ app.whenReady().then(async () => {
   assert.deepEqual(await listed(), [false, '1'], 'hidden while another bot is selected, counted on its creator');
   await window.webContents.executeJavaScript('selectAgent(' + JSON.stringify(researcher.id) + ')');
   assert.deepEqual(await listed(), [true, '1'], 'shown while its creator is selected');
+  // A working sub-bot animates its creator's icon too; the creator's own status is unchanged (2026-11-10, the user).
+  const creatorIcon = await window.webContents.executeJavaScript(`(async () => {
+    const id = ${JSON.stringify(reviewer.id)}, saved = fleetState.agentStates[id];
+    const row = bot => document.querySelector('#agent-list .agent-nav[data-agent="' + bot + '"]');
+    const look = () => [${JSON.stringify(researcher.id)}, id, ${JSON.stringify(agents.primary.data.agents[2].id)}]
+      .map(bot => [row(bot).classList.contains('agent-working'), row(bot).getAttribute('aria-label')]);
+    fleetState.agentStates[id] = { ...saved, busy: 'sub-bot-turn', requests: [], connection: 'ready' };
+    renderAgents();
+    const busy = look();
+    // A working icon turns a quarter at a time on the page's clock, so a rebuilt row (a new preview) carries on its turn.
+    const icon = () => row(id).querySelector('.agent-avatar');
+    const spin = [getComputedStyle(icon()).animationName, getComputedStyle(icon()).animationDuration];
+    // A row built at time T starts its turn T into the cycle, as if it had been turning all along.
+    const onClock = () => {
+      const offset = ((-parseFloat(getComputedStyle(icon()).animationDelay) * 1000 - document.timeline.currentTime) % SPIN_MS + SPIN_MS) % SPIN_MS;
+      return Math.min(offset, SPIN_MS - offset) < 20;
+    };
+    const first = onClock();
+    await new Promise(resolve => setTimeout(resolve, 700));
+    agentRenderKey = null; renderAgents();
+    const keepsTurn = first && onClock();
+    fleetState.agentStates[id] = saved;
+    renderAgents();
+    return { busy, spin, keepsTurn, idle: look().map(([animated]) => animated) };
+  })()`);
+  assert.deepEqual(creatorIcon, { busy: [[true, 'Researcher · Ready · a bot under it is working'], [true, 'Reviewer · Working'],
+    [false, `${agents.primary.data.agents[2].name} · Ready`]], spin: ['agent-spin', '5s'], keepsTurn: true, idle: [false, false, false] });
   // Work a bot does for another bot shows in its chat: a sub-bot's always, read only; another bot's while the job is open,
   // then its own chat again.
   const giveWork = async (profile, delivered) => {

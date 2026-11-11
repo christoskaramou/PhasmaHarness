@@ -1829,6 +1829,7 @@ function replyUnread(id, at, status) {
 }
 window.addEventListener('focus', () => { if (state) renderAgents(); });
 
+const SPIN_MS = 5000; // one full turn of a working bot's icon (style.css agent-spin)
 function renderAgents() {
   const agents = state.agents || [{ id: 'main', name: 'Assistant' }];
   const switching = submitting || readingImages || changingPermissions;
@@ -1858,6 +1859,10 @@ function renderAgents() {
       accessLabel: worker.accessModes.find(a => a.id === (conversation?.access || worker.settings.access))?.label,
       error: !['ready', 'connecting'].includes(worker.connection) ? worker.error : null };
   });
+  // A bot whose sub-bot (or one under that) is working animates its icon too, since its sub-bots are folded away unless it
+  // is selected; its own status stays as it is (2026-11-10, the user).
+  const working = new Set(rows.filter(row => row.status === 'Working').map(row => row.id));
+  for (const row of rows) row.subWorking = row.status !== 'Working' && subBotsOf(row.id).some(bot => working.has(bot.id));
   const active = agents.filter(a => a.busy).length;
   const query = $('#agent-search').value.trim().toLocaleLowerCase();
   const filtering = !!query || botFilter !== 'all';
@@ -1929,14 +1934,19 @@ function renderAgents() {
       node.style.setProperty('--depth', row.depth);
     }
     node.setAttribute('aria-pressed', String(row.id === selectedAgent && !current()?.group));
-    node.setAttribute('aria-label', `${row.name} · ${row.status}`);
+    const spoken = `${row.name} · ${row.status}${row.subWorking ? ' · a bot under it is working' : ''}`;
+    node.setAttribute('aria-label', spoken);
     node.setAttribute('aria-haspopup', 'menu');
     const label = element('span', 'agent-nav-label');
     label.append(element('strong', '', row.name));
     if (row.status === 'Ready') node.classList.add('agent-idle');
-    // Working: the avatar breathes in grey and the preview shimmers, instead of a green dot.
-    if (row.status === 'Working') node.classList.add('agent-working');
-    if (row.unread) { node.classList.add('agent-unread'); node.setAttribute('aria-label', `${row.name} · ${row.status} · new reply`); }
+    // Working, or a sub-bot under it is: the avatar turns a quarter at a time (style.css agent-spin), instead of a green
+    // dot. The row is rebuilt whenever its preview changes, so the turn keeps to the page's clock instead of restarting.
+    if (row.status === 'Working' || row.subWorking) {
+      node.classList.add('agent-working');
+      node.style.setProperty('--spin-delay', `${-((document.timeline.currentTime ?? performance.now()) % SPIN_MS)}ms`);
+    }
+    if (row.unread) { node.classList.add('agent-unread'); node.setAttribute('aria-label', `${spoken} · new reply`); }
     node.append(avatar(row), label);
     if (row.subBots) {
       const count = element('span', 'agent-subbots', String(row.subBots));
