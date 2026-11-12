@@ -18,7 +18,7 @@ const REMOTE_METHODS = new Set([
   'bootstrap', 'saveAgent', 'renameHub', 'saveGroup', 'deleteAgent',
   'browseWorkspace', 'settings', 'create', 'permissions', 'load', 'image', 'stepDetail', 'rename', 'archive',
   'deleteSession', 'preview', 'send', 'stop', 'reviseJob', 'reconcileJob', 'jobBudget',
-  'stopArtifactRun', 'artifactAction', 'artifactDownload', 'stopDownloads', 'appInfo', 'runnerInfo', 'updateStatus', 'queuedMessage', 'backgroundTask', 'replySuggestion', 'suggestWiki', 'compact',
+  'stopArtifactRun', 'artifactAction', 'artifactDownload', 'stopDownloads', 'appInfo', 'runnerInfo', 'updateStatus', 'queuedMessage', 'backgroundTask', 'replySuggestion', 'suggestWiki', 'summarizeLast', 'compact',
   'clearConversation', 'acknowledgeTask', 'applyCopy', 'undoComparison', 'undoRule', 'dreamNow', 'dismissSkillNotice', 'proposeWiki', 'answer', 'readDocument', 'answerConfirmation',
   'providerConnection', 'renewModels', 'providerModels',
   'connectorList', 'connectorSave', 'connectorAction', 'openFile', 'linkImage', 'routineList',

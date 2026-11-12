@@ -3021,6 +3021,7 @@ const WRITERS = { codex: 'Codex CLI', 'claude-cli': 'Claude CLI', 'cursor-cli': 
 function writer(item, session) {
   if (item.groupSpeaker) return item.groupSpeaker.name;
   if (item.type === 'plan') return 'Plan';
+  if (item.tldr) return WRITERS[item.provider || 'codex'] || 'Codex CLI';
   if (item.routeLabel === 'Jev · quick answer') return 'Jev';
   const route = item.turnId ? (session.routes || []).find(r => r.turnId === item.turnId) : null;
   return WRITERS[route?.provider || 'codex'] || 'Codex CLI';
@@ -3080,7 +3081,8 @@ function renderMessages(session) {
   const container = $('#conversation');
   // A different bot's chat opens at its end, whatever the old chat's scroll position was.
   const switched = renderedSession !== selectedId;
-  const atBottom = switched || container.scrollHeight - container.scrollTop - container.clientHeight < 100;
+  // Follows new content only from the very end (2 px allows sub-pixel rounding); a 100 px margin snapped small scrolls back (2026-11-12, the user).
+  const atBottom = switched || container.scrollHeight - container.scrollTop - container.clientHeight < 2;
   if (switched) { $('#messages').replaceChildren(); messageNodes.clear(); renderedSession = selectedId; }
   const ids = new Set();
   const chats = chatSessions(session);
@@ -3099,7 +3101,8 @@ function renderMessages(session) {
     const maintenance = (session.routes || []).filter(route => route.wikiMaintenanceTaskId);
     // bellOnly: a notification (e.g. the test pool's passed and skipped tests) listed in the bot's bell, not the chat.
     if (item.internal || item.agentReply || item.bellOnly || maintenance.some(route => route.messageId === (item.clientId || item.id) || (route.turnId && route.turnId === item.turnId))) continue;
-    if (hideSteps && !CHAT_ITEM_TYPES.has(item.type)) continue;
+    // A /tldr notice answers the user's own command, so it shows even with steps hidden.
+    if (hideSteps && !CHAT_ITEM_TYPES.has(item.type) && !item.tldr) continue;
     ids.add(item.id);
     let entry = messageNodes.get(item.id);
     const selected = item.type === 'userMessage' ? session.routes.find(r => r.messageId === (item.clientId || item.id)) : null;
@@ -3132,12 +3135,13 @@ function renderMessages(session) {
       }
       node.replaceChildren(details);
     } else if (item.type === 'agentResult') renderAgentResult(item, node, session);
-    else if (item.type === 'notice') renderNotice(item, node, session);
+    // A /tldr summary reads like a normal answer: bubble, Copy, time and model label.
+    else if (item.type === 'notice' && !item.tldr) renderNotice(item, node, session);
     else if (item.type === 'agentArtifact' && item.localOnly) {
       node.className = 'message';
       node.replaceChildren(element('div', 'message-label', 'Artifact available'), renderArtifacts([item.artifact], session.id, item.id));
     }
-    else if (item.type === 'userMessage' || item.type === 'agentMessage' || item.type === 'plan') {
+    else if (item.type === 'userMessage' || item.type === 'agentMessage' || item.type === 'plan' || item.tldr) {
       const user = item.type === 'userMessage';
       node.className = `message ${user ? 'user' : item.phase === 'commentary' ? 'commentary' : 'assistant'}`;
       node.tabIndex = 0;
@@ -3484,6 +3488,12 @@ const COMMANDS = {
     if (!selectedId) throw new Error('Open a chat first.');
     notify('Looking for wiki updates in this chat…');
     api.suggestWiki(selectedId).catch(notify);
+  } },
+  // Not awaited, like /wiki: the summary appears as a notice when the call returns.
+  tldr: { description: 'Summarize the last answer in a few lines, shown only to you.', run: () => {
+    if (!selectedId) throw new Error('Open a chat first.');
+    notify('Summarizing the last answer…');
+    api.summarizeLast(selectedId).catch(notify);
   } },
 };
 let commandPanel = null, commandPicking = false;

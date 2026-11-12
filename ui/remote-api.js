@@ -161,7 +161,7 @@
   for (const method of ['bootstrap', 'saveAgent', 'renameHub', 'saveGroup', 'deleteAgent',
     'browseWorkspace', 'settings', 'create', 'permissions', 'load', 'image', 'stepDetail', 'rename',
     'archive', 'deleteSession', 'preview', 'send', 'stop', 'reviseJob', 'reconcileJob', 'jobBudget',
-    'stopArtifactRun', 'artifactAction', 'stopDownloads', 'appInfo', 'runnerInfo', 'updateStatus', 'queuedMessage', 'backgroundTask', 'replySuggestion', 'suggestWiki', 'compact',
+    'stopArtifactRun', 'artifactAction', 'stopDownloads', 'appInfo', 'runnerInfo', 'updateStatus', 'queuedMessage', 'backgroundTask', 'replySuggestion', 'suggestWiki', 'summarizeLast', 'compact',
     'clearConversation', 'acknowledgeTask', 'applyCopy', 'undoComparison', 'undoRule', 'dreamNow', 'dismissSkillNotice', 'proposeWiki', 'answer', 'answerConfirmation', 'renewModels', 'providerModels', 'openFile', 'linkImage', 'routineList'])
     api[method] = (...args) => call(method, args);
   for (const method of ['nativeProviderAction',

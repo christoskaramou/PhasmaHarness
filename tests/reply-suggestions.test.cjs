@@ -152,3 +152,19 @@ test('/suggestion asks for one suggestion even when the setting is off, and the 
   assert.deepEqual(await controller.suggestNext('s'), { itemId: 'a1', text: 'Now add tests for it.' });
   assert.equal(calls.length, 1, 'the same answer is not asked twice');
 });
+
+test('/tldr summarizes the last answer as a local notice with the quick model', async () => {
+  const { controller, session, calls } = chat({ reply: { tldr: 'The parser is written.' } });
+  Object.assign(controller, { save() {}, changed() {} });
+  assert.equal(await controller.summarizeLast('s'), 'The parser is written.');
+  assert.equal(calls[0].choice.model, 'gpt');
+  assert.equal(JSON.parse(calls[0].request.prompt).message, 'Here is the parser.');
+  const notice = session.items.at(-1);
+  assert.equal(notice.type, 'notice');
+  assert.equal(notice.localOnly, true);
+  assert.equal(notice.tldr, true, 'shown even when steps are hidden');
+  assert.equal(notice.provider, 'codex', 'labelled with the summarizing model, like an answer');
+  assert.equal(notice.text, 'TL;DR: The parser is written.');
+  const empty = chat({ items: [{ id: 'u1', type: 'userMessage', content: [{ type: 'text', text: 'Hi' }] }] });
+  await assert.rejects(empty.controller.summarizeLast('s'), /no answer to summarize/);
+});
