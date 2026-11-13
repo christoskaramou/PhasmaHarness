@@ -182,7 +182,10 @@ function fillEfforts(effort, group, id, auto = false) {
   if ([...effort.options].map(o => o.value).join('|') !== values.join('|'))
     effort.replaceChildren(...(autoOn ? [new Option('Auto effort', 'auto')] : []), ...variants.map(p => new Option(p.effort || 'default', p.effort || '')));
   const own = variants.find(p => p.id === id);
-  effort.value = autoOn && (HarnessAgentState.parseAutoEffort(id) || !own) ? 'auto' : own?.effort || values[0] || '';
+  // A model picked for the first time starts at its picker's preferred effort when it offers one (2026-11-13, the user):
+  // workers high, the Secondary model low, the advisor xhigh (data-preferred in index.html). A saved effort stays.
+  const preferred = !own && !HarnessAgentState.parseAutoEffort(id) && values.includes(effort.dataset.preferred) ? effort.dataset.preferred : null;
+  effort.value = preferred ?? (autoOn && (HarnessAgentState.parseAutoEffort(id) || !own) ? 'auto' : own?.effort || values[0] || '');
   effort.hidden = variants.length < 2;
 }
 // The model group of a mode: an Auto effort mode's model, or the group holding that preset.
@@ -1171,6 +1174,8 @@ function editAgent(profile) {
   // A fresh list for this agent: nothing left from the last time the dialog was open.
   dialog.dataset.mode = profile?.mode || state.settings.mode;
   dialog.dataset.secondary = profile?.secondaryModel || 'inherit';
+  dialog.dataset.advisor = profile?.advisorModel || 'inherit';
+  $('#agent-advisor').dataset.signature = '';
   dialog.dataset.router = profile?.router || 'inherit';
   dialog.dataset.cap = profile?.effortCap || 'inherit';
   $('#agent-secondary').dataset.signature = '';
@@ -1208,7 +1213,7 @@ const CAP_LABELS = { low: 'Up to low', medium: 'Up to medium', high: 'Up to high
 // Up the creator chain: a creator's live state holds its resolved values; without one (a browser before the fleet state
 // arrives, a creator just deleted), its saved values, else its own creator's. Never the open chat's unless it is that
 // creator's. Unknown stays undefined: the option then reads just "Inherit".
-const SAVED_KEYS = { router: 'router', secondary: 'secondaryModel', cap: 'effortCap' };
+const SAVED_KEYS = { router: 'router', secondary: 'secondaryModel', advisor: 'advisorModel', cap: 'effortCap' };
 function inheritedSettings(dialog) {
   const profiles = state.agents || [];
   const result = {}, seen = new Set();
@@ -1216,7 +1221,7 @@ function inheritedSettings(dialog) {
   while (id && !seen.has(id) && Object.keys(SAVED_KEYS).some(key => result[key] === undefined)) {
     seen.add(id);
     const live = fleetState?.agentStates?.[id] || (selectedAgent === id ? state : null);
-    const values = live ? { router: live.routerKind || 'secondary', secondary: live.secondaryId || 'off', cap: live.settings?.effortCap || 'high' }
+    const values = live ? { router: live.routerKind || 'secondary', secondary: live.secondaryId || 'off', advisor: live.settings?.advisorModel || 'chat', cap: live.settings?.effortCap || 'high' }
       : Object.fromEntries(Object.entries(SAVED_KEYS).map(([key, saved]) => [key, profiles.find(agent => agent.id === id)?.[saved]]));
     for (const key of Object.keys(SAVED_KEYS)) result[key] ??= values[key];
     if (live || id === 'main') break;
@@ -1225,6 +1230,10 @@ function inheritedSettings(dialog) {
   return result;
 }
 const secondaryLabel = id => id === 'off' ? 'Off' : (state.chatScanPresets || []).find(p => p.id === id)?.label || id;
+// A bot's Advisor (2026-11-13, the user): on by default as its own model at the highest effort its Effort cap allows.
+const ADVISOR_DEFAULT = 'Bot’s model, highest effort';
+// Any enabled model of any provider, as for the Secondary model (chatScanPresets).
+const advisorLabel = id => id === 'off' ? 'Off' : id === 'chat' ? ADVISOR_DEFAULT : (state.chatScanPresets || []).find(p => p.id === id)?.label || id;
 function renderBotSettings(prefix) {
   const dialog = $(`#${prefix}-dialog`), d = dialog.dataset, inherit = prefix === 'agent';
   const from = inherit ? inheritedSettings(dialog) : null;
@@ -1241,6 +1250,12 @@ function renderBotSettings(prefix) {
     effort.disabled = true;
   } else
     fillModelEffort(select, effort, state.chatScanPresets || [], d.secondary, [...inheritOption(secondaryLabel(from?.secondary)), new Option('Off', 'off')]);
+  const advisor = $(`#${prefix}-advisor`), advisorEffort = $(`#${prefix}-advisor-effort`);
+  if (providersConnecting().active) {
+    showConnecting(advisor);
+    advisorEffort.disabled = true;
+  } else
+    fillModelEffort(advisor, advisorEffort, state.chatScanPresets || [], d.advisor || 'chat', [...inheritOption(advisorLabel(from?.advisor)), new Option(ADVISOR_DEFAULT, 'chat'), new Option('Off', 'off')]);
   // Without a router, Auto effort runs the model's default effort; say why.
   const value = (key, inherited) => (d[key] === 'inherit' ? inherited : d[key]);
   const routerNow = value('router', from?.router), secondaryNow = value('secondary', from?.secondary);
@@ -1261,6 +1276,12 @@ for (const prefix of ['agent', 'hub']) {
   const dialog = $(`#${prefix}-dialog`);
   $(`#${prefix}-router`).onchange = () => { dialog.dataset.router = $(`#${prefix}-router`).value; renderBotSettings(prefix); };
   $(`#${prefix}-effort-cap`).onchange = () => { dialog.dataset.cap = $(`#${prefix}-effort-cap`).value; renderBotSettings(prefix); };
+  for (const picker of [`#${prefix}-advisor`, `#${prefix}-advisor-effort`]) {
+    $(picker).onchange = () => {
+      dialog.dataset.advisor = modelEffortChoice($(`#${prefix}-advisor`), $(`#${prefix}-advisor-effort`), state.chatScanPresets || []);
+      renderBotSettings(prefix);
+    };
+  }
   for (const picker of [`#${prefix}-secondary`, `#${prefix}-secondary-effort`]) {
     $(picker).onchange = () => {
       dialog.dataset.secondary = modelEffortChoice($(`#${prefix}-secondary`), $(`#${prefix}-secondary-effort`), state.chatScanPresets || []);
@@ -1353,6 +1374,8 @@ function editHub(profile) {
   $('#hub-access').value = dialog.dataset.access;
   $('#hub-dialog').dataset.mode = main.settings.mode === 'auto' ? main.hubMode : main.settings.mode;
   $('#hub-dialog').dataset.secondary = main.secondaryId || 'off';
+  $('#hub-dialog').dataset.advisor = main.settings.advisorModel || 'chat';
+  $('#hub-advisor').dataset.signature = '';
   $('#hub-dialog').dataset.router = main.routerKind || 'secondary';
   $('#hub-dialog').dataset.cap = main.settings.effortCap || 'high';
   $('#hub-secondary').dataset.signature = '';
@@ -1368,18 +1391,18 @@ function editHub(profile) {
 // Workspace and access are the main bot's settings; name and model go through renameHub. Each save sends only what changed.
 const hubEditor = autosaveEditor($('#hub-dialog'), {
   read: () => ({ name: $('#hub-name').value, workspace: $('#hub-workspace').value.trim(), access: $('#hub-access').value,
-    mode: $('#hub-dialog').dataset.mode, secondaryModel: $('#hub-dialog').dataset.secondary, router: $('#hub-dialog').dataset.router,
+    mode: $('#hub-dialog').dataset.mode, secondaryModel: $('#hub-dialog').dataset.secondary, advisorModel: $('#hub-dialog').dataset.advisor, router: $('#hub-dialog').dataset.router,
     effortCap: $('#hub-dialog').dataset.cap }),
   fill: saved => {
     $('#hub-name').value = saved.name;
     $('#hub-workspace').value = saved.workspace;
     $('#hub-access').value = saved.access;
     $('#hub-dialog').dataset.mode = saved.mode;
-    Object.assign($('#hub-dialog').dataset, { secondary: saved.secondaryModel, router: saved.router, cap: saved.effortCap });
+    Object.assign($('#hub-dialog').dataset, { secondary: saved.secondaryModel, advisor: saved.advisorModel, router: saved.router, cap: saved.effortCap });
     renderHubModels();
   },
   save: async (next, saved) => {
-    const changed = Object.fromEntries(['workspace', 'access', 'secondaryModel', 'router', 'effortCap'].filter(key => next[key] !== saved[key]).map(key => [key, next[key]]));
+    const changed = Object.fromEntries(['workspace', 'access', 'secondaryModel', 'advisorModel', 'router', 'effortCap'].filter(key => next[key] !== saved[key]).map(key => [key, next[key]]));
     if (Object.keys(changed).length)
       applyState(await window.router.settings(changed, 'main'));
     // The model is checked only when it changed, so a rename still works while providers reconnect.
@@ -1422,6 +1445,7 @@ $('#hub-browse').onclick = async () => {
 const agentForm = () => ({ id: $('#agent-dialog').dataset.agentId || undefined, name: $('#agent-name').value,
   instructions: $('#agent-instructions').value, workspace: $('#agent-workspace').value, inheritWorkspace: $('#agent-inherit').checked,
   mode: $('#agent-dialog').dataset.mode, access: $('#agent-access').value, secondaryModel: $('#agent-dialog').dataset.secondary || 'inherit',
+  advisorModel: $('#agent-dialog').dataset.advisor || 'inherit',
   router: $('#agent-dialog').dataset.router || 'inherit', effortCap: $('#agent-dialog').dataset.cap || 'inherit' });
 const agentEditor = autosaveEditor($('#agent-dialog'), {
   read: agentForm,
@@ -1432,7 +1456,7 @@ const agentEditor = autosaveEditor($('#agent-dialog'), {
     $('#agent-inherit').checked = saved.inheritWorkspace;
     showInherit();
     $('#agent-dialog').dataset.mode = saved.mode;
-    Object.assign($('#agent-dialog').dataset, { secondary: saved.secondaryModel, router: saved.router, cap: saved.effortCap });
+    Object.assign($('#agent-dialog').dataset, { secondary: saved.secondaryModel, advisor: saved.advisorModel, router: saved.router, cap: saved.effortCap });
     renderAgentModels();
     $('#agent-access').value = saved.access;
   },
@@ -1610,7 +1634,15 @@ function clearAlerts(id) {
   saveAlertsRead(id, []);
   fillBotAlerts();
 }
-const alertRead = (id, entry) => (!entry.current && entry.at <= (botAlerts.seen[id] || 0)) || !!botAlerts.read[id]?.includes(entry.key + ':' + entry.level);
+// Read keys as a set per saved list (saveAlertsRead replaces the list): a list scanned once per entry cost O(entries²).
+const readSets = new WeakMap();
+function readKeys(id) {
+  const list = botAlerts.read[id] || [];
+  let keys = readSets.get(list);
+  if (!keys) readSets.set(list, keys = new Set(list));
+  return keys;
+}
+const alertRead = (id, entry) => (!entry.current && entry.at <= (botAlerts.seen[id] || 0)) || readKeys(id).has(entry.key + ':' + entry.level);
 function saveAlertsRead(id, keys) {
   botAlerts.read[id] = keys;
   localStorage.setItem('botAlertsRead', JSON.stringify(botAlerts.read));
@@ -1683,31 +1715,57 @@ function botAlertEntries(id) {
   const cleared = new Set(botAlerts.cleared[id] || []);
   return allAlertEntries(id).filter(entry => !cleared.has(alertId(entry)));
 }
+// The bell is worked out again only for what changed: a chat's entries are kept with its message list, a bot's with its
+// chat list, and its badge with those and its read and cleared lists. State updates replace changed chats and lists and
+// keep the rest (keepSessions, mergeChat); every bot's badge from scratch took about 10.5 ms of each sidebar redraw
+// (15 bots, 2026-11-13).
+const chatAlerts = new WeakMap(), botAlertLists = new Map(), botBadges = new Map();
+function chatAlertEntries(chat) {
+  const kept = chatAlerts.get(chat.items);
+  if (kept && kept.title === chat.title && kept.created === chat.created) return kept;
+  const entries = [];
+  let at = chat.created || 0;
+  for (const item of chat.items) {
+    at = Math.max(at, item.createdAt || 0);
+    const alert = !item.internal && alertOf(item);
+    // Tool calls show only when they fail or are declined; messages, notices and Harness's own steps show in grey.
+    if (alert?.title && !(ALERT_TOOLS.has(item.type) && alert.level === 'info')) entries.push({ ...alert, key: item.id, at, chat: chat.title });
+  }
+  const result = { title: chat.title, created: chat.created, entries, at };
+  chatAlerts.set(chat.items, result);
+  return result;
+}
 function allAlertEntries(id) {
-  const worker = fleetState?.agentStates?.[id] || state;
+  const worker = fleetState?.agentStates?.[id] || state, background = fleetState?.executionStates?.[id];
+  const key = [worker.sessions, worker.sessions.length, background?.sessions, background?.sessions.length, !!worker.requests?.length, worker.connection, worker.error];
+  const kept = botAlertLists.get(id);
+  if (kept?.key.every((value, index) => value === key[index])) return kept.entries;
   const chats = new Map();
-  for (const context of [worker, fleetState?.executionStates?.[id]].filter(Boolean))
+  for (const context of [worker, background].filter(Boolean))
     for (const chat of context.sessions) chats.set(chat.id, chat);
   const entries = [];
   for (const chat of chats.values()) {
-    let at = chat.created || 0;
-    for (const item of chat.items) {
-      at = Math.max(at, item.createdAt || 0);
-      const alert = !item.internal && alertOf(item);
-      // Tool calls show only when they fail or are declined; messages, notices and Harness's own steps show in grey.
-      if (alert?.title && !(ALERT_TOOLS.has(item.type) && alert.level === 'info')) entries.push({ ...alert, key: item.id, at, chat: chat.title });
-    }
+    const { entries: own, at } = chatAlertEntries(chat);
+    entries.push(...own);
     if (chat.error) entries.push({ level: 'error', title: `Turn failed: ${chat.error}`, key: chat.id + ':error', at, chat: chat.title });
+    else if (turnWarning(chat)) entries.push({ level: 'warning', title: `Warning: ${turnWarning(chat)}`, key: chat.id + ':warning', at, chat: chat.title });
   }
   entries.sort((a, b) => b.at - a.at);
   const current = [];
   if (worker.requests?.length) current.push({ level: 'warning', title: 'Needs input', key: id + ':requests', current: true });
   if (!['ready', 'connecting'].includes(worker.connection) && worker.error) current.push({ level: 'error', title: worker.error, key: id + ':connection', current: true });
-  return [...current, ...entries];
+  const all = [...current, ...entries];
+  botAlertLists.set(id, { key, entries: all });
+  return all;
 }
 function alertBadge(id) {
+  const entries = allAlertEntries(id), key = [entries, botAlerts.cleared[id], botAlerts.read[id], botAlerts.seen[id]];
+  const kept = botBadges.get(id);
+  if (kept?.key.every((value, index) => value === key[index])) return kept.badge;
   const unseen = botAlertEntries(id).filter(entry => !alertRead(id, entry));
-  return { count: unseen.length, level: ALERT_LEVELS[Math.max(0, ...unseen.map(entry => ALERT_LEVELS.indexOf(entry.level)))] };
+  const badge = { count: unseen.length, level: ALERT_LEVELS[Math.max(0, ...unseen.map(entry => ALERT_LEVELS.indexOf(entry.level)))] };
+  botBadges.set(id, { key, badge });
+  return badge;
 }
 function fillBotAlerts() {
   const id = botAlerts.id, entries = botAlertEntries(id);
@@ -2367,12 +2425,14 @@ function render() {
     $('#message-queue').append(row);
   }
   renderBackgroundTasks();
-  $('#send').disabled = ((!ready || (state.coordinator && !currentMode())) && !slashCommand($('#prompt').value)) || !!session?.queueSending || !!session?.compacting || (state.busy && state.busy !== selectedId && !state.coordinator) || changingPermissions || submitting || readingImages || (!$('#prompt').value.trim() && !attachedImages().length && !attachedFiles().length);
+  $('#send').disabled = ((!ready || (state.coordinator && !currentMode())) && !knownCommand($('#prompt').value)) || missingMessage($('#prompt').value) || !!session?.queueSending || !!session?.compacting || (state.busy && state.busy !== selectedId && !state.coordinator) || changingPermissions || submitting || readingImages || (!$('#prompt').value.trim() && !attachedImages().length && !attachedFiles().length);
   renderImages();
   $('#working').hidden = !session?.groupTurn && (!state.busy || state.busy !== selectedId || !!session?.pendingMessage);
   const turnError = state.busy === selectedId ? '' : session?.error || '';
-  $('#turn-error').textContent = turnError ? `${session.status === 'interrupted' ? 'Stopped' : 'Turn failed'}: ${turnError}` : '';
-  $('#turn-error').hidden = !turnError;
+  const warning = state.busy === selectedId ? '' : turnWarning(session);
+  $('#turn-error').textContent = turnError ? `${session.status === 'interrupted' ? 'Stopped' : 'Turn failed'}: ${turnError}`
+    : warning ? `Warning: ${warning}` : '';
+  $('#turn-error').hidden = !turnError && !warning;
   renderModelFetching();
   $('#working-text').textContent = (session?.groupTurn ? `${session.groupTurn.round > 1 ? `Round ${session.groupTurn.round} · ` : ''}${session.groupTurn.name} ${session.groupTurn.state === 'needs-input' ? 'needs your input' : session.groupTurn.state === 'waiting' ? 'is waiting to reply' : 'is replying'}…` : '') || session?.waitingForAgent || (session?.compacting ? 'Compacting conversation context…' : state.routing === selectedId && state.routing
     ? '' : `${session?.routes.at(-1)?.label || 'Codex CLI'} ${backgroundWait(session) || 'is working'}…`);
@@ -3021,7 +3081,7 @@ const WRITERS = { codex: 'Codex CLI', 'claude-cli': 'Claude CLI', 'cursor-cli': 
 function writer(item, session) {
   if (item.groupSpeaker) return item.groupSpeaker.name;
   if (item.type === 'plan') return 'Plan';
-  if (item.tldr) return WRITERS[item.provider || 'codex'] || 'Codex CLI';
+  if (item.tldr || item.advisor) return WRITERS[item.provider || 'codex'] || 'Codex CLI';
   if (item.routeLabel === 'Jev · quick answer') return 'Jev';
   const route = item.turnId ? (session.routes || []).find(r => r.turnId === item.turnId) : null;
   return WRITERS[route?.provider || 'codex'] || 'Codex CLI';
@@ -3101,8 +3161,8 @@ function renderMessages(session) {
     const maintenance = (session.routes || []).filter(route => route.wikiMaintenanceTaskId);
     // bellOnly: a notification (e.g. the test pool's passed and skipped tests) listed in the bot's bell, not the chat.
     if (item.internal || item.agentReply || item.bellOnly || maintenance.some(route => route.messageId === (item.clientId || item.id) || (route.turnId && route.turnId === item.turnId))) continue;
-    // A /tldr notice answers the user's own command, so it shows even with steps hidden.
-    if (hideSteps && !CHAT_ITEM_TYPES.has(item.type) && !item.tldr) continue;
+    // A /tldr summary and an advisor's advice show even with steps hidden.
+    if (hideSteps && !CHAT_ITEM_TYPES.has(item.type) && !item.tldr && !item.advisor) continue;
     ids.add(item.id);
     let entry = messageNodes.get(item.id);
     const selected = item.type === 'userMessage' ? session.routes.find(r => r.messageId === (item.clientId || item.id)) : null;
@@ -3110,13 +3170,17 @@ function renderMessages(session) {
     const who = item.type === 'userMessage' ? item.routineRun ? routine : 'You' : writer(item, session);
     // A comparison's batch report is replaced by its comparison card.
     const batch = item.hubBatch && !item.comparisonId && fleetState?.batchReports?.[item.hubBatch.id];
-    const signature = JSON.stringify([item, selected, who, batch, hideSteps]);
-    if (entry?.signature === signature) continue;
+    // Updates carry only the messages and routes that changed (chatDelta), so an unchanged one is the object drawn last
+    // time: encoding every message took 3.4-4.9 ms per render on a 5,500-message chat (2026-11-12).
+    const parts = [item, selected, who, batch, hideSteps];
+    if (entry?.parts?.every((part, index) => part === parts[index])) continue;
+    const signature = JSON.stringify(parts);
+    if (entry?.signature === signature) { entry.parts = parts; continue; }
     if (!entry) {
       const node = document.createElement('div');
       entry = { node }; messageNodes.set(item.id, entry); $('#messages').append(node);
     }
-    entry.signature = signature;
+    entry.signature = signature; entry.parts = parts;
     const node = entry.node;
     const batchOpened = node.querySelector('.batch-report:not(.comparison-card)')?.open || false;
     const comparisonOpened = node.querySelector('.comparison-card')?.open ?? true;
@@ -3136,12 +3200,12 @@ function renderMessages(session) {
       node.replaceChildren(details);
     } else if (item.type === 'agentResult') renderAgentResult(item, node, session);
     // A /tldr summary reads like a normal answer: bubble, Copy, time and model label.
-    else if (item.type === 'notice' && !item.tldr) renderNotice(item, node, session);
+    else if (item.type === 'notice' && !item.tldr && !item.advisor) renderNotice(item, node, session);
     else if (item.type === 'agentArtifact' && item.localOnly) {
       node.className = 'message';
       node.replaceChildren(element('div', 'message-label', 'Artifact available'), renderArtifacts([item.artifact], session.id, item.id));
     }
-    else if (item.type === 'userMessage' || item.type === 'agentMessage' || item.type === 'plan' || item.tldr) {
+    else if (item.type === 'userMessage' || item.type === 'agentMessage' || item.type === 'plan' || item.tldr || item.advisor) {
       const user = item.type === 'userMessage';
       node.className = `message ${user ? 'user' : item.phase === 'commentary' ? 'commentary' : 'assistant'}`;
       node.tabIndex = 0;
@@ -3339,11 +3403,13 @@ async function updatePreview() {
   renderSlashMenu();
   const version = ++routeVersion;
   const prompt = $('#prompt').value;
-  $('#send').disabled = (state?.connection !== 'ready' && !slashCommand(prompt)) || changingPermissions || submitting || readingImages || (!prompt.trim() && !attachedImages().length && !attachedFiles().length) || !!readOnlyNote();
+  $('#send').disabled = (state?.connection !== 'ready' && !knownCommand(prompt)) || missingMessage(prompt) || changingPermissions || submitting || readingImages || (!prompt.trim() && !attachedImages().length && !attachedFiles().length) || !!readOnlyNote();
   if (state?.coordinator) return;
+  // An unknown name that no command starts with goes out as a message, so it gets the message preview.
   const command = slashCommand(prompt);
-  if (command) {
-    $('#route-preview').replaceChildren(element('strong', '', '/' + command), element('span', '', COMMANDS[command]?.description || (Object.keys(COMMANDS).some(name => name.startsWith(command)) ? 'Choose a command from the menu.' : 'Unknown command. Use /help.')));
+  if (command && (COMMANDS[command] || Object.keys(COMMANDS).some(name => name.startsWith(command)))) {
+    $('#route-preview').replaceChildren(element('strong', '', '/' + command), element('span', '', missingMessage(prompt) ? `Type your message after /${command}.`
+      : COMMANDS[command]?.description || 'Choose a command from the menu, or send it as a message.'));
     return;
   }
   if (!prompt.trim()) {
@@ -3437,6 +3503,22 @@ function renderRequest() {
   if (document.activeElement?.matches('button')) dialog.focus({ preventScroll: true });
 }
 
+// A finished turn's warning (Claude tool calls that were denied), shown only while that turn is the chat's latest.
+function turnWarning(chat) {
+  const warning = chat?.warning;
+  return warning && !chat.error && chat.status === 'completed' && warning.messageId === chat.routes?.at(-1)?.messageId ? warning.text : '';
+}
+
+// A message starting with "/" is a command only when one has that name; anything else is sent as written (2026-11-13, the user).
+function knownCommand(text) {
+  const name = slashCommand(text);
+  return name && Object.hasOwn(COMMANDS, name) ? name : null;
+}
+// A command that needs a message (/advisor) typed without one: it cannot be sent yet (2026-11-13, the user).
+function missingMessage(text) {
+  const name = knownCommand(text);
+  return !!name && COMMANDS[name].args === 'required' && !text.trim().slice(name.length + 1).trim();
+}
 function slashCommand(text) {
   return text.trim() === '/' ? 'help' : text.trim().match(/^\/([a-z][\w-]*)(?:\s|$)/i)?.[1].toLowerCase();
 }
@@ -3459,7 +3541,7 @@ const COMMANDS = {
     return api.compact(selectedId);
   } },
   clear: { description: 'Start fresh after confirmation; archive the current chat locally.', run: clearConversation },
-  stop: { description: 'Stop this agent and its pending child tasks.', run: () => api.stop() },
+  stop: { description: 'Stop this agent and the sub-bots working for it.', run: () => stopBot() },
   agents: { description: 'Open the agent overview.', run: () => $('#agents-overview').click() },
   settings: { description: 'Open Harness settings.', run: () => $('#settings').onclick() },
   context: { description: 'Show context usage, remaining capacity and last compaction.', run: () => openCommandPanel('context') },
@@ -3494,6 +3576,12 @@ const COMMANDS = {
     if (!selectedId) throw new Error('Open a chat first.');
     notify('Summarizing the last answer…');
     api.summarizeLast(selectedId).catch(notify);
+  } },
+  advisor: { args: 'required', description: 'Ask the advisor model about this chat: /advisor <message>. Shown only to you.', run: question => {
+    if (!selectedId) throw new Error('Open a chat first.');
+    if (!question) throw new Error('Type your message after /advisor, then press Enter.');
+    notify('Asking the advisor…');
+    api.adviseChat(selectedId, question).catch(notify);
   } },
 };
 let commandPanel = null, commandPicking = false;
@@ -3661,7 +3749,8 @@ function renderSlashMenu() {
     } else {
       button.dataset.command = name;
       button.append(element('code', '', '/' + name), element('span', '', COMMANDS[name].description));
-      button.onclick = () => chooseSlashCommand(name, true);
+      // A click only fills the command in; Enter runs it, so a command that takes text (/advisor) can get it first.
+      button.onclick = () => chooseSlashCommand(name, false);
     }
     button.onmousedown = event => event.preventDefault();
     return button;
@@ -3681,7 +3770,10 @@ function renderSlashMenu() {
 function chooseSlashCommand(name, execute) {
   if (submitting || readingImages || changingPermissions) return;
   const prompt = $('#prompt');
-  prompt.value = '/' + name; prompt.setSelectionRange(prompt.value.length, prompt.value.length);
+  // One that needs a message is only filled in, even by Enter: the message comes first.
+  if (COMMANDS[name]?.args === 'required') execute = false;
+  prompt.value = '/' + name + (!execute && COMMANDS[name]?.args ? ' ' : ''); prompt.setSelectionRange(prompt.value.length, prompt.value.length);
+  if (!execute) prompt.focus();
   sentHistory = null; sentHistoryIndex = -1; slashDismissed = true;
   hideSlashMenu(); updatePreview();
   if (execute) runCommand(name, prompt.value);
@@ -3693,9 +3785,11 @@ async function runCommand(name, text) {
   submitting = true; render();
   try {
     if (!Object.hasOwn(COMMANDS, name)) throw new Error('Unknown command. Use /help for available commands.');
-    if (text && text !== '/' && text.toLowerCase() !== '/' + name) throw new Error(`/${name} does not take arguments.`);
+    // A command marked args takes the text after its name (/advisor <question>); the others take none.
+    const rest = text && text.trim().toLowerCase().startsWith('/' + name) ? text.trim().slice(name.length + 1).trim() : '';
+    if (text && text !== '/' && text.toLowerCase() !== '/' + name && !(COMMANDS[name].args && rest)) throw new Error(`/${name} does not take arguments.`);
     if (text && (attachedImages().length || attachedFiles().length)) throw new Error('Remove attachments before running a slash command.');
-    const result = await COMMANDS[name].run();
+    const result = await COMMANDS[name].run(rest);
     if (result !== false && text && draftKey() === key && $('#prompt').value.trim() === text) {
       $('#prompt').value = ''; drafts.delete(key); updatePreview();
     }
@@ -3725,7 +3819,7 @@ $('#composer').addEventListener('submit', async event => {
   }
   const text = $('#prompt').value.trim();
   if (text.length > $('#prompt').maxLength) { notify(new Error('Your draft is over the message limit. Shorten it before sending.')); return; }
-  const command = slashCommand(text);
+  const command = knownCommand(text);
   if (command) { await runCommand(command, text); return; }
   if (state.coordinator && !currentMode()) { notify(new Error('Choose a model in the main Bot’s Edit options.')); return; }
   const images = attachedImages().slice();
@@ -3840,7 +3934,8 @@ $('#prompt').addEventListener('keydown', event => {
       event.preventDefault();
       const option = options[slashIndex];
       if (option.dataset.member) chooseGroupMention(option.dataset.member);
-      else chooseSlashCommand(option.dataset.command, event.key === 'Enter');
+      // Enter runs a command already typed in full; on a partial one it only completes it, like a click (2026-11-13, the user).
+      else chooseSlashCommand(option.dataset.command, event.key === 'Enter' && $('#prompt').value.trim().toLowerCase() === '/' + option.dataset.command);
       return;
     }
     if (!options.length && event.key === 'Enter' && groupMentionQuery() !== undefined) { event.preventDefault(); return; }
@@ -3888,7 +3983,13 @@ async function changeAccess(access) {
   finally { changingPermissions = false; render(); }
 }
 $('#permissions').onchange = () => changeAccess($('#permissions').value).catch(notify);
-$('#stop').onclick = () => api.stop().catch(notify);
+// Stop also stops the sub-bots working for this bot and names them (2026-11-12, the user).
+function stopBot(id) {
+  return api.stop(id).then(result => {
+    if (result?.stoppedSubBots?.length) notify(`Also stopped its sub-bots: ${result.stoppedSubBots.join(', ')}.`);
+  });
+}
+$('#stop').onclick = () => stopBot().catch(notify);
 
 // Reply suggestions (Settings → General): after the AI answers, its suggested next message shows as grey text in the
 // composer and stays grey while the draft matches its start. Right arrow at the end of the draft accepts it.
@@ -4488,7 +4589,7 @@ document.addEventListener('click', event => {
 document.addEventListener('keydown', event => {
   if (event.defaultPrevented) return;
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'n' && !document.querySelector('dialog[open]')) { event.preventDefault(); editAgent(); }
-  if (event.key === 'Escape' && (state?.busy === selectedId || current()?.groupTurn) && !document.querySelector('dialog[open]')) api.stop(selectedId).catch(notify);
+  if (event.key === 'Escape' && (state?.busy === selectedId || current()?.groupTurn) && !document.querySelector('dialog[open]')) stopBot(selectedId).catch(notify);
 });
 // Ctrl+F finds text in the shown chat. Matches are painted with the CSS Highlight API, so the rendered messages are not
 // changed. ponytail: a match must sit inside one text node; words split by inline formatting are not found.

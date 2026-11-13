@@ -120,6 +120,8 @@ module.exports = {
     session.compacting = false;
     session.status = outcome.status;
     session.error = outcome.error || null;
+    // Tagged with its message: the UI shows it only while this is the chat's latest turn.
+    session.warning = outcome.status === 'completed' && outcome.warning ? { text: outcome.warning, messageId: submission.messageId } : null;
     const budgetRoute = session.routes.find(route => route.messageId === submission.messageId);
     const finalUsage = budgetRoute?.budgetUsageInvalid ? null
       : budgetRoute && Object.hasOwn(budgetRoute, 'budgetFinalUsage') ? budgetRoute.budgetFinalUsage : budgetRoute?.turnUsage;
@@ -296,13 +298,14 @@ module.exports = {
         } : {})
       };
     }
+    // findLast: streamed items sit at the chat's end (see the Claude turn's assistant()).
     if (method === 'item/agentMessage/delta') {
-      let item = session.items.find(i => i.id === p.itemId);
+      let item = session.items.findLast(i => i.id === p.itemId);
       if (!item) { item = { id: p.itemId, turnId: p.turnId, type: 'agentMessage', text: '', routeLabel: session.routes.at(-1)?.label, createdAt: Date.now() }; session.items.push(item); }
       item.text += p.delta;
     }
     if (method === 'item/commandExecution/outputDelta') {
-      const item = session.items.find(i => i.id === p.itemId);
+      const item = session.items.findLast(i => i.id === p.itemId);
       if (item) item.aggregatedOutput = ((item.aggregatedOutput || '') + p.delta).slice(-60000);
     }
     if (method === 'error') session.error = p.error?.message || p.message;

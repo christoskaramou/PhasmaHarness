@@ -115,3 +115,15 @@ test('each bot has its own activity log file, which rolls over and keeps three',
     fs.existsSync(path.join(directory, 'bot3.log'))], ['first version\n', 'current\n', false]);
   assert.equal(new ActivityLog(directory).file('bot2', 'New: bot?'), path.join(directory, 'New bot-bot2.log'), 'characters Windows refuses are left out');
 });
+
+test('a save with nothing new skips the file checks once the log exists, and a deleted log comes back with its next line', async t => {
+  const { log, controller, session, read } = fixture(t);
+  log.capture(controller);
+  const file = log.file('bot1', 'Builder');
+  fs.rmSync(file);
+  log.capture(controller);
+  assert.equal(fs.existsSync(file), false, 'nothing to write: no file work');
+  session.items.push({ id: 'u2', type: 'userMessage', content: [{ type: 'text', text: 'next message' }] });
+  log.capture(controller);
+  assert.match(read(), /^Activity log for Builder\..*\n.*You:\n {4}next message\n$/);
+});

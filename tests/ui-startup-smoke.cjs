@@ -2432,8 +2432,9 @@ app.whenReady().then(async () => {
   const mainConversationId = agents.conversation(controller).id;
   oldConversation.items.push({ id: 'clear-history', type: 'agentMessage', text: 'Earlier agent history.' });
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
-  const commandNames = ['/help', '/compact', '/clear', '/stop', '/agents', '/settings', '/context', '/model', '/effort', '/access', '/switch', '/export', '/status', '/suggestion', '/wiki', '/tldr'];
-  const sentBeforeCommands = sent.length, previewsBeforeCommands = previews;
+  const commandNames = ['/help', '/compact', '/clear', '/stop', '/agents', '/settings', '/context', '/model', '/effort', '/access', '/switch', '/export', '/status', '/suggestion', '/wiki', '/tldr', '/advisor'];
+  const sentBeforeCommands = sent.length;
+  let previewsBeforeCommands = previews;
   const typeCommand = text => window.webContents.executeJavaScript(`(() => {
     const prompt = document.querySelector('#prompt'); prompt.focus(); prompt.value = ${JSON.stringify(text)};
     prompt.setSelectionRange(prompt.value.length, prompt.value.length); prompt.dispatchEvent(new Event('input'));
@@ -2456,16 +2457,32 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), '/c');
   assert.deepEqual(await typeCommand('/zz'), []);
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#slash-empty").hidden'), false);
+  // 2026-11-13, the user: "/zz" names no command, so it would go out as a message and gets that message's route preview.
+  for (let i = 0; i < 100 && previews === previewsBeforeCommands; i++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(previews, previewsBeforeCommands + 1, 'text naming no command is previewed as a message');
+  previewsBeforeCommands = previews;
   assert.deepEqual(await typeCommand('/'), commandNames, 'removing a prefix restores all commands');
   assert.deepEqual(await typeCommand('/se'), ['/settings']);
+  await commandKey('Enter');
+  // 2026-11-13, the user: Enter on a partial command only completes it; Enter on the full one runs it.
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), '/settings');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#settings-dialog").open'), false, 'a partial command is completed, not run');
+  await typeCommand('/settings');
   await commandKey('Enter');
   for (let i = 0; i < 100 && !await window.webContents.executeJavaScript('document.querySelector("#settings-dialog").open'); i++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#settings-dialog").open'), true);
   await window.webContents.executeJavaScript('document.querySelector("#settings-dialog").close(); true');
   await typeCommand('/he');
   await window.webContents.executeJavaScript('document.querySelector("#slash-help").click(); true');
+  // 2026-11-13, the user: a click only fills the command in; Enter (a submit) runs it.
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), '/help');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#commands-dialog").open'), false, 'a click does not run the command');
+  await submit('/help', false);
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#commands-dialog").open'), true);
   await window.webContents.executeJavaScript('document.querySelector("#commands-dialog").close(); true');
+  await typeCommand('/adv');
+  await window.webContents.executeJavaScript('document.querySelector("#slash-advisor").click(); true');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), '/advisor ', 'a command that takes text leaves room for it');
   await typeCommand('/clear extra');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#slash-menu").hidden'), true, 'arguments are not command completions');
   await typeCommand('/');
@@ -2679,6 +2696,8 @@ app.whenReady().then(async () => {
   phase = 'confirmation dialogs';
   await typeCommand('/cl');
   await window.webContents.executeJavaScript('document.querySelector("#slash-clear").click(); true');
+  assert.equal(clearPrompts, 0, 'a click only fills /clear in');
+  await submit('/clear', false);
   await waitForDialog();
   assert.equal(clearPrompts, 1);
   assert.equal(agents.conversation(agents.controller(commandAgent)).id, oldConversation.id);
@@ -2726,11 +2745,31 @@ app.whenReady().then(async () => {
   assert.equal(await window.webContents.executeJavaScript('current().items.length'), 0);
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), '');
   assert.equal(agents.conversation(controller).id, mainConversationId);
-  await submit('/not-a-command');
-  assert.match(await window.webContents.executeJavaScript('document.querySelector("#toast").textContent'), /Unknown command/);
   assert.equal(sent.length, sentBeforeCommands, 'slash commands never become model prompts');
   assert.equal(previews, previewsBeforeCommands, 'slash commands do not invoke routing previews');
+  // 2026-11-13, the user: text starting with "/" that names no command is sent as written.
+  await submit('/not-a-command and some text');
+  for (let i = 0; i < 100 && sent.length === sentBeforeCommands; i++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(sent.length, sentBeforeCommands + 1, 'an unknown slash command is sent as a message');
+  assert.match(JSON.stringify(sent.at(-1)), /\/not-a-command and some text/);
   console.log('Slash commands, selected-agent targeting and confirmed clear passed');
+  // A finished turn with denied Claude tool calls shows a warning, not "Turn failed", and only while it is the latest turn.
+  const deniedWarning = await window.webContents.executeJavaScript(`(() => {
+    const chat = current(), saved = { status: chat.status, error: chat.error, warning: chat.warning, routes: chat.routes };
+    Object.assign(chat, { status: 'completed', error: null, routes: [...(chat.routes || []), { messageId: 'denied-turn' }],
+      warning: { text: 'Claude was not allowed to run this tool call; the rest of the turn finished.\\n- Bash: ls build', messageId: 'denied-turn' } });
+    render();
+    const box = document.querySelector('#turn-error'), shown = [box.hidden, box.textContent];
+    chat.routes = [...chat.routes, { messageId: 'later-turn' }]; render();
+    const later = box.hidden;
+    Object.assign(chat, saved); render();
+    return [...shown, later];
+  })()`);
+  assert.equal(deniedWarning[0], false, 'the warning is shown');
+  assert.match(deniedWarning[1], /^Warning: Claude was not allowed to run this tool call;[^]*- Bash: ls build$/);
+  assert.doesNotMatch(deniedWarning[1], /Turn failed/);
+  assert.equal(deniedWarning[2], true, 'a later turn hides it');
+  console.log('Denied Claude tool calls show as a warning on the latest turn only passed');
   const selectableButtons = await window.webContents.executeJavaScript(`(() => {
     const buttons = [...document.querySelectorAll('button,button *,[role=button],[role=button] *,input[type=button],input[type=submit],input[type=reset]')];
     return buttons.filter(element => getComputedStyle(element).userSelect !== 'none').map(element => element.outerHTML);

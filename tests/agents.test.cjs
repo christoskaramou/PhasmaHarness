@@ -2079,7 +2079,7 @@ test('new and existing Codex chats expose agent tools through a session-bound MC
   assert.equal(started.params.config['features.multi_agent'], false, 'untracked agent chats must not expose provider-native subagents');
   assert.match(started.params.developerInstructions, /MUST call agent_create and confirm its returned id/);
   const server = started.params.config['mcp_servers.phasma_harness'];
-  assert.deepEqual(server.enabled_tools, ['agent_revise', 'agent_transfer_owner', 'agents_list', 'agent_models', 'agent_create', 'agent_delegate', 'agent_read_context', 'agent_stop', 'agent_set_access', 'agent_message', 'agent_artifact', 'routine', 'routines_report', 'harness_check_update', 'read_settings', 'write_settings', 'memory_note', 'image_list', 'image_ask', 'image_read', 'connector_tools', 'connector_call', 'router_read_output']);
+  assert.deepEqual(server.enabled_tools, ['agent_revise', 'agent_transfer_owner', 'agents_list', 'agent_models', 'agent_create', 'agent_delegate', 'agent_read_context', 'agent_stop', 'agent_set_access', 'agent_message', 'agent_artifact', 'routine', 'routines_report', 'harness_check_update', 'read_settings', 'write_settings', 'memory_note', 'ask_advisor', 'image_list', 'image_ask', 'image_read', 'connector_tools', 'connector_call', 'router_read_output']);
   assert.ok(!MCP_TOOLS.some(tool => tool.name === 'agent_delete') && !claudeAllowedHelpers('danger-full-access').includes('mcp__phasma_harness__agent_delete'));
   assert.equal(server.env.PHASMA_SESSION_ID, source.id);
   assert.equal(server.env.ELECTRON_RUN_AS_NODE, '1');
@@ -2155,6 +2155,41 @@ test('background startup errors stay visible on the saved agent', async t => {
   assert.ok(agents.profile(profile.id));
 });
 
+// 2026-11-12, the user: PhasmaProjects' model could not change while its sub-bots' results waited in its queue.
+test('a bot with queued messages takes a new model and access; only a running turn locks it', async t => {
+  const { agents, workspace } = await setup(t);
+  const base = { name: 'Lead', workspace, mode: 'auto', access: 'read-only', instructions: '' };
+  const profile = await agents.saveAgent(base);
+  const controller = agents.controller(profile.id), chat = controller.create();
+  chat.queue = [{ id: 'q1', agentReply: true, text: 'Result from agent "Helper"' }];
+  const saved = await agents.saveAgent({ ...base, id: profile.id, mode: 'terra-light' });
+  assert.equal(saved.mode, 'terra-light');
+  assert.equal(chat.queue.length, 1, 'the queued result stays to run with the new model');
+  assert.equal((await agents.saveAgent({ ...base, id: profile.id, mode: 'terra-light', access: 'workspace-write' })).access, 'workspace-write');
+  controller.busy = chat.id;
+  await assert.rejects(agents.saveAgent({ ...base, id: profile.id, mode: 'auto' }), /Lead is running\. Stop it first/);
+  controller.busy = null;
+});
+
+// 2026-11-13, the user: the Advisor is per bot, on by default, and a bot without one escalates again.
+test('each bot has its own Advisor: on by default through Hub, Off per bot, and Inherit follows Hub', async t => {
+  const { agents, workspace } = await setup(t);
+  const base = { name: 'Worker', workspace, mode: 'auto', access: 'read-only', instructions: '' };
+  const profile = await agents.saveAgent(base);
+  const bot = agents.controller(profile.id);
+  assert.deepEqual([bot.data.settings.advisorModel, bot.hasAdvisor(), profile.advisorModel], ['chat', true, undefined], 'on by default, Inherit not stored');
+  await agents.saveAgent({ ...base, id: profile.id, advisorModel: 'off' });
+  assert.deepEqual([bot.data.settings.advisorModel, bot.hasAdvisor()], ['off', false]);
+  await agents.saveAgent({ ...base, id: profile.id, advisorModel: 'inherit' });
+  agents.settings({ advisorModel: 'off' }, 'main');
+  assert.equal(agents.controller(profile.id).hasAdvisor(), false, 'Inherit follows Hub');
+  await assert.rejects(agents.saveAgent({ ...base, id: profile.id, advisorModel: 'no-such-model' }), /Unknown advisor model/);
+  // Any enabled model of any provider, as for the Secondary model (2026-11-13, the user).
+  for (const choice of agents.primary.chatScanChoices().slice(-2))
+    assert.equal((await agents.saveAgent({ ...base, id: profile.id, advisorModel: choice.id })).advisorModel, choice.id);
+  assert.throws(() => agents.settings({ advisorModel: 'chat' }, profile.id), /Edit dialog/);
+});
+
 test('quitting during configuration does not start an agent afterward', async t => {
   const { agents, workspace } = await setup(t);
   let release, closed = 0;
@@ -2227,19 +2262,18 @@ test('clear rejects pending work, rechecks after confirmation and rolls back a f
   let confirmations = 0;
   const confirm = () => { confirmations++; return true; };
   primary.busy = old.id;
-  await assert.rejects(agents.clearConversation('main', confirm), /pending work/);
-  primary.busy = null; old.queue = [{ id: 'queued', text: 'Keep pending input.' }];
-  await assert.rejects(agents.clearConversation('main', confirm), /queued/);
-  old.queue = [];
+  await assert.rejects(agents.clearConversation('main', confirm), /is running\. Stop it first/);
+  // 2026-11-12, the user: only work actually running locks a chat; a sub-bot running a job for it does.
+  primary.busy = null;
   const child = await add('Child'), task = agents.conversation(child, true);
-  task.delegation = { source: old.id, state: 'queued', delivered: false }; child.connection = 'disconnected';
-  await assert.rejects(agents.clearConversation('main', confirm), /delegated tasks/);
-  delete task.delegation;
+  task.delegation = { id: 'job', source: old.id, state: 'running', delivered: false }; child.busy = task.id;
+  await assert.rejects(agents.clearConversation('main', confirm), /sub-bots are still running: Child\. Stop stops them too/);
+  child.busy = null; delete task.delegation;
   assert.equal(confirmations, 0);
   let answer;
   const clearing = agents.clearConversation('main', () => new Promise(resolve => { answer = resolve; }));
   primary.busy = old.id; answer(true);
-  await assert.rejects(clearing, /pending work/); primary.busy = null;
+  await assert.rejects(clearing, /is running/); primary.busy = null;
   const previous = primary.data.sessions, before = JSON.stringify(readSessionData(primary.filename)), save = primary.save;
   primary.save = () => { throw new Error('Disk full'); };
   await assert.rejects(agents.clearConversation('main', confirm), /Disk full/); primary.save = save;
@@ -2296,6 +2330,26 @@ test('one conversation is retained per agent and old chats migrate once without 
   assert.equal(migrated.snapshot().agents[0].name, 'Assistant');
 });
 
+// 2026-11-12, the user: work left by a Stop, a usage limit or a closed Harness never locks a chat; clearing cancels it.
+test('clear goes ahead over queued messages and unfinished jobs, and cancels the jobs; Stop names the sub-bots it stopped', async t => {
+  const { agents, primary, add } = await setup(t);
+  const old = agents.conversation(primary, true);
+  old.queue = [{ id: 'queued', text: 'Left over.' }];
+  const child = await add('Child'), task = agents.conversation(child, true);
+  task.delegation = { id: 'job', source: old.id, owner: old.id, state: 'queued', delivered: false };
+  const fresh = await agents.clearConversation('main', () => true);
+  assert.notEqual(fresh.id, old.id);
+  assert.equal(task.delegation.cancelled, true, 'the job left for the cleared chat is cancelled');
+  assert.deepEqual(primary.data.sessions.find(s => s.id === old.id).queue, []);
+
+  const next = agents.conversation(primary, true), helper = await add('Helper'), work = agents.conversation(helper, true);
+  work.delegation = { id: 'job2', source: next.id, owner: next.id, state: 'running', delivered: false };
+  helper.busy = work.id;
+  helper.stop = async () => { helper.busy = null; };
+  const stopped = await agents.stop(next.id);
+  assert.deepEqual(stopped?.stoppedSubBots, ['Helper']);
+});
+
 test('agent deletion protects Main and pending work, persists removal, and keeps recovery files', async t => {
   const { agents, primary, add } = await setup(t);
   const worker = await add('Delete me');
@@ -2303,11 +2357,8 @@ test('agent deletion protects Main and pending work, persists removal, and keeps
   await assert.rejects(agents.deleteAgent('main'), /cannot be deleted/);
   await assert.rejects(agents.deleteAgent(), /Unknown agent/);
   worker.busy = chat.id;
-  await assert.rejects(agents.deleteAgent(worker.agentId), /Stop this agent/);
+  await assert.rejects(agents.deleteAgent(worker.agentId), /Delete me is running\. Stop it first/);
   worker.busy = null;
-  chat.delegation = { source: 'source', state: 'queued', delivered: false };
-  await assert.rejects(agents.deleteAgent(worker.agentId), /delegated tasks/);
-  delete chat.delegation;
   const save = primary.save.bind(primary); primary.save = () => { throw new Error('Disk full'); };
   await assert.rejects(agents.deleteAgent(worker.agentId), /Disk full/);
   assert.ok(agents.profile(worker.agentId)); assert.equal(agents.controller(worker.agentId), worker);
@@ -2614,12 +2665,9 @@ test('management rejects escalation, self-targeting, inactive calls and pending 
   }
   await assert.rejects(primary.bridgeTool(source.id, 'agent_set_access', { agentId: worker.agentId, access: 'admin' }), /Unknown access/);
   source.access = 'workspace-write';
-  chat.queue = [{ id: 'pending', text: 'Keep this task.' }]; chat.queuePaused = true;
-  await assert.rejects(agents.deleteAgent(worker.agentId), /queued/, 'the user\'s delete also waits for queued work');
-  await assert.rejects(primary.bridgeTool(source.id, 'agent_set_access', { agentId: worker.agentId, access: 'read-only' }), /pending work/);
-  chat.queue = []; worker.busy = chat.id;
-  await assert.rejects(agents.deleteAgent(worker.agentId), /pending work/);
-  await assert.rejects(primary.bridgeTool(source.id, 'agent_set_access', { agentId: worker.agentId, access: 'read-only' }), /pending work/);
+  worker.busy = chat.id;
+  await assert.rejects(agents.deleteAgent(worker.agentId), /is running\. Stop it first/);
+  await assert.rejects(primary.bridgeTool(source.id, 'agent_set_access', { agentId: worker.agentId, access: 'read-only' }), /is running/);
   worker.busy = null;
   assert.equal(chat.access, 'workspace-write');
   complete(primary, source);
@@ -2808,7 +2856,7 @@ test('busy recipients persist FIFO assignments without changing active work or p
   assert.deepEqual({ turn: chat.turnId, title: chat.title, access: chat.access }, active);
   assert.deepEqual(chat.delegationQueue.map(job => job.id), [first.jobId, second.jobId]);
   assert.equal(readSessionData(worker.filename).sessions.find(s => s.id === chat.id).delegationQueue.length, 2);
-  await assert.rejects(agents.clearConversation(worker.agentId, async () => true), /pending|delegated/);
+  await assert.rejects(agents.clearConversation(worker.agentId, async () => true), /is running/);
   assert.throws(() => agents.settings({ access: 'danger-full-access' }, worker.agentId), /Stop/);
   complete(worker, chat, 'Original task');
   await until(() => chat.delegation?.id === first.jobId && !!chat.turnId);

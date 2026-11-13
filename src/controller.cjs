@@ -65,6 +65,8 @@ function stateItem(item) {
   return { ...item, arguments: undefined, result: undefined, subject: subject || undefined };
 }
 
+const DIRECT_CONTEXT_CHARS = 100000;
+
 // Token counts summed over model calls; an unknown cached count stays unknown.
 function sumUsage(counts) {
   return counts.reduce((sum, item) => ({
@@ -72,6 +74,21 @@ function sumUsage(counts) {
     cachedInputTokens: sum.cachedInputTokens === null || item.cachedInputTokens === null ? null : sum.cachedInputTokens + (item.cachedInputTokens || 0),
     outputTokens: sum.outputTokens + (item.outputTokens || 0),
   }), { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 });
+}
+
+// Claude's result.permission_denials ({ tool_name, tool_input }) as a warning naming each blocked call. A denial does not
+// fail a finished turn: the selected access or a deny rule in Claude's settings (which binds even bypassPermissions)
+// blocked one call, and the model went on without it (2026-11-12, the user).
+function deniedCallsWarning(denials) {
+  const calls = denials.slice(0, 5).map(denial => {
+    const input = denial?.tool_input || {};
+    const detail = String(input.command ?? input.file_path ?? input.path ?? input.pattern ?? input.url ?? '').split('\n')[0].trim();
+    return `- ${denial?.tool_name || 'Tool'}${detail ? `: ${detail.length > 160 ? detail.slice(0, 159) + '…' : detail}` : ''}`;
+  });
+  if (denials.length > 5) calls.push(`- …and ${denials.length - 5} more`);
+  const one = denials.length === 1;
+  return `Claude was not allowed to run ${one ? 'this tool call' : `these ${denials.length} tool calls`}; the rest of the turn finished.\n` +
+    `${calls.join('\n')}\nThe selected access or a deny rule in Claude's settings (which applies even with Full access) blocked ${one ? 'it' : 'them'}.`;
 }
 
 // Claude's cost tracker (result.modelUsage, total_cost_usd) counts every call of a Claude session, subagents included,
@@ -211,6 +228,9 @@ class Controller extends EventEmitter {
         delete message.sending;
         delete message.waiting;
       }
+      for (const item of session.items || []) if (item.pendingDelivery)
+        this.undelivered(item, { text: (item.content || []).filter(part => part.type === 'text').map(part => part.text).join('\n'),
+          images: (item.content || []).filter(part => part.type === 'image').map(part => part.url), fileMessage: item.fileMessage }, 'the app closed before it was confirmed');
       // What the Secondary model held stops with the app; it stays in the chat with Send again and Edit, so nothing starts
       // by itself after a restart (direct-answer.cjs).
       this.endQueued(session, (session.queue || []).filter(message => message.secondary && !message.uncertain), 'interrupted', 'the app closed');
@@ -353,9 +373,11 @@ class Controller extends EventEmitter {
       connectingProviders: [...new Set([...this.connectingProviders.keys(), ...(this.chatgptLoginPending ? ['codex'] : [])])],
       chatgptLoginPending: this.chatgptLoginPending,
       ...visibleData, settings: { ...this.data.settings, mode: plan ? 'auto' : this.data.settings.mode }, planRouting: plan, connection: this.connection, error: this.error, account: this.account, busy: this.busy,
-      sessions: this.data.sessions.map(({ groupChatContext, coordinatorConversation, items, ...session }) => ({
+      // directContext (history quoted to Codex) is never shown and was 14-18% of a busy chat's state, resent on every
+      // streamed update (2026-11-12).
+      sessions: this.data.sessions.map(({ groupChatContext, coordinatorConversation, directContext, items, ...session }) => ({
         ...withoutImages({ ...session, background: this.background.get(session.id), tasks: (session.tasks || []).map(({ inputImages, ...task }) => task) }),
-        items: (items || []).map(stateItem) })),
+        items: this.stateItems(session, items) })),
       routing: this.routing, routingProvider: this.routingProvider, routerModel: this.routingProvider === 'jev' ? this.smartRouter.jev?.model || JEV_MODEL : this.secondaryPick()?.model || null,
       jev: { configured: !!this.smartRouter.jev?.configured, keySaved: !!(this.smartRouter.jev?.keyStore?.configured ?? this.smartRouter.jev?.configured), enabled: this.data.settings.jevEnabled !== false, model: this.smartRouter.jev?.model || null, requestedModel: JEV_MODEL, health: this.smartRouter.jev?.health || null },
       helperCapabilities: {
@@ -435,6 +457,38 @@ class Controller extends EventEmitter {
       // Under Agents the fleet update builds every bot's snapshot itself; only a standalone controller's listeners get one.
       this.emit('state', this.agents ? undefined : this.snapshot());
     }, 100);
+  }
+
+  // Whether this bot has an advisor (ask_advisor, /advisor): then it never escalates (task-gate.cjs). Each bot's own
+  // setting (its Edit dialog; Agents.sync resolves Inherit), on unless set to Off.
+  hasAdvisor() {
+    return this.data.settings.advisorModel !== 'off';
+  }
+
+  // directContext: exchanges with other backends that the chat's next Codex turn quotes. It grew without end in chats
+  // Codex never ran in (1 MB in the user's largest, 2026-11-12), all of which Codex would have been sent. The newest are
+  // kept up to DIRECT_CONTEXT_CHARS (about 25,000 tokens), and always the newest one.
+  rememberDirect(session, entry) {
+    const list = [...(session.directContext || []), entry];
+    let from = list.length, size = 0;
+    while (from > 0 && ((size += JSON.stringify(list[from - 1]).length) <= DIRECT_CONTEXT_CHARS || from === list.length)) from--;
+    session.directContext = list.slice(from);
+  }
+
+  // A chat's messages as the window gets them (stateItem). Every update mapped every bot's chats again: 19.6 ms per update
+  // on the user's 15 bots, up to ten updates a second while one streams (2026-11-12). A chat whose message count, status
+  // and revision did not move reuses its mapped list. Most messages map to themselves, so an edit made in place still
+  // shows; a tool step or a message with images (copies), or a message replaced, without a change notice shows when the
+  // cache drops, every minute. ponytail: the 10-minute full state can carry such an edit up to a minute late.
+  stateItems({ id, status }, items = []) {
+    const now = Date.now();
+    if (!this.stateItemCache || now - this.stateItemCache.at >= 60000) this.stateItemCache = { at: now, chats: new Map() };
+    const mark = `${items.length}:${status}:${this.sharedRevision || 0}:${this.chatRevisions?.get(id) || 0}`;
+    const kept = this.stateItemCache.chats.get(id);
+    if (kept?.items === items && kept.mark === mark) return kept.mapped;
+    const mapped = items.map(stateItem);
+    this.stateItemCache.chats.set(id, { items, mark, mapped });
+    return mapped;
   }
 
   flushSave() {
@@ -526,6 +580,13 @@ class Controller extends EventEmitter {
         throw new Error('This dream model is unavailable on your account.');
 
       next.dreamModel = values.dreamModel;
+    }
+    if (values.advisorModel !== undefined) {
+      // Any enabled model of any provider, as for the Secondary model.
+      const choice = this.chatScanChoices().find(p => p.id === values.advisorModel);
+      if (!['chat', 'off'].includes(values.advisorModel) && !choice) throw new Error('Unknown advisor model.');
+      if (choice && !this.available(choice)) throw new Error('This advisor model is unavailable on your account.');
+      next.advisorModel = values.advisorModel;
     }
     if (values.chatScanModel !== undefined) {
       const choice = this.chatScanChoices().find(p => p.id === values.chatScanModel);
@@ -1345,8 +1406,10 @@ class Controller extends EventEmitter {
       counted = turn;
       turnRoute.turnUsage = turn;
     };
+    // findLast: the streamed message and tool calls sit at the chat's end; a forward search of a 5,500-item chat cost
+    // 37 µs per streamed token (measured 2026-11-12).
     const assistant = id => {
-      let item = session.items.find(i => i.id === id);
+      let item = session.items.findLast(i => i.id === id);
       if (!item) { item = { id, turnId, type: 'agentMessage', text: '', phase: 'final_answer', routeLabel: selected.label, localOnly: true, createdAt: Date.now() }; session.items.push(item); }
       assistantIds.add(id); return item;
     };
@@ -1445,7 +1508,7 @@ class Controller extends EventEmitter {
             const body = content.filter(c => c.type === 'text').map(c => c.text).join('\n');
             if (body) assistant(event.message.id || current || `${turnId}-answer`).text = body;
             for (const tool of content.filter(c => c.type === 'tool_use')) {
-              const known = session.items.find(i => i.id === tool.id);
+              const known = session.items.findLast(i => i.id === tool.id);
               // A repeated call carries its later name and input (Cursor fills them in after starting the tool).
               if (known) Object.assign(known, { tool: tool.name, arguments: tool.input });
               else session.items.push({
@@ -1455,7 +1518,7 @@ class Controller extends EventEmitter {
             }
           }
           if (event.type === 'user') for (const output of event.message?.content || []) {
-            const item = session.items.find(i => i.id === output.tool_use_id);
+            const item = session.items.findLast(i => i.id === output.tool_use_id);
             if (item) { item.status = output.is_error ? 'failed' : 'completed'; item.result = output.content; }
           }
           // Streamed text touches only this chat.
@@ -1505,17 +1568,28 @@ class Controller extends EventEmitter {
       const costUsd = tracked ? tracked.costUsd : result.total_cost_usd;
       if (route && Number.isFinite(costUsd) && costUsd >= 0)
         route.providerEstimateUsd = costUsd;
-      if (result.permission_denials?.length) outcome.error = 'Some Claude tool calls were declined or not permitted under the selected access. Review the response before changing access.';
+      if (result.permission_denials?.length) outcome.warning = deniedCallsWarning(result.permission_denials);
     } catch (error) { outcome = { status: abort.signal.aborted ? 'interrupted' : 'failed', error: error.message, limit: abort.signal.aborted ? null : error.limit }; }
     finally {
       const answer = session.items.filter(i => assistantIds.has(i.id)).map(i => stripTaskStatus(i.text)).join('\n');
-      (session.directContext ||= []).push({ question: contextText + text, answer: answer || `[${backend} turn ${outcome.status}]` });
+      this.rememberDirect(session, { question: contextText + text, answer: answer || `[${backend} turn ${outcome.status}]` });
       if (outcome.status === 'completed') {
         session[lastKey] = session.items.at(-1)?.id;
         session[backend + 'TurnEndedAt'] = Date.now();
         session[backend + 'InstructionHash'] = instructionHash;
         session[historyKey] = [...new Set([...seenHistory, ...history.filter(item => item.delegatedFrom).map(item => item.id)])];
       }
+      else if ((outcome.status === 'interrupted' || outcome.limit) && session[sessionKey]) {
+        // A usage limit or Stop ends the turn, not the CLI's session, which it saved. Dropping the link made the next turn
+        // hand a new session the whole chat, more than a long chat's handoff allows, so it could never go on (2026-11-12,
+        // the user's PhasmaProjects chat). The next turn hands this turn's message over again, in case the CLI never got
+        // it: lastKey stays for the session it resumed, and a session this turn started holds the chat up to that message.
+        if (session[sessionKey] !== resumed) {
+          const sent = session.items.findIndex(item => item.id === clientId || item.clientId === clientId);
+          session[lastKey] = sent > 0 ? session.items[sent - 1].id : null;
+        }
+      }
+      // Other failures can be the session itself (one that no longer resumes): the next turn starts a new one.
       else { session[lastKey] = null; session[sessionKey] = null; }
       this.cliAbort = null; this.liveInput = null; this.liveInputCaps = null; turnOver = true;
       this.liveControl = null;
@@ -1641,15 +1715,19 @@ class Controller extends EventEmitter {
         if (action === 'steer') this.sentNow(message);
         this.lastSends.delete(session.id);
         // Send now applies within the turn where the provider can (liveSteer); otherwise it joins the provider's own queue.
-        // Once the provider holds the message (Claude takes it after its current step), it shows as waiting with Send
-        // now available, and the rest of the queue is free again.
+        // Once the provider holds the message (Claude takes it after its current step) it is sent: it leaves the queue for
+        // the chat (2026-11-13, the user: the queue is only what is not sent yet), and the rest of the queue is free again.
+        // pendingDelivery marks it until the provider confirms; if that never comes it gets Send again (below, and at startup).
         const written = () => {
           if (!session.queue.includes(message))
             return;
 
           released = true;
-          message.waiting = true;
           delete message.sending;
+          session.queue = session.queue.filter(m => m !== message);
+          this.recordLiveMessage(session, message, activeTask);
+          const item = session.items.find(entry => entry.clientId === message.id);
+          if (item) item.pendingDelivery = true;
           session.queueSending = false;
           this.save();
           this.changed();
@@ -1657,6 +1735,7 @@ class Controller extends EventEmitter {
         const sent = this.forModel(session, session.routes?.at(-1), message.text, message.images);
         await this.liveInput({ ...message, ...sent, text: this.stepNote(session, message) + sent.text }, { steer: action === 'steer' && !!this.liveInputCaps?.liveSteer, written });
         this.recordLiveMessage(session, message, activeTask);
+        delete session.items.find(entry => entry.clientId === message.id)?.pendingDelivery;
       } else if (action === 'steer' && session.activeProvider === 'claude-cli' && !this.isCoordinator()) {
         // Claude without live input is finishing its turn; a restart would drop its saved session. The message sends next.
         return;
@@ -1693,6 +1772,9 @@ class Controller extends EventEmitter {
       message.uncertain = /timed out|closed|disconnect/i.test(error.message);
       // One the Secondary model held leaves its queue for the chat, with Send again and Edit (unless delivery is unsure).
       if (message.secondary && !message.uncertain) this.endQueued(session, [message], 'interrupted', error.message);
+      // Already in the chat (handed to the provider) but never confirmed: it says so there, with Send again and Edit.
+      const shown = released && session.items.find(entry => entry.clientId === message.id && entry.pendingDelivery);
+      if (shown) this.undelivered(shown, message, error.message);
       throw error;
     } finally {
       delete message.sending;
@@ -1715,10 +1797,15 @@ class Controller extends EventEmitter {
   flushLiveQueue(session) {
     if (!this.liveInput || !this.liveInputCaps?.liveQueue || this.busy !== session.id || session.queueSending || session.queuePaused ||
         session.compacting || this.stopping.has(session.id) || session.delegation || this.isCoordinator()) return;
-    const message = session.queue?.[0];
+    // What the Secondary model holds for later turns (held messages, steps it split off) waits its turn without blocking a
+    // message passed on after it (2026-11-13, the user: one waited behind a held "Step 3 of 3"); the user's own messages
+    // keep their order.
+    const message = session.queue?.find(entry => !entry.hold && !entry.step);
     // Not while the Secondary model reads it, nor once it holds it for the next turn at another effort (readQueued), nor
     // a step it split off: each runs as its own turn (2026-11-06: steps 2 and 3 were passed into step 1's running turn).
-    if (!message || message.waiting || message.error || message.uncertain || message.agentReply || message.routineRun || message.wikiTaskId || message.triage || message.hold || message.step ||
+    // Only what the Secondary model read and passed on goes by itself; any other message stays queued, with X, until the
+    // turn ends or Send now (2026-11-13, the user).
+    if (!message || !message.triaged || message.waiting || message.error || message.uncertain || message.agentReply || message.routineRun || message.wikiTaskId || message.triage || message.hold || message.step ||
         (message.mode && message.mode !== this.liveInputMode)) return;
     this.queuedMessage(session.id, message.id, 'live').catch(() => {});
   }
@@ -1803,6 +1890,14 @@ class Controller extends EventEmitter {
     }
   }
 
+  // A message shown as sent whose delivery never came (the provider closed first, or the app did): marked in the chat with
+  // Send again and Edit, never resent by itself.
+  undelivered(item, message, reason) {
+    delete item.pendingDelivery;
+    Object.assign(item, { queueState: 'interrupted', queueLabel: `Not delivered: ${reason}`,
+      resend: { text: message.text, images: message.images || [], mode: message.mode, task: message.task || 'on', ...(message.fileMessage ? { fileMessage: message.fileMessage } : {}) } });
+  }
+
   recordLiveMessage(session, message, task) {
     if (!session.items.some(item => item.clientId === message.id)) {
       session.items.push({
@@ -1813,8 +1908,8 @@ class Controller extends EventEmitter {
       // The Secondary model's reply to it (readQueued) follows it in the chat.
       if (message.ack) session.items.push({ id: randomUUID(), type: 'agentMessage', phase: 'final_answer', text: message.ack.text, quickReply: true,
         routeLabel: `${message.ack.label} · quick reply`, localOnly: true, createdAt: Date.now() });
+      if (task?.state === 'running') task.amendments.push({ id: message.id, text: message.text });
     }
-    if (task?.state === 'running') task.amendments.push({ id: message.id, text: message.text });
   }
 
   async restartWithMessage(session, message, task) {

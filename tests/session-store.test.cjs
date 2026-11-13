@@ -154,3 +154,95 @@ test('a save re-encodes only what may have changed, and an older message edited 
   assert.equal(reload().sessions[0].items[0].text, 'edited long ago', 'and the full pass saves it');
   store.closeJournal();
 });
+
+// 2026-11-12: tool calls were 133 MB of the user's largest store, encoded again on every full pass and checkpoint.
+test('saves and checkpoints reuse an unchanged tool call’s encoding, and save one whose fields were replaced', t => {
+  const { file, store, data } = fixture(t);
+  const call = { id: 't1', type: 'mcpToolCall', status: 'completed', arguments: { command: 'ls' }, result: [{ type: 'text', text: 'big' }] };
+  data.sessions[0].items.push({ id: 'm1', type: 'userMessage', text: 'Q' }, call);
+  data.sessions.push({ id: 'bare', title: 'No items', hidden: undefined });
+  store.save(data);
+  const stringify = JSON.stringify;
+  let encodedCalls = 0;
+  t.mock.method(JSON, 'stringify', (value, ...rest) => { if (value?.type === 'mcpToolCall') encodedCalls++; return stringify(value, ...rest); });
+  store.fullAt = 0; data.sessions[0].title = 'Full pass'; store.save(data);
+  assert.equal(encodedCalls, 0, 'the full pass reuses the unchanged call');
+  store.fullAt = 0; call.result = [{ type: 'text', text: 'compacted' }]; store.save(data);
+  assert.equal(encodedCalls, 1, 'a replaced field is encoded again');
+  assert.deepEqual(readSessionData(file).sessions[0].items[1].result, call.result);
+  data.sessions[0].items[1] = { ...call, status: 'failed' }; store.fullAt = 0; store.save(data);
+  assert.equal(readSessionData(file).sessions[0].items[1].status, 'failed', 'a new object at the same place is saved');
+
+  encodedCalls = 0;
+  store.checkpoint(data);
+  assert.equal(encodedCalls, 0, 'the checkpoint is written from the encodings');
+  t.mock.restoreAll();
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { ...JSON.parse(stringify(data)), _journalRevision: store.revision });
+  assert.deepEqual(new SessionStore(file).load(null), JSON.parse(stringify(data)));
+});
+
+// 2026-11-13: rewriting 136 MB of large messages took most of each 300 ms checkpoint of the user's largest store.
+test('large messages are written once to a pack beside the store, and a pack mostly unused is replaced', t => {
+  const { file, store, data } = fixture(t);
+  const big = id => ({ id, type: 'mcpToolCall', status: 'completed', result: [{ type: 'text', text: id.repeat(20000) }] });
+  data.sessions[0].items.push({ id: 'm1', type: 'userMessage', text: 'Q' }, big('a'), big('b'));
+  store.checkpoint(data);
+  const pack = file + '.pack-1', main = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(main._pack, 'sessions.json.pack-1');
+  assert.deepEqual(main.sessions[0].items.slice(1).map(item => Object.keys(item)), [['$pack'], ['$pack']], 'the store names the pack');
+  assert.ok(fs.statSync(file).size < 1000);
+  assert.deepEqual(readSessionData(file), data);
+  const size = fs.statSync(pack).size;
+  store.checkpoint(data);
+  assert.equal(fs.statSync(pack).size, size, 'unchanged messages are not written again');
+
+  const reloaded = new SessionStore(file), copy = reloaded.load(null);
+  assert.deepEqual(copy, data);
+  reloaded.checkpoint(copy);
+  assert.equal(fs.statSync(pack).size, size, 'nor after a restart');
+  copy.sessions[0].items[2].status = 'failed'; copy.sessions[0].items.push(big('c'));
+  reloaded.save(copy);
+  reloaded.checkpoint(copy);
+  assert.ok(fs.statSync(pack).size > size, 'edited and new messages are appended');
+  assert.deepEqual(readSessionData(file), copy);
+
+  // Over half unused and over 32 MB: one large message replaced many times.
+  const named = () => JSON.parse(fs.readFileSync(file, 'utf8'))._pack;
+  for (let n = 0; n < 20 && named() === 'sessions.json.pack-1'; n++) { copy.sessions[0].items[1] = { ...big('a'), result: [{ type: 'text', text: String(n % 10).repeat(4e6) }] }; reloaded.checkpoint(copy); }
+  assert.equal(named(), 'sessions.json.pack-2');
+  assert.ok(!fs.existsSync(pack), 'the replaced pack is removed');
+  assert.ok(fs.statSync(file + '.pack-2').size < 5e6, 'only the messages in use are kept');
+  assert.deepEqual(readSessionData(file), copy);
+  reloaded.closeJournal(); store.closeJournal();
+});
+
+test('a checkpoint that fails after appending to the pack leaves the last store readable; a missing pack fails closed', t => {
+  const { file, store, data } = fixture(t);
+  data.sessions[0].items.push({ id: 'a', type: 'agentMessage', text: 'a'.repeat(20000) });
+  store.checkpoint(data);
+  const saved = structuredClone(data);
+  data.sessions[0].items.push({ id: 'b', type: 'agentMessage', text: 'b'.repeat(20000) });
+  const rename = t.mock.method(fs, 'renameSync', () => { throw new Error('Injected rename failure'); });
+  assert.throws(() => store.checkpoint(data), /Injected rename failure/); rename.mock.restore();
+  assert.deepEqual(readSessionData(file), saved);
+  store.checkpoint(data);
+  assert.deepEqual(readSessionData(file), data);
+  store.closeJournal();
+  fs.rmSync(file + '.pack-1');
+  assert.throws(() => new SessionStore(file).load(null), /ENOENT/);
+  assert.ok(fs.existsSync(file), 'the store is preserved');
+});
+
+test('a store saved before packs loads, and its next checkpoint moves large messages to a pack', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-journal-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, 'sessions.json');
+  const data = { version: 1, settings: {}, sessions: [{ id: 'chat', items: [{ id: 'a', type: 'agentMessage', text: 'a'.repeat(20000) }] }] };
+  fs.writeFileSync(file, JSON.stringify({ ...data, _journalRevision: 0 }));
+  const store = new SessionStore(file);
+  assert.deepEqual(store.load(null), data);
+  store.checkpoint(data);
+  assert.ok(fs.existsSync(file + '.pack-1'));
+  assert.deepEqual(readSessionData(file), data);
+  store.closeJournal();
+});

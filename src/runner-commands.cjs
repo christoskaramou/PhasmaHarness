@@ -150,6 +150,7 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
   handle('suggestNext', id => agents.owner(id).suggestNext(id));
   handle('suggestWiki', id => agents.owner(id).suggestWiki(id));
   handle('summarizeLast', id => agents.owner(id).summarizeLast(id));
+  handle('adviseChat', (id, question) => agents.owner(id).adviseChat(id, question));
   handle('clearConversation', async (agentId, groupId) => {
     const session = await agents.clearConversation(agentId, name => ask({
       title: 'Start a fresh conversation?', message: `Clear the current context for ${name} and start with a blank chat.`,

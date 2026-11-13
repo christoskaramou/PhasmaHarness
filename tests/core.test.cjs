@@ -1827,6 +1827,8 @@ test('a correction in the chat becomes a trial rule through the scanner and the 
 // Cascade: an Auto task whose checks still fail after its one correction runs, once, at its model's highest effort.
 async function cascadeSetup(t, failures) {
   const { controller, fake, smartRouter } = await setup(t);
+  // Escalation runs only for a bot without an advisor (2026-11-13, the user).
+  controller.data.settings.advisorModel = 'off';
   const { WikiStore } = require('../src/workspace/wiki-store.cjs');
   controller.wikiStore = new WikiStore(path.join(path.dirname(controller.filename), 'wiki-store'));
   const session = controller.create();
@@ -1952,8 +1954,25 @@ test('a repair runs the task’s own model at its highest effort within the cap,
 
 // The chat checker: a Git workspace with one file the user had already changed before the task started (or a plain
 // folder), the checker's verdicts in order, and a stronger worker a repair can take.
+// 2026-11-13, the user: a bot with an advisor never escalates; its worker asks the advisor instead.
+test('a bot with an advisor never escalates: failed checks stop at Needs you', async t => {
+  const { controller, session, asked, turns, settle } = await cascadeSetup(t, 2);
+  controller.data.settings.advisorModel = 'chat';
+  assert.equal(controller.hasAdvisor(), true);
+  await controller.send({ id: session.id, text: 'Fix the off-by-one in pager.js', mode: 'auto', task: 'on' });
+  await settle(1);
+  await settle(2);
+  await controller.gateDone;
+  const task = session.tasks[0];
+  assert.equal(task.state, 'needs-you', 'stops after its one correction');
+  assert.deepEqual([asked, task.repair, turns().length], [[], undefined, 2], 'no rerun at the highest effort');
+  assert.equal(session.routes.some(route => route.escalatedFrom), false);
+});
+
 async function checkerSetup(t, { verdicts = [], checks = true, git = true } = {}) {
   const { controller, fake, smartRouter } = await setup(t, { secondary: false });
+  // Escalation runs only for a bot without an advisor (2026-11-13, the user).
+  controller.data.settings.advisorModel = 'off';
   const { execFileSync } = require('node:child_process');
   const { WikiStore } = require('../src/workspace/wiki-store.cjs');
   controller.wikiStore = new WikiStore(path.join(path.dirname(controller.filename), 'wiki-store'));
@@ -2631,6 +2650,12 @@ test('a quick reply from the Secondary model answers at once with no worker, or 
   assert.equal(timeout, 12000, 'the worker waits at most 12 s for the quick reply');
   assert.equal(session.items.some(item => item.text === 'Stale note.'), false, 'the leftover note is dropped');
   complete(controller, session, fake.turnIds.at(-1)); await flush();
+  // Cursor CLI reads take 15–28 s (Grok 4.7), so a Cursor Secondary model gets 45 s instead.
+  const pick = controller.secondaryPick;
+  controller.secondaryPick = () => ({ provider: 'cursor-cli', model: 'grok-4.7', effort: 'low' });
+  assert.equal(await controller.readMessage(session, { text: 'Stop.', mode: auto, running: true }), null);
+  assert.equal(timeout, 45000, 'a Cursor CLI read waits up to 45 s');
+  controller.secondaryPick = pick;
 });
 
 test('the Secondary model reads messages sent during a turn: stop, effort now, after the turn, or it asks which', async t => {
@@ -2736,7 +2761,8 @@ test('a message the Secondary model still reads when the turn ends waits for the
   const send = text => controller.send({ id: session.id, text, mode: 'terra-light', task: 'off' });
   const lastInput = () => fake.calls.findLast(call => call.method === 'turn/start').params.input[0].text;
 
-  // One it answers: not sent while it reads, and its answer is the reply; no turn starts.
+  // One it could answer: not sent while it reads, then the worker gets it; it never replies to a queued message
+  // (2026-11-13, the user).
   await send('first');
   let turn = fake.turnIds.at(-1);
   await send('what is 2 + 2?');
@@ -2744,11 +2770,12 @@ test('a message the Secondary model still reads when the turn ends waits for the
   complete(controller, session, turn); await flush();
   assert.equal(fake.turnIds.at(-1), turn, 'not sent while it is read');
   pending.get('what is 2 + 2?')({ kind: 'answer', text: '4.' });
-  await until(() => session.items.some(item => item.text === '4.'));
-  await flush();
-  assert.deepEqual([fake.turnIds.at(-1), session.queue.length], [turn, 0], 'answered: the worker never gets it');
+  await until(() => fake.turnIds.at(-1) !== turn);
+  assert.match(lastInput(), /what is 2 \+ 2\?/);
+  assert.equal(session.items.some(item => item.text === '4.'), false, 'no reply of its own');
+  complete(controller, session, fake.turnIds.at(-1)); await flush();
 
-  // One it passes on: it runs as the next turn, once, with its reply, and is not read again.
+  // One it passes on: it runs as the next turn, once, with no reply, and is not read again.
   await send('second');
   turn = fake.turnIds.at(-1);
   await send('also check b.js');
@@ -2760,7 +2787,7 @@ test('a message the Secondary model still reads when the turn ends waits for the
   await until(() => fake.turnIds.at(-1) !== turn);
   assert.match(lastInput(), /also check b\.js/);
   assert.equal(reads, before, 'not read again when it runs');
-  assert.ok(session.items.some(item => item.text === 'Checking b.js next.'));
+  assert.equal(session.items.some(item => item.text === 'Checking b.js next.'), false);
   assert.equal(fake.calls.some(call => call.method === 'turn/steer'), false);
   complete(controller, session, fake.turnIds.at(-1)); await flush();
   assert.equal(session.queue.length, 0);
@@ -2805,7 +2832,7 @@ test('the Secondary model decides how work reaches the worker: split into turns,
   complete(controller, session, fake.turnIds.at(-1)); await flush();
 });
 
-test('Send now on a message the Secondary model holds passes it into the running turn: waiting steps stay their own turns, and its reply is reworded', async t => {
+test('Send now on a message the Secondary model holds passes it into the running turn: waiting steps stay their own turns, with no reply', async t => {
   // 2026-11-06, the user: a message of theirs the Secondary model holds stays in their queue, with Send now, Edit and Remove.
   // Live, after Send now the worker also did the waiting steps, which then ran again, and the reply still said it waits.
   const { controller, fake, smartRouter } = await setup(t, { quick: true });
@@ -2826,7 +2853,7 @@ test('Send now on a message the Secondary model holds passes it into the running
   assert.match(fake.calls.find(call => call.method === 'turn/steer').params.input[0].text,
     /^\[Harness: these steps [^\]]*do not do them now: Step 2 of 2: Build it\. Answer the message below, then go on with only the step you were on\.\]\n\nthen update the README$/);
   const at = session.items.findIndex(item => item.content?.[0]?.text === 'then update the README');
-  assert.deepEqual([session.items[at + 1]?.text, session.items[at + 1]?.routeLabel], ['Sent now instead of after this turn.', 'Harness · quick reply']);
+  assert.equal(session.items[at + 1]?.quickReply, undefined, 'it never replies to a queued message (2026-11-13, the user)');
   assert.deepEqual(session.queue.map(message => message.text), ['Step 2 of 2: Build it.']);
   // The step still runs as its own turn.
   complete(controller, session, first);
@@ -2895,7 +2922,7 @@ test('split steps run as their own turns: never passed into a running turn, and 
   complete(controller, session, fake.turnIds.at(-1)); await flush();
 });
 
-test('the Secondary model keeps its own queue: it always replies, drops what you cancel, and Stop or a restart leave Send again and Edit', async t => {
+test('the Secondary model keeps its own queue: it never replies, drops what you cancel, and Stop or a restart leave Send again and Edit', async t => {
   // 2026-11-06, the user: the Secondary model's queue is not the worker's (Send now, Edit, Remove, only when it is off,
   // fails or times out); it shows in the chat with Remove, it controls it, and Stop ends it, leaving Send again and Edit.
   const { controller, fake, smartRouter } = await setup(t, { quick: true });
@@ -2914,15 +2941,14 @@ test('the Secondary model keeps its own queue: it always replies, drops what you
   const held = text => session.queue.find(message => message.text === text && message.hold);
   await send('first');
 
-  // Held for after the turn: its queue, not the worker's, with its reply.
+  // Held for after the turn: its queue, not the worker's, with no reply of its own (2026-11-13, the user).
   await send('then update the README');
   await until(() => held('then update the README'));
-  assert.deepEqual([held('then update the README').secondary, held('then update the README').ack.text], [true, 'README after this turn.']);
-  // Passed on now: its reply follows the message in the chat.
+  assert.deepEqual([held('then update the README').secondary, held('then update the README').ack], [true, undefined]);
+  // Passed on now: the message reaches the chat and the worker, with no reply.
   await send('also check b.js');
-  await until(() => session.items.some(item => item.text === 'Passing that on now.'));
-  const passed = session.items.findIndex(item => item.text === 'Passing that on now.');
-  assert.equal(session.items[passed - 1].content[0].text, 'also check b.js');
+  await until(() => session.items.some(item => item.content?.[0]?.text === 'also check b.js'));
+  assert.equal(session.items.some(item => item.text === 'Passing that on now.'), false);
 
   // It drops what a message cancels: the message stays in the chat, marked, with Send again and Edit.
   await send('forget the README');
@@ -3737,6 +3763,136 @@ async function claudeChat(t) {
   return chat;
 }
 
+test('the window state leaves out directContext, history quoted only to Codex', async t => {
+  const { controller } = await setup(t);
+  const session = controller.create();
+  session.directContext = [{ question: 'Older question', answer: 'Older answer' }];
+  const shown = controller.snapshot().sessions.find(chat => chat.id === session.id);
+  assert.equal(shown.directContext, undefined);
+  assert.equal(session.directContext.length, 1, 'kept for the next Codex turn');
+});
+
+// 2026-11-12: directContext grew to 1 MB in a chat Codex never ran in, all of it to be quoted to Codex.
+test('the history kept for Codex holds only the newest exchanges, up to 100,000 characters, and always the newest', async t => {
+  const { controller } = await setup(t);
+  const session = controller.create();
+  for (let index = 0; index < 30; index++) controller.rememberDirect(session, { question: 'Q' + index, answer: 'x'.repeat(9000) });
+  assert.ok(JSON.stringify(session.directContext).length <= 100000);
+  assert.equal(session.directContext.at(-1).question, 'Q29');
+  assert.equal(session.directContext.length, 11);
+  controller.rememberDirect(session, { question: 'Huge', answer: 'x'.repeat(200000) });
+  assert.deepEqual(session.directContext.map(entry => entry.question), ['Huge']);
+});
+
+// 2026-11-12: every update mapped every bot's messages again, 19.6 ms on the user's 15 bots.
+test('the window state reuses a chat’s mapped messages until it changes, and maps them again every minute', async t => {
+  const { controller } = await setup(t);
+  t.mock.timers.enable({ apis: ['Date'], now: 1000 });
+  const session = controller.create(), other = controller.create();
+  session.items.push({ id: 'm1', type: 'agentMessage', text: 'A' }, { id: 't1', type: 'mcpToolCall', tool: 'Bash', arguments: { command: 'ls' }, result: 'x' });
+  const items = () => controller.snapshot().sessions.find(chat => chat.id === session.id).items;
+  const first = items();
+  assert.equal(items(), first, 'unchanged: the same list');
+  assert.equal(first[1].result, undefined);
+  controller.changed(other);
+  assert.equal(items(), first, 'another chat’s change leaves it');
+  session.items[0].text = 'A, streamed';
+  assert.equal(items()[0].text, 'A, streamed', 'an edit made in place shows at once');
+  controller.changed(session);
+  assert.notEqual(items(), first, 'its own change maps it again');
+  session.items.push({ id: 'm2', type: 'agentMessage', text: 'B' });
+  assert.equal(items().length, 3, 'a new message maps it again');
+  const third = items();
+  controller.changed();
+  assert.notEqual(items(), third, 'a change to every chat maps it again');
+  const fourth = items();
+  session.items[1] = { ...session.items[1], status: 'failed' };
+  assert.equal(items(), fourth, 'a silent replacement waits for the cache');
+  t.mock.timers.tick(60000);
+  assert.equal(items()[1].status, 'failed', 'shown within a minute');
+});
+
+test('a completed Claude turn with denied tool calls warns and names them, instead of failing; the next turn clears it', async t => {
+  const chat = await claudeChat(t);
+  chat.reply = () => ({ ...OPUS_RESULTS.A, permission_denials: [
+    { tool_name: 'Bash', tool_use_id: 't1', tool_input: { command: 'cd /c/repo; ls build/_wgpu_spec\nfind . -name x' } },
+    { tool_name: 'Read', tool_use_id: 't2', tool_input: { file_path: 'C:\\repo\\build\\out.txt' } },
+  ] });
+  const route = await chat.turn('Find the spec');
+  assert.equal(chat.session.status, 'completed');
+  assert.equal(chat.session.error, null, 'a denial is not a turn failure');
+  assert.equal(chat.session.warning.messageId, route.messageId, 'tied to the turn it happened in');
+  assert.match(chat.session.warning.text, /these 2 tool calls; the rest of the turn finished/);
+  assert.match(chat.session.warning.text, /^- Bash: cd \/c\/repo; ls build\/_wgpu_spec$/m, 'first line of the command');
+  assert.match(chat.session.warning.text, /^- Read: C:\\repo\\build\\out\.txt$/m);
+  assert.match(chat.session.warning.text, /deny rule in Claude's settings/);
+
+  chat.reply = () => OPUS_RESULTS.D;
+  await chat.turn('Again');
+  assert.equal(chat.session.warning, null);
+});
+
+// 2026-11-12, the user: a turn stopped by the 5-hour limit dropped PhasmaProjects' Claude session, and every later turn
+// then failed handing its whole chat (5.2 million characters) to a new one.
+test('a usage limit or Stop keeps the chat’s Claude session, so the next turn resumes it; another failure starts a new one', async t => {
+  const chat = await claudeChat(t);
+  const attempt = text => chat.turn(text).catch(error => error);
+  const handedOver = () => chat.runs.at(-1).prompt;
+  chat.reply = () => OPUS_RESULTS.A;
+  await chat.turn('First question');
+  const seen = chat.session.claudeLastItem;
+  assert.equal(chat.session.claudeSessionId, 'f44ece8e');
+
+  chat.reply = () => { throw Object.assign(new Error('You’ve hit your limit'), { limit: { until: null, reason: 'limit' } }); };
+  await attempt('Limited question');
+  assert.equal(chat.session.status, 'failed');
+  assert.deepEqual([chat.session.claudeSessionId, chat.session.claudeLastItem], ['f44ece8e', seen], 'a limit keeps the link');
+  chat.reply = () => OPUS_RESULTS.D;
+  await chat.turn('Continue');
+  assert.equal(chat.runs.at(-1).resume, 'f44ece8e');
+  assert.match(handedOver(), /Limited question/, 'the limited message goes again, in case the CLI never got it');
+  assert.doesNotMatch(handedOver(), /First question/, 'not the chat the session already holds');
+
+  chat.controller.claude.run = async options => { chat.runs.push(options); await chat.controller.stop(); throw new Error('Claude stopped.'); };
+  await attempt('Stopped question');
+  assert.equal(chat.session.status, 'interrupted');
+  assert.equal(chat.session.claudeSessionId, 'f44ece8e', 'Stop keeps the link');
+
+  // Any other failure can be the session itself: the next turn starts a new session with the whole chat.
+  chat.controller.claude.run = async options => { chat.runs.push(options); throw new Error('No conversation found with session ID: f44ece8e'); };
+  await attempt('Broken session');
+  assert.deepEqual([chat.session.claudeSessionId, chat.session.claudeLastItem], [null, null]);
+
+  // A session this turn started holds the chat up to its message, so a limit keeps it with that point.
+  chat.controller.claude.run = async options => {
+    chat.runs.push(options); options.onEvent({ type: 'system', subtype: 'init', session_id: 'n3w' });
+    throw Object.assign(new Error('You’ve hit your limit'), { limit: { until: null, reason: 'limit' } });
+  };
+  await attempt('New session, limited');
+  assert.equal(chat.runs.at(-1).resume, null);
+  assert.match(handedOver(), /First question/, 'the new session got the whole chat');
+  const sent = chat.session.items.findIndex(item => item.clientId === chat.session.routes.at(-1).messageId);
+  assert.deepEqual([chat.session.claudeSessionId, chat.session.claudeLastItem], ['n3w', chat.session.items[sent - 1].id]);
+  chat.controller.claude.run = async options => { chat.runs.push(options); options.onEvent({ type: 'system', subtype: 'init', session_id: 'n3w' }); return { result: 'Done.', session_id: 'n3w' }; };
+  await chat.turn('After the limit');
+  assert.equal(chat.runs.at(-1).resume, 'n3w');
+  assert.match(handedOver(), /New session, limited/);
+  assert.doesNotMatch(handedOver(), /First question/);
+});
+
+test('a handoff too large to send fails the turn before the CLI runs and keeps the chat’s Claude session', async t => {
+  const chat = await claudeChat(t);
+  chat.reply = () => OPUS_RESULTS.A;
+  await chat.turn('First question');
+  const link = [chat.session.claudeSessionId, chat.session.claudeLastItem];
+  chat.session.items.push({ id: 'huge', type: 'agentMessage', phase: 'final_answer', text: 'x'.repeat(1000001) });
+  const runs = chat.runs.length;
+  const error = await chat.turn('Next').catch(failure => failure);
+  assert.match(String(error?.message ?? chat.session.error), /too large to transfer/);
+  assert.equal(chat.runs.length, runs, 'the CLI never ran');
+  assert.deepEqual([chat.session.claudeSessionId, chat.session.claudeLastItem], link);
+});
+
 test('a completed Claude turn counts the change in Claude’s cost tracker, subagent calls and resumed sessions included', async t => {
   const chat = await claudeChat(t);
   chat.reply = () => OPUS_RESULTS.A;
@@ -4117,7 +4273,9 @@ test('Send now preserves the queued message if another Stop cancels restart', as
 });
 
 
-test('Claude queues are forwarded during work in order, without replaying uncertain or different-model messages', async t => {
+// 2026-11-13, the user: the queue is only what is not sent yet. During work only what the Secondary model read and passed
+// on goes to Claude by itself; without it a message stays queued, with X, until the turn ends or Send now.
+test('during work only messages the Secondary model passed on go to Claude, in order; others stay queued', async t => {
   const { controller } = await setup(t);
   const session = controller.create();
   controller.busy = session.id;
@@ -4133,6 +4291,12 @@ test('Claude queues are forwarded during work in order, without replaying uncert
   });
   await controller.send({ id: session.id, text: 'first correction' });
   await controller.send({ id: session.id, text: 'second correction' });
+  assert.deepEqual([delivered, session.queue.length], [[], 2], 'not read by a Secondary model: they stay queued');
+  await controller.queuedMessage(session.id, session.queue[1].id, 'remove');
+  assert.deepEqual(session.queue.map(message => message.text), ['first correction'], 'X removes a queued message');
+  await controller.send({ id: session.id, text: 'second correction' });
+  for (const message of session.queue) message.triaged = true;
+  controller.flushLiveQueue(session);
   assert.deepEqual(delivered, ['first correction']);
   acknowledgements.shift()();
   await new Promise(setImmediate);
@@ -4141,13 +4305,14 @@ test('Claude queues are forwarded during work in order, without replaying uncert
   await new Promise(setImmediate);
   assert.equal(session.queue.length, 0);
   await controller.send({ id: session.id, text: 'different model', mode: 'different' });
+  session.queue[0].triaged = true;
+  controller.flushLiveQueue(session);
   assert.equal(delivered.length, 2);
   assert.equal(session.queue.length, 1);
 });
 
-// 2026-10-29: "status?" reached Claude while it ran a 10-minute foreground wait. The queue hid it for 30 s, then showed it
-// as Paused with Send now greyed out, although Claude still held it.
-test('a message Claude holds shows as waiting, frees the queue, and Send now asks Claude for it at once', async t => {
+// 2026-11-13, the user: a passed-on message waited behind a held "Step 3 of 3" at the head of the queue.
+test('a step the Secondary model holds for later does not block a message it passed on', async t => {
   const { controller } = await setup(t);
   const session = controller.create();
   controller.busy = session.id;
@@ -4155,34 +4320,60 @@ test('a message Claude holds shows as waiting, frees the queue, and Send now ask
   controller.activeTurns.set(session.id, 'live-turn');
   controller.liveInputMode = controller.data.settings.mode;
   controller.liveInputCaps = require('../src/providers/capabilities.cjs').capabilities('claude-cli');
-  const calls = [];
-  let acknowledge;
+  const delivered = [];
+  controller.liveInput = message => { delivered.push(message.text); return Promise.resolve(); };
+  session.queue = [{ id: 'step3', text: 'Step 3 of 3: later', images: [], step: true, triaged: true, secondary: true, mode: controller.liveInputMode }];
+  await controller.send({ id: session.id, text: 'a passed-on note' });
+  session.queue.find(message => message.text === 'a passed-on note').triaged = true;
+  controller.flushLiveQueue(session);
+  await new Promise(setImmediate);
+  assert.equal(delivered.length, 1);
+  assert.match(delivered[0], /^\[Harness: these steps [^\]]*Step 3 of 3: later[^\]]*\]\n\na passed-on note$/, 'with the note that the step is not for now');
+  assert.deepEqual(session.queue.map(message => message.id), ['step3'], 'the step still waits for its own turn');
+});
+
+// 2026-10-29: "status?" reached Claude while it ran a 10-minute foreground wait and the queue hid it. 2026-11-13, the user:
+// once Claude holds a message it is sent, so it leaves the queue for the chat at once.
+test('a message handed to Claude moves to the chat at once and frees the queue; one never confirmed says so, with Send again', async t => {
+  const { controller } = await setup(t);
+  const session = controller.create();
+  controller.busy = session.id;
+  session.activeProvider = 'claude-cli';
+  controller.activeTurns.set(session.id, 'live-turn');
+  controller.liveInputMode = controller.data.settings.mode;
+  controller.liveInputCaps = require('../src/providers/capabilities.cjs').capabilities('claude-cli');
+  const pending = [];
   controller.liveInput = (message, options) => {
-    calls.push([message.text, options.steer]);
-    if (calls.length > 1)
-      return Promise.resolve();
-
     options.written();
-    return new Promise(resolve => { acknowledge = resolve; });
+    return new Promise((resolve, reject) => pending.push({ resolve, reject }));
   };
-  await controller.send({ id: session.id, text: 'status?' });
-  const [message] = session.queue;
-  assert.deepEqual([message.waiting, message.sending, session.queueSending], [true, undefined, false], 'shown, with the queue free');
-  await assert.rejects(controller.queuedMessage(session.id, message.id, 'edit'), /already has this message/);
-  await assert.rejects(controller.queuedMessage(session.id, message.id, 'remove'), /already has this message/);
-
-  await controller.queuedMessage(session.id, message.id, 'steer');
-  assert.deepEqual(calls, [['status?', false], ['status?', true]]);
-  assert.equal(session.queue[0], message, 'it stays until Claude echoes it');
+  const handOver = async text => {
+    await controller.send({ id: session.id, text });
+    const [message] = session.queue;
+    message.triaged = true;
+    controller.flushLiveQueue(session);
+    await new Promise(setImmediate);
+    return { message, item: () => session.items.find(item => item.clientId === message.id) };
+  };
+  const first = await handOver('status?');
+  assert.deepEqual([session.queue.length, session.queueSending, first.item()?.pendingDelivery], [0, false, true], 'in the chat, the queue free');
 
   controller.save();
-  const [reopened] = reopen(controller).session(session.id).queue;
-  assert.deepEqual([reopened.uncertain, reopened.waiting], [true, undefined], 'an app restart cannot know whether Claude took it');
+  const reopened = reopen(controller).session(session.id).items.find(item => item.clientId === first.message.id);
+  assert.deepEqual([reopened.queueState, reopened.pendingDelivery], ['interrupted', undefined]);
+  assert.match(reopened.queueLabel, /^Not delivered: the app closed before it was confirmed/);
+  assert.equal(reopened.resend.text, 'status?', 'Send again is offered, nothing resends by itself');
 
-  acknowledge();
+  pending.shift().resolve();
   await new Promise(setImmediate);
-  assert.equal(session.queue.length, 0);
-  assert.equal(session.items.filter(item => item.clientId === message.id).length, 1);
+  assert.deepEqual([first.item().pendingDelivery, first.item().queueState], [undefined, undefined], 'confirmed');
+  assert.equal(session.items.filter(item => item.clientId === first.message.id).length, 1);
+
+  const second = await handOver('and the logs?');
+  pending.shift().reject(new Error('Claude closed before taking it'));
+  await new Promise(setImmediate);
+  assert.equal(second.item().queueState, 'interrupted');
+  assert.match(second.item().queueLabel, /Not delivered: Claude closed before taking it/);
 });
 
 

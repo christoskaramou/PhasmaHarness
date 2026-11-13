@@ -2,6 +2,7 @@ const { randomUUID } = require('node:crypto');
 
 const GENERAL = {
   jevEnabled: 'boolean', jevImages: 'boolean', dreamModel: 'hub (Hub’s model at its highest effort) or a model ID',
+  advisorModel: 'chat (the bot’s model at the highest effort its effort cap allows), off, or a model ID; high or xhigh effort suggested',
   contextRanking: ['local', 'jev'], toolSelection: ['off', 'jev'], largeResponses: 'boolean',
 };
 const LOCAL = { workspace: 'Absolute folder path', access: ['read-only', 'workspace-write', 'danger-full-access'],
@@ -101,6 +102,8 @@ class SettingsTools {
       throw new Error('Choose an available model ID, or autoeffort:<provider>:<model> for Auto effort. Read models for the choices.');
     if (name === 'secondaryModel' && !['off', ...(own ? ['inherit'] : [])].includes(value) && !available(primary.chatScanChoices().find(p => p.id === value)))
       throw new Error('Choose off, an available model ID' + (own ? ' or inherit' : '') + ' for the Secondary model.');
+    if (name === 'advisorModel' && !['chat', 'off'].includes(value) && !available(primary.chatScanChoices().find(p => p.id === value)))
+      throw new Error('Choose chat, off or an available model ID for advisorModel.');
     if (name === 'dreamModel' && value !== 'hub' && !available(primary.catalog().find(p => p.worker && p.id === value)))
       throw new Error('Choose hub or an available model ID for the Dream model.');
     // A sub-bot follows the bot that made it: its model, Router, Secondary model and Effort cap change there.

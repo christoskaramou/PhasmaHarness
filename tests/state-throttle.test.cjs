@@ -196,3 +196,143 @@ test('a change notice and a save both advance the bot revision that decides whet
   controller.save();
   assert.equal(controller.stateRevision, start + 2);
 });
+
+// 2026-11-12, the user: a streaming chat went whole on every update (5.9 MB for 5,500 messages, up to 10 a second).
+test('a resent chat carries only its changed and new messages, merged by id; reorders, duplicate ids and full states go whole', t => {
+  const { stateStream, acceptState, keepSessions, FULL_STATE_MS } = require('../ui/agent-state.js');
+  t.mock.timers.enable({ apis: ['Date'], now: 1000 });
+  const fleet = (revision, items) => ({ agentStates: { main: { stateRevision: revision, sessions: [{ id: 'c', status: 'running', items }] } } });
+  const message = (id, text) => ({ id, type: 'agentMessage', text });
+  const stream = stateStream(), applied = {};
+  let page = null;
+  const apply = next => { next = structuredClone(next); if (!acceptState(next, applied)) return null; const merged = keepSessions(next, page); if (merged) page = merged; return merged; };
+  const sentItems = next => next.agentStates.main.sessions[0];
+  const shown = () => page.agentStates.main.sessions[0].items.map(item => item.text);
+
+  let state = [message('a', 'A'), message('b', 'B'), message('c', 'C')];
+  apply(stream.push(fleet(1, state)));
+  assert.equal(sentItems(stream.push(fleet(2, state))).itemsFrom, undefined, 'the first change after a full state goes whole');
+  apply(stream.push(fleet(2, state)));
+  state = [message('a', 'A'), message('b', 'B, streamed'), message('c', 'C'), message('d', 'D')];
+  const delta = stream.push(fleet(3, state));
+  assert.deepEqual([sentItems(delta).items.map(item => item.id), sentItems(delta).itemsFrom, sentItems(delta).itemCount], [['b', 'd'], 3, 4]);
+  const kept = page.agentStates.main.sessions[0].items[0];
+  apply(delta);
+  assert.deepEqual(shown(), ['A', 'B, streamed', 'C', 'D']);
+  assert.equal(page.agentStates.main.sessions[0].items[0], kept, 'an unchanged message keeps the copy the window holds');
+  assert.equal(page.agentStates.main.sessions[0].itemsFrom, undefined);
+
+  // A reply trims against what the page was pushed, and is not recorded: the chat it carried goes whole on the next push.
+  state = [...state.slice(0, 3), message('d', 'D, done')];
+  const reply = stream.reply(fleet(4, state));
+  assert.deepEqual(sentItems(reply).items.map(item => item.id), ['d']);
+  assert.ok(apply(reply));
+  assert.deepEqual(sentItems(stream.push(fleet(4, state))).items.map(item => item.id), ['a', 'b', 'c', 'd']);
+
+  // A copy that does not match (a missed update) asks for a full state instead of merging.
+  const mismatch = stream.push(fleet(5, [...state, message('e', 'E')]));
+  const short = structuredClone(page); short.agentStates.main.sessions[0].items.pop();
+  assert.equal(keepSessions(structuredClone(mismatch), short), null);
+  page = keepSessions(structuredClone(mismatch), page);
+  state = [...state, message('e', 'E')];
+  assert.deepEqual(shown(), ['A', 'B, streamed', 'C', 'D, done', 'E']);
+
+  // Removed or reordered earlier messages, and duplicate ids, go whole.
+  state = [state[1], state[0], ...state.slice(2)];
+  assert.equal(sentItems(stream.push(fleet(6, state))).itemsFrom, undefined, 'reordered');
+  state = [...state, message('a', 'again')];
+  assert.equal(sentItems(stream.push(fleet(7, state))).itemsFrom, undefined, 'duplicate id');
+  state = state.slice(1, 3);
+  assert.equal(sentItems(stream.push(fleet(8, state))).itemsFrom, undefined, 'removed');
+  assert.ok(sentItems(stream.push(fleet(9, [...state, message('f', 'F')]))).itemsFrom !== undefined, 'deltas resume');
+
+  // The 10-minute full state sends every chat whole and records no message texts; deltas start again after it.
+  t.mock.timers.tick(FULL_STATE_MS);
+  const full = stream.push(fleet(10, [...state, message('f', 'F')]));
+  assert.equal(sentItems(full).itemsFrom, undefined);
+  assert.equal(sentItems(full).items.length, 3);
+  assert.equal(sentItems(stream.push(fleet(11, [...state, message('f', 'F')]))).itemsFrom, undefined);
+  assert.ok(sentItems(stream.push(fleet(12, [...state, message('f', 'F2')]))).itemsFrom !== undefined);
+});
+
+// A send's reply adds the message and pendingMessage, and the turn then clears pendingMessage back to what the last push
+// held: a delta built on that push would leave the page with the reply's copy (a stuck pending message, and a message
+// count that asks for a full state on every send).
+test('a chat a reply carried goes whole on its next push, then deltas resume', () => {
+  const { stateStream, acceptState, keepSessions } = require('../ui/agent-state.js');
+  const fleet = (revision, chat) => ({ agentStates: { main: { stateRevision: revision, sessions: [chat] } } });
+  const message = (id, text) => ({ id, type: 'agentMessage', text });
+  const stream = stateStream(), applied = {};
+  let page = null;
+  const apply = next => { next = structuredClone(next); if (!acceptState(next, applied)) return false; page = keepSessions(next, page); return !!page; };
+  const held = () => page.agentStates.main.sessions[0];
+  const items = [message('a', 'A'), message('b', 'B')];
+  apply(stream.push(fleet(1, { id: 'c', status: 'idle', items })));
+  apply(stream.push(fleet(2, { id: 'c', status: 'idle', items })));
+
+  assert.ok(apply(stream.reply(fleet(3, { id: 'c', status: 'idle', pendingMessage: 'Q', items: [...items, message('q', 'Q')] }))));
+  assert.equal(held().pendingMessage, 'Q');
+  const started = { id: 'c', status: 'running', items: [...items, message('q', 'Q'), message('r', 'R')] };
+  const next = stream.push(fleet(4, started));
+  assert.equal(next.agentStates.main.sessions[0].itemsFrom, undefined, 'the chat goes whole once');
+  assert.ok(apply(next));
+  assert.deepEqual(held(), started);
+
+  const streamed = { ...started, items: [...started.items.slice(0, 3), message('r', 'R, streamed')] };
+  const delta = stream.push(fleet(5, streamed));
+  assert.deepEqual(delta.agentStates.main.sessions[0].items.map(item => item.id), ['r'], 'deltas resume');
+  assert.ok(apply(delta));
+  assert.deepEqual(held(), streamed);
+  // A reply that carried nothing for the chat leaves its deltas alone.
+  stream.reply(fleet(5, streamed));
+  assert.notEqual(stream.push(fleet(6, { ...streamed, title: 'T' })).agentStates.main.sessions[0].itemsFrom, undefined);
+});
+
+test('a chat delta sends only changed fields and route entries; a chat-scoped push compares only the newest messages, a reply all of them', () => {
+  const { stateStream, acceptState, keepSessions } = require('../ui/agent-state.js');
+  const many = Array.from({ length: 80 }, (_, i) => ({ id: 'm' + i, type: 'agentMessage', text: 'm' + i }));
+  const fleet = (shared, own, chat) => ({ agentStates: { main: { stateRevision: shared, sharedRevision: shared, chatRevisions: { c: own }, sessions: [chat] } } });
+  const chat = (items, extra = {}) => ({ id: 'c', status: 'running', title: 'T', items, routes: [{ messageId: 'm0', label: 'A' }], tasks: [], queue: [], ...extra });
+  const stream = stateStream(), applied = {};
+  let page = null;
+  const apply = next => { next = structuredClone(next); if (!acceptState(next, applied)) return false; page = keepSessions(next, page); return !!page; };
+  const held = () => page.agentStates.main.sessions[0];
+  apply(stream.push(fleet(1, 0, chat(many))));
+  apply(stream.push(fleet(2, 0, chat(many))));
+
+  // Streamed text (a chat-scoped change): only the newest message goes, with no unchanged field.
+  let items = many.map((item, i) => (i === 79 ? { ...item, text: 'm79 streaming' } : item));
+  const streamed = stream.push(fleet(2, 3, chat(items)));
+  assert.deepEqual(Object.keys(streamed.agentStates.main.sessions[0]).sort(), ['id', 'itemCount', 'items', 'itemsFrom']);
+  assert.ok(apply(streamed));
+  assert.equal(held().items[79].text, 'm79 streaming');
+  assert.equal(held().title, 'T', 'unchanged fields stay');
+
+  // An old message edited alongside a chat-scoped change is left to a later exact comparison.
+  items = items.map((item, i) => (i === 3 ? { ...item, text: 'm3 undone' } : item));
+  assert.deepEqual(stream.push(fleet(2, 4, chat(items))).agentStates.main.sessions[0].items, [], 'the tail had nothing new');
+
+  // A shared change compares everything; fields, removed fields and route entries go as changes.
+  const next = chat(items, { title: 'Renamed', routes: [{ messageId: 'm0', label: 'A, done' }, { messageId: 'm80', label: 'B' }] });
+  delete next.queue;
+  const shared = stream.push(fleet(6, 4, next)).agentStates.main.sessions[0];
+  assert.deepEqual(shared.items.map(item => item.id), ['m3'], 'the exact comparison finds the old edit the tail missed');
+  assert.equal(shared.title, 'Renamed');
+  assert.deepEqual(shared.removedFields, ['queue']);
+  assert.deepEqual(shared.listChanges.routes, { from: 1, length: 2, entries: [[0, { messageId: 'm0', label: 'A, done' }], [1, { messageId: 'm80', label: 'B' }]] });
+  page = keepSessions(structuredClone({ agentStates: { main: { stateRevision: 6, sessions: [shared] } } }), page);
+  assert.equal(held().title, 'Renamed');
+  assert.equal('queue' in held(), false);
+  assert.deepEqual(held().routes.map(route => route.label), ['A, done', 'B']);
+  assert.equal(held().items[3].text, 'm3 undone');
+
+  // A reply compares every message, so an old edit beside a chat-scoped change goes at once.
+  items = items.map((item, i) => (i === 4 ? { ...item, text: 'm4 undone' } : item));
+  const reply = stream.reply(fleet(6, 7, chat(items, { title: 'Renamed', routes: next.routes, queue: undefined })));
+  assert.deepEqual(reply.agentStates.main.sessions[0].items.map(item => item.id), ['m4']);
+  assert.ok(apply(reply));
+  assert.equal(held().items[4].text, 'm4 undone');
+
+  // A shorter route list cannot be patched by position: the chat goes whole.
+  assert.equal(stream.push(fleet(7, 5, chat(items, { routes: [] }))).agentStates.main.sessions[0].itemsFrom, undefined);
+});

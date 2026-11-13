@@ -363,8 +363,11 @@ test('a browser gets only the bots whose chats changed, and one that falls behin
   f.remote.broadcast('state', { agentStates: { a: bot(3, 'a1', 4), b: bot(2, 'b1', 4) }, settings: {} });
   entry.out.emit('drain');
   const caught = (await events.next()).value;
-  assert.deepEqual([caught.agentStates.a.sessions?.[0].items.length, caught.agentStates.b.sessions?.[0].items.length], [4, 4],
+  // A chat sent before carries only its new message (chatDelta, ui/agent-state.js); itemCount is its full length.
+  const count = sent => sent?.itemCount ?? sent?.items.length;
+  assert.deepEqual([count(caught.agentStates.a.sessions?.[0]), count(caught.agentStates.b.sessions?.[0])], [4, 4],
     'a change made while behind is not lost to the state that replaced it');
+  assert.deepEqual(caught.agentStates.a.sessions[0].items.map(item => item.id), ['a1-3']);
 });
 
 // 2026-11-10: every action's reply carried the whole fleet, 64 MB on the user's data and over the 32 MB limit, so the

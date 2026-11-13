@@ -364,21 +364,35 @@ test('retention errors warn once per day and do not change saved Main references
   assert.deepEqual(saved, [{ threadId: 'keep' }]);
 });
 
-test('a slow retention lookup remains inside Main timeout and cannot start inference after cancellation', async t => {
-  let started = false;
+// 2026-11-13: the first Codex thread/list of a day took about 6.4 s ahead of the model call; it now runs after the reply.
+test('Main transcript cleanup runs after the reply, never delays it, and stops when the router closes', async t => {
+  const calls = [];
+  let listed;
+  const listing = new Promise(resolve => { listed = resolve; });
   class Client extends EventEmitter {
     async start() {} close() {}
-    async call(method) {
-      if (method === 'thread/list') return new Promise(() => {});
-      if (method === 'turn/start') started = true;
+    async call(method, params) {
+      calls.push(method);
+      if (method === 'thread/list') { listed(); return new Promise(() => {}); }
+      if (method === 'config/read') return { config: {} };
+      if (method === 'thread/start') return { thread: { id: 'thread-1' } };
+      if (method === 'turn/start') queueMicrotask(() => {
+        this.emit('notification', { method: 'item/completed', params: { threadId: params.threadId, item: { type: 'agentMessage', text: '{"reply":"ok"}' } } });
+        this.emit('notification', { method: 'turn/completed', params: { threadId: params.threadId, turn: { status: 'completed' } } });
+      });
       return {};
     }
   }
-  const router = new SmartRouter(directory(t), () => new Client());
-  router.savedConversations = () => [];
-  await assert.rejects(router.complete({ instructions: policy, prompt: '{}', schema, timeoutMs: 10,
-    conversation: { key: 'stop', context: { conversation: [] } } }, { provider: 'codex', model: 'test' }, signal()), /too long/);
-  assert.equal(started, false); router.close();
+  const router = new SmartRouter(directory(t), () => new Client()), warnings = [];
+  router.savedConversations = () => []; router.retentionWarning = error => warnings.push(error.message);
+  const result = await router.complete({ instructions: policy, prompt: '{}', schema, timeoutMs: 1000,
+    conversation: { key: 'chat', context: { conversation: [] }, save() {} } }, { provider: 'codex', model: 'test' }, signal());
+  assert.deepEqual(result.decision, { reply: 'ok' });
+  assert.ok(!calls.includes('thread/list'), 'the reply did not wait for the cleanup');
+  await listing;
+  assert.ok(calls.indexOf('thread/list') > calls.indexOf('turn/start'));
+  router.close();
+  assert.deepEqual(warnings, [], 'a cleanup stopped by closing is not a warning');
 });
 
 test('Main transcript retention preserves live, pinned, recent and unrelated Codex threads across pages', async t => {

@@ -353,7 +353,9 @@ module.exports = {
         return;
       }
 
-      const escalates = (this.agents?.primary || this).data.settings.escalateFailedChecks !== false;
+      // A bot with an advisor does not escalate: its worker asks the advisor when stuck, and a rerun at the highest effort
+      // would pay twice for the same deeper reasoning (2026-11-13, the user).
+      const escalates = (this.agents?.primary || this).data.settings.escalateFailedChecks !== false && !this.hasAdvisor();
       const repair = state === 'needs-you' && workerOutcome === 'completed' && escalates && this.repairRoute(session, task);
       if (repair) {
         await this.escalate(session, task, gate, repair);
@@ -650,7 +652,7 @@ module.exports = {
 
     const settings = (this.agents?.primary || this).data.settings;
     const canRevise = settings.checkerRevise !== false && !task.critique.revised;
-    const canEscalate = settings.checkerEscalate !== false && (look.verdict === 'escalate' || !canRevise);
+    const canEscalate = settings.checkerEscalate !== false && !this.hasAdvisor() && (look.verdict === 'escalate' || !canRevise);
     const repair = canEscalate ? this.repairRoute(session, task) : null;
     if (repair || canRevise)
       return { repair, findings: look.findings };

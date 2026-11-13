@@ -50,6 +50,8 @@ const NO_SECONDARY = '\n\nChanging your effort or model, or stopping you mid-tur
 // The worker waits for the quick reply (a full answer means it never runs), so a slow call gives up early.
 // 2026-11-06 (the user): 12 s, up from 8 s, which Haiku through Claude Code sometimes ran over.
 const QUICK_TIMEOUT_MS = 12000;
+// 2026-11-13: Cursor CLI reads took 15–28 s (Grok 4.7, low) and all timed out at 12 s, so it gets longer.
+const CURSOR_TIMEOUT_MS = 45000;
 const FINAL = new Set(['passed', 'failed', 'blocked', 'not-checked', 'cancelled']);
 
 const visibleText = item => item.type === 'userMessage'
@@ -109,7 +111,7 @@ module.exports = {
       queued: held.map((message, index) => ({ id: `q${index + 1}`, text: message.text.slice(0, 500) })),
       ...(attached ? { attachments: 'The message has attachments you cannot see: reply with kind "ack".' } : {}) });
     let call;
-    try { call = this.smartRouter.complete({ instructions: INSTRUCTIONS, prompt, schema: SCHEMA, timeoutMs: QUICK_TIMEOUT_MS }, answerer, abort); }
+    try { call = this.smartRouter.complete({ instructions: INSTRUCTIONS, prompt, schema: SCHEMA, timeoutMs: answerer.provider === 'cursor-cli' ? CURSOR_TIMEOUT_MS : QUICK_TIMEOUT_MS }, answerer, abort); }
     catch (error) { call = Promise.reject(error); }
     return Promise.resolve(call).then(({ decision } = {}) => {
       const reply = typeof decision?.text === 'string' ? decision.text.trim() : '';
@@ -129,9 +131,10 @@ module.exports = {
   // triage, so it is not passed to the worker meanwhile) and acts: "stop" stops the work; "stop and go xhigh effort" or
   // "change effort to xhigh now" stops it and continues at that effort; "after this turn use xhigh" runs it as the next
   // turn at that effort; "change effort to xhigh" asks whether now or after this turn, and a reply answers.
-  // Anything else goes on to the worker as before; a short question it can answer fully, it answers. Never throws.
-  // 2026-11-06 (the user): it always replies, and the messages it holds for later turns are its own queue, shown in the
-  // chat with Remove; it drops held ones the new message cancels or replaces. Only when it fails or times out does the
+  // Anything else goes on to the worker as before. Never throws.
+  // 2026-11-13 (the user): it never replies to a queued message, not even a question it could answer; only Harness's own
+  // notices of what it did (stopping, switching effort) show. The messages it holds for later turns are its own queue,
+  // shown in the chat with Remove (2026-11-06); it drops held ones the new message cancels or replaces. Only when it fails or times out does the
   // message join the worker's queue, with Send now, Edit and Remove.
   async readQueued(session, message) {
     const question = session.effortQuestion && session.queue?.some(m => m.id === session.effortQuestion.messageId) ? session.effortQuestion : null;
@@ -210,18 +213,16 @@ module.exports = {
     }
     // With the turn ended there is nothing to ask now or after about.
     if (changes && (read.when === 'now' || !running)) return restart(message, wanted.effort);
-    if (changes && read.when === 'after') return hold(message, wanted.effort, `Runs after this turn at ${wanted.effort} effort.`, read.text);
+    if (changes && read.when === 'after') return hold(message, wanted.effort, `Runs after this turn at ${wanted.effort} effort.`);
     if (changes) {
       const text = `Change to ${wanted.effort} effort now, which stops the current work, or after this turn? Reply "now" or "after".`;
       session.effortQuestion = { messageId: message.id, text };
       return hold(message, wanted.effort, text);
     }
-    if (read.kind === 'answer' && !read.effort) return consume(read.text);
-    // Separate work waits for the next turn; the rest reaches the worker during its turn (deliverNow). Either way its
-    // reply goes into the chat with the message.
-    if (read.deliver === 'after') return hold(message, null, 'Runs after this turn.', read.text);
+    // Separate work waits for the next turn; the rest reaches the worker during its turn (deliverNow).
+    if (read.deliver === 'after') return hold(message, null, 'Runs after this turn.');
     // Read already: a provider that takes nothing mid-turn runs it after the turn without reading it again (send: triaged).
-    Object.assign(message, { triaged: true, ack: { text: read.text, label } });
+    Object.assign(message, { triaged: true });
     this.save();
     if (running) this.deliverNow(session, message); else this.changed();
   },
@@ -344,7 +345,7 @@ module.exports = {
     session.items.push({ ...session.pendingMessage, pending: false, localOnly: true },
       { id: randomUUID(), type: 'agentMessage', phase: 'final_answer', text: quick.text, routeLabel: label, localOnly: true, createdAt: Date.now() });
     // The worker's next turn sees the exchange: CLI backends read the items since their last turn, Codex this context.
-    (session.directContext ||= []).push({ question: text, answer: quick.text });
+    this.rememberDirect(session, { question: text, answer: quick.text });
     const route = { ...answerer, directAnswer: true, label, source: 'direct', assessment: selected?.assessment,
       reason: `${answerer.label || answerer.model} answered it right away.`, at: Date.now(), messageId: clientId };
     session.routes.push(route);

@@ -561,8 +561,7 @@ class Agents extends EventEmitter {
     const context = items.length ? handoff(items, Infinity) : '';
     const previous = { items: chat.items, directContext: chat.directContext, retained: target.data.retainedExecutions };
     chat.items = [...chat.items, ...items];
-    if (items.length) chat.directContext = [...(chat.directContext || []),
-      { question: 'Completed delegated conversation (history, not a new task).', answer: context }];
+    if (items.length) target.rememberDirect(chat, { question: 'Completed delegated conversation (history, not a new task).', answer: context });
     target.data.retainedExecutions = { ...target.data.retainedExecutions, [work.id]: [...new Set([...retained, ...work.items.map(item => item.id)])] };
     try { target.save(); }
     catch (error) {
@@ -597,18 +596,25 @@ class Agents extends EventEmitter {
       throw new Error('Stop the group reply before continuing.');
     const execution = !controller.executionContext && this.executions.get(controller.agentId);
     if (execution) this.requireIdle(execution);
-    if (controller.busy || controller.loading.size || controller.activeTurns.size || controller.requests.size || controller.cleanupPending.size || controller.blockedReason())
-      throw new Error('Stop this agent and resolve its pending work before continuing.');
-    if (this.foregroundTasks().some(record => record.controller === controller)) throw new Error('Finish or stop this agent’s saved direct tasks before continuing.');
+    // Only work actually running locks a bot (2026-11-12, the user). Queued messages, waiting replies, paused tasks and
+    // unfinished jobs left by a Stop, a usage limit or a closed Harness do not: clearing and deleting cancel them.
+    if (controller.busy || controller.loading.size || controller.activeTurns.size || controller.requests.size || controller.cleanupPending.size)
+      throw new Error(`${this.agentName(controller.agentId)} is running. Stop it first.`);
     const ids = new Set(controller.data.sessions.map(s => s.id));
-    if (this.pendingJobs().some(record => record.controller === controller || ids.has(record.job.source) || ids.has(record.job.owner)))
-      throw new Error('Finish or stop delegated tasks and resolve pending work before continuing.');
-    const savedReport = (session, message) => session === clearing && message.agentReply && !message.agentMail && !message.sending &&
-      session.items.some(item => item.localOnly && item.type === 'agentResult' && item.id === message.id &&
-        ['completed', 'failed', 'cancelled', 'interrupted'].includes(item.status));
-    if (controller.data.sessions.some(s => s.queue?.some(message => !savedReport(s, message)) ||
-        s.items.some(item => item.pendingReply && !savedReport(s, item.pendingReply))))
-      throw new Error('Clear queued messages and resolve pending work before continuing.');
+    const helpers = this.runningJobs().filter(record => ids.has(record.job.source) || ids.has(record.job.owner));
+    if (helpers.length) throw new Error(`Its sub-bots are still running: ${[...new Set(helpers.map(record => this.agentName(record.controller.agentId)))].join(', ')}. Stop stops them too.`);
+  }
+
+  // Delegated jobs whose worker is running them now.
+  runningJobs() {
+    return this.pendingJobs().filter(({ controller, session, job }) => job === session.delegation && controller.busy === session.id);
+  }
+
+  // Delegated jobs and paused direct tasks left for chats that are cleared or bots that are deleted: cancelled, so
+  // nothing waits for them or resumes them later.
+  async cancelLeftovers(taskChosen, jobChosen) {
+    for (const record of this.foregroundTasks().filter(taskChosen)) await this.stopForegroundTask(record);
+    for (const record of this.pendingJobs().filter(jobChosen)) if (!record.job.delivered) await this.stop(record.job.id, true);
   }
 
   async clearConversation(id, confirm, groupId = null) {
@@ -618,6 +624,11 @@ class Agents extends EventEmitter {
     if (!current) throw new Error('This agent has no conversation to clear.');
     if (!await confirm(current.group ? current.title : this.agentName(id))) return null;
     if (this.controllers.get(id) !== controller || (groupId ? !controller.data.sessions.includes(current) || current.archived : this.conversation(controller)?.id !== current.id)) throw new Error('The conversation changed. Try clearing it again.');
+    this.requireIdle(controller, current);
+    // Results of the jobs cancelled here come back to this chat; it is being archived, so they must not start a turn.
+    current.queuePaused = true;
+    await this.cancelLeftovers(record => record.controller === controller && record.session.id === current.id,
+      ({ job }) => job.source === current.id || job.owner === current.id);
     this.requireIdle(controller, current);
     const now = Date.now();
     const fresh = { id: randomUUID(), threadId: null, title: current.group ? current.title : 'New session',
@@ -667,6 +678,13 @@ class Agents extends EventEmitter {
       }
     }
     this.requireDependentsIdle(id);
+    // What these bots left unfinished is cancelled: their jobs report back as stopped, so no owner waits for them.
+    const gone = new Set(removed.flatMap(agent => [this.controllers.get(agent), this.executions.get(agent)]).filter(Boolean));
+    const chats = new Set([...gone].flatMap(bot => bot.data.sessions.map(session => session.id)));
+    for (const bot of gone) for (const session of bot.data.sessions) session.queuePaused = true;
+    await this.cancelLeftovers(record => gone.has(record.controller),
+      ({ controller: worker, job }) => gone.has(worker) || chats.has(job.source) || chats.has(job.owner));
+    check();
     const previous = this.primary.data.agents;
     const contexts = this.primary.data.workerContexts;
     this.primary.data.agents = previous.filter(a => !removed.includes(a.id));
@@ -695,9 +713,11 @@ class Agents extends EventEmitter {
     return this.snapshot();
   }
 
-  // A bot's router, Secondary model or effort cap: its own, or on Inherit (the default) its creator's, up to Hub's.
+  // A bot's router, Secondary model, advisor or effort cap: its own, or on Inherit (the default) its creator's, up to Hub's.
+  // Hub's advisor is on by default: its model at the highest effort its cap allows ('chat', 2026-11-13, the user).
   botSetting(agentId, key) {
     const hub = { router: () => this.primary.data.settings.router, secondaryModel: () => this.primary.secondarySaved() || undefined,
+      advisorModel: () => this.primary.data.settings.advisorModel || 'chat',
       effortCap: () => this.primary.data.settings.effortCap || DEFAULT_EFFORT_CAP }[key];
     for (let id = agentId, seen = new Set(); id && id !== 'main' && !seen.has(id); ) {
       seen.add(id);
@@ -752,7 +772,7 @@ class Agents extends EventEmitter {
     const profile = controller.agentId === 'main' ? this.primary.data.settings : this.profile(controller.agentId);
     controller.data.settings = { ...this.primary.data.settings, workspace: profile.workspace, mode: profile.mode, access: profile.access,
       router: this.botSetting(controller.agentId, 'router'), secondaryModel: this.botSetting(controller.agentId, 'secondaryModel'),
-      effortCap: this.botSetting(controller.agentId, 'effortCap') };
+      advisorModel: this.botSetting(controller.agentId, 'advisorModel'), effortCap: this.botSetting(controller.agentId, 'effortCap') };
     // Usage windows belong to the account, not the agent.
     controller.data.providerLimits = this.primary.data.providerLimits;
     controller.limits.store = this.primary.limits.store;
@@ -878,17 +898,20 @@ class Agents extends EventEmitter {
     // Router, Secondary model and effort cap: kept when an edit does not mention them (agent_update, renames); Inherit,
     // the default, is not stored.
     const own = key => { const v = value[key] ?? existing?.[key] ?? 'inherit'; return v === 'auto' ? 'inherit' : v; };
-    const router = own('router'), secondary = own('secondaryModel'), effortCap = own('effortCap');
+    const router = own('router'), secondary = own('secondaryModel'), advisor = own('advisorModel'), effortCap = own('effortCap');
+    if (advisor !== existing?.advisorModel && !['inherit', 'off', 'chat'].includes(advisor) && !this.primary.chatScanChoices().some(p => p.id === advisor))
+      throw new Error('Unknown advisor model.');
     if (router !== 'inherit' && !BOT_SETTINGS.router.includes(router)) throw new Error('Unknown router.');
     if (secondary !== existing?.secondaryModel && !['inherit', 'off'].includes(secondary) && !this.primary.chatScanChoices().some(p => p.id === secondary))
       throw new Error('Unknown secondary model.');
     if (effortCap !== 'inherit' && !BOT_SETTINGS.effortCap.includes(effortCap)) throw new Error('Unknown effort cap.');
     const profile = { id, name: value.name.trim(), instructions: value.instructions.trim(), workspace: this.primary.workspace(pick('workspace')), mode, access,
       createdBy, ...Object.fromEntries(Object.values(INHERITED).map(flag => [flag, draft[flag]])),
-      ...Object.fromEntries(Object.entries({ router, secondaryModel: secondary, effortCap }).filter(([, v]) => v !== 'inherit')) };
+      ...Object.fromEntries(Object.entries({ router, secondaryModel: secondary, advisorModel: advisor, effortCap }).filter(([, v]) => v !== 'inherit')) };
     if (temporaryBatch) profile.temporaryBatch = temporaryBatch;
     // Editing and saving promotes a batch worker to a regular bot; an agent's write_settings change (keepBatch) does not.
     else if (keepBatch && existing?.temporaryBatch) profile.temporaryBatch = existing.temporaryBatch;
+    // Only a running bot is locked (requireIdle); queued messages run with the new settings when their turn comes.
     if (existing) this.requireIdle(this.controller(profile.id));
     const moved = existing ? Object.keys(INHERITED).filter(key => (key === 'workspace' ? !sameFolder(existing.workspace, profile.workspace) : existing[key] !== profile[key])) : [];
     if (moved.length)
@@ -916,7 +939,8 @@ class Agents extends EventEmitter {
     if (execution && ['workspace', 'access'].some(key => values[key] !== undefined &&
         values[key] !== controller.data.settings[key])) this.requireIdle(execution);
     if (conversation && ['workspace', 'access'].some(key => values[key] !== undefined && values[key] !== conversation[key]) &&
-        (controller.busy || controller.loading.size || conversation.queue?.length || conversation.delegationQueue?.some(job => !job.delivered) || this.pendingDelegations(conversation.id) || (conversation.delegation && !conversation.delegation.delivered))) throw new Error('Stop this agent before changing its workspace or access.');
+        (controller.busy || controller.loading.size || this.runningJobs().some(({ job }) => job.source === conversation.id || job.owner === conversation.id)))
+      throw new Error('Stop this agent before changing its workspace or access.');
     const inheritable = Object.keys(INHERITED).filter(key => values[key] !== undefined);
     if (inheritable.length && this.isSubBot(this.profile(agentId)))
       throw new Error(`${this.profile(agentId).name} works for the bot that made it and follows its settings. Change that bot instead.`);
@@ -925,11 +949,11 @@ class Agents extends EventEmitter {
     // The chat checker and its switches run between turns and the simple-messages model is read when a message is routed,
     // so changing them never waits for agents to stop.
     const local = Object.keys(values).every(key => ['workspace', 'mode', 'access', 'replySuggestions', 'chatScanModel', 'checkResponses',
-      'checkerRevise', 'checkerEscalate', 'scanReplies', 'escalateFailedChecks', 'dream', 'dreamModel', 'secondaryModel', 'router', 'effortCap', 'showTips',
+      'checkerRevise', 'checkerEscalate', 'scanReplies', 'escalateFailedChecks', 'dream', 'dreamModel', 'advisorModel', 'secondaryModel', 'router', 'effortCap', 'showTips',
       'hideSteps', 'coldStartMinutes', 'coldStartPercent'].includes(key));
     if (!local && this.busy) throw new Error('Stop all agents before changing shared settings.');
-    if (agentId !== 'main' && ['router', 'secondaryModel', 'effortCap'].some(key => values[key] !== undefined))
-      throw new Error('Change a bot’s Router, Secondary model and Effort cap in its Edit dialog.');
+    if (agentId !== 'main' && ['router', 'secondaryModel', 'advisorModel', 'effortCap'].some(key => values[key] !== undefined))
+      throw new Error('Change a bot’s Router, Secondary model, Advisor and Effort cap in its Edit dialog.');
     if (agentId === 'main') this.primary.settings(values);
     else {
       const { workspace, mode, access, ...shared } = values;
@@ -2262,6 +2286,17 @@ class Agents extends EventEmitter {
         throw error;
       });
     }
+    if (name === 'ask_advisor') {
+      const started = Date.now();
+      return controller.askAdvisor(session, args).then(result => {
+        controller.recordStep(session, { tool: name, title: result.repeated ? 'Advisor · earlier advice repeated' : `Asked advisor (${result.by})`,
+          lines: [`Error: ${args.error}`, result.advice, ...(result.note ? [result.note] : []), `${Date.now() - started} ms`] });
+        return result;
+      }, error => {
+        controller.recordStep(session, { tool: name, error: true, title: 'Advisor · failed', lines: [error.message] });
+        throw error;
+      });
+    }
     if (name === 'harness_check_update') {
       if (Object.keys(args).length) throw new Error('The update check takes no arguments; installation requires user confirmation in the app.');
       if (!this.checkUpdate) throw new Error('The update service is unavailable.');
@@ -2377,6 +2412,9 @@ class Agents extends EventEmitter {
       if (id) sessions.push({ controller, session: controller.session(id) });
       else if (controller.busy) sessions.push({ controller, session: controller.session(controller.busy) });
     } catch { /* An assignment ID addresses its targets, not an unrelated active conversation. */ }
+    // Stop names the sub-bots it stopped mid-job along with this bot (2026-11-12, the user).
+    const helpers = [...new Set(targets.filter(record => record.job === record.session.delegation && record.controller.busy === record.session.id)
+      .map(record => this.agentName(record.controller.agentId)))];
     let failure;
     try { this.recordCancellation(id, targets); await this.stop(id, true); }
     catch (error) { failure = error; }
@@ -2385,6 +2423,7 @@ class Agents extends EventEmitter {
     const stopped = await Promise.allSettled([...active].map(controller => controller.stop()));
     failure ||= stopped.find(result => result.status === 'rejected')?.reason;
     if (failure) throw failure;
+    return helpers.length ? { stoppedSubBots: helpers } : undefined;
   }
 
   async stop(id, recorded = false) {
