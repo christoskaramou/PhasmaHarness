@@ -309,8 +309,10 @@ module.exports = {
       if (item) item.aggregatedOutput = ((item.aggregatedOutput || '') + p.delta).slice(-60000);
     }
     if (method === 'error') session.error = p.error?.message || p.message;
-    // Streamed text and command output touch only this chat; other events can change the bot's own state too.
-    const streamed = method === 'item/agentMessage/delta' || method === 'item/commandExecution/outputDelta';
+    // Streamed text, command output, a step's start or end and token usage touch only this chat (its newest messages, its
+    // current route): scoped, a push compares only that chat's tail instead of every message of every chat of the bot
+    // (7.4 ms on a 5,600-message chat, 2026-11-13). Other events can change the bot's own state too.
+    const streamed = ['item/agentMessage/delta', 'item/commandExecution/outputDelta', 'item/started', 'item/completed', 'thread/tokenUsage/updated'].includes(method);
     session.updated = Date.now(); this.changed(streamed ? session : undefined);
   },
 

@@ -654,6 +654,15 @@ test('a Claude turn lists its background tasks, reads and stops one, and drops t
   const fleet = () => trimFleet({ agentStates: { main: { ...controller.snapshot(), stateRevision: controller.stateRevision || 0,
     sharedRevision: controller.sharedRevision || 0, chatRevisions: Object.fromEntries(controller.chatRevisions || []) } } }, sent, false).agentStates.main;
   fleet();
+  // A tool call and its result touch only this chat: its own revision moves, not the bot-wide one (a bot-wide move
+  // re-compared every message of every chat of the bot, 7.4 ms on a 5,600-message chat), and the window still gets them.
+  const shared = controller.sharedRevision;
+  request.onEvent({ type: 'assistant', message: { id: 'm1', content: [{ type: 'tool_use', id: 'tool-1', name: 'Bash', input: { command: 'ls' } }] } });
+  request.onEvent({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: 'a.txt' }] } });
+  assert.equal(controller.sharedRevision, shared, 'CLI events leave the bot-wide revision alone');
+  assert.equal(controller.chatRevisions.get(session.id), controller.stateRevision, 'they move the chat’s own revision');
+  const step = fleet().sessions.find(chat => chat.id === session.id).items.find(item => item.id === 'tool-1');
+  assert.equal(step?.status, 'completed', 'the finished step reaches the window');
   request.onEvent({ type: 'system', subtype: 'background_tasks_changed', tasks: [
     { task_id: 'b1', task_type: 'local_bash', description: 'Wait until Dota 2 closes' },
     { task_id: 'w', task_type: 'local_bash', description: 'CLI watcher', ambient: true }] });

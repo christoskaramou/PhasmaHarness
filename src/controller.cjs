@@ -1521,8 +1521,9 @@ class Controller extends EventEmitter {
             const item = session.items.findLast(i => i.id === output.tool_use_id);
             if (item) { item.status = output.is_error ? 'failed' : 'completed'; item.result = output.content; }
           }
-          // Streamed text touches only this chat.
-          this.changed(event.type === 'stream_event' && event.event?.type === 'content_block_delta' ? session : undefined);
+          // A CLI event touches only this chat: its newest messages, usage, route and background tasks. executionAccepted
+          // reports its own bot-wide change. Scoped, a push compares only this chat's tail (see turns.cjs).
+          this.changed(session);
         }
       });
       this.agents?.executionAccepted?.(this, session, submission);
