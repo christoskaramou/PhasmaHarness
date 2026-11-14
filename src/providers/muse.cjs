@@ -1,7 +1,7 @@
 const { spawn } = require('node:child_process');
 const os = require('node:os');
 const { spawnOwned, stopTree } = require('../process-tree.cjs');
-const { findNativeCLI, deadline } = require('./native-cli.cjs');
+const { findNativeCLI, deadline, takeTurn } = require('./native-cli.cjs');
 const { imageData } = require('../image-input.cjs');
 const { invalidResponse } = require('./structured.cjs');
 
@@ -193,8 +193,8 @@ class MuseCLI {
   }
 
   async run(options) {
-    if (this.active) throw new Error('Muse Code already has an active turn.');
-    this.active = true;
+    // Every call has its own process; a tool-free reply (a Secondary read, routing) runs beside a turn, turns take turns.
+    const release = options.schema ? () => {} : await takeTurn(this, options.signal, LABEL);
     let host;
     try {
       host = await this.createHost(options.cwd, options.signal);
@@ -279,7 +279,7 @@ class MuseCLI {
       return { session_id: session.sessionId, result: text, ...(usage ? { usage, cacheUsageUnknown: true } : {}), ...(contextWindow ? { contextWindow } : {}) };
     } finally {
       try { if (host) await this.closeHost(host); }
-      finally { this.active = false; }
+      finally { release(); }
     }
   }
 

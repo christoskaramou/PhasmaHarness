@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnOwned, stopTree, stopStartedSince } = require('../process-tree.cjs');
-const { findNativeCLI, deadline, stepStopped } = require('./native-cli.cjs');
+const { findNativeCLI, deadline, stepStopped, takeTurn } = require('./native-cli.cjs');
 const { structuredResponse } = require('./structured.cjs');
 const { imageData } = require('../image-input.cjs');
 
@@ -174,13 +174,15 @@ class DeepSeekCLI {
   }
 
   async run(options) {
-    if (this.active) throw new Error('DeepSeek Harness already has an active turn.');
-    this.active = true;
+    // A tool-free reply on its own process (a Secondary read, routing) runs beside the worker's turn; the rest share
+    // this.host or this.reviewHost, so they take turns.
+    const isolated = options.schema && !options.persistSession;
+    const release = isolated ? () => {} : await takeTurn(this, options.signal, LABEL);
     let host, context;
     try {
       const access = options.schema ? 'read-only' : options.access;
-      if (this.host && (this.host.cwd !== options.cwd || this.host.access !== access || this.host.rpc.signal.aborted)) await this.closeHost(this.host);
-      if (this.reviewHost && (this.reviewHost.cwd !== options.cwd || this.reviewHost.rpc.signal.aborted)) await this.closeHost(this.reviewHost);
+      if (!isolated && this.host && (this.host.cwd !== options.cwd || this.host.access !== access || this.host.rpc.signal.aborted)) await this.closeHost(this.host);
+      if (!isolated && this.reviewHost && (this.reviewHost.cwd !== options.cwd || this.reviewHost.rpc.signal.aborted)) await this.closeHost(this.reviewHost);
       host = options.schema ? (options.persistSession
         ? this.reviewHost || (this.reviewHost = await this.createHost(options.cwd, access, options.signal))
         : await this.createHost(options.cwd, access, options.signal))
@@ -231,7 +233,7 @@ class DeepSeekCLI {
     finally {
       if (host) host.context = null;
       try { if (options.schema && !options.persistSession && host && this.hosts.has(host)) await this.closeHost(host); }
-      finally { this.active = false; }
+      finally { release(); }
     }
   }
 

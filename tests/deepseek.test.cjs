@@ -310,7 +310,7 @@ test('DeepSeek ignores foreign or malformed updates and fails turns that do not 
   assert.equal(result.result, 'Hello world');
   const failed = await fixture(t, { stopReason: 'refusal' });
   await assert.rejects(failed.backend.run(runOptions()), /without completion: refusal/);
-  assert.equal(failed.backend.active, false);
+  assert.equal(failed.backend.active, null);
 });
 
 test('DeepSeek image prompts follow the advertised capability and keep each media type', async t => {
@@ -343,7 +343,7 @@ test('DeepSeek cancellation stops its process tree and releases the active turn'
   await assert.rejects(running, /stopped/);
   assert.equal(children[0].child.exitCode, 0);
   assert.equal(backend.hosts.size, 0);
-  assert.equal(backend.active, false);
+  assert.equal(backend.active, null);
 });
 
 test('DeepSeek sign-in explains that dsh keeps its own API key', async t => {
@@ -410,4 +410,22 @@ test('an approval answered after Send now cannot approve anything for the replac
   assert.deepEqual(methodCalls(calls, 'permission').map(([, permission]) => permission.outcome), [{ outcome: 'cancelled' }, { outcome: 'cancelled' }],
     'the late Allow does not apply');
   assert.equal(methodCalls(calls, 'prompt').length, 2);
+});
+
+// 2026-11-13: a Secondary read that timed out was still closing when the worker's turn started on the same instance,
+// and the send failed with "DeepSeek Harness already has an active turn". A second call now waits for the first.
+test('a second DeepSeek call waits for the first instead of failing, and Stop ends the wait', async t => {
+  const { backend } = await fixture(t);
+  const [first, second] = await Promise.all([backend.run(runOptions()), backend.run(runOptions())]);
+  assert.deepEqual([first.result, second.result], ['Hello world', 'Hello world']);
+  const { takeTurn } = require('../src/providers/native-cli.cjs');
+  const owner = {};
+  const release = await takeTurn(owner, undefined, 'Test CLI');
+  const abort = new AbortController();
+  const waiting = takeTurn(owner, abort.signal, 'Test CLI');
+  abort.abort();
+  await assert.rejects(waiting, { name: 'AbortError', message: 'Test CLI stopped.' });
+  release();
+  assert.equal(owner.active, null);
+  (await takeTurn(owner, undefined, 'Test CLI'))();
 });

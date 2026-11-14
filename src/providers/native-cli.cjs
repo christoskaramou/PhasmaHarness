@@ -108,4 +108,20 @@ function stepStopped(promise, label, ms = 15000) {
   return Promise.race([promise.catch(() => null), refused]).finally(() => clearTimeout(timer));
 }
 
-module.exports = { findNativeCLI, executableOnPath, deadline, stepStopped, NATIVE_CLI_INFO };
+// One call at a time per CLI instance: a second one waits for the first to end instead of failing. 2026-11-13: a
+// Secondary read that timed out was still closing when the worker's turn started, and the send failed with "already
+// has an active turn". Stop still ends the wait. Resolves to a release function.
+async function takeTurn(owner, signal, label) {
+  for (;;) {
+    if (signal?.aborted) throw Object.assign(new Error(`${label} stopped.`), { name: 'AbortError' });
+    if (!owner.active) break;
+    let onAbort;
+    await Promise.race([owner.active, new Promise(resolve => { onAbort = resolve; signal?.addEventListener('abort', resolve, { once: true }); })]);
+    signal?.removeEventListener('abort', onAbort);
+  }
+  let release;
+  owner.active = new Promise(resolve => { release = () => { owner.active = null; resolve(); }; });
+  return release;
+}
+
+module.exports = { findNativeCLI, executableOnPath, deadline, takeTurn, stepStopped, NATIVE_CLI_INFO };

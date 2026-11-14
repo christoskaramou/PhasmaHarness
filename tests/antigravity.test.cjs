@@ -130,7 +130,12 @@ test('Stop and timeout confirm cleanup and remove only the generated worker conf
   const abort = new AbortController();
   const pending = f.backend.run({ ...turn(cwd), signal: abort.signal });
   await new Promise(resolve => setImmediate(resolve));
-  await assert.rejects(f.backend.run(turn(cwd)), /active process/);
+  // A second call waits for the first instead of failing, and its own Stop ends the wait before it starts anything.
+  const waitAbort = new AbortController(), waiting = f.backend.run({ ...turn(cwd), signal: waitAbort.signal });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.children.length, 1, 'the second call waits');
+  waitAbort.abort();
+  await assert.rejects(waiting, { name: 'AbortError' });
   abort.abort();
   await assert.rejects(pending, { name: 'AbortError' });
   assert.equal(f.children[0].child.exitCode, 0);

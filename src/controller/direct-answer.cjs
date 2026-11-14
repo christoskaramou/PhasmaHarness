@@ -51,7 +51,8 @@ const NO_SECONDARY = '\n\nChanging your effort or model, or stopping you mid-tur
 // 2026-11-06 (the user): 12 s, up from 8 s, which Haiku through Claude Code sometimes ran over.
 const QUICK_TIMEOUT_MS = 12000;
 // 2026-11-13: Cursor CLI reads took 15–28 s (Grok 4.7, low) and all timed out at 12 s, so it gets longer.
-const CURSOR_TIMEOUT_MS = 45000;
+// 2026-11-13: DeepSeek reads took 8-10 s live, and one ran past 12 s in the Assistant chat.
+const SLOW_READ_MS = { 'cursor-cli': 45000, 'native:deepseek': 30000 };
 const FINAL = new Set(['passed', 'failed', 'blocked', 'not-checked', 'cancelled']);
 
 const visibleText = item => item.type === 'userMessage'
@@ -111,7 +112,7 @@ module.exports = {
       queued: held.map((message, index) => ({ id: `q${index + 1}`, text: message.text.slice(0, 500) })),
       ...(attached ? { attachments: 'The message has attachments you cannot see: reply with kind "ack".' } : {}) });
     let call;
-    try { call = this.smartRouter.complete({ instructions: INSTRUCTIONS, prompt, schema: SCHEMA, timeoutMs: answerer.provider === 'cursor-cli' ? CURSOR_TIMEOUT_MS : QUICK_TIMEOUT_MS }, answerer, abort); }
+    try { call = this.smartRouter.complete({ instructions: INSTRUCTIONS, prompt, schema: SCHEMA, timeoutMs: SLOW_READ_MS[answerer.provider] || QUICK_TIMEOUT_MS }, answerer, abort); }
     catch (error) { call = Promise.reject(error); }
     return Promise.resolve(call).then(({ decision } = {}) => {
       const reply = typeof decision?.text === 'string' ? decision.text.trim() : '';

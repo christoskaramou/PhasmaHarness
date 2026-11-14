@@ -4,7 +4,7 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { spawnOwned, stopTree } = require('../process-tree.cjs');
-const { findNativeCLI, deadline } = require('./native-cli.cjs');
+const { findNativeCLI, deadline, takeTurn } = require('./native-cli.cjs');
 const { invalidResponse } = require('./structured.cjs');
 
 // agy signs in with the Google account the Gemini tools share; its own log confirms "authenticated successfully as"
@@ -171,12 +171,13 @@ class AntigravityCLI {
   }
 
   async run(options) {
-    if (this.active || this.hosts.size) throw new Error('Antigravity already has an active process or pending cleanup.');
+    // A second call waits for the first; a stop whose cleanup was never confirmed still refuses (see the finally below).
+    const release = await takeTurn(this, options.signal, LABEL);
+    if (this.hosts.size) { release(); throw new Error('Antigravity already has an active process or pending cleanup.'); }
     // A Hub or routing reply is tool-free (a tool step below rejects it), so only worker turns need Full access.
-    if (!options.schema && options.access !== 'danger-full-access') throw new Error('Antigravity currently requires Full access. Ask and Workspace permissions are not verified for its headless interface.');
-    if (options.images?.length) throw new Error('Antigravity headless input accepts text only. Choose another worker for images.');
-    if (options.signal?.aborted) throw Object.assign(new Error('Antigravity stopped.'), { name: 'AbortError' });
-    this.active = true;
+    if (!options.schema && options.access !== 'danger-full-access') { release(); throw new Error('Antigravity currently requires Full access. Ask and Workspace permissions are not verified for its headless interface.'); }
+    if (options.images?.length) { release(); throw new Error('Antigravity headless input accepts text only. Choose another worker for images.'); }
+    if (options.signal?.aborted) { release(); throw Object.assign(new Error('Antigravity stopped.'), { name: 'AbortError' }); }
     let host, agent, succeeded = false;
     try {
       agent = agentFile(options.cwd, options.helpers);
@@ -262,7 +263,7 @@ class AntigravityCLI {
       // A confirmed result stands; an unconfirmed stop keeps the host pending, so the next run refuses until it is resolved.
       try { if (host) await this.closeHost(host); else agent?.remove(); }
       catch (error) { if (!succeeded) throw error; }
-      finally { this.active = false; }
+      finally { release(); }
     }
   }
 

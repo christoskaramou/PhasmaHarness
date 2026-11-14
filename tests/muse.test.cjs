@@ -150,7 +150,7 @@ test('Muse cancellation cleans up and failures never become successful reports',
   abort.abort();
   await assert.rejects(running, /stopped/);
   assert.equal(children[0].child.exitCode, 0);
-  assert.equal(backend.active, false);
+  assert.equal(backend.active, null);
   const failed = await fixture(t, { terminal: 'failed' });
   await assert.rejects(failed.backend.run(runOptions()), /did not complete/);
   // Muse's own reason (here its live 402 billing reply) reaches the user instead of a generic failure.
