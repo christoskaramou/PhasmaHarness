@@ -870,6 +870,15 @@ test('an exhausted provider keeps background work for review rather than failing
   assert.equal(work.queue?.some(message => message.failover) || false, false);
   assert.equal(worker.client.calls.filter(call => call.method === 'turn/start').length, 1);
   assert.equal(source.items.some(item => item.type === 'agentResult'), false);
+  // 2026-11-14: it stayed paused forever, and the bot that assigned it waited with no end. While the limit lasts it waits;
+  // once the limit has passed it continues in the same chat.
+  agents.pump();
+  assert.equal(worker.client.calls.filter(call => call.method === 'turn/start').length, 1, 'no new turn while the limit lasts');
+  worker.limits.clear('codex');
+  agents.pump();
+  await until(() => worker.client.calls.filter(call => call.method === 'turn/start').length === 2);
+  assert.deepEqual([work.delegation.state, work.queuePaused, work.error, work.delegation.limitResume], ['running', false, null, undefined]);
+  assert.match(worker.client.calls.filter(call => call.method === 'turn/start').at(-1).params.input[0].text, /usage limit .* has reset/);
 });
 
 test('queued quota holds survive restart and Stop without submitting a provider turn', async t => {

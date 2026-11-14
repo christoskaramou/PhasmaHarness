@@ -517,6 +517,8 @@ module.exports = {
       if (session.delegation && !session.delegation.delivered) {
         session.delegation.state = 'interrupted';
         session.delegation.error = session.error;
+        // The job continues by itself once this limit has passed (agents.pump); its Claude session link is kept.
+        session.delegation.limitResume = { provider, model: model || null };
       }
       this.lastSends.delete(session.id);
       this.save(); this.changed(); return;

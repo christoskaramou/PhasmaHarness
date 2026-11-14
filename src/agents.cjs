@@ -1252,6 +1252,15 @@ class Agents extends EventEmitter {
           session.status = 'interrupted'; this.deliver(controller, session); continue;
         }
         if (this.budgets.held(job) && !job.cancelled) continue;
+        // 2026-11-14: a job a usage limit stopped stayed paused for review forever: it was never reported back or resumed,
+        // so the bot that assigned it waited on it with no end. Once the limit has passed it continues where it stopped.
+        // A job stopped before limitResume existed is known by its saved error; the chat's last route names the provider.
+        const limit = job.state === 'interrupted' && !job.recovery && (job.limitResume ||
+          (/reached its usage limit/.test(job.error || '') ? { provider: session.routes?.at(-1)?.provider || 'codex', model: session.routes?.at(-1)?.model || null } : null));
+        if (limit) {
+          if (!controller.limits.limited(limit.provider, limit.model)) this.resumeAfterLimit(controller, session, job);
+          continue;
+        }
         if (job.workspaceCopy) {
           const copy = this.workspaces.record(session.workspace);
           if (copy?.state === 'failed' && !job.recovery) {
@@ -1299,6 +1308,28 @@ class Agents extends EventEmitter {
         if (reply) controller.settle(reply);
       }
     }
+  }
+
+  // Continues a delegated job a usage limit stopped, in the same chat and session, once that limit has passed.
+  resumeAfterLimit(controller, session, job) {
+    if (controller.busy || controller.loading.size || controller.stopping.size || controller.blockedReason() || controller.connection !== 'ready') return;
+    const quota = this.backgroundQuota(controller, session);
+    if (quota) { this.quotaWake(quota); return; }
+    const previous = { state: job.state, error: job.error, limitResume: job.limitResume, sessionError: session.error, queuePaused: session.queuePaused };
+    job.state = 'running'; delete job.error; delete job.limitResume;
+    session.error = null; session.queuePaused = false;
+    try { controller.save(); }
+    catch (error) {
+      Object.assign(job, { state: previous.state, error: previous.error, limitResume: previous.limitResume });
+      Object.assign(session, { error: previous.sessionError, queuePaused: previous.queuePaused });
+      throw error;
+    }
+    controller.log.info('Assignment resumed after its usage limit', { jobId: job.id });
+    this.sync(controller);
+    controller.send({ id: session.id, text: 'The usage limit that stopped this assignment has reset. Continue it from where you stopped; check what finished on disk first.',
+      images: [], mode: job.mode || controller.data.settings.mode, task: 'on' }).catch(error => {
+      session.error = error.message; session.status = 'failed'; controller.changed();
+    });
   }
 
   // A Codex load error while many app-servers start together (seen 2026-10-19: "workspace routing discovery timed out")
