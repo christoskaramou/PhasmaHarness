@@ -336,3 +336,24 @@ test('a chat delta sends only changed fields and route entries; a chat-scoped pu
   // A shorter route list cannot be patched by position: the chat goes whole.
   assert.equal(stream.push(fleet(7, 5, chat(items, { routes: [] }))).agentStates.main.sessions[0].itemsFrom, undefined);
 });
+
+// 2026-11-14: all 1,522 of the user's job budgets went with every update (0.56 MB, about 2.6 ms to send and read).
+test('job budgets go whole once, then only the changed and removed ones; a page without them asks for everything', t => {
+  const { stateStream, keepSessions, FULL_STATE_MS } = require('../ui/agent-state.js');
+  const stream = stateStream();
+  const fleet = jobBudgets => ({ agentStates: { main: { stateRevision: 1, sharedRevision: 1, sessions: [] } }, jobBudgets });
+  const page = keepSessions(stream.push(fleet({ a: { state: 'active', usedMs: 1 }, b: { state: 'active', usedMs: 2 } })), null);
+  assert.deepEqual(Object.keys(page.jobBudgets), ['a', 'b']);
+  const quiet = stream.push(fleet({ a: { state: 'active', usedMs: 1 }, b: { state: 'paused', usedMs: 2 }, c: { state: 'active', usedMs: 0 } }));
+  assert.deepEqual([Object.keys(quiet.jobBudgets), quiet.jobBudgetsDelta], [['b', 'c'], true], 'only the changed and new budgets');
+  const merged = keepSessions(quiet, page);
+  assert.deepEqual(merged.jobBudgets, { a: { state: 'active', usedMs: 1 }, b: { state: 'paused', usedMs: 2 }, c: { state: 'active', usedMs: 0 } });
+  assert.equal(merged.jobBudgetsDelta, undefined);
+  const removed = stream.push(fleet({ a: { state: 'active', usedMs: 1 }, c: { state: 'active', usedMs: 0 } }));
+  assert.deepEqual([removed.jobBudgets, removed.jobBudgetsRemoved], [{}, ['b']]);
+  assert.deepEqual(Object.keys(keepSessions(removed, merged).jobBudgets), ['a', 'c']);
+  assert.equal(keepSessions(stream.push(fleet({ a: { state: 'paused', usedMs: 1 } })), { agentStates: {} }), null, 'no budgets held: ask for everything');
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + FULL_STATE_MS });
+  const repair = stream.push(fleet({ a: { state: 'paused', usedMs: 1 } }));
+  assert.deepEqual([Object.keys(repair.jobBudgets), repair.jobBudgetsDelta], [['a'], undefined], 'the 10-minute full state sends them all');
+});

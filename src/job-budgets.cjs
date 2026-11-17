@@ -4,6 +4,7 @@ const { performance } = require('node:perf_hooks');
 const { randomUUID } = require('node:crypto');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const { capabilities } = require('./providers/capabilities.cjs');
+const { FINAL } = require('./tasks.cjs');
 
 const DEFAULT_MINUTES = 120;
 const MAX_MINUTES = 7 * 24 * 60;
@@ -371,4 +372,34 @@ class JobBudgets {
   }
 }
 
-module.exports = { JobBudgets, DEFAULT_MINUTES, MAX_MINUTES, DEFAULT_ATTEMPTS, normalizedUsage, usageSummary, usageText };
+const BUDGET_KEYS = new Set(['budgetId', 'replyBudgetId', 'queuePauseBudgetId']);
+/** Budget ids something can still look up: every store's data except chat history, returned jobs and finished tasks
+ * (a returned job keeps its usage in its result's budgetSummary). Pending replies, queues, open jobs and tasks, a Hub
+ * chat's hubRequest and any other saved field all count.
+ * @param {any[]} stores each store's data @returns {Set<string>} */
+function budgetReferences(stores) {
+  const keep = new Set();
+  /** @param {any} value */
+  const walk = value => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) { for (const entry of value) walk(entry); return; }
+    for (const [key, entry] of Object.entries(value)) {
+      if (BUDGET_KEYS.has(key) && typeof entry === 'string') keep.add(entry);
+      else walk(entry);
+    }
+  };
+  for (const data of stores) {
+    const { sessions, jobBudgets, ...rest } = data;
+    walk(rest);
+    for (const session of sessions || []) {
+      const { items, tasks, routes, directContext, delegation, delegationQueue, ...fields } = session;
+      walk(fields);
+      for (const job of [delegation, ...(delegationQueue || [])]) if (job && !job.delivered) walk(job);
+      for (const task of tasks || []) if (!FINAL.has(task.state) || task.budgetPaused || task.budgetResumePending) walk(task);
+      for (const item of items || []) if (item.pendingReply) walk(item.pendingReply);
+    }
+  }
+  return keep;
+}
+
+module.exports = { JobBudgets, budgetReferences, DEFAULT_MINUTES, MAX_MINUTES, DEFAULT_ATTEMPTS, normalizedUsage, usageSummary, usageText };

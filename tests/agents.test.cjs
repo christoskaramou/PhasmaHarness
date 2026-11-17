@@ -881,6 +881,98 @@ test('an exhausted provider keeps background work for review rather than failing
   assert.match(worker.client.calls.filter(call => call.method === 'turn/start').at(-1).params.input[0].text, /usage limit .* has reset/);
 });
 
+// A restart turned a job the limit had stopped into a restart review and forgot the limit, so it never continued.
+test('a job a usage limit stopped stays that way across a restart and continues once the limit passes', async t => {
+  const { agents, primary, addWorker, factory, workspace } = await setup(t);
+  const worker = await addWorker('Builder'), source = primary.create();
+  const accepted = agents.delegate(primary, source, worker.agentId, 'Build the game');
+  const work = worker.session(accepted.sessionId);
+  await until(() => !!work.turnId);
+  worker.lastSends.set(work.id, { clientId: work.submission.messageId, text: 'Build the game', images: [], task: 'on' });
+  worker.notification({ method: 'turn/completed', params: { threadId: work.threadId, turn: {
+    id: work.turnId, status: 'failed', error: { message: 'Usage exhausted.', codexErrorInfo: 'usageLimitExceeded' } } } });
+  await until(() => !worker.busy && work.delegation.state === 'interrupted');
+  agents.budgets.refresh(); // the time lease ends once the bot is idle, as the running app does on its next update
+  primary.runnerRecoverySafe = true;
+  primary.save(); worker.save();
+  const root = factory(primary.filename, workspace);
+  root.runnerRecoverySafe = true;
+  await root.initialize();
+  const restored = new Agents(root, async () => {}, factory);
+  t.after(() => { restored.closing = true; clearTimeout(restored.quotaTimer); for (const c of restored.allControllers()) c.close(); });
+  await restored.initialize();
+  const execution = restored.owner(accepted.sessionId), job = execution.session(accepted.sessionId).delegation;
+  assert.deepEqual([job.state, job.recovery, job.limitResume?.provider, /usage limit/.test(job.error)], ['interrupted', undefined, 'codex', true]);
+  execution.limits.clear('codex');
+  restored.pump();
+  await until(() => execution.client.calls.some(call => call.method === 'turn/start'));
+  assert.equal(job.state, 'running');
+});
+
+// 2026-11-14: a bot that hit a usage limit while answering other bots' reports kept them paused until the user typed.
+test('reports queued behind a usage limit run once the limit passes, and a Stop keeps them paused', async t => {
+  const { agents, addWorker } = await setup(t);
+  const worker = await addWorker('Coordinator');
+  const turns = () => worker.client.calls.filter(call => call.method === 'turn/start').length;
+  const limit = () => {
+    const session = worker.create();
+    session.queue = [{ id: randomUUID(), text: 'Result from agent "Lead". Status: completed', images: [], mode: worker.data.settings.mode, task: 'off', agentReply: true }];
+    worker.lastSends.set(session.id, { clientId: 'reply', agentReply: true });
+    worker.providerOutcome(session, 'codex', null, 'reply', { status: 'failed', error: 'Usage exhausted.', limit: { until: null, reason: 'Usage exhausted.' } });
+    return session;
+  };
+  const session = limit();
+  assert.deepEqual([session.queuePaused, /paused for review/.test(session.error)], [true, true]);
+  const before = turns();
+  agents.pump();
+  assert.equal(turns(), before, 'the reports wait while the limit lasts');
+  worker.limits.clear('codex');
+  agents.pump();
+  await until(() => turns() === before + 1);
+  assert.deepEqual([session.queuePaused, session.error, session.limitResume], [false, null, undefined]);
+  await until(() => !!session.turnId);
+  worker.notification({ method: 'turn/completed', params: { threadId: session.threadId, turn: { id: session.turnId, status: 'completed' } } });
+  await until(() => !worker.busy);
+
+  const stopped = limit();
+  await agents.stop(stopped.id);
+  worker.limits.clear('codex');
+  const after = turns();
+  agents.pump();
+  assert.deepEqual([stopped.queuePaused, stopped.limitResume, turns()], [true, undefined, after], 'a Stop is not undone when the limit passes');
+});
+
+// 2026-11-14: job budgets were never deleted (1,534 for the user, re-encoded on every Hub save).
+test('a restart drops the budgets of returned jobs and keeps paused ones and any still referenced', async t => {
+  const { agents, primary, addWorker, factory, workspace } = await setup(t);
+  const worker = await addWorker('Builder'), owner = primary.create();
+  const done = agents.delegate(primary, owner, worker.agentId, 'Build it');
+  const chat = worker.session(done.sessionId);
+  await until(() => worker.activeTurns.has(chat.id));
+  complete(worker, chat, 'Built.');
+  await until(() => chat.delegation.delivered);
+  const returned = chat.delegation.budgetId;
+  const receipt = owner.items.find(item => item.deliveryId === done.jobId);
+  assert.ok(receipt.budgetSummary, 'the returned job keeps its usage in its result');
+  const fake = id => ({ ...structuredClone(agents.budgets.records[returned]), id, activeSince: null });
+  Object.assign(agents.budgets.records, { orphan: fake('orphan'), 'hub-ref': fake('hub-ref'), held: { ...fake('held'), state: 'paused', reason: 'Review it.' } });
+  await until(() => primary.busy === owner.id && !!owner.turnId);
+  complete(primary, owner, 'Reported.'); // the Hub answers the report
+  await until(() => !primary.busy);
+  agents.budgets.refresh(); // its time lease ends once idle
+  // A later delegation from this chat would still inherit its hubRequest's budget.
+  owner.hubRequest = { id: 'r', text: 'Build it', budgetId: 'hub-ref' };
+  primary.save(); worker.save();
+  const root = factory(primary.filename, workspace);
+  await root.initialize();
+  const restored = new Agents(root, async () => {}, factory);
+  t.after(() => { restored.closing = true; clearTimeout(restored.quotaTimer); for (const c of restored.allControllers()) c.close(); });
+  await restored.initialize();
+  assert.deepEqual(Object.keys(restored.budgets.records).sort(), ['held', 'hub-ref']);
+  assert.deepEqual(Object.keys(root.data.jobBudgets).sort(), ['held', 'hub-ref'], 'the prune is saved');
+  assert.ok(restored.owner(owner.id).session(owner.id).items.find(item => item.deliveryId === done.jobId).budgetSummary);
+});
+
 test('queued quota holds survive restart and Stop without submitting a provider turn', async t => {
   const { agents, primary, addWorker, factory, workspace } = await setup(t);
   const worker = await addWorker('Builder'), source = primary.create();
@@ -2175,9 +2267,28 @@ test('a bot with queued messages takes a new model and access; only a running tu
   assert.equal(saved.mode, 'terra-light');
   assert.equal(chat.queue.length, 1, 'the queued result stays to run with the new model');
   assert.equal((await agents.saveAgent({ ...base, id: profile.id, mode: 'terra-light', access: 'workspace-write' })).access, 'workspace-write');
+  // 2026-11-14, the user: a working bot can be edited too; the edit applies when it is done.
   controller.busy = chat.id;
-  await assert.rejects(agents.saveAgent({ ...base, id: profile.id, mode: 'auto' }), /Lead is running\. Stop it first/);
+  await assert.rejects(agents.saveAgent({ ...base, id: profile.id, advisorModel: 'no-such-model' }), /Unknown advisor model/, 'still checked at once');
+  const later = await agents.saveAgent({ ...base, id: profile.id, mode: 'auto', instructions: 'First.' });
+  await agents.saveAgent({ ...base, id: profile.id, mode: 'auto', instructions: 'Second.' });
+  assert.deepEqual([later.pendingEdit, agents.profile(profile.id).mode, agents.profile(profile.id).instructions], [true, 'terra-light', '']);
+  assert.equal(agents.snapshot().agents.find(row => row.id === profile.id).pendingEdit.instructions, 'Second.', 'the dialog shows the latest edit');
+  agents.pump();
+  assert.equal(agents.profile(profile.id).mode, 'terra-light', 'nothing changes while it works');
   controller.busy = null;
+  agents.pump();
+  assert.deepEqual([agents.profile(profile.id).mode, agents.profile(profile.id).instructions, agents.primary.data.pendingEdits[profile.id]], ['auto', 'Second.', undefined]);
+
+  // An edit that cannot apply any more keeps its error for the dialog and is not retried.
+  controller.busy = chat.id;
+  await agents.saveAgent({ ...base, id: profile.id, name: 'Lead two' });
+  await agents.saveAgent({ ...base, name: 'Lead two' }); // the name is taken meanwhile
+  controller.busy = null;
+  agents.pump();
+  await until(() => !!agents.primary.data.pendingEdits[profile.id]?.error);
+  assert.match(agents.snapshot().agents.find(row => row.id === profile.id).pendingEdit.error, /unique agent name/);
+  assert.equal(agents.profile(profile.id).name, 'Lead');
 });
 
 // 2026-11-13, the user: the Advisor is per bot, on by default, and a bot without one escalates again.

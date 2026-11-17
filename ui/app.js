@@ -1159,15 +1159,22 @@ async function showRoutines(section, agentId, withAgent) {
   section.hidden = !routines.length;
 }
 
+// An edit saved while the bot works applies when it is done (2026-11-14, the user); the dialog shows the saved edit.
+function showPendingEdit(name, pending) {
+  $('#agent-pending').hidden = !pending;
+  $('#agent-pending').textContent = pending ? `${name} is working. Your changes are saved and apply when it is done.` : '';
+}
 function editAgent(profile) {
   const worker = profile && fleetState?.agentStates?.[profile.id];
   const conversation = worker?.sessions.find(s => s.id === worker.conversationId);
+  const pending = profile?.pendingEdit;
+  if (pending) profile = { ...profile, ...pending };
   const dialog = $('#agent-dialog'); dialog.dataset.agentId = profile?.id || '';
   $('#agent-heading').textContent = profile ? 'Edit agent' : 'New agent';
   $('#agent-dialog .dialog-footer').hidden = !!profile;
   $('#agent-name').value = profile?.name || '';
   $('#agent-instructions').value = profile?.instructions || '';
-  $('#agent-workspace').value = conversation?.workspace || profile?.workspace || state.settings.workspace;
+  $('#agent-workspace').value = (pending && profile.workspace) || conversation?.workspace || profile?.workspace || state.settings.workspace;
   // New bots inherit their creator's workspace; bots made before Inherit existed keep their own folder.
   $('#agent-inherit').checked = profile ? profile.inheritWorkspace === true : true;
   showInherit();
@@ -1184,10 +1191,12 @@ function editAgent(profile) {
   $('#agent-save').disabled = false;
   renderAgentModels();
   $('#agent-access').replaceChildren(...state.accessModes.map(p => new Option(p.label, p.id)));
-  $('#agent-access').value = conversation?.access || profile?.access || 'read-only';
+  $('#agent-access').value = (pending && profile.access) || conversation?.access || profile?.access || 'read-only';
   agentEditor.start(!!profile);
   showRoutines($('#agent-routines'), profile?.id, false);
-  $('#agent-error').textContent = ''; dialog.showModal(); $('#agent-name').focus();
+  showPendingEdit(profile?.name, !!pending && !pending.error);
+  $('#agent-error').textContent = pending?.error ? `Your saved changes could not be applied: ${pending.error}` : '';
+  dialog.showModal(); $('#agent-name').focus();
 }
 // The Edit dialogs pick a model like the composer: models grouped by provider, a model's efforts in a picker beside it.
 // The dialog's data-mode holds the choice, so a redraw keeps it.
@@ -1460,7 +1469,7 @@ const agentEditor = autosaveEditor($('#agent-dialog'), {
     renderAgentModels();
     $('#agent-access').value = saved.access;
   },
-  save: next => api.saveAgent(next),
+  save: async next => { const saved = await api.saveAgent(next); showPendingEdit(next.name, !!saved?.pendingEdit); },
 });
 $('#agent-form').onsubmit = async event => {
   event.preventDefault();
@@ -2042,7 +2051,7 @@ function renderAgents() {
     else if (isSubBot(row))
       actions.append(button('Delete', row, 'delete', !!row.busy || row.queued || deletingAgent));
     else
-      actions.append(button('Edit', row, 'edit', !!row.busy || row.queued), button('Delete', row, 'delete', !!row.busy || row.queued || deletingAgent));
+      actions.append(button('Edit', row, 'edit'), button('Delete', row, 'delete', !!row.busy || row.queued || deletingAgent));
     if (row.busy || row.queued) { const stop = button('Stop', row, 'stop'); stop.className = 'stop'; actions.append(stop); }
     card.append(heading, role, details, activity, actions); return card;
   }));

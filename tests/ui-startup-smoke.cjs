@@ -2140,7 +2140,7 @@ app.whenReady().then(async () => {
   console.log('Options inside click, outside click and Escape dismissal passed');
   await window.webContents.executeJavaScript('document.querySelector(\'#agent-list [data-agent="' + profile.id + '"]\').dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true })); true');
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#agent-menu [data-action=delete]").disabled'), true, 'Busy agents cannot be deleted from the menu');
-  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#agent-menu [data-action=edit]").disabled'), true, 'Busy agents cannot be edited from the menu');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#agent-menu [data-action=edit]").disabled'), false, 'Busy agents can be edited from the menu; the edit applies when they are done');
   await window.webContents.executeJavaScript('document.querySelector("#agent-menu [data-action=stop]").click(); true');
   await until(() => stoppedAgent === profile.id, 'Context menu Stop targets its agent, not the selected conversation');
   worker.busy = null;

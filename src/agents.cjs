@@ -12,7 +12,7 @@ const { handoff } = require('./providers/claude.cjs');
 const artifacts = require('./artifacts.cjs');
 const { ArtifactDownloads } = require('./artifact-downloads.cjs');
 const { FINAL, validateChecks } = require('./tasks.cjs');
-const { JobBudgets, usageText } = require('./job-budgets.cjs');
+const { JobBudgets, budgetReferences, usageText } = require('./job-budgets.cjs');
 const { JobWorkspaces, summary: workspaceSummary } = require('./workspace/job-workspaces.cjs');
 const reports = require('./job-reports.cjs');
 const groupChats = require('./group-chats.cjs');
@@ -125,7 +125,10 @@ class Agents extends EventEmitter {
       delete session.capacityWaiting;
       delete session.quotaWaiting;
       if (session.items.some(item => item.pendingReply)) session.queuePaused = true;
-      if (session.delegation && !session.delegation.delivered) {
+      // A job a usage limit had already stopped was not running when the app closed: it stays as it was, and continues
+      // once the limit passes (pump), instead of becoming a restart review with its limit forgotten.
+      const limitStopped = session.delegation?.state === 'interrupted' && !session.delegation.recovery && !!session.delegation.limitResume;
+      if (session.delegation && !session.delegation.delivered && !limitStopped) {
         const resume = this.recoverQueued(controller, session, session.delegation);
         session.delegation.recovery = restartRecovery(session.delegation);
         if (resume) {
@@ -149,6 +152,21 @@ class Agents extends EventEmitter {
     this.routines = new Routines(this);
     for (const controller of this.allControllers()) if (repaired.has(controller) || controller.data.sessions.some(session =>
       [session.delegation, ...(session.delegationQueue || [])].some(job => job?.recovery))) controller.save();
+    this.pruneBudgets();
+  }
+
+  // Job budgets only grew (1,534 for the user, 1.6 MB re-encoded on every Hub save; 2026-11-14). At startup, before
+  // anything registers or runs, drop the active ones nothing can still look up. Paused ones wait for the user, and a
+  // store that did not load could hold a reference, so then nothing is dropped.
+  pruneBudgets() {
+    if (this.primary.data.agents.some(profile => !this.controllers.has(profile.id)) ||
+        (this.primary.data.workerContexts || []).some(id => !this.executions.has(id))) return;
+    const keep = budgetReferences(this.allControllers().map(controller => controller.data));
+    const drop = Object.values(this.budgets.records).filter(budget => budget.state === 'active' && !budget.activeSince && !keep.has(budget.id));
+    if (!drop.length) return;
+    for (const budget of drop) delete this.budgets.records[budget.id];
+    this.primary.save();
+    this.primary.log.info('Pruned finished job budgets', { removed: drop.length, kept: Object.keys(this.budgets.records).length });
   }
 
   recoverQueued(controller, session, job) {
@@ -861,7 +879,8 @@ class Agents extends EventEmitter {
     const { conversationId, waitingForAgents, stateRevision, sharedRevision, chatRevisions, ...primary } = agentStates.main;
     return { ...primary, settingsChanges: this.settingsTools?.snapshot() || [], anyAgentBusy: this.busy, updateBlockedReason: this.updateBlockedReason?.() || null, artifactRuns: this.artifactRuns.snapshot(), downloads: this.downloads.snapshot(), jobBudgets, batchReports, jobVerification,
       agents: [{ id: 'main', name: this.hubName(), workspace: this.primary.data.settings.workspace }, ...this.primary.data.agents].map(profile => ({ ...profile,
-        busy: this.controller(profile.id).busy || this.executions.get(profile.id)?.busy || null })),
+        busy: this.controller(profile.id).busy || this.executions.get(profile.id)?.busy || null,
+        pendingEdit: this.primary.data.pendingEdits?.[profile.id] ? { ...this.primary.data.pendingEdits[profile.id].value, error: this.primary.data.pendingEdits[profile.id].error || null } : null })),
       agentStates,
       executionStates: Object.fromEntries([...this.executions].map(([id, controller]) => [id, snapshot(controller)])),
     };
@@ -869,7 +888,7 @@ class Agents extends EventEmitter {
 
   saveGroup(value) { return groupChats.save(this, value); }
 
-  async saveAgent(value, temporaryBatch = null, { keepBatch = false } = {}) {
+  async saveAgent(value, temporaryBatch = null, { keepBatch = false, applying = false } = {}) {
     if (!value || typeof value.name !== 'string' || !value.name.trim() || value.name.length > 60 || typeof value.instructions !== 'string' || value.instructions.length > 8000) throw new Error('Enter an agent name (up to 60 characters) and instructions (up to 8,000 characters).');
     if (value.id && !this.profile(value.id)) throw new Error('Unknown agent.');
     if (this.reservedName(value.name)) throw new Error('This name belongs to the Hub, the permanent agent.');
@@ -911,14 +930,26 @@ class Agents extends EventEmitter {
     if (temporaryBatch) profile.temporaryBatch = temporaryBatch;
     // Editing and saving promotes a batch worker to a regular bot; an agent's write_settings change (keepBatch) does not.
     else if (keepBatch && existing?.temporaryBatch) profile.temporaryBatch = existing.temporaryBatch;
-    // Only a running bot is locked (requireIdle); queued messages run with the new settings when their turn comes.
-    if (existing) this.requireIdle(this.controller(profile.id));
     const moved = existing ? Object.keys(INHERITED).filter(key => (key === 'workspace' ? !sameFolder(existing.workspace, profile.workspace) : existing[key] !== profile[key])) : [];
-    if (moved.length)
-      this.requireDependentsIdle(profile.id, moved);
-    const previous = this.primary.data.agents;
+    // Only running work locks a bot. An edit of a working bot (or of one whose followers are working) is checked now,
+    // saved, and applied by pump once they are done (2026-11-14, the user); queued messages then run with it.
+    if (existing) {
+      try {
+        this.requireIdle(this.controller(profile.id));
+        if (moved.length) this.requireDependentsIdle(profile.id, moved);
+      } catch (error) {
+        if (applying) return null; // still working: pump tries again later
+        const edits = this.primary.data.pendingEdits ??= {}, before = edits[profile.id];
+        edits[profile.id] = { value: structuredClone(value), keepBatch, at: Date.now() };
+        try { this.primary.save(); } catch (failure) { if (before) edits[profile.id] = before; else delete edits[profile.id]; throw failure; }
+        this.primary.changed();
+        return { ...existing, pendingEdit: true, pendingReason: error.message };
+      }
+    }
+    const previous = this.primary.data.agents, edits = this.primary.data.pendingEdits, superseded = edits?.[profile.id];
     this.primary.data.agents = existing ? previous.map(a => a.id === profile.id ? profile : a) : [...previous, profile];
-    try { this.primary.save(); } catch (error) { this.primary.data.agents = previous; throw error; }
+    if (superseded) delete edits[profile.id];
+    try { this.primary.save(); } catch (error) { this.primary.data.agents = previous; if (superseded) edits[profile.id] = superseded; throw error; }
     const controller = existing ? this.controller(profile.id) : this.open(profile);
     this.sync(controller); controller.loaded.clear();
     this.updateConversation(controller, profile);
@@ -1215,10 +1246,30 @@ class Agents extends EventEmitter {
     if (changed) this.budgets.refresh();
   }
 
+  // Edits saved while a bot was working (saveAgent), applied once it is idle. One that fails then keeps its error for
+  // the Edit dialog and is not retried until the next edit.
+  applyPendingEdits() {
+    const edits = this.primary.data.pendingEdits;
+    if (!edits) return;
+    for (const [id, edit] of Object.entries(edits)) {
+      if (edit.error) continue;
+      if (!this.profile(id)) { delete edits[id]; continue; }
+      try { this.requireIdle(this.controller(id)); } catch { continue; }
+      this.saveAgent(edit.value, null, { keepBatch: edit.keepBatch, applying: true }).catch(error => {
+        if (edits[id] !== edit) return;
+        edit.error = String(error.message || error);
+        try { this.primary.save(); } catch { /* kept in memory; shown in the dialog */ }
+        this.primary.log.warn('A saved bot edit could not be applied', { agentId: id, error: edit.error });
+        this.primary.changed();
+      });
+    }
+  }
+
   pump() {
     this.budgets.refresh();
     this.updateCapacity();
     if (this.closing || this.providerChanging) return;
+    this.applyPendingEdits();
     this.workspaces.cancelUnused();
     for (const { controller, session, job } of this.pendingJobs()) {
       if (!job.workspaceCopy || job.cancelled || this.budgets.held(job)) continue;
@@ -1238,6 +1289,12 @@ class Agents extends EventEmitter {
     }
     for (const controller of this.allControllers()) {
       for (const session of controller.data.sessions) {
+        // 2026-11-14: a bot that hit a usage limit while answering other bots' reports kept them paused until the user
+        // typed in that chat. Once the limit has passed, its queue runs again (settled below).
+        if (session.queuePaused && session.limitResume && !controller.limits.limited(session.limitResume.provider, session.limitResume.model)) {
+          session.queuePaused = false; session.error = null; delete session.limitResume; controller.save(); controller.changed();
+          controller.log.info('Queued reports resumed after the usage limit', { session: session.id });
+        }
         this.flushReplies(controller, session);
         if (controller === this.primary && !session.archived && !controller.busy && session.queue?.some(message => !message.agentReply)) {
           controller.settle(session);
@@ -1578,8 +1635,10 @@ class Agents extends EventEmitter {
   flushReplies(controller, session) {
     const room = 10 - (session.queue?.length || 0);
     if (room <= 0) return;
-    const pending = session.items.filter(item => item.localOnly && ['agentResult', 'agentMail'].includes(item.type) &&
-        item.pendingReply && controller.canReceiveQueued(session, item.pendingReply))
+    // Runs for every chat on every pump (up to ten a second while a bot streams): the rare pendingReply is tested first,
+    // 0.28 ms instead of 1.0 ms over 32,000 messages (2026-11-14).
+    const pending = session.items.filter(item => item.pendingReply && item.localOnly && (item.type === 'agentResult' || item.type === 'agentMail') &&
+        controller.canReceiveQueued(session, item.pendingReply))
       .slice(0, room).map(item => ({ item, reply: item.pendingReply, notified: item.notified }));
     if (!pending.length) return;
     const queue = session.queue;
@@ -2232,6 +2291,7 @@ class Agents extends EventEmitter {
     const mode = changesModel ? this.agentMode(args.mode ?? profile.mode, args.effort) : profile.mode;
     const saved = await this.saveAgent({ id: profile.id, name: args.name ?? profile.name, instructions: args.instructions ?? profile.instructions,
       workspace, access, mode });
+    if (saved.pendingEdit) return { agentId: saved.id, name: saved.name, pending: `Saved. ${saved.name} is working; the change applies when it is done.` };
     return { agentId: saved.id, name: saved.name, instructions: saved.instructions, mode: saved.mode };
   }
 
@@ -2449,7 +2509,7 @@ class Agents extends EventEmitter {
     let failure;
     try { this.recordCancellation(id, targets); await this.stop(id, true); }
     catch (error) { failure = error; }
-    for (const { session } of sessions) session.queuePaused = true;
+    for (const { session } of sessions) { session.queuePaused = true; delete session.limitResume; }
     const active = new Set(sessions.filter(({ controller, session }) => failure && controller.busy === session.id).map(record => record.controller));
     const stopped = await Promise.allSettled([...active].map(controller => controller.stop()));
     failure ||= stopped.find(result => result.status === 'rejected')?.reason;
@@ -2501,7 +2561,7 @@ class Agents extends EventEmitter {
     if (session) {
       if (controller.busy === id) controller.stopping.add(id);
       if (session.delegation && !session.delegation.delivered) session.delegation.cancelled = true;
-      session.queuePaused = true; controller.save();
+      session.queuePaused = true; delete session.limitResume; controller.save();
       const children = assignment ? descendants
         : this.pendingJobs().filter(({ job }) => job.source === id || job.owner === id);
       for (const child of children) await this.stop(child.job.id, true);

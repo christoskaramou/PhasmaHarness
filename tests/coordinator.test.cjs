@@ -957,11 +957,14 @@ test('bots waiting in a Who replies round can be edited, and each turn re-checks
   await hub.send({ id: group.id, text: 'Discuss the plan.' });
   const worker = agents.execution(coder.id);
   await until(() => worker.activeTurns.size);
-  await assert.rejects(agents.saveAgent({ id: coder.id, ...profile('Coder'), instructions: 'Changed.' }), /Stop the group reply/,
-    'the bot replying now stays locked');
+  const later = await agents.saveAgent({ id: coder.id, ...profile('Coder'), instructions: 'Changed.' });
+  assert.deepEqual([later.pendingEdit, agents.profile(coder.id).instructions], [true, 'Answer the group.'],
+    'the bot replying now keeps its settings; the edit waits until it is done');
   await agents.saveAgent({ id: reviewer.id, ...profile('Reviewer'), workspace: outside });
   finishGroupReply(worker, 'CODER_REPLY\n[done]');
   await until(() => !agents.groupRuns.has(group.id));
+  agents.pump();
+  assert.equal(agents.profile(coder.id).instructions, 'Changed.', 'the saved edit applies once the reply is done');
   assert.equal(group.status, 'completed');
   assert.match(group.items.find(item => item.groupFailure)?.text || '',
     /^Reviewer could not reply: Sending a message to a different workspace requires Full access/, 'the edit is checked when its turn starts');

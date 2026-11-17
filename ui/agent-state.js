@@ -52,6 +52,7 @@ var HarnessAgentState = (() => {
     return isSubBot(fleet?.agents?.find(agent => agent.id === id)) || (!!job && !job.delivered && !own) ? background || null : null;
   }
 
+  const BUDGETS = 'jobBudgets'; // trimFleet's record of the budgets a receiver holds
   // The desktop window gets a bot's chats only when they changed since it last got them, and everything when full is set;
   // the Main Bot's chats are not repeated at the top level. A chat changed when its revision moved (the bot's
   // sharedRevision, or its own chatRevisions entry for a change confined to it) or its message count or status changed,
@@ -62,6 +63,22 @@ var HarnessAgentState = (() => {
   function trimFleet(state, sent, full, exact = false) {
     if (!state?.agentStates) return state;
     const { sessions, ...trimmed } = state;
+    // Job budgets: only those that changed since this receiver last got them (jobBudgetsDelta, merged by keepSessions).
+    // All 1,522 of the user's went with every update: 0.56 MB, about 2.6 ms to send and read (2026-11-14).
+    if (state.jobBudgets) {
+      const previous = sent.get(BUDGETS), texts = new Map(), changed = /** @type {Record<string, any>} */ ({});
+      for (const [id, budget] of Object.entries(state.jobBudgets)) {
+        const text = JSON.stringify(budget);
+        texts.set(id, text);
+        if (full || !previous || previous.get(id) !== text) changed[id] = budget;
+      }
+      sent.set(BUDGETS, texts);
+      if (!full && previous) {
+        trimmed.jobBudgets = changed; trimmed.jobBudgetsDelta = true;
+        const removed = [...previous.keys()].filter(id => !texts.has(id));
+        if (removed.length) trimmed.jobBudgetsRemoved = removed;
+      }
+    }
     for (const group of ['agentStates', 'executionStates']) {
       if (!state[group]) continue;
       trimmed[group] = {};
@@ -203,6 +220,12 @@ var HarnessAgentState = (() => {
   /** @param {any} next @param {any} previous */
   function keepSessions(next, previous) {
     if (!next?.agentStates) return next;
+    if (next.jobBudgetsDelta) {
+      if (!previous?.jobBudgets) return null;
+      const budgets = { ...previous.jobBudgets, ...next.jobBudgets };
+      for (const id of next.jobBudgetsRemoved || []) delete budgets[id];
+      next.jobBudgets = budgets; delete next.jobBudgetsDelta; delete next.jobBudgetsRemoved;
+    }
     for (const group of ['agentStates', 'executionStates']) {
       for (const [id, context] of Object.entries(next[group] || {})) {
         const kept = previous?.[group]?.[id]?.sessions;

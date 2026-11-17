@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { JobBudgets, normalizedUsage, usageSummary } = require('../src/job-budgets.cjs');
+const { JobBudgets, budgetReferences, normalizedUsage, usageSummary } = require('../src/job-budgets.cjs');
 
 test('task bots and their children have no default time or attempt limits; explicit limits remain enforced', t => {
   const f = fixture(t), root = f.worker('task', {}, null), child = f.worker('child', root.session);
@@ -19,6 +19,19 @@ test('task bots and their children have no default time or attempt limits; expli
   assert.equal(f.budgets.summary(budget.id).attempts, 25);
   const limited = f.worker('maintenance');
   assert.equal(f.budgets.forJob(limited.job).limitsEnabled, true);
+});
+
+test('only open work, pending replies and saved requests keep a job budget; history and finished work do not', () => {
+  const keep = budgetReferences([{ jobBudgets: { ignored: { budgetId: 'ledger' } }, routines: [{ request: { budgetId: 'routine' } }], sessions: [{
+    hubRequest: { budgetId: 'hub' }, replyBudgetId: 'reply', queuePauseBudgetId: 'pause',
+    queue: [{ agentResult: { request: { budgetId: 'queued' } } }],
+    delegation: { delivered: true, budgetId: 'returned', originalRequest: { budgetId: 'returned-request' } },
+    delegationQueue: [{ delivered: false, budgetId: 'open', originalRequest: { budgetId: 'open-request' } }],
+    tasks: [{ state: 'checks-passed', budgetId: 'finished' }, { state: 'running', budgetId: 'task' }, { state: 'needs-you', budgetId: 'review', budgetPaused: true }],
+    routes: [{ budget: { budgetId: 'route' } }],
+    items: [{ agentResult: { request: { budgetId: 'history' } } }, { pendingReply: { agentResult: { request: { budgetId: 'pending' } } } }],
+  }] }]);
+  assert.deepEqual([...keep].sort(), ['hub', 'open', 'open-request', 'pause', 'pending', 'queued', 'reply', 'review', 'routine', 'task']);
 });
 
 test('legacy default caps become unlimited while customized limits survive reload', t => {

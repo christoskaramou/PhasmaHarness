@@ -938,7 +938,7 @@ class Controller extends EventEmitter {
         throw new Error('Another turn is running. Switch to that session to queue a message.');
       }
       if ((session.queue?.length || 0) >= 10) throw new Error('The queue is full (10 messages).');
-      session.queuePaused = false;
+      session.queuePaused = false; delete session.limitResume;
       const entry = { id: randomUUID(), text, images, mode: mode || this.data.settings.mode, task, agentReply, agentReplyCancelled,
         ...(fileMessage ? { fileMessage } : {}), ...(contextText ? { contextText } : {}),
         ...(session.delegation && !session.delegation.delivered ? { assignmentRevision: session.delegation.revision || 1 } : {}),
@@ -955,7 +955,7 @@ class Controller extends EventEmitter {
       this.flushLiveQueue(session);
       return { queued: true };
     }
-    session.queuePaused = false;
+    session.queuePaused = false; delete session.limitResume;
     session.activeTaskId = null;
     session.hubStronger = !!hubStronger;
     const chosenMode = this.runMode(mode);
@@ -2012,7 +2012,7 @@ class Controller extends EventEmitter {
     this.modelPreparation?.abort();
     this.readAbort?.abort(); // Hub's Secondary model reading a message (send)
     const session = this.session(this.busy);
-    session.queuePaused = true;
+    session.queuePaused = true; delete session.limitResume; // a Stop is never undone when a limit passes
     if (budgetId) session.queuePauseBudgetId = budgetId;
     else delete session.queuePauseBudgetId;
     if (this.coordinatorAbort) { this.stopping.add(session.id); this.coordinatorAbort.abort(); return; }

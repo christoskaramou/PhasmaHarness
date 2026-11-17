@@ -519,7 +519,7 @@ module.exports = {
         session.delegation.error = session.error;
         // The job continues by itself once this limit has passed (agents.pump); its Claude session link is kept.
         session.delegation.limitResume = { provider, model: model || null };
-      }
+      } else session.limitResume = { provider, model: model || null }; // its queued reports run again once the limit passes (agents.pump)
       this.lastSends.delete(session.id);
       this.save(); this.changed(); return;
     }
