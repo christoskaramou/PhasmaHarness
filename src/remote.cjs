@@ -12,6 +12,7 @@ const gzip = promisify(zlib.gzip);
 
 const MAX_BODY = 16 * 1024 * 1024;
 const MAX_EVENT = 32 * 1024 * 1024;
+const EVENT_PART = 4 * 1024 * 1024;
 const SESSION_MS = 30 * 24 * 60 * 60 * 1000;
 const CLIENT_ID = /^[a-f0-9-]{36}$/;
 const REMOTE_METHODS = new Set([
@@ -401,10 +402,21 @@ class RemoteRunner {
     this.write(client, this.event('state', client.stream.push(value)));
   }
 
+  // A full state outgrows any single event as history builds up: over MAX_EVENT on the user's bots by 2026-11-19, so the
+  // phone could not load at all. A long value goes as `part` events that the page joins before the event that closes it
+  // (ui/remote-api.js). Every message stays under the page's buffer cap, whatever the history size. JSON text has no raw
+  // newlines, and a cut never splits a surrogate pair.
   event(type, value) {
-    const data = `event: ${type}\ndata: ${JSON.stringify(value)}\n\n`;
-    if (Buffer.byteLength(data) > MAX_EVENT) throw failure(413, 'This history is too large for browser access. Use the desktop to archive older conversations.');
-    return data;
+    const text = JSON.stringify(value);
+    let data = '', at = 0;
+    while (text.length - at > EVENT_PART) {
+      let end = at + EVENT_PART;
+      const code = text.charCodeAt(end - 1);
+      if (code >= 0xd800 && code <= 0xdbff) end--;
+      data += `event: part\ndata: ${text.slice(at, end)}\n\n`;
+      at = end;
+    }
+    return data + `event: ${type}\ndata: ${text.slice(at)}\n\n`;
   }
 
   write(client, data, replaceable = null) {
@@ -516,4 +528,4 @@ class RemoteRunner {
   }
 }
 
-module.exports = { RemoteRunner, remoteKey, originValue, REMOTE_METHODS };
+module.exports = { RemoteRunner, remoteKey, originValue, REMOTE_METHODS, EVENT_PART };

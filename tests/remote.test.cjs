@@ -521,7 +521,7 @@ function browserView(responses, saved = { local: 'saved-ticket', session: null }
   };
   require('node:vm').runInNewContext(fs.readFileSync(path.join(__dirname, '../ui/remote-api.js'), 'utf8'), context);
   const [notice, login] = elements;
-  return { timers, requests, notice, login, localStorage, sessionStorage, settle: async () => { for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve)); } };
+  return { window: context.window, timers, requests, notice, login, localStorage, sessionStorage, settle: async () => { for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve)); } };
 }
 
 // 2026-10-26: an installed phone app opens in a new context, so a per-tab ticket signed it out on every launch.
@@ -535,6 +535,45 @@ test('the browser view keeps its session on the device until the runner refuses 
   await refused.settle();
   assert.equal(refused.localStorage.values.has('runner-session'), false, 'a refused ticket is forgotten on the device');
   assert.equal(refused.login.hidden, false, 'and the connection key is asked for');
+});
+
+// 2026-11-19: the phone's first state outgrew the 32 MB event cap again and the page could not load. A long state now
+// goes as parts, whatever its size.
+test('a state longer than one event arrives as parts that join to the same value, without splitting a surrogate pair', async t => {
+  const { EVENT_PART } = require('../src/remote.cjs');
+  const f = await fixture(t);
+  // {"text":" is 9 characters, so the first emoji's high surrogate sits on the last character of the first part.
+  const big = { text: 'a'.repeat(EVENT_PART - 10) + '😀Ω'.repeat(EVENT_PART / 2) };
+  f.remote.snapshot = () => big;
+  const token = await f.pair(), abort = new AbortController();
+  const response = await fetch(`${f.url}/api/events?client=${randomUUID()}`, { headers: { Authorization: 'Bearer ' + token }, signal: abort.signal });
+  const reader = response.body.getReader(), decoder = new TextDecoder();
+  let text = '';
+  while (!text.includes('event: state\n')) text += decoder.decode((await reader.read()).value, { stream: true });
+  while (!text.endsWith('\n\n')) text += decoder.decode((await reader.read()).value, { stream: true });
+  abort.abort(); reader.cancel().catch(() => {});
+  const events = text.split('\n\n').filter(Boolean).map(event => [/^event: (.+)$/m.exec(event)[1], event.slice(event.indexOf('data: ') + 6)]);
+  assert.ok(events.length > 2, 'the state was split');
+  assert.deepEqual(events.slice(0, -1).map(([type]) => type), events.slice(0, -1).map(() => 'part'));
+  assert.equal(events.at(-1)[0], 'state');
+  assert.ok(events.every(([, data]) => data.length <= EVENT_PART));
+  assert.ok(!text.includes('�'), 'no surrogate pair was cut');
+  const joined = JSON.parse(events.map(([, data]) => data).join(''));
+  assert.equal(joined.text, big.text);
+});
+
+test('the browser view joins a state sent as parts before handing it on', async () => {
+  const value = { text: 'Γειά 😀 '.repeat(20) };
+  const json = JSON.stringify(value), cut = 17;
+  const wire = `event: part\ndata: ${json.slice(0, cut)}\n\n: heartbeat\n\nevent: state\ndata: ${json.slice(cut)}\n\n`;
+  const bytes = new TextEncoder().encode(wire), chunks = [];
+  for (let at = 0; at < bytes.length; at += 7) chunks.push(bytes.subarray(at, at + 7));
+  const view = browserView([() => ({ ok: true, status: 200, json: async () => ({}) }),
+    () => ({ ok: true, status: 200, body: { getReader: () => ({ read: async () => chunks.length ? { done: false, value: chunks.shift() } : new Promise(() => {}) }) } })]);
+  const states = [];
+  view.window.router.onState(state => states.push(state));
+  await view.settle();
+  assert.equal(JSON.stringify(states), JSON.stringify([value]));
 });
 
 test('the browser view keeps its session through a network blip and shows runner refusals instead of looping', async () => {

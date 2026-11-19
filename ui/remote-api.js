@@ -72,28 +72,33 @@
       }
       status(''); delay = 2000;
       const reader = response.body.getReader(), decoder = new TextDecoder();
-      let buffer = '';
+      // parts: a long state arrives as `part` events joined before the event that closes it (RemoteRunner.event).
+      // from: where the search for the next event end resumes, so a long event is not rescanned on every chunk.
+      let buffer = '', from = 0, parts = [];
       for (;;) {
         const next = await reader.read();
         if (next.done) break;
         buffer += decoder.decode(next.value, { stream: true });
         if (buffer.length > 32 * 1024 * 1024) {
-          reason = 'The runner history is too large for browser access. Use the desktop to archive older conversations.';
+          reason = 'The runner sent an event too large for browser access.';
           retry = false;
           return;
         }
         let end;
-        while ((end = buffer.indexOf('\n\n')) >= 0) {
-          const event = buffer.slice(0, end); buffer = buffer.slice(end + 2);
+        while ((end = buffer.indexOf('\n\n', from)) >= 0) {
+          const event = buffer.slice(0, end); buffer = buffer.slice(end + 2); from = 0;
           if (event.startsWith(':')) continue;
           const type = /^event: (.+)$/m.exec(event)?.[1];
           const data = event.split('\n').find(line => line.startsWith('data: '))?.slice(6);
           if (!data) continue;
-          const value = JSON.parse(data);
+          if (type === 'part') { parts.push(data); continue; }
+          const value = JSON.parse(parts.join('') + data);
+          parts = [];
           for (const callback of listeners.get(type) || []) {
             try { callback(value); } catch (error) { console.error(error); }
           }
         }
+        from = Math.max(0, buffer.length - 1);
       }
     } catch { /* Reconnect snapshots replace missing intermediate updates. */ }
     finally {
