@@ -1679,6 +1679,33 @@ test('two background slots preserve foreground chat and admit queued work when a
   assert.equal(agents.backgroundSlots.size, 2);
 });
 
+test('worker sub-bots fill four background slots, and a fifth waits for one to free', async t => {
+  // 2026-11-20, the user: worker concurrency 4 (other background work keeps two, as in the test above).
+  const { agents, workspace } = await setup(t);
+  const lead = await agents.saveAgent({ name: 'Lead', instructions: 'Lead.', workspace, access: 'workspace-write', mode: 'terra-light', workerModel: 'chat' });
+  const leadBot = agents.controller(lead.id);
+  await agents.initializeController(leadBot);
+  const chat = agents.conversation(leadBot, true, workspace, 'workspace-write');
+  const workers = [];
+  for (const name of ['W1', 'W2', 'W3', 'W4', 'W5']) {
+    const profile = await agents.tool(leadBot, chat, 'agent_create', { name, instructions: 'Build one part.' });
+    assert.equal(profile.role, 'worker');
+    const execution = agents.execution(profile.id);
+    await agents.initializeController(execution);
+    workers.push(execution);
+  }
+  workers.forEach((worker, index) => agents.delegate(leadBot, chat, worker.agentId, `Build part ${index + 1}.`));
+  await until(() => workers.slice(0, 4).every(worker => worker.activeTurns.size));
+  assert.equal(agents.backgroundSlots.size, 4);
+  const fifth = agents.conversation(workers[4]);
+  await until(() => fifth.capacityWaiting);
+  assert.equal(workers[4].client.calls.filter(call => call.method === 'turn/start').length, 0);
+  complete(workers[0], agents.conversation(workers[0]));
+  await until(() => workers[4].activeTurns.size);
+  assert.equal(fifth.capacityWaiting, undefined);
+  assert.equal(agents.backgroundSlots.size, 4);
+});
+
 test('a worker context left signed out by a transient Codex load error retries and starts its queued job', async t => {
   const { agents, primary, workspace, addWorker } = await setup(t);
   agents.accountRetryMs = 20;
@@ -2533,6 +2560,146 @@ test('a bot that inherits follows its creator’s workspace down a chain, live; 
   await agents.deleteAgent(lead.id);
   assert.deepEqual([agents.profile(lead.id), agents.profile(helper.id)], [undefined, undefined], 'deleting a bot deletes its sub-bots');
   assert.equal(fs.realpathSync(primary.data.settings.workspace), second);
+});
+
+test('Workers: a supervisor’s new sub-bots are workers at one effort lower (or the picked model), and they make no agents', async t => {
+  // 2026-11-20, the user: the bot supervises at its own model and effort; worker sub-bots take parts of its work cheaper.
+  const { agents, primary, workspace } = await setup(t);
+  // One model at low, medium and high, for every bot.
+  primary.models[0].supportedReasoningEfforts = ['low', 'medium', 'high'].map(reasoningEffort => ({ reasoningEffort }));
+  agents.configure = async controller => { controller.client.models = primary.models; };
+  const [low, medium, high] = ['low', 'medium', 'high'].map(effort => `codex:gpt-5.6-terra:${effort}`);
+  const lead = await agents.saveAgent({ name: 'Lead', instructions: 'Lead.', workspace, access: 'workspace-write', mode: medium });
+  const leadBot = agents.controller(lead.id);
+  await agents.initializeController(leadBot);
+  const chat = agents.conversation(leadBot, true);
+  // Off by default (Hub's Workers): a sub-bot is a plain one, and the bot is not told to supervise.
+  const plain = await agents.tool(leadBot, chat, 'agent_create', { name: 'Plain helper', instructions: 'Help.' });
+  assert.equal(plain.role, undefined);
+  assert.doesNotMatch(agents.instructions(leadBot, chat), /Worker sub-bots are on/);
+  // The advisor rule goes to any bot with an advisor (on by default), workers or not (2026-11-20, live run).
+  assert.match(agents.instructions(leadBot, chat), /Use ask_advisor only when you are stuck[^\n]*Never use it to review a plan/);
+
+  await agents.saveAgent({ ...lead, workerModel: 'chat' });
+  assert.equal(agents.botSetting(lead.id, 'workerModel'), 'chat');
+  // Turning Workers on is the user's delegation request, the exception in the default "one agent" rule (third live run).
+  assert.match(agents.instructions(leadBot, chat), /Worker sub-bots are on for you: the user turned on Workers[^\n]*explicit request for delegation[^\n]*You are the supervisor/);
+  // A concrete rule (2026-11-20, live run: "larger work" left it to the model, which did four features alone).
+  assert.match(agents.instructions(leadBot, chat), /two or more independent parts that each need more than a few edits, give each part to a worker/);
+  const worker = await agents.tool(leadBot, chat, 'agent_create', { name: 'Worker one', instructions: 'Build parts.' });
+  assert.equal(worker.role, 'worker');
+  const workerBot = agents.controller(worker.id);
+  await agents.initializeController(workerBot);
+  const workerChat = agents.conversation(workerBot, true);
+  assert.match(agents.instructions(workerBot, workerChat), /You are a worker sub-bot for "Lead"[\s\S]*Use ask_advisor only when you are stuck/);
+  assert.doesNotMatch(agents.instructions(workerBot, workerChat), /you are the supervisor/);
+  assert.equal(agents.tool(leadBot, chat, 'agents_list', {}).find(entry => entry.id === worker.id).role, 'worker');
+  // A model asked for by name makes a plain sub-bot at that model.
+  assert.equal((await agents.tool(leadBot, chat, 'agent_create', { name: 'Named', instructions: 'Help.', mode: high })).role, undefined);
+
+  // Auto: each job runs at the supervisor's model one effort below its chat's (medium → low).
+  const jobMode = result => agents.findJob(result.jobId).job.mode;
+  assert.equal(jobMode(agents.delegate(leadBot, chat, worker.id, 'Write the parser.')), low);
+  // Its profile shows the model its job runs at, not the supervisor's (fifth live run).
+  assert.deepEqual([agents.profile(worker.id).mode, agents.profile(worker.id).inheritMode], [low, false]);
+  // A picked Workers model runs instead.
+  await agents.saveAgent({ ...agents.profile(lead.id), workerModel: high });
+  assert.equal(jobMode(agents.delegate(leadBot, chat, worker.id, 'Write the tests.')), high);
+  // Worker tasks have Hub's ceiling of ten per request, not three (fifth live run: the fourth feature was refused);
+  // other sub-bots keep three.
+  for (const part of ['Write the docs.', 'Write the examples.']) agents.delegate(leadBot, chat, worker.id, part);
+  assert.equal(chat.agentDelegations, 4);
+  assert.throws(() => agents.delegate(leadBot, chat, plain.id, 'Help.'), /already sent three agent tasks/);
+  // Auto's step can be changed (2026-11-20, the user): from the supervisor's medium, the same effort or the lowest.
+  for (const [setting, expected] of [['chat:0', medium], ['chat:min', low], ['chat:-2', low]]) {
+    await agents.saveAgent({ ...agents.profile(lead.id), workerModel: setting });
+    assert.equal(jobMode(agents.delegate(leadBot, chat, worker.id, `Part at ${setting}.`)), expected, setting);
+  }
+  // A step of the other role, or an unknown one, is refused.
+  for (const setting of ['chat:2', 'chat:max', 'chat:-5'])
+    await assert.rejects(agents.saveAgent({ ...agents.profile(lead.id), workerModel: setting }), /Unknown workers model/, setting);
+  await assert.rejects(agents.saveAgent({ ...agents.profile(lead.id), workerModel: 'no-such-model' }), /Unknown workers model/);
+  // The same rule as a short note on the user's own turns (fourth live run), never on a returned result.
+  const inputs = () => leadBot.client.calls.filter(call => call.method === 'turn/start').map(call => call.params.input[0].text);
+  await leadBot.send({ id: chat.id, text: 'Build the four features.', mode: medium, task: 'off' });
+  assert.match(inputs().at(-1), /^\[Harness: Workers are on for this bot[^\]]*give each to a worker[^\]]*\]\n\nBuild the four features\./);
+  complete(leadBot, chat);
+  await until(() => !leadBot.busy);
+  await leadBot.send({ id: chat.id, text: 'Worker result: done.', mode: medium, task: 'off', agentReply: true });
+  assert.doesNotMatch(inputs().at(-1), /Workers are on/);
+  complete(leadBot, chat);
+  await until(() => !leadBot.busy);
+  // Advisor Off: no advisor rule.
+  await agents.saveAgent({ ...agents.profile(lead.id), advisorModel: 'off' });
+  assert.doesNotMatch(agents.instructions(leadBot, chat), /ask_advisor only when/);
+  // Sixth live run: workers stopped at missing folders and one messaged Hub; the supervisor sent tasks without the spec.
+  assert.match(agents.instructions(workerBot, workerChat), new RegExp(`agentId "${lead.id}"[^\\n]*yours to create[^\\n]*Send no progress or completion notes[^\\n]*agent_message with agentId "${lead.id}"`));
+  assert.match(agents.instructions(leadBot, chat), /Workers see only the task you send, not the user's request/);
+  await workerBot.send({ id: workerChat.id, text: 'Build part one.', mode: low, task: 'off' });
+  assert.throws(() => agents.tool(workerBot, workerChat, 'agent_message', { agentId: 'main', messageId: 'to-hub', text: 'Done.' }),
+    /A worker messages only its supervisor, Lead/);
+  assert.throws(() => agents.delegate(workerBot, workerChat, plain.id, 'Take my part.'), /hands no work to other agents/);
+  complete(workerBot, workerChat);
+  await until(() => !workerBot.busy);
+  // Workers make no agents of their own.
+  assert.throws(() => agents.tool(workerBot, workerChat, 'agent_create', { name: 'Sub worker', instructions: 'Help.' }), /worker sub-bot and does not create agents/);
+});
+
+test('the Advisor is a sub-bot: made on first use with read-only access, it remembers its exchanges, workers share it, and it takes no work', async t => {
+  // 2026-11-20, the user: one advisor per bot, one effort above the bot's on Auto; /advisor goes only to it.
+  const { agents, primary, workspace } = await setup(t);
+  // One model at low, medium and high, for every bot.
+  primary.models[0].supportedReasoningEfforts = ['low', 'medium', 'high'].map(reasoningEffort => ({ reasoningEffort }));
+  agents.configure = async controller => { controller.client.models = primary.models; };
+  const [low, medium, high] = ['low', 'medium', 'high'].map(effort => `codex:gpt-5.6-terra:${effort}`);
+  const lead = await agents.saveAgent({ name: 'Lead', instructions: 'Lead.', workspace, access: 'workspace-write', mode: low, workerModel: 'chat' });
+  const leadBot = agents.controller(lead.id);
+  await agents.initializeController(leadBot);
+  const chat = agents.conversation(leadBot, true);
+  const prompts = [];
+  const advise = controller => { controller.smartRouter.complete = async (request, choice) => {
+    prompts.push({ prompt: JSON.parse(request.prompt), instructions: request.instructions, choice: choice.id });
+    return { decision: { advice: `Advice ${prompts.length}.` } };
+  }; };
+  advise(leadBot);
+  const first = await leadBot.adviseChat(chat.id, 'Why does the build fail?');
+  assert.equal(prompts[0].choice, medium, 'Auto: one effort above the bot’s (low → medium)');
+  assert.equal(first.advice, 'Advice 1.');
+  const advisor = agents.primary.data.agents.find(profile => profile.role === 'advisor');
+  assert.deepEqual([advisor.createdBy, advisor.access, agents.isSubBot(advisor)], [lead.id, 'read-only', true]);
+  // Its profile shows the model that answered, not its creator's (2026-11-20, live run).
+  assert.deepEqual([advisor.mode, advisor.inheritMode], [medium, false]);
+  const advisorChat = () => agents.conversation(agents.controller(advisor.id));
+  assert.deepEqual(advisorChat().items.map(item => item.type === 'userMessage' ? item.content[0].text : item.text), ['Why does the build fail?', 'Advice 1.']);
+  // The advice also shows in the bot's chat, as a notice its model never gets as history.
+  assert.equal(chat.items.at(-1).type, 'notice');
+
+  // The next question carries the earlier exchange as the advisor's memory.
+  await leadBot.adviseChat(chat.id, 'And now?');
+  assert.deepEqual(prompts[1].prompt.earlierExchanges, [{ role: 'asked', text: 'Why does the build fail?' }, { role: 'advised', text: 'Advice 1.' }]);
+  assert.match(prompts[1].instructions, /earlierExchanges/);
+  // Auto's step can be changed (2026-11-20, the user): from the bot's low, the highest within its cap, or the same.
+  for (const [setting, expected] of [['chat:max', high], ['chat:2', high], ['chat:0', low]]) {
+    await agents.saveAgent({ ...agents.profile(lead.id), advisorModel: setting });
+    await leadBot.adviseChat(chat.id, `Which effort at ${setting}?`);
+    assert.equal(prompts.at(-1).choice, expected, setting);
+  }
+  await assert.rejects(agents.saveAgent({ ...agents.profile(lead.id), advisorModel: 'chat:-2' }), /Unknown advisor model/);
+  await agents.saveAgent({ ...agents.profile(lead.id), advisorModel: 'chat' });
+
+  // A worker's ask_advisor reaches its supervisor's advisor: no advisor of its own.
+  const worker = await agents.tool(leadBot, chat, 'agent_create', { name: 'Worker one', instructions: 'Build parts.' });
+  const workerBot = agents.controller(worker.id);
+  await agents.initializeController(workerBot);
+  advise(workerBot);
+  const workerChat = agents.conversation(workerBot, true);
+  await workerBot.askAdvisor(workerChat, { goal: 'Build the parser', tried: 'Ran npm test', error: 'Cannot find module x' });
+  assert.equal(agents.primary.data.agents.filter(profile => profile.role === 'advisor').length, 1);
+  assert.match(advisorChat().items.at(-2).content[0].text, /Stuck — goal: Build the parser[\s\S]*Cannot find module x/);
+
+  // It takes no work and no messages.
+  assert.throws(() => agents.delegate(leadBot, chat, advisor.id, 'Fix the build.'), /only answers ask_advisor and \/advisor/);
+  await assert.rejects(agents.saveAgent({ ...advisor, name: 'Renamed advisor' }), /works for the bot that made it/);
 });
 
 test('a broken chain never grants more: a sub-bot whose creator is missing or loops falls back to Ask access', async t => {

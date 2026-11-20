@@ -461,6 +461,24 @@ module.exports = {
     return variants.find(p => p.effort === asked) || variants.filter(p => EFFORT_ORDER.indexOf(p.effort) <= EFFORT_ORDER.indexOf(asked)).at(-1) || variants[0];
   },
 
+  // Auto Advisor and Workers (2026-11-20, the user): the bot's model one effort above (step 1) or below (step -1) the
+  // effort `route` ran at, within the bot's cap; the same effort when there is none further. An unknown effort takes the
+  // highest (advisor) or lowest (workers). Null without a model.
+  stepEffort(route, step) {
+    if (!route?.model) return null;
+    const variants = this.ownVariants(`autoeffort:${route.provider || 'codex'}:${route.model}`).filter(p => p.effort);
+    if (!variants.length) return null;
+    const at = variants.findIndex(p => p.effort === route.effort);
+    return variants[at < 0 ? (step > 0 ? variants.length - 1 : 0) : Math.min(variants.length - 1, Math.max(0, at + step))];
+  },
+
+  // The model and effort a chat runs at now: its last worker turn, else the bot's set model, else its Auto effort default.
+  currentRoute(session) {
+    const mode = this.data.settings.mode;
+    return (session?.routes || []).findLast(route => !route.directAnswer && route.model) ||
+      (parseAutoEffort(mode) ? this.autoEffortDefault(mode) : this.resolveWorker(mode)) || null;
+  },
+
   // Escalation: the bot's model at its highest effort within its cap, when that is higher than `route`'s. None while its
   // provider is at a usage limit, so a repair, rule writer or dream does not start a call that cannot run.
   higherEffort(route) {

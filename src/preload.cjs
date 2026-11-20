@@ -50,6 +50,7 @@ api.suggestNext = id => ipcRenderer.invoke('suggestNext', id);
 api.suggestWiki = id => ipcRenderer.invoke('suggestWiki', id);
 api.summarizeLast = id => ipcRenderer.invoke('summarizeLast', id);
 api.adviseChat = (id, question) => ipcRenderer.invoke('adviseChat', id, question);
+api.setGoal = (id, text) => ipcRenderer.invoke('setGoal', id, text);
 api.connectorList = () => ipcRenderer.invoke('connectorList');
 api.routineList = agentId => ipcRenderer.invoke('routineList', agentId);
 api.connectorSave = input => ipcRenderer.invoke('connectorSave', input);

@@ -1182,7 +1182,8 @@ function editAgent(profile) {
   dialog.dataset.mode = profile?.mode || state.settings.mode;
   dialog.dataset.secondary = profile?.secondaryModel || 'inherit';
   dialog.dataset.advisor = profile?.advisorModel || 'inherit';
-  $('#agent-advisor').dataset.signature = '';
+  dialog.dataset.workers = profile?.workerModel || 'inherit';
+  $('#agent-advisor').dataset.signature = ''; $('#agent-workers').dataset.signature = '';
   dialog.dataset.router = profile?.router || 'inherit';
   dialog.dataset.cap = profile?.effortCap || 'inherit';
   $('#agent-secondary').dataset.signature = '';
@@ -1222,7 +1223,7 @@ const CAP_LABELS = { low: 'Up to low', medium: 'Up to medium', high: 'Up to high
 // Up the creator chain: a creator's live state holds its resolved values; without one (a browser before the fleet state
 // arrives, a creator just deleted), its saved values, else its own creator's. Never the open chat's unless it is that
 // creator's. Unknown stays undefined: the option then reads just "Inherit".
-const SAVED_KEYS = { router: 'router', secondary: 'secondaryModel', advisor: 'advisorModel', cap: 'effortCap' };
+const SAVED_KEYS = { router: 'router', secondary: 'secondaryModel', advisor: 'advisorModel', workers: 'workerModel', cap: 'effortCap' };
 function inheritedSettings(dialog) {
   const profiles = state.agents || [];
   const result = {}, seen = new Set();
@@ -1230,7 +1231,8 @@ function inheritedSettings(dialog) {
   while (id && !seen.has(id) && Object.keys(SAVED_KEYS).some(key => result[key] === undefined)) {
     seen.add(id);
     const live = fleetState?.agentStates?.[id] || (selectedAgent === id ? state : null);
-    const values = live ? { router: live.routerKind || 'secondary', secondary: live.secondaryId || 'off', advisor: live.settings?.advisorModel || 'chat', cap: live.settings?.effortCap || 'high' }
+    const values = live ? { router: live.routerKind || 'secondary', secondary: live.secondaryId || 'off', advisor: live.settings?.advisorModel || 'chat',
+      workers: live.settings?.workerModel || 'off', cap: live.settings?.effortCap || 'high' }
       : Object.fromEntries(Object.entries(SAVED_KEYS).map(([key, saved]) => [key, profiles.find(agent => agent.id === id)?.[saved]]));
     for (const key of Object.keys(SAVED_KEYS)) result[key] ??= values[key];
     if (live || id === 'main') break;
@@ -1239,10 +1241,36 @@ function inheritedSettings(dialog) {
   return result;
 }
 const secondaryLabel = id => id === 'off' ? 'Off' : (state.chatScanPresets || []).find(p => p.id === id)?.label || id;
-// A bot's Advisor (2026-11-13, the user): on by default as its own model at the highest effort its Effort cap allows.
-const ADVISOR_DEFAULT = 'Bot’s model, highest effort';
-// Any enabled model of any provider, as for the Secondary model (chatScanPresets).
-const advisorLabel = id => id === 'off' ? 'Off' : id === 'chat' ? ADVISOR_DEFAULT : (state.chatScanPresets || []).find(p => p.id === id)?.label || id;
+// A bot's Advisor and Workers (2026-11-20, the user): one tick each to turn the sub-bots on, and one picker for their model.
+// Auto ('chat'): the bot's model one effort above (Advisor, on by default) or below (Workers, off by default) the turn's.
+// The Advisor takes any enabled model of any provider (chatScanPresets); Workers a worker model (presets).
+// On Auto the Effort beside it is the step from the bot's effort (2026-11-20, the user: it can be changed, not fixed);
+// its values ('chat', 'chat:<step>') are the setting's (ROLE_STEPS in agent-state.js).
+const ROLE_ROWS = { advisor: { auto: 'Auto: bot’s model', setting: 'advisorModel', presets: () => state.chatScanPresets || [] },
+  workers: { auto: 'Auto: bot’s model', setting: 'workerModel', presets: () => state.presets || [] } };
+const roleSteps = key => HarnessAgentState.ROLE_STEPS[ROLE_ROWS[key].setting];
+const roleStep = (key, id) => roleSteps(key).find(([value]) => value === id);
+const roleLabel = (key, id) => id === 'off' ? 'Off' : roleStep(key, id) ? `${ROLE_ROWS[key].auto} · ${roleStep(key, id)[1].toLowerCase()}`
+  : ROLE_ROWS[key].presets().find(p => p.id === id)?.label || id;
+function renderRoleRow(prefix, key, from, inheritOption) {
+  const d = $(`#${prefix}-dialog`).dataset, on = $(`#${prefix}-${key}-on`), select = $(`#${prefix}-${key}`), effort = $(`#${prefix}-${key}-effort`);
+  const inheritedOn = !!from?.[key] && from[key] !== 'off';
+  on.checked = d[key] === 'inherit' ? inheritedOn : !!d[key] && d[key] !== 'off';
+  if (providersConnecting().active) { showConnecting(select); effort.disabled = true; return; }
+  // Unticked, the picker keeps showing what ticking brings back.
+  const shown = d[key] === 'off' || (d[key] === 'inherit' && !inheritedOn) ? d[`${key}Last`] || 'chat' : d[key];
+  const auto = !!roleStep(key, shown);
+  fillModelEffort(select, effort, ROLE_ROWS[key].presets(), auto ? 'chat' : shown, [...(inheritedOn ? inheritOption(roleLabel(key, from[key])) : []), new Option(ROLE_ROWS[key].auto, 'chat')]);
+  // Auto: its steps, rebuilt only when they differ, so a live update never closes an open list. Inherit: the creator's.
+  if (select.value === 'chat') {
+    const steps = roleSteps(key);
+    if ([...effort.options].map(o => o.value).join('|') !== steps.map(([value]) => value).join('|'))
+      effort.replaceChildren(...steps.map(([value, label]) => new Option(label, value)));
+    effort.value = auto ? shown : 'chat';
+  } else if (select.value === 'inherit') effort.replaceChildren(new Option('—', ''));
+  select.disabled = !on.checked;
+  effort.disabled = !on.checked || select.value === 'inherit';
+}
 function renderBotSettings(prefix) {
   const dialog = $(`#${prefix}-dialog`), d = dialog.dataset, inherit = prefix === 'agent';
   const from = inherit ? inheritedSettings(dialog) : null;
@@ -1259,12 +1287,7 @@ function renderBotSettings(prefix) {
     effort.disabled = true;
   } else
     fillModelEffort(select, effort, state.chatScanPresets || [], d.secondary, [...inheritOption(secondaryLabel(from?.secondary)), new Option('Off', 'off')]);
-  const advisor = $(`#${prefix}-advisor`), advisorEffort = $(`#${prefix}-advisor-effort`);
-  if (providersConnecting().active) {
-    showConnecting(advisor);
-    advisorEffort.disabled = true;
-  } else
-    fillModelEffort(advisor, advisorEffort, state.chatScanPresets || [], d.advisor || 'chat', [...inheritOption(advisorLabel(from?.advisor)), new Option(ADVISOR_DEFAULT, 'chat'), new Option('Off', 'off')]);
+  for (const key of Object.keys(ROLE_ROWS)) renderRoleRow(prefix, key, from, inheritOption);
   // Without a router, Auto effort runs the model's default effort; say why.
   const value = (key, inherited) => (d[key] === 'inherit' ? inherited : d[key]);
   const routerNow = value('router', from?.router), secondaryNow = value('secondary', from?.secondary);
@@ -1285,9 +1308,22 @@ for (const prefix of ['agent', 'hub']) {
   const dialog = $(`#${prefix}-dialog`);
   $(`#${prefix}-router`).onchange = () => { dialog.dataset.router = $(`#${prefix}-router`).value; renderBotSettings(prefix); };
   $(`#${prefix}-effort-cap`).onchange = () => { dialog.dataset.cap = $(`#${prefix}-effort-cap`).value; renderBotSettings(prefix); };
-  for (const picker of [`#${prefix}-advisor`, `#${prefix}-advisor-effort`]) {
-    $(picker).onchange = () => {
-      dialog.dataset.advisor = modelEffortChoice($(`#${prefix}-advisor`), $(`#${prefix}-advisor-effort`), state.chatScanPresets || []);
+  for (const key of Object.keys(ROLE_ROWS)) {
+    for (const picker of [`#${prefix}-${key}`, `#${prefix}-${key}-effort`]) {
+      $(picker).onchange = () => {
+        const select = $(`#${prefix}-${key}`), effort = $(`#${prefix}-${key}-effort`);
+        // Auto keeps the step picked beside it; switching to Auto from a model starts at the default step.
+        dialog.dataset[key] = select.value === 'chat' ? (roleStep(key, effort.value) ? effort.value : 'chat') : modelEffortChoice(select, effort, ROLE_ROWS[key].presets());
+        renderBotSettings(prefix);
+      };
+    }
+    // The tick: off, or back to the last pick (Inherit while the creator has it on, else Auto).
+    $(`#${prefix}-${key}-on`).onchange = () => {
+      const d = dialog.dataset, from = prefix === 'agent' ? inheritedSettings(dialog) : null;
+      if (!$(`#${prefix}-${key}-on`).checked) {
+        if (!['off', 'inherit'].includes(d[key])) d[`${key}Last`] = d[key];
+        d[key] = 'off';
+      } else d[key] = from?.[key] && from[key] !== 'off' ? 'inherit' : d[`${key}Last`] || 'chat';
       renderBotSettings(prefix);
     };
   }
@@ -1384,7 +1420,8 @@ function editHub(profile) {
   $('#hub-dialog').dataset.mode = main.settings.mode === 'auto' ? main.hubMode : main.settings.mode;
   $('#hub-dialog').dataset.secondary = main.secondaryId || 'off';
   $('#hub-dialog').dataset.advisor = main.settings.advisorModel || 'chat';
-  $('#hub-advisor').dataset.signature = '';
+  $('#hub-dialog').dataset.workers = main.settings.workerModel || 'off';
+  $('#hub-advisor').dataset.signature = ''; $('#hub-workers').dataset.signature = '';
   $('#hub-dialog').dataset.router = main.routerKind || 'secondary';
   $('#hub-dialog').dataset.cap = main.settings.effortCap || 'high';
   $('#hub-secondary').dataset.signature = '';
@@ -1400,18 +1437,19 @@ function editHub(profile) {
 // Workspace and access are the main bot's settings; name and model go through renameHub. Each save sends only what changed.
 const hubEditor = autosaveEditor($('#hub-dialog'), {
   read: () => ({ name: $('#hub-name').value, workspace: $('#hub-workspace').value.trim(), access: $('#hub-access').value,
-    mode: $('#hub-dialog').dataset.mode, secondaryModel: $('#hub-dialog').dataset.secondary, advisorModel: $('#hub-dialog').dataset.advisor, router: $('#hub-dialog').dataset.router,
+    mode: $('#hub-dialog').dataset.mode, secondaryModel: $('#hub-dialog').dataset.secondary, advisorModel: $('#hub-dialog').dataset.advisor,
+    workerModel: $('#hub-dialog').dataset.workers, router: $('#hub-dialog').dataset.router,
     effortCap: $('#hub-dialog').dataset.cap }),
   fill: saved => {
     $('#hub-name').value = saved.name;
     $('#hub-workspace').value = saved.workspace;
     $('#hub-access').value = saved.access;
     $('#hub-dialog').dataset.mode = saved.mode;
-    Object.assign($('#hub-dialog').dataset, { secondary: saved.secondaryModel, advisor: saved.advisorModel, router: saved.router, cap: saved.effortCap });
+    Object.assign($('#hub-dialog').dataset, { secondary: saved.secondaryModel, advisor: saved.advisorModel, workers: saved.workerModel, router: saved.router, cap: saved.effortCap });
     renderHubModels();
   },
   save: async (next, saved) => {
-    const changed = Object.fromEntries(['workspace', 'access', 'secondaryModel', 'advisorModel', 'router', 'effortCap'].filter(key => next[key] !== saved[key]).map(key => [key, next[key]]));
+    const changed = Object.fromEntries(['workspace', 'access', 'secondaryModel', 'advisorModel', 'workerModel', 'router', 'effortCap'].filter(key => next[key] !== saved[key]).map(key => [key, next[key]]));
     if (Object.keys(changed).length)
       applyState(await window.router.settings(changed, 'main'));
     // The model is checked only when it changed, so a rename still works while providers reconnect.
@@ -1454,7 +1492,7 @@ $('#hub-browse').onclick = async () => {
 const agentForm = () => ({ id: $('#agent-dialog').dataset.agentId || undefined, name: $('#agent-name').value,
   instructions: $('#agent-instructions').value, workspace: $('#agent-workspace').value, inheritWorkspace: $('#agent-inherit').checked,
   mode: $('#agent-dialog').dataset.mode, access: $('#agent-access').value, secondaryModel: $('#agent-dialog').dataset.secondary || 'inherit',
-  advisorModel: $('#agent-dialog').dataset.advisor || 'inherit',
+  advisorModel: $('#agent-dialog').dataset.advisor || 'inherit', workerModel: $('#agent-dialog').dataset.workers || 'inherit',
   router: $('#agent-dialog').dataset.router || 'inherit', effortCap: $('#agent-dialog').dataset.cap || 'inherit' });
 const agentEditor = autosaveEditor($('#agent-dialog'), {
   read: agentForm,
@@ -1465,7 +1503,7 @@ const agentEditor = autosaveEditor($('#agent-dialog'), {
     $('#agent-inherit').checked = saved.inheritWorkspace;
     showInherit();
     $('#agent-dialog').dataset.mode = saved.mode;
-    Object.assign($('#agent-dialog').dataset, { secondary: saved.secondaryModel, advisor: saved.advisorModel, router: saved.router, cap: saved.effortCap });
+    Object.assign($('#agent-dialog').dataset, { secondary: saved.secondaryModel, advisor: saved.advisorModel, workers: saved.workerModel, router: saved.router, cap: saved.effortCap });
     renderAgentModels();
     $('#agent-access').value = saved.access;
   },
@@ -2398,6 +2436,13 @@ function render() {
   fitComposer();
   $('#welcome').hidden = chatSessions(session).some(chat => chat.items.length || chat.pendingMessage);
   renderSendButton();
+  const goal = current()?.goal || '';
+  $('#chat-goal').hidden = !goal;
+  const clearGoalButton = element('button', 'chat-goal-clear', '×');
+  clearGoalButton.type = 'button'; clearGoalButton.title = 'Clear goal'; clearGoalButton.setAttribute('aria-label', 'Clear goal');
+  clearGoalButton.onclick = () => clearGoal().catch(notify);
+  const goalText = element('span', '', goal); goalText.title = goal;
+  $('#chat-goal').replaceChildren(...(goal ? [element('strong', '', 'Goal'), goalText, clearGoalButton] : []));
   $('#message-queue').replaceChildren();
   // The user's queued messages, also those the Secondary model reads or holds (2026-11-06, the user: they are the user's,
   // not its queue). Only the steps it split off show in the chat instead (renderMessages).
@@ -2410,6 +2455,8 @@ function render() {
     // chat with the message when it runs (controller/direct-answer.cjs).
     if (message.note) text.append(element('small', 'queued-note', message.note));
     if (message.ack?.text) text.append(element('small', 'queued-note', message.ack.text));
+    // The Secondary model only suggests removing it (suggestDrop); the user decides with ×.
+    if (message.mayCancel) text.append(element('small', 'queued-note', 'A newer message may cancel this one. Remove it with × if so.'));
     row.append(text);
     for (const [action, label] of [[(state.busy && !session.groupTurn) || revise ? 'steer' : 'send', 'Send now'], ['edit', '✎'], ['remove', '×']]) {
       const button = element('button', 'compact-action', label);
@@ -3592,7 +3639,20 @@ const COMMANDS = {
     notify('Asking the advisor…');
     api.adviseChat(selectedId, question).catch(notify);
   } },
+  goal: { args: 'optional', description: 'Pin a goal to this chat: /goal <text>; /goal shows it, /goal clear removes it.', run: async text => {
+    if (!selectedId) throw new Error('Open a chat first.');
+    if (!text) { notify(current()?.goal ? `Goal: ${current().goal}` : 'No goal set. Use /goal <text> to pin one.'); return; }
+    if (text.toLowerCase() === 'clear') return clearGoal();
+    await api.setGoal(selectedId, text);
+    notify('Goal pinned; every message in this chat now includes it.');
+  } },
 };
+// /goal clear and the Goal bar's ×.
+async function clearGoal() {
+  if (!selectedId) throw new Error('Open a chat first.');
+  await api.setGoal(selectedId, '');
+  notify('Goal cleared.');
+}
 let commandPanel = null, commandPicking = false;
 function openCommandPanel(name) {
   if (['model', 'effort'].includes(name)) {

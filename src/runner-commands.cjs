@@ -9,7 +9,7 @@ const WATCH_ONLY = 'This bot works for the bot that made it; only that bot gives
 function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolder, stopDownloads, linkShell }) {
   const { controller, agents, documents, updater } = runner;
   const register = handle;
-  const chatMutations = new Set(['create', 'permissions', 'rename', 'archive', 'deleteSession', 'queuedMessage', 'compact', 'clearConversation']);
+  const chatMutations = new Set(['create', 'permissions', 'rename', 'setGoal', 'archive', 'deleteSession', 'queuedMessage', 'compact', 'clearConversation']);
   handle = (name, handler) => register(name, (...args) => {
     if (chatMutations.has(name)) {
       const agentId = name === 'create' ? args[2] : name === 'clearConversation' ? args[0]
@@ -146,6 +146,7 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
     return agents.owner(id).backgroundTask(id, taskId, action);
   });
   handle('compact', id => agents.owner(id).compact(id));
+  handle('setGoal', (id, text) => agents.owner(id).setGoal(id, text));
   handle('replySuggestion', id => agents.owner(id).replySuggestion(id));
   handle('suggestNext', id => agents.owner(id).suggestNext(id));
   handle('suggestWiki', id => agents.owner(id).suggestWiki(id));

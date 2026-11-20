@@ -259,7 +259,7 @@ async function setup(t) {
           const read = reads[JSON.parse(request.prompt).message];
           if (!read) throw new Error('No scripted read.');
           calls.push({ request, choice, abort, read: true });
-          const decision = { kind: 'ack', text: 'On it.', stop: false, effort: 'none', when: 'now', steps: [], deliver: 'now', drop: [], ...read };
+          const decision = { kind: 'pass', text: '', stop: false, effort: 'none', when: 'now', deliver: 'now', drop: [], ...read };
           return { decision: structuredResponse(decision, request.schema) };
         }
         calls.push({ request, choice, abort });
@@ -1685,6 +1685,50 @@ test('Hub queues another request for an explicitly selected busy worker with hon
   assert.equal(chat.delegationQueue[0].originalRequest.text, 'Queue another task with the same builder');
 });
 
+test('Hub’s response schema is valid for strict structured outputs; an any-JSON argument travels as JSON text', async t => {
+  // 2026-11-20: write_settings' untyped value ({}) made every Hub turn on a Codex model fail with "schema must specify a type".
+  const { agents, calls, replies, send } = await setup(t);
+  const written = [];
+  agents.settingsTools = { write: async (caller, args) => { written.push(args); return { status: 'queued' }; } };
+  replies.push(action('write_settings', { name: 'hideSteps', value: 'true', agentId: null }),
+    action('write_settings', { name: 'advisorModel', value: 'off', agentId: null }),
+    action('write_settings', { name: 'browserAccess', value: '{"enabled":false,"port":4100,"origin":null}', agentId: null }));
+  await send('Hide steps, turn the advisor off and turn browser access off');
+  // Strict structured outputs: every node has a type (or anyOf), and every object is closed with all properties required.
+  const schema = calls.find(call => call.request.schema?.properties?.action).request.schema, problems = [];
+  const walk = (node, at) => {
+    if (node.anyOf) return node.anyOf.forEach((item, index) => walk(item, `${at}/anyOf/${index}`));
+    if (!node.type) return problems.push(`${at}: no type`);
+    const types = [].concat(node.type);
+    if (types.includes('object')) {
+      const keys = Object.keys(node.properties || {});
+      if (node.additionalProperties !== false || keys.some(key => !node.required?.includes(key))) problems.push(`${at}: open object`);
+      keys.forEach(key => walk(node.properties[key], `${at}/properties/${key}`));
+    }
+    if (types.includes('array')) walk(node.items, `${at}/items`);
+  };
+  walk(schema, '');
+  assert.deepEqual(problems, []);
+  // JSON text arrives as its value; plain text stays a string.
+  assert.deepEqual(written.map(args => args.value), [true, 'off', { enabled: false, port: 4100, origin: null }]);
+  assert.deepEqual(written.map(args => args.name), ['hideSteps', 'advisorModel', 'browserAccess']);
+});
+
+test('a Hub chat sends its /goal with user requests only, never with worker results', async t => {
+  const { hub, session, calls, send } = await setup(t);
+  hub.setGoal(session.id, 'Ship the parser');
+  await send('Hello');
+  assert.deepEqual(JSON.parse(calls.at(-1).request.prompt).pinnedGoal?.goal, 'Ship the parser');
+  assert.match(JSON.parse(calls.at(-1).request.prompt).pinnedGoal.note, /current request takes priority/);
+  await hub.send({ id: session.id, text: 'The review completed.', agentReply: true });
+  const result = JSON.parse(calls.at(-1).request.prompt);
+  assert.equal(result.incoming, 'worker_result');
+  assert.equal(result.pinnedGoal, undefined);
+  hub.setGoal(session.id, '');
+  await send('Continue');
+  assert.equal(JSON.parse(calls.at(-1).request.prompt).pinnedGoal, undefined);
+});
+
 test('Hub saves its effective mode and resumes old worker results with its pinned model', async t => {
   for (const mode of ['auto', 'terra-light']) await t.test(mode, async t => {
     const { hub, session, calls, send } = await setup(t);
@@ -3071,7 +3115,7 @@ test('Hub’s Secondary model reads its messages: efforts follow the read, a sto
   const reading = send('summarize the repo');
   await until(() => releaseRead);
   await hub.stop();
-  releaseRead({ decision: { kind: 'ack', text: 'On it.', stop: false, effort: 'none', when: 'now', steps: [], deliver: 'now', drop: [] } });
+  releaseRead({ decision: { kind: 'pass', text: '', stop: false, effort: 'none', when: 'now', deliver: 'now', drop: [] } });
   assert.deepEqual(await reading, { stopped: true });
   assert.deepEqual([planning(), hub.busy, session.items.at(-1).queueState, session.items.at(-1).content[0].text], [before, null, 'stopped', 'summarize the repo']);
   hub.smartRouter.complete = complete;

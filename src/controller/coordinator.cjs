@@ -69,13 +69,18 @@ const workReply = result => (result.agents
   : result.waiting ? `Queued the task for **${result.agent}**. Their current work continues; I will bring the result back here.`
     : `Sent the task to **${result.agent}**. I’ll bring the result back here.`);
 const WORKER_INSTRUCTIONS = 'Carry out tasks delegated by Hub. Verify your work and return concise results, changed files, checks and limitations. Read relevant original user context when needed.';
+// A field that takes any JSON value (write_settings' value) has no type, and strict schemas refuse that: every Hub turn on
+// a Codex model failed with "schema must specify a type" (found 2026-11-20). Hub writes it as text, and actionArguments
+// reads JSON text back as its value (true, 3, {"enabled":true}); other text, such as off, stays a string.
+const anyJson = field => !field.type && !field.anyOf && !field.enum;
+const JSON_TEXT = { type: 'string', maxLength: 32768, description: 'JSON text for a number, boolean, object or array (true, 3, {"enabled":true}); plain text for a string (off).' };
 const SCHEMA = { type: 'object', properties: { reply: { type: 'string' },
   action: { anyOf: [{ type: 'null' }, ...HUB_TOOLS.map(tool => ({
   type: 'object', properties: { tool: { type: 'string', enum: [tool.name] }, arguments: {
     ...tool.inputSchema,
     // Strict schemas require every property; null preserves the meaning of an omitted optional argument.
-    properties: Object.fromEntries(Object.entries(tool.inputSchema.properties).map(([key, value]) => [key,
-      tool.inputSchema.required?.includes(key) ? value : { anyOf: [value, { type: 'null' }] }])),
+    properties: Object.fromEntries(Object.entries(tool.inputSchema.properties).map(([key, field]) => [key, anyJson(field) ? JSON_TEXT : field])
+      .map(([key, value]) => [key, tool.inputSchema.required?.includes(key) ? value : { anyOf: [value, { type: 'null' }] }])),
     required: Object.keys(tool.inputSchema.properties),
   } }, required: ['tool', 'arguments'], additionalProperties: false,
 }))] } }, required: ['reply', 'action'], additionalProperties: false };
@@ -106,13 +111,16 @@ function actionArguments(action) {
         const field = schema.properties[key];
         if (!Object.hasOwn(schema.properties, key)) return true;
         if (value === null) return schema.required?.includes(key);
+        if (anyJson(field)) return typeof value !== 'string' || value.length > JSON_TEXT.maxLength;
         if (field.type === 'integer') return !Number.isInteger(value) || value < field.minimum || value > field.maximum;
         if (field.type === 'boolean') return typeof value !== 'boolean';
         if (field.type === 'array') return !Array.isArray(value) ||
           value.some(item => typeof item !== 'string' || item.length < field.items.minLength || item.length > field.items.maxLength);
         return typeof value !== 'string' || value.length < field.minLength || value.length > field.maxLength || (field.enum && !field.enum.includes(value));
       })) throw new Error('Hub returned invalid action arguments. No action was taken from that response.');
-  return Object.fromEntries(Object.entries(args).filter(([, value]) => value !== null));
+  const decode = text => { try { return JSON.parse(text); } catch { return text; } };
+  return Object.fromEntries(Object.entries(args).filter(([, value]) => value !== null)
+    .map(([key, value]) => [key, anyJson(schema.properties[key]) ? decode(value) : value]));
 }
 
 // With Jev image assist, `images` (imageNumbers) names each message's images so the Hub can ask about earlier ones.
@@ -472,6 +480,9 @@ module.exports = {
         note: 'Answer as the Hub unless a task needs a helper. Group membership grants no additional access. Do not broadcast messages to every member.' };
       context.timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
       if (effortNote) context.harnessNote = effortNote;
+      // The chat's /goal, like a worker's (controller.send): only with the user's own turns.
+      if (session.goal && !agentReply && !agentMail && !agentResult && !routineRun)
+        context.pinnedGoal = { goal: session.goal, note: 'Standing context the user pinned with /goal: work toward it, but the current request takes priority. Do not restate the goal.' };
       if (seen.text !== text) context.attachedImages = seen.text.slice(text.length).trim();
       let reply, comparison = null, quietResult = false;
       let continued = false, modelRetried = false;

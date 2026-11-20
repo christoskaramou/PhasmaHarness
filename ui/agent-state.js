@@ -1,7 +1,7 @@
 /** Shared by the runner and renderer so ownership and inheritance cannot diverge. */
 var HarnessAgentState = (() => {
   /** @typedef {'read-only'|'workspace-write'|'danger-full-access'} Access */
-  /** @typedef {{id:string, name?:string, createdBy?:string, temporaryBatch?:string, workspace?:string, access?:Access, mode?:string, inheritWorkspace?:boolean, inheritAccess?:boolean, inheritMode?:boolean}} Profile */
+  /** @typedef {{id:string, name?:string, createdBy?:string, temporaryBatch?:string, role?:'advisor'|'worker', workspace?:string, access?:Access, mode?:string, inheritWorkspace?:boolean, inheritAccess?:boolean, inheritMode?:boolean}} Profile */
   /** @typedef {{id:string, delegation?:{owner?:string, source?:string, delivered?:boolean}}} Chat */
   /** @typedef {{conversationId?:string, sessions:Chat[]}} Context */
   /** @typedef {{agents?:Profile[], agentStates?:Record<string, Context>, executionStates?:Record<string, Context>}} Fleet */
@@ -20,10 +20,23 @@ var HarnessAgentState = (() => {
   }
   // Settings each bot has, or takes from its creator (Hub, for a top-level bot) on Inherit, the default.
   const BOT_SETTINGS = { router: ['off', 'jev', 'secondary'], effortCap: ['low', 'medium', 'high', 'xhigh', 'max'] };
+  // Auto Advisor and Workers: the bot's model at a step from the effort its turn runs at, within its effort cap. 'chat' is
+  // the default step; 'chat:<step>' another (2026-11-20, the user: the step beside Auto can be changed). [value, label, step].
+  /** @type {Record<'advisorModel'|'workerModel', [string, string, number][]>} */
+  const ROLE_STEPS = {
+    advisorModel: [['chat', 'One higher', 1], ['chat:2', 'Two higher', 2], ['chat:max', 'Highest', Infinity], ['chat:0', 'Same as bot', 0]],
+    workerModel: [['chat', 'One lower', -1], ['chat:-2', 'Two lower', -2], ['chat:min', 'Lowest', -Infinity], ['chat:0', 'Same as bot', 0]],
+  };
+  /** The step of an Auto value, or null for Off, a model id or an unknown value. @param {'advisorModel'|'workerModel'} key @param {unknown} value */
+  function autoStep(key, value) {
+    const entry = ROLE_STEPS[key]?.find(([id]) => id === value);
+    return entry ? entry[2] : null;
+  }
 
   /** @param {Profile|null|undefined} profile */
   function isSubBot(profile) {
-    return !!profile?.createdBy && profile.createdBy !== 'main' && !profile.temporaryBatch;
+    // An advisor sub-bot is one also when Hub made it (agent-roles.cjs): it takes no work and no messages.
+    return (!!profile?.createdBy && profile.createdBy !== 'main' && !profile.temporaryBatch) || profile?.role === 'advisor';
   }
 
   /** @param {Profile} profile @param {keyof typeof INHERITED} key @param {Profile[]} profiles @param {string} mainWorkspace */
@@ -278,6 +291,6 @@ var HarnessAgentState = (() => {
     return chat;
   }
 
-  return { INHERITED, AUTO_EFFORT, autoEffortMode, parseAutoEffort, BOT_SETTINGS, isSubBot, inheritedSource, backgroundView, trimFleet, keepSessions, stateStream, acceptState, FULL_STATE_MS };
+  return { INHERITED, AUTO_EFFORT, autoEffortMode, parseAutoEffort, BOT_SETTINGS, ROLE_STEPS, autoStep, isSubBot, inheritedSource, backgroundView, trimFleet, keepSessions, stateStream, acceptState, FULL_STATE_MS };
 })();
 if (typeof module !== 'undefined') module.exports = HarnessAgentState;

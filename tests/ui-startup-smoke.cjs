@@ -1603,6 +1603,58 @@ app.whenReady().then(async () => {
   await pick('#hub-secondary', secondaryPick[0]);
   await until(() => controller.data.settings.secondaryModel === secondaryPick[1], 'Hub’s Secondary model saves from its Edit dialog');
   assert.equal(controller.secondaryPick()?.id, secondaryPick[1], 'and does Hub’s secondary work');
+  // Advisor and Workers (2026-11-20, the user): one tick each, and a model picker with Auto first. Advisor on, Workers off.
+  const tick = (id, checked) => window.webContents.executeJavaScript(`(async () => {
+    const box = document.querySelector('${id}'); box.checked = ${checked};
+    box.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 300));
+  })()`);
+  // On Auto the Effort beside it is a step the user can change, enabled while the row is ticked (2026-11-20, the user).
+  assert.deepEqual(await window.webContents.executeJavaScript(`['advisor', 'workers'].map(key => { const effort = document.querySelector('#hub-' + key + '-effort');
+    return [document.querySelector('#hub-' + key + '-on').checked, document.querySelector('#hub-' + key).disabled, document.querySelector('#hub-' + key).options[0].textContent,
+      effort.disabled, [...effort.options].map(option => option.textContent)]; })`),
+  [[true, false, 'Auto: bot’s model', false, ['One higher', 'Two higher', 'Highest', 'Same as bot']],
+    [false, true, 'Auto: bot’s model', true, ['One lower', 'Two lower', 'Lowest', 'Same as bot']]]);
+  await pick('#hub-advisor-effort', 'chat:max');
+  await until(() => controller.data.settings.advisorModel === 'chat:max', 'a changed Auto step saves');
+  assert.deepEqual(await window.webContents.executeJavaScript("[document.querySelector('#hub-advisor').value, document.querySelector('#hub-advisor-effort').value]"), ['chat', 'chat:max']);
+  await pick('#hub-advisor-effort', 'chat');
+  await until(() => controller.data.settings.advisorModel === 'chat', 'and back to one higher');
+  // Layout (2026-11-20, the user's screenshot: the tick floated above its name and Effort wrapped to its own line): the tick
+  // sits beside its name, and the model and effort pickers share one row, in the Secondary model row's columns.
+  const roleLayout = prefix => window.webContents.executeJavaScript(`['advisor', 'workers'].map(key => {
+    const box = id => document.querySelector('#${prefix}-' + id).getBoundingClientRect();
+    const tick = box(key + '-on'), name = document.querySelector('#${prefix}-' + key + '-on').closest('label').getBoundingClientRect();
+    const model = box(key), effort = box(key + '-effort'), secondary = box('secondary'), secondaryEffort = box('secondary-effort');
+    const near = (a, b) => Math.abs(a - b) < 2;
+    return { tickBesideName: tick.width < 30 && near(tick.top + tick.height / 2, name.top + name.height / 2), oneRow: near(model.top, effort.top),
+      columns: near(model.left, secondary.left) && near(model.width, secondary.width) && near(effort.left, secondaryEffort.left) };
+  })`);
+  const roleLayoutOk = [true, true].map(() => ({ tickBesideName: true, oneRow: true, columns: true }));
+  // Checked and captured in light and dark (the user's screenshot was dark), then the theme is put back.
+  const roleLayoutThemes = async (prefix, file) => {
+    await window.webContents.executeJavaScript(`document.querySelector('#${prefix}-advisor').scrollIntoView({ block: 'center' }); window.roleTheme = document.documentElement.dataset.appearance; true`);
+    for (const theme of ['light', 'dark']) {
+      await window.webContents.executeJavaScript(`document.documentElement.dataset.appearance = '${theme}'; new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 100))))`);
+      assert.deepEqual(await roleLayout(prefix), roleLayoutOk, `${prefix} Advisor and Workers rows in ${theme}`);
+      fs.writeFileSync(path.resolve(__dirname, `../.scratch/${file}${theme === 'dark' ? '-dark' : ''}.png`), (await window.webContents.capturePage()).toPNG());
+    }
+    await window.webContents.executeJavaScript("if (window.roleTheme) document.documentElement.dataset.appearance = window.roleTheme; else delete document.documentElement.dataset.appearance; delete window.roleTheme; true");
+  };
+  await roleLayoutThemes('hub', 'advisor-workers-rows');
+  await tick('#hub-workers-on', true);
+  await until(() => controller.data.settings.workerModel === 'chat', 'ticking Workers saves Auto');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#hub-workers-effort').disabled"), false, 'ticked, its step can be changed');
+  await pick('#hub-workers-effort', 'chat:min');
+  await until(() => controller.data.settings.workerModel === 'chat:min', 'the Workers step saves');
+  await pick('#hub-workers-effort', 'chat');
+  await until(() => controller.data.settings.workerModel === 'chat', 'and back to one lower');
+  await tick('#hub-workers-on', false);
+  await until(() => controller.data.settings.workerModel === 'off', 'unticking saves Off');
+  await tick('#hub-advisor-on', false);
+  await until(() => controller.data.settings.advisorModel === 'off', 'the Advisor tick turns it off');
+  await tick('#hub-advisor-on', true);
+  await until(() => controller.data.settings.advisorModel === 'chat', 'and back on at Auto');
   await pick('#hub-effort-cap', 'medium');
   await until(() => controller.data.settings.effortCap === 'medium', 'Hub’s effort cap saves');
   await pick('#hub-router', 'off');
@@ -1706,6 +1758,8 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(controller.snapshot()) + '); new Promise(r => setTimeout(r, 50))');
   assert.deepEqual([(await pickers())[1][1], (await pickers())[1][2][0]], [false, 'Choose a model']);
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#agent-save').disabled"), false);
+  // A bot's dialog (with its Inherit options) has the same Advisor and Workers layout as Hub's.
+  await roleLayoutThemes('agent', 'agent-advisor-workers-rows');
   await window.webContents.executeJavaScript("document.querySelector('#agent-secondary-detail').scrollIntoView({ block: 'center' }); new Promise(r => setTimeout(r, 100))");
   fs.writeFileSync(path.resolve(__dirname, '../.scratch/agent-secondary-hints.png'), (await window.webContents.capturePage()).toPNG());
   await window.webContents.executeJavaScript("document.querySelector('#agent-dialog').close(); document.querySelector('#settings-dialog').showModal(); true");
@@ -2432,7 +2486,7 @@ app.whenReady().then(async () => {
   const mainConversationId = agents.conversation(controller).id;
   oldConversation.items.push({ id: 'clear-history', type: 'agentMessage', text: 'Earlier agent history.' });
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
-  const commandNames = ['/help', '/compact', '/clear', '/stop', '/agents', '/settings', '/context', '/model', '/effort', '/access', '/switch', '/export', '/status', '/suggestion', '/wiki', '/tldr', '/advisor'];
+  const commandNames = ['/help', '/compact', '/clear', '/stop', '/agents', '/settings', '/context', '/model', '/effort', '/access', '/switch', '/export', '/status', '/suggestion', '/wiki', '/tldr', '/advisor', '/goal'];
   const sentBeforeCommands = sent.length;
   let previewsBeforeCommands = previews;
   const typeCommand = text => window.webContents.executeJavaScript(`(() => {

@@ -22,11 +22,12 @@ const { EventEmitter } = require('node:events');
 const { CodexClient } = require('./providers/codex.cjs');
 const { PRESETS, ROUTER_PRESETS, route } = require('./routing/router.cjs');
 const { SmartRouter } = require('./routing/smart-router.cjs');
-const { parseAutoEffort, BOT_SETTINGS } = require('../ui/agent-state.js');
+const { parseAutoEffort, BOT_SETTINGS, autoStep } = require('../ui/agent-state.js');
 const { MODEL: JEV_MODEL } = require('./providers/jev.cjs');
 const { TOOL: CONTEXT_TOOL } = require('./workspace/context-search.cjs');
 const { INSTRUCTIONS: HELPER_INSTRUCTIONS, TOOLS: HELPER_TOOLS, ToolHelpers } = require('./tools/tool-helpers.cjs');
 const { RouterBridge } = require('./tools/router-bridge.cjs');
+const roles = require('./agent-roles.cjs');
 const { FINAL, canProposeWiki, hasProjectWiki, restartReason, shouldTrack, summaryLine } = require('./tasks.cjs');
 const { WORKER_INSTRUCTIONS, workerInstructions, DEFAULT_SKILLS } = require('./worker-instructions.cjs');
 const skillPackages = require('./skill-packages.cjs');
@@ -584,9 +585,17 @@ class Controller extends EventEmitter {
     if (values.advisorModel !== undefined) {
       // Any enabled model of any provider, as for the Secondary model.
       const choice = this.chatScanChoices().find(p => p.id === values.advisorModel);
-      if (!['chat', 'off'].includes(values.advisorModel) && !choice) throw new Error('Unknown advisor model.');
+      if (values.advisorModel !== 'off' && autoStep('advisorModel', values.advisorModel) === null && !choice) throw new Error('Unknown advisor model.');
       if (choice && !this.available(choice)) throw new Error('This advisor model is unavailable on your account.');
       next.advisorModel = values.advisorModel;
+    }
+    // Workers (2026-11-20, the user): off, Auto ('chat': the bot's model one effort lower, or 'chat:<step>') or a worker model.
+    if (values.workerModel !== undefined) {
+      const auto = values.workerModel === 'off' || autoStep('workerModel', values.workerModel) !== null;
+      const choice = auto ? null : this.resolveWorker(values.workerModel);
+      if (!auto && !choice) throw new Error('Unknown workers model.');
+      if (choice && !this.available(choice)) throw new Error('This workers model is unavailable on your account.');
+      next.workerModel = values.workerModel;
     }
     if (values.chatScanModel !== undefined) {
       const choice = this.chatScanChoices().find(p => p.id === values.chatScanModel);
@@ -709,6 +718,16 @@ class Controller extends EventEmitter {
   rename(id, title) {
     if (typeof title !== 'string' || !title.trim()) throw new Error('Enter a session name.');
     this.session(id).title = title.trim().slice(0, 120); this.save(); this.changed();
+  }
+
+  // /goal <text>: the user pins a goal to this chat; each turn's context starts with it until /goal clear (2026-11-20, the user).
+  setGoal(id, text = '') {
+    const session = this.session(id);
+    text = String(text || '').trim();
+    if (text.length > 1000) throw new Error('Keep the goal under 1000 characters.');
+    if (text) session.goal = text; else delete session.goal;
+    this.save(); this.changed();
+    return session.goal || null;
   }
 
   archive(id) {
@@ -924,7 +943,7 @@ class Controller extends EventEmitter {
         this.save(); this.changed();
         return { stopped: true };
       }
-      if (hubRead?.drop.length) { this.endQueued(session, hubRead.drop, 'dropped'); this.save(); this.changed(); }
+      if (hubRead) this.suggestDrop(session, hubRead.drop);
       if (hubRead?.stop) return this.stopFromHub(session, { text, images, fileMessage, read: hubRead });
     }
     // The effort it read (or held the message with), null for none; undefined when nothing read it, so the words decide.
@@ -1003,7 +1022,11 @@ class Controller extends EventEmitter {
     if (useSmart && chosenMode === 'auto' && !wikiTaskId) this.lastSends.set(id, { clientId, text, images, task, failover: failover === true,
       ...(fileMessage ? { fileMessage } : {}), ...(agentReply ? { agentReply: true } : {}), ...(routineRun ? { routineRun } : {}) });
     // The worker is told the effort change it was asked for is already done, so it does not answer that it cannot.
-    const effortNote = askedEffort ? this.effortNote(askedEffort.effort) : '';
+    const effortNote = (askedEffort ? this.effortNote(askedEffort.effort) : '')
+      // A /goal goes only with the user's own turns: bot replies, mail, results and routines could be steered off course or loop.
+      + (session.goal && !agentReply && !routineRun && !agentMail && !agentResult ? `<pinned-goal>\n${session.goal}\n</pinned-goal>\nStanding context the user pinned with /goal: work toward it, but the current message takes priority. Do not restate the goal.\n\n` : '')
+      // A supervisor's reminder to use its workers, with the user's own turns too (agent-roles.cjs supervisorTurnNote).
+      + (this.agents && !agentReply && !routineRun && !agentMail && !agentResult ? roles.supervisorTurnNote(this.agents, this) : '');
     session.pendingMessage = {
       ...(contextText || effortNote ? { contextText: effortNote + contextText } : {}),
       id: clientId, clientId, type: 'userMessage', pending: true, createdAt: Date.now(),
@@ -1110,8 +1133,6 @@ class Controller extends EventEmitter {
         selected = { ...readEffort, source: 'manual', reason: `You asked for ${readEffort.effort} effort.`, effortCap: this.data.settings.effortCap };
         if (session.pendingMessage) session.pendingMessage.contextText = this.effortNote(readEffort.effort) + (session.pendingMessage.contextText || '');
       }
-      // A request of several parts the Secondary model split into worker turns: this one does the first (queueSteps).
-      if (quickResult?.kind === 'ack' && quickResult.steps?.length > 1) this.queueSteps(session, { text, steps: quickResult.steps, mode: chosenMode, task });
       if (quickResult?.kind === 'answer') {
         const done = this.finishQuickAnswer(session, { text, clientId, quick: quickResult, selected });
         if (done) return done;
