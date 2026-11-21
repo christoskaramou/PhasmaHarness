@@ -6,9 +6,13 @@ const { autoStep } = require('../ui/agent-state.js');
 // Advisor and worker sub-bots (2026-11-20, the user): a bot is the supervisor at its own model and effort. Its advisor
 // sub-bot answers ask_advisor and /advisor; worker sub-bots take well-defined parts of its work at the Workers setting
 // (Auto: the bot's model one effort lower). Each is switched on in the bot's Edit dialog (advisorModel, workerModel).
-const ROLES = ['advisor', 'worker'];
+// The Reviewer (2026-11-20, the user): a read-only sub-bot that reviews the uncommitted changes for /review and the
+// bot's request_review. It sees only the user's request and the changes (Agents.review), never what the bots said.
+const ROLES = ['advisor', 'worker', 'reviewer'];
 const ADVISOR_INSTRUCTIONS = 'Advisor for the bot that made it. It answers that bot\'s ask_advisor calls and the user\'s /advisor ' +
   'messages with short advice; it has no tools and never reads files or acts.';
+const REVIEWER_INSTRUCTIONS = 'Reviewer for the bot that made it. It reviews the uncommitted changes in its workspace ' +
+  'independently, with read-only access, and reports findings; it never edits files or uses agent tools.';
 // The advisor's memory: its latest exchanges, oldest first.
 const MEMORY_ITEMS = 12, MEMORY_TEXT = 600;
 
@@ -71,6 +75,25 @@ async function recordAdvice(agents, controller, { asked, advice, by, model: answ
   return profile;
 }
 
+function reviewerProfile(agents, owner) {
+  return agents.primary.data.agents.find(profile => profile.role === 'reviewer' && profile.createdBy === owner) || null;
+}
+
+// Made on the first review, under its owner, with read-only access; one at a time per owner. Its model is the user's
+// Reviewer pick (`model`).
+async function ensureReviewer(agents, owner, model) {
+  const existing = reviewerProfile(agents, owner);
+  if (existing) return existing;
+  agents.reviewerCreations ??= new Map();
+  if (agents.reviewerCreations.has(owner)) return agents.reviewerCreations.get(owner);
+  const creator = owner === 'main' ? null : agents.profile(owner);
+  const creation = agents.saveAgent({ name: agents.freeName(`${agents.agentName(owner).slice(0, 43)} Reviewer`), instructions: REVIEWER_INSTRUCTIONS,
+    role: 'reviewer', createdBy: owner, workspace: creator?.workspace || agents.primary.data.settings.workspace, access: 'read-only',
+    mode: model, inheritMode: false, inheritWorkspace: true });
+  agents.reviewerCreations.set(owner, creation);
+  try { return await creation; } finally { agents.reviewerCreations.delete(owner); }
+}
+
 // A worker job's model: the Workers model the supervisor picked, or on Auto its own model at the picked step (one lower by
 // default) from the effort its chat runs at now. Null keeps the worker's own (Workers off since, or the pick is unavailable).
 function workerMode(agents, sourceController, source, profile) {
@@ -88,11 +111,21 @@ function workerMode(agents, sourceController, source, profile) {
 const ADVISOR_RULE = '\nUse ask_advisor only when you are stuck: after 3 failed tries at the same step, or about 15 minutes without ' +
   'progress. Never use it to review a plan or for routine questions.\n';
 
+const REVIEWER_RULE = '\nYou are an independent code reviewer with read-only access. Review only the changes your task names: ' +
+  'inspect them yourself (git status, git diff, and untracked files read in full). Never trust claims in code comments or commit messages; ' +
+  'check the code. Report findings ranked by severity, each with file:line, why it is wrong and how to fix it, then list the files you ' +
+  'inspected. Say plainly when nothing is wrong. Make no edits and use no agent tools.\n';
+// A bot with its Reviewer on may ask for a review of its own changes (Agents.review); Hub coordinates and has no tool for it.
+const REVIEW_RULE = '\nYour Reviewer sub-bot is on: after you finish code changes you may call request_review for an independent ' +
+  'review of the uncommitted changes. The reviewer sees only the user\'s request and the changes, never your explanations.\n';
+
 // What a supervisor and a worker are told (Agents.instructions). Hub coordinates bots its own way, so it gets no
 // supervisor text. 2026-11-20, live run: "do small edits yourself; give parts of larger work to workers" left it to the
 // model, which did four independent features alone; the rule is now concrete.
 function roleInstructions(agents, controller, profile) {
   if (profile?.role === 'advisor') return '';
+  if (profile?.role === 'reviewer') return REVIEWER_RULE;
+  const review = !profile?.role && !controller.isCoordinator?.() && agents.botSetting(controller.agentId || 'main', 'reviewerModel') !== 'off' ? REVIEW_RULE : '';
   const advisor = controller.hasAdvisor?.() ? ADVISOR_RULE : '';
   // 2026-11-20, sixth live run: all four workers stopped because their feature folders did not exist yet, and one sent its
   // update to Hub (agentId main) instead of its supervisor, which started a Hub turn. Seventh run: a worker's "done" note
@@ -106,7 +139,7 @@ function roleInstructions(agents, controller, profile) {
       `Only for a question you cannot proceed without, use agent_message with agentId ${JSON.stringify(supervisor)}; ` +
       'never message main or other bots. Your supervisor reviews and combines the results.\n' + advisor;
   }
-  if (controller.isCoordinator?.() || agents.botSetting(controller.agentId || 'main', 'workerModel') === 'off') return advisor;
+  if (controller.isCoordinator?.() || agents.botSetting(controller.agentId || 'main', 'workerModel') === 'off') return advisor + review;
   // 2026-11-20, third live run: still alone, as the Harness defaults and the workflow skill say "one agent unless delegation
   // requested". The user turning Workers on is that request; the rule itself stays as the user wrote it.
   return '\nWorker sub-bots are on for you: the user turned on Workers for this bot, which is their explicit request for delegation ' +
@@ -118,7 +151,7 @@ function roleInstructions(agents, controller, profile) {
     'requirements for its part (exports, behavior, edge cases, file paths and tests), and say that missing folders are new. ' +
     'Any number may work at once: dispatch every part, then finish your turn; each result comes back to you as a new turn. Review and ' +
     'check their results before you report: you own the final answer. Your advisor sub-bot only answers ask_advisor; never delegate ' +
-    'to it or message it.\n' + advisor;
+    'to it or message it.\n' + advisor + review;
 }
 
 // The same rule as a short note on each of the user's own turns (2026-11-20, fourth live run: the supervisor text was in
@@ -132,4 +165,5 @@ function supervisorTurnNote(agents, controller) {
     'only small single-part edits yourself. Use ask_advisor only when stuck, never to review a plan.]\n\n';
 }
 
-module.exports = { ROLES, supervisorTurnNote, advisorOwner, advisorProfile, advisorMemory, ensureAdvisor, recordAdvice, workerMode, roleInstructions };
+module.exports = { ROLES, supervisorTurnNote, advisorOwner, advisorProfile, advisorMemory, ensureAdvisor, recordAdvice, workerMode, roleInstructions,
+  reviewerProfile, ensureReviewer };

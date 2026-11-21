@@ -58,7 +58,8 @@ const COMPARE = { name: 'compare', description: 'Only when the user explicitly a
 const UPDATE = { name: 'agent_update', description: 'Only when the user asks: change an existing bot’s name, role and instructions, or model and effort. Pass only what changes. agentId main changes your own chat model and effort (mode/effort only); it applies from the next message. Its workspace and access stay as they are (agent_set_access changes access; the workspace changes only in its Edit dialog). For a model, call agent_models and pass its mode; set effort only when requested. The bot must be idle.',
   inputSchema: { type: 'object', properties: { agentId: { type: 'string', minLength: 1 }, name: { type: 'string', minLength: 1, maxLength: 60 },
     instructions: { type: 'string', maxLength: 8000 }, mode: { type: 'string' }, effort: { type: 'string' } }, required: ['agentId'], additionalProperties: false } };
-const HUB_TOOLS = [WORK, COMPARE, UPDATE, ...TOOLS.filter(t => t.name !== 'agent_delegate').map(t => t.name === 'agent_create' ? HUB_CREATE : t)];
+// request_review is for a bot reviewing its own changes; Hub makes none.
+const HUB_TOOLS = [WORK, COMPARE, UPDATE, ...TOOLS.filter(t => !['agent_delegate', 'request_review'].includes(t.name)).map(t => t.name === 'agent_create' ? HUB_CREATE : t)];
 // How long Hub's "Allow work in another folder?" prompt waits; then it closes and counts as not allowed.
 const FOLDER_PROMPT_MS = 2 * 60 * 1000;
 // A folder strictly inside another (Windows compares without case).

@@ -734,10 +734,11 @@ class Agents extends EventEmitter {
 
   // A bot's router, Secondary model, advisor or effort cap: its own, or on Inherit (the default) its creator's, up to Hub's.
   // Hub's advisor is on by default ('chat', 2026-11-13, the user; since 2026-11-20 Auto: one effort above the turn's).
-  // Workers are off until the user ticks them (2026-11-20).
+  // Workers and the Reviewer are off until the user ticks them (2026-11-20).
   botSetting(agentId, key) {
     const hub = { router: () => this.primary.data.settings.router, secondaryModel: () => this.primary.secondarySaved() || undefined,
       advisorModel: () => this.primary.data.settings.advisorModel || 'chat', workerModel: () => this.primary.data.settings.workerModel || 'off',
+      reviewerModel: () => this.primary.data.settings.reviewerModel || 'off',
       effortCap: () => this.primary.data.settings.effortCap || DEFAULT_EFFORT_CAP }[key];
     for (let id = agentId, seen = new Set(); id && id !== 'main' && !seen.has(id); ) {
       seen.add(id);
@@ -793,7 +794,7 @@ class Agents extends EventEmitter {
     controller.data.settings = { ...this.primary.data.settings, workspace: profile.workspace, mode: profile.mode, access: profile.access,
       router: this.botSetting(controller.agentId, 'router'), secondaryModel: this.botSetting(controller.agentId, 'secondaryModel'),
       advisorModel: this.botSetting(controller.agentId, 'advisorModel'), workerModel: this.botSetting(controller.agentId, 'workerModel'),
-      effortCap: this.botSetting(controller.agentId, 'effortCap') };
+      reviewerModel: this.botSetting(controller.agentId, 'reviewerModel'), effortCap: this.botSetting(controller.agentId, 'effortCap') };
     // Usage windows belong to the account, not the agent.
     controller.data.providerLimits = this.primary.data.providerLimits;
     controller.limits.store = this.primary.limits.store;
@@ -920,12 +921,15 @@ class Agents extends EventEmitter {
     // Router, Secondary model and effort cap: kept when an edit does not mention them (agent_update, renames); Inherit,
     // the default, is not stored.
     const own = key => { const v = value[key] ?? existing?.[key] ?? 'inherit'; return v === 'auto' ? 'inherit' : v; };
-    const router = own('router'), secondary = own('secondaryModel'), advisor = own('advisorModel'), workers = own('workerModel'), effortCap = own('effortCap');
+    const router = own('router'), secondary = own('secondaryModel'), advisor = own('advisorModel'), workers = own('workerModel'), reviewer = own('reviewerModel'), effortCap = own('effortCap');
     // A sub-bot's role is set when it is made (agent-roles.cjs) and kept.
     const role = existing ? existing.role : value.role;
     if (role !== undefined && !roles.ROLES.includes(role)) throw new Error('Unknown agent role.');
     if (workers !== existing?.workerModel && !['inherit', 'off'].includes(workers) && autoStep('workerModel', workers) === null && !this.primary.resolveWorker(workers))
       throw new Error('Unknown workers model.');
+    // The Reviewer has no Auto (2026-11-20, the user): off or a model the user picked.
+    if (reviewer !== existing?.reviewerModel && !['inherit', 'off'].includes(reviewer) && !this.primary.resolveWorker(reviewer))
+      throw new Error('Unknown reviewer model.');
     if (advisor !== existing?.advisorModel && !['inherit', 'off'].includes(advisor) && autoStep('advisorModel', advisor) === null && !this.primary.chatScanChoices().some(p => p.id === advisor))
       throw new Error('Unknown advisor model.');
     if (router !== 'inherit' && !BOT_SETTINGS.router.includes(router)) throw new Error('Unknown router.');
@@ -934,7 +938,7 @@ class Agents extends EventEmitter {
     if (effortCap !== 'inherit' && !BOT_SETTINGS.effortCap.includes(effortCap)) throw new Error('Unknown effort cap.');
     const profile = { id, name: value.name.trim(), instructions: value.instructions.trim(), workspace: this.primary.workspace(pick('workspace')), mode, access,
       createdBy, ...(role ? { role } : {}), ...Object.fromEntries(Object.values(INHERITED).map(flag => [flag, draft[flag]])),
-      ...Object.fromEntries(Object.entries({ router, secondaryModel: secondary, advisorModel: advisor, workerModel: workers, effortCap }).filter(([, v]) => v !== 'inherit')) };
+      ...Object.fromEntries(Object.entries({ router, secondaryModel: secondary, advisorModel: advisor, workerModel: workers, reviewerModel: reviewer, effortCap }).filter(([, v]) => v !== 'inherit')) };
     if (temporaryBatch) profile.temporaryBatch = temporaryBatch;
     // Editing and saving promotes a batch worker to a regular bot; an agent's write_settings change (keepBatch) does not.
     else if (keepBatch && existing?.temporaryBatch) profile.temporaryBatch = existing.temporaryBatch;
@@ -988,11 +992,11 @@ class Agents extends EventEmitter {
     // The chat checker and its switches run between turns and the simple-messages model is read when a message is routed,
     // so changing them never waits for agents to stop.
     const local = Object.keys(values).every(key => ['workspace', 'mode', 'access', 'replySuggestions', 'chatScanModel', 'checkResponses',
-      'checkerRevise', 'checkerEscalate', 'scanReplies', 'escalateFailedChecks', 'dream', 'dreamModel', 'advisorModel', 'workerModel', 'secondaryModel', 'router', 'effortCap', 'showTips',
+      'checkerRevise', 'checkerEscalate', 'scanReplies', 'escalateFailedChecks', 'dream', 'dreamModel', 'advisorModel', 'workerModel', 'reviewerModel', 'secondaryModel', 'router', 'effortCap', 'showTips',
       'hideSteps', 'coldStartMinutes', 'coldStartPercent'].includes(key));
     if (!local && this.busy) throw new Error('Stop all agents before changing shared settings.');
-    if (agentId !== 'main' && ['router', 'secondaryModel', 'advisorModel', 'workerModel', 'effortCap'].some(key => values[key] !== undefined))
-      throw new Error('Change a bot’s Router, Secondary model, Advisor, Workers and Effort cap in its Edit dialog.');
+    if (agentId !== 'main' && ['router', 'secondaryModel', 'advisorModel', 'workerModel', 'reviewerModel', 'effortCap'].some(key => values[key] !== undefined))
+      throw new Error('Change a bot’s Router, Secondary model, Advisor, Workers, Reviewer and Effort cap in its Edit dialog.');
     if (agentId === 'main') this.primary.settings(values);
     else {
       const { workspace, mode, access, ...shared } = values;
@@ -1481,7 +1485,11 @@ class Agents extends EventEmitter {
     if (foreground.agentId === sourceController.agentId && !resuming) throw new Error('Choose another agent.');
     // A sub-bot's results go to the bot that made it, so only that bot gives it work.
     if (profile?.role === 'advisor') throw new Error(`${profile.name} only answers ask_advisor and /advisor. Give the task to a worker or another bot.`);
+    // The Reviewer takes only the review Harness writes (review()), so no bot can steer it with a task of its own.
+    if (profile?.role === 'reviewer' && !options.review)
+      throw new Error(`${profile.name} only reviews changes. Use request_review; Harness writes its task.`);
     const sourceProfile = this.profile(sourceController.agentId);
+    if (sourceProfile?.role === 'reviewer') throw new Error('A reviewer hands no work to other agents; it only reports its review.');
     if (sourceProfile?.role === 'worker' && !resuming)
       throw new Error('A worker does its part itself and hands no work to other agents; report back to your supervisor.');
     if (this.isSubBot(profile) && profile.createdBy !== (sourceController === this.primary ? 'main' : sourceController.agentId))
@@ -1500,13 +1508,15 @@ class Agents extends EventEmitter {
     if (source.access !== 'danger-full-access' && !this.workspaces.same(workspace, source.delegation?.projectScope || source.workspace) &&
         !(options.folderAllowed && sourceController === this.primary && this.workspaces.same(workspace, options.folderAllowed)))
       throw new Error('Sending a task to a different workspace requires Full access.');
-    if (!resuming) this.checkDelegationCapacity(sourceController, source, 1, profile?.role === 'worker');
+    // A /review the user asks for is no part of a bot's request, so it does not count against that request's tasks.
+    const counted = !resuming && options.review !== 'user';
+    if (counted) this.checkDelegationCapacity(sourceController, source, 1, profile?.role === 'worker' || !!options.review);
     else if (this.pendingJobs().length >= 10) throw new Error('The agent task queue is full.');
     const access = ACCESS_MODES[Math.min(...[...(resuming ? [resumeTask.access] : []), source.access, visible?.access || foreground.data.settings.access,
       current?.access || foreground.data.settings.access].map(value => ACCESS_MODES.findIndex(a => a.id === value)))]?.id;
     if (!access) throw new Error('Invalid delegation permissions.');
     const target = existing || this.execution(agentId);
-    if (!resuming) this.checkDelegationCapacity(sourceController, source, 1, profile?.role === 'worker');
+    if (counted) this.checkDelegationCapacity(sourceController, source, 1, profile?.role === 'worker' || !!options.review);
     const occupied = target.busy || target.loading.size || target.stopping.size || target.cleanupPending.size || target.requests.size || target.blockedReason() || current?.queue?.length || current?.delegationQueue?.some(job => !job.delivered) || this.pendingDelegations(current?.id) || (current?.delegation && !current.delegation.delivered);
     const session = this.conversation(target, true, workspace, access);
     const request = originalRequest ? { ...originalRequest } : null;
@@ -1518,6 +1528,8 @@ class Agents extends EventEmitter {
     // A worker sub-bot runs each job at its supervisor's Workers model (agent-roles.cjs).
     const workerMode = !resuming && profile?.role === 'worker' ? roles.workerMode(this, sourceController, source, profile) : null;
     if (workerMode) job.mode = workerMode;
+    // A review runs at the user's Reviewer model and is delivered by who asked for it (deliver).
+    if (options.review) Object.assign(job, { review: options.review, reviewFocus: options.reviewFocus || '', mode: options.reviewMode || job.mode });
     // Its profile shows the model its job runs at (live run: workers showed the supervisor's medium while running low).
     // Left as it is while it works, so a running job's settings never change under it.
     if (workerMode && !occupied && profile.mode !== workerMode) {
@@ -1547,7 +1559,7 @@ class Agents extends EventEmitter {
     const previous = { delegation: session.delegation, access: session.access, title: session.title, queue: session.delegationQueue, count: source.agentDelegations };
     if (occupied) session.delegationQueue = [...(session.delegationQueue || []).filter(job => !job.delivered), job];
     else { session.delegation = job; session.access = access; session.title = job.title; }
-    if (!resuming) source.agentDelegations = (source.agentDelegations || 0) + 1;
+    if (counted) source.agentDelegations = (source.agentDelegations || 0) + 1;
     try { this.budgets.persist(); sourceController.save(); target.save(); }
     catch (error) {
       session.delegation = previous.delegation; session.access = previous.access; session.title = previous.title; session.delegationQueue = previous.queue; source.agentDelegations = previous.count;
@@ -1569,6 +1581,74 @@ class Agents extends EventEmitter {
     return { jobId: job.id, sessionId: session.id, agent: profile?.name || this.hubName(), status: occupied ? 'queued' : session.delegation.state, waiting: occupied, note: 'Accepted and saved. The result returns to the requesting conversation; queued assignments wait for the current work to finish.' };
   }
 
+  // The user's own latest request in this chat: the original request of a Hub job it works on, else the user's last
+  // message (its visible text only). Never a bot's reply, plan, result or note.
+  reviewRequest(source) {
+    const job = source.delegation;
+    if (job && !job.delivered && job.originalRequest?.text) return job.originalRequest.text.trim();
+    const asked = source.items.findLast(item => item.type === 'userMessage' && !item.agentReply && !item.agentMail && !item.routineRun && !item.queueState);
+    return (asked?.content || []).filter(part => part.type === 'text').map(part => part.text).join('\n').trim();
+  }
+
+  // A review of the uncommitted changes by the bot's Reviewer (2026-11-20, the user: "unbiased of what the other bots took
+  // to reach or what they said or suggest"). Harness writes the whole task from the user's own request and the changes;
+  // no bot text reaches the reviewer, and each review starts in a new chat, so no earlier review does either.
+  async review(sourceController, source, { by, focus = '', paths = [] } = {}) {
+    if (this.closing) throw new Error('The app is closing.');
+    if (!['user', 'supervisor'].includes(by)) throw new Error('Invalid review request.');
+    const owner = sourceController.agentId || 'main', ownerProfile = this.profile(owner);
+    if (ownerProfile?.role) throw new Error(`${ownerProfile.name} is a ${ownerProfile.role} sub-bot and has no Reviewer.`);
+    const setting = this.botSetting(owner, 'reviewerModel');
+    if (!setting || setting === 'off') throw new Error('No reviewer: turn on Reviewer in this bot’s Edit dialog and pick its model.');
+    const choice = sourceController.resolveWorker(setting);
+    if (!choice) throw new Error('Unknown reviewer model.');
+    if (!sourceController.available(choice)) throw new Error('This reviewer model is unavailable on your account.');
+    if (typeof focus !== 'string' || focus.trim().length > 1000) throw new Error('Keep the review focus under 1,000 characters.');
+    const asked = by === 'user' ? focus.trim() : '';
+    if (!Array.isArray(paths) || (by === 'supervisor' ? paths.length > 20 : paths.length)) throw new Error('Name at most 20 paths to review.');
+    const files = paths.map(file => {
+      if (typeof file !== 'string' || !file.trim() || file.length > 500) throw new Error('Each review path is 1 to 500 characters.');
+      const relative = file.trim().replace(/\\/g, '/');
+      if (path.isAbsolute(file) || /^[a-zA-Z]:/.test(relative) || relative.startsWith('/') || relative.split('/').includes('..'))
+        throw new Error('Review paths are relative to the workspace and cannot use "..".');
+      return relative;
+    });
+    // Checked again after the reviewer is made, since that waits.
+    const ready = profile => {
+      if (by === 'user' && sourceController.busy === source.id) throw new Error('Wait for this bot to finish before /review.');
+      // One at a time: each review replaces the reviewer's chat, which a running one still needs.
+      if (profile && this.pendingJobs().some(({ controller, job }) => controller.agentId === profile.id && job.review))
+        throw new Error('A review is already running for this bot.');
+    };
+    ready(roles.reviewerProfile(this, owner));
+    const request = this.reviewRequest(source);
+    const notes = [...(asked ? [`The user asks you to focus on:\n${asked}`] : []),
+      ...(files.length ? [`Limit the review to these paths, relative to the workspace:\n${files.map(file => '- ' + file).join('\n')}`] : []),
+      'Inspect the changes yourself: git status, git diff (staged and unstaged), and read untracked files in full. Check correctness ' +
+      'first, then whether the change does what the request asks. Report findings ranked by severity, each with file:line, why it is ' +
+      'wrong and how to fix it; then list the files you inspected. Say plainly when you find nothing wrong. Do not edit any file.'];
+    // The request fills what the 16,000-character task has left, up to 12,000 characters.
+    const room = Math.min(12000, 15000 - notes.join('\n\n').length);
+    const task = ['Review the uncommitted changes in this workspace, including untracked files.',
+      request ? `The user's request (verbatim${request.length > room ? `, first ${room} characters` : ''}):\n${request.slice(0, room)}`
+        : 'No user request was found; review the changes on their own merits.', ...notes].join('\n\n');
+    const profile = await roles.ensureReviewer(this, owner, choice.id);
+    ready(profile);
+    const foreground = this.controller(profile.id), execution = this.execution(profile.id);
+    // A new chat (and so a new provider thread) for every review; the last one is archived with its history.
+    // ponytail: archived review chats are kept for history without a limit; prune old ones if they grow large.
+    const old = this.conversation(execution);
+    if (old) old.archived = true;
+    const fresh = execution.create(source.delegation?.projectScope || source.workspace, 'read-only');
+    execution.data.agentSessionId = fresh.id; execution.save();
+    if (profile.mode !== choice.id || profile.inheritMode) {
+      Object.assign(profile, { mode: choice.id, inheritMode: false });
+      this.primary.save(); this.sync(foreground); this.sync(execution); this.primary.changed();
+    }
+    const result = this.delegate(sourceController, source, profile.id, task, [], null, null, { review: by, reviewFocus: asked, reviewMode: choice.id });
+    return { jobId: result.jobId, reviewer: profile.name };
+  }
+
   deliver(controller, session) {
     const job = session.delegation;
     if (job.cancelled) session.status = 'interrupted';
@@ -1584,15 +1664,10 @@ class Agents extends EventEmitter {
     const source = sourceController.session(job.owner || job.source);
     const deliveryId = job.id || session.id;
     const delivered = source.agentDeliveries ||= [];
-    if (!delivered.includes(deliveryId)) {
-      const items = session.items.slice(job.startIndex || 0);
-      const end = items.findLastIndex(item => item.type === 'agentMessage' && item.phase !== 'commentary' && stripTaskStatus(item.text || '').trim());
-      const last = items[end];
-      const start = items.slice(0, end).findLastIndex(item => item.type === 'userMessage');
-      const answers = items.filter((item, index) => item.type === 'agentMessage' && item.phase !== 'commentary' &&
-        (last?.turnId ? item.turnId === last.turnId : index > start && index <= end && !item.turnId));
-      const report = answers
-        .map(item => stripTaskStatus(item.text || '')).filter(Boolean).join('\n\n');
+    // A /review the user asked for shows in their chat and starts no turn: the bot acts on it only when the user says so.
+    if (job.review === 'user' && !delivered.includes(deliveryId)) this.deliverReview(controller, session, sourceController, source, deliveryId);
+    else if (!delivered.includes(deliveryId)) {
+      const report = this.finalReport(session, job);
       const result = report.slice(-16000);
       const budgetSummary = this.budgets.summary(job.budgetId);
       const task = (session.tasks || []).findLast(task => task.assignmentId === job.id);
@@ -1642,6 +1717,41 @@ class Agents extends EventEmitter {
     job.state = session.status; job.delivered = true; delete job.deliveryError;
     this.dropEndedMail(session);
     controller.save();
+  }
+
+  // The job's final answer: the last turn's non-commentary messages.
+  finalReport(session, job) {
+    const items = session.items.slice(job.startIndex || 0);
+    const end = items.findLastIndex(item => item.type === 'agentMessage' && item.phase !== 'commentary' && stripTaskStatus(item.text || '').trim());
+    const last = items[end];
+    const start = items.slice(0, end).findLastIndex(item => item.type === 'userMessage');
+    const answers = items.filter((item, index) => item.type === 'agentMessage' && item.phase !== 'commentary' &&
+      (last?.turnId ? item.turnId === last.turnId : index > start && index <= end && !item.turnId));
+    return answers.map(item => stripTaskStatus(item.text || '')).filter(Boolean).join('\n\n');
+  }
+
+  // The report of a /review goes into the user's chat as the reviewer's message, and into the bot's next turn as an
+  // earlier exchange, so it can act on it when the user asks. No turn starts here.
+  deliverReview(controller, session, sourceController, source, deliveryId) {
+    const job = session.delegation, report = this.finalReport(session, job).slice(-16000);
+    const ended = job.cancelled ? 'The review was stopped before it finished.'
+      : session.status !== 'completed' ? `The review did not finish (${session.status}${session.error ? ': ' + session.error : ''}).` : '';
+    const text = [ended, report].filter(Boolean).join('\n\n') || 'The reviewer produced no report.';
+    const model = sourceController.resolveWorker(job.mode)?.label || job.mode;
+    const item = { id: `review-${deliveryId}`, type: 'agentMessage', phase: 'final_answer', text,
+      routeLabel: `${this.agentName(controller.agentId)}${model ? ' · ' + model : ''}`, localOnly: true, reviewReport: true, createdAt: Date.now() };
+    // In place: the bot may be running a new turn by now, which adds to the same list.
+    const directContext = source.directContext;
+    source.items.push(item);
+    sourceController.rememberDirect(source, { question: '/review' + (job.reviewFocus ? ' ' + job.reviewFocus : ''), answer: text });
+    source.agentDeliveries.push(deliveryId);
+    try { sourceController.save(); }
+    catch (error) {
+      source.items = source.items.filter(entry => entry !== item); source.directContext = directContext;
+      source.agentDeliveries = source.agentDeliveries.filter(id => id !== deliveryId);
+      throw error;
+    }
+    sourceController.changed();
   }
 
   // Bot messages about an assignment that ended without finishing (stopped, interrupted, failed) can never run: its chat
@@ -2165,6 +2275,9 @@ class Agents extends EventEmitter {
     // A sub-bot hears from the bot that made it and from its own sub-bots, and gets answers to its questions.
     const recipient = this.profile(target.agentId), sender = controller === this.primary ? 'main' : controller.agentId;
     if (recipient?.role === 'advisor') throw new Error(`${recipient.name} only answers ask_advisor and /advisor.`);
+    // The Reviewer hears nothing from the bots, so nothing biases its review, and sends nothing but its report.
+    if (recipient?.role === 'reviewer') throw new Error(`${recipient.name} takes no messages; use request_review.`);
+    if (this.profile(sender)?.role === 'reviewer') throw new Error('A reviewer sends no messages; give your review as your final answer.');
     // A worker talks only to its supervisor (sixth live run: one messaged Hub, which started a Hub turn).
     const senderProfile = this.profile(sender);
     if (senderProfile?.role === 'worker' && args.agentId !== (senderProfile.createdBy || 'main'))
@@ -2391,6 +2504,9 @@ class Agents extends EventEmitter {
 
   tool(controller, session, name, args, temporaryBatch = null) {
     if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Invalid agent arguments.');
+    // A reviewer reads the changes itself: no other bot's chat (agent_read_context), advisor, messages or settings.
+    if (this.profile(controller.agentId)?.role === 'reviewer' && !imageTools.NAMES.has(name))
+      throw new Error('A reviewer uses no agent tools; give your review as your final answer.');
     if (session.delegation?.cancelled && !session.delegation.delivered && !['agents_list', 'agent_models', 'agent_read_context'].includes(name)) throw new Error('This assignment was stopped. Wait for a new user request.');
     if (session.agentReplyCancelledActive && !['agents_list', 'agent_models', 'agent_read_context'].includes(name)) throw new Error('A cancelled result cannot start or change work. Wait for a new user request.');
     if (session.delegation && ['revising', 'revision-blocked'].includes(session.delegation.state) && !['agents_list', 'agent_models', 'agent_read_context', 'agent_stop'].includes(name)) throw new Error('Wait for the accepted assignment change before taking another action.');
@@ -2481,6 +2597,15 @@ class Agents extends EventEmitter {
     }
     if (name === 'agent_delegate' && Object.keys(args).every(key => ['agentId', 'task'].includes(key)))
       return this.delegate(controller, session, args.agentId, args.task);
+    // Only paths: Harness writes the review task, so the bot cannot steer its reviewer (review()).
+    if (name === 'request_review') {
+      if (Object.keys(args).some(key => key !== 'paths')) throw new Error('request_review takes only optional paths; Harness writes the review task.');
+      if (controller.isCoordinator()) throw new Error('Hub has no request_review; give the work to a bot with its Reviewer on.');
+      const role = this.profile(controller.agentId)?.role;
+      if (role) throw new Error(`A ${role} sub-bot has no Reviewer; report back to the bot that made you.`);
+      return this.review(controller, session, { by: 'supervisor', paths: args.paths ?? [] }).then(result => ({ ...result,
+        note: 'Accepted. The reviewer works on its own; finish your turn. Its report returns to you as a new turn.' }));
+    }
     if (name === 'agent_message' && Object.keys(args).every(key => ['agentId', 'messageId', 'text', 'kind', 'replyTo', 'jobId'].includes(key))) return this.sendMessage(controller, session, args);
     if (name === 'agent_artifact' && Object.keys(args).every(key => ['artifactId', 'path', 'expectedVersion'].includes(key))) return this.publishArtifact(controller, session, args);
     if (name === 'agent_revise' && Object.keys(args).every(key => ['jobId', 'expectedRevision', 'amendmentId', 'text'].includes(key))) return this.revise(controller, session, args);

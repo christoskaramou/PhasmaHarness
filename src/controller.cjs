@@ -466,6 +466,15 @@ class Controller extends EventEmitter {
     return this.data.settings.advisorModel !== 'off';
   }
 
+  // /review [focus] (2026-11-20, the user): this bot's Reviewer reviews the uncommitted changes; its report shows in this
+  // chat as a message, and the bot acts on it only when the user asks (Agents.review, Agents.deliverReview).
+  async requestReview(id, focus = '') {
+    const text = typeof focus === 'string' ? focus.trim() : '';
+    if (text.length > 1000) throw new Error('Keep the review focus under 1,000 characters.');
+    if (!this.agents) throw new Error('The Reviewer is unavailable here.');
+    return this.agents.review(this, this.session(id), { by: 'user', focus: text });
+  }
+
   // directContext: exchanges with other backends that the chat's next Codex turn quotes. It grew without end in chats
   // Codex never ran in (1 MB in the user's largest, 2026-11-12), all of which Codex would have been sent. The newest are
   // kept up to DIRECT_CONTEXT_CHARS (about 25,000 tokens), and always the newest one.
@@ -596,6 +605,13 @@ class Controller extends EventEmitter {
       if (!auto && !choice) throw new Error('Unknown workers model.');
       if (choice && !this.available(choice)) throw new Error('This workers model is unavailable on your account.');
       next.workerModel = values.workerModel;
+    }
+    // Reviewer (2026-11-20, the user): off or a model the user picked; it has no Auto.
+    if (values.reviewerModel !== undefined) {
+      const choice = values.reviewerModel === 'off' ? null : this.resolveWorker(values.reviewerModel);
+      if (values.reviewerModel !== 'off' && !choice) throw new Error('Unknown reviewer model.');
+      if (choice && !this.available(choice)) throw new Error('This reviewer model is unavailable on your account.');
+      next.reviewerModel = values.reviewerModel;
     }
     if (values.chatScanModel !== undefined) {
       const choice = this.chatScanChoices().find(p => p.id === values.chatScanModel);

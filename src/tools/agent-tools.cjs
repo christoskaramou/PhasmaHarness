@@ -35,6 +35,12 @@ const TOOLS = [
       tried: { type: 'string', minLength: 1, maxLength: 800, description: 'What you tried and how each failed.' },
       error: { type: 'string', minLength: 1, maxLength: 700, description: 'The exact error or blocker.' },
     }, required: ['goal', 'tried', 'error'], additionalProperties: false } },
+  // The user's Reviewer (2026-11-20): no text field, so the bot cannot steer it; paths are checked in Agents.review (at most 20).
+  { name: 'request_review', description: 'Ask this bot\'s Reviewer sub-bot for an independent review of the uncommitted changes in ' +
+    'this workspace, including untracked files. Harness writes the review task from the user\'s request and the changes, so you cannot ' +
+    'add text; optional paths (relative to the workspace, at most 20) limit it. The report returns to you as a new turn, so finish your ' +
+    'turn after calling it. Only when the user\'s Reviewer setting for this bot is on.',
+    inputSchema: { type: 'object', properties: { paths: { type: 'array', items: { type: 'string', minLength: 1, maxLength: 500 } } }, additionalProperties: false } },
   ...require('./image-tools.cjs').TOOLS,
 ];
 module.exports = { TOOLS };

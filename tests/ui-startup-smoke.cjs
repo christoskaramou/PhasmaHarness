@@ -1622,7 +1622,7 @@ app.whenReady().then(async () => {
   await until(() => controller.data.settings.advisorModel === 'chat', 'and back to one higher');
   // Layout (2026-11-20, the user's screenshot: the tick floated above its name and Effort wrapped to its own line): the tick
   // sits beside its name, and the model and effort pickers share one row, in the Secondary model row's columns.
-  const roleLayout = prefix => window.webContents.executeJavaScript(`['advisor', 'workers'].map(key => {
+  const roleLayout = prefix => window.webContents.executeJavaScript(`['advisor', 'workers', 'reviewer'].map(key => {
     const box = id => document.querySelector('#${prefix}-' + id).getBoundingClientRect();
     const tick = box(key + '-on'), name = document.querySelector('#${prefix}-' + key + '-on').closest('label').getBoundingClientRect();
     const model = box(key), effort = box(key + '-effort'), secondary = box('secondary'), secondaryEffort = box('secondary-effort');
@@ -1630,13 +1630,13 @@ app.whenReady().then(async () => {
     return { tickBesideName: tick.width < 30 && near(tick.top + tick.height / 2, name.top + name.height / 2), oneRow: near(model.top, effort.top),
       columns: near(model.left, secondary.left) && near(model.width, secondary.width) && near(effort.left, secondaryEffort.left) };
   })`);
-  const roleLayoutOk = [true, true].map(() => ({ tickBesideName: true, oneRow: true, columns: true }));
+  const roleLayoutOk = [true, true, true].map(() => ({ tickBesideName: true, oneRow: true, columns: true }));
   // Checked and captured in light and dark (the user's screenshot was dark), then the theme is put back.
   const roleLayoutThemes = async (prefix, file) => {
-    await window.webContents.executeJavaScript(`document.querySelector('#${prefix}-advisor').scrollIntoView({ block: 'center' }); window.roleTheme = document.documentElement.dataset.appearance; true`);
+    await window.webContents.executeJavaScript(`document.querySelector('#${prefix}-workers').scrollIntoView({ block: 'center' }); window.roleTheme = document.documentElement.dataset.appearance; true`);
     for (const theme of ['light', 'dark']) {
       await window.webContents.executeJavaScript(`document.documentElement.dataset.appearance = '${theme}'; new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 100))))`);
-      assert.deepEqual(await roleLayout(prefix), roleLayoutOk, `${prefix} Advisor and Workers rows in ${theme}`);
+      assert.deepEqual(await roleLayout(prefix), roleLayoutOk, `${prefix} Advisor, Workers and Reviewer rows in ${theme}`);
       fs.writeFileSync(path.resolve(__dirname, `../.scratch/${file}${theme === 'dark' ? '-dark' : ''}.png`), (await window.webContents.capturePage()).toPNG());
     }
     await window.webContents.executeJavaScript("if (window.roleTheme) document.documentElement.dataset.appearance = window.roleTheme; else delete document.documentElement.dataset.appearance; delete window.roleTheme; true");
@@ -1655,6 +1655,25 @@ app.whenReady().then(async () => {
   await until(() => controller.data.settings.advisorModel === 'off', 'the Advisor tick turns it off');
   await tick('#hub-advisor-on', true);
   await until(() => controller.data.settings.advisorModel === 'chat', 'and back on at Auto');
+  // Reviewer (2026-11-20, the user): off by default and no Auto; ticked, it waits for a model the user picks.
+  const reviewerRow = () => window.webContents.executeJavaScript(`(() => { const select = document.querySelector('#hub-reviewer');
+    return [document.querySelector('#hub-reviewer-on').checked, select.disabled, document.querySelector('#hub-reviewer-effort').disabled, select.selectedOptions[0]?.textContent]; })()`);
+  assert.deepEqual((await reviewerRow()).slice(0, 3), [false, true, true], 'Reviewer: unticked by default, both pickers disabled');
+  assert.equal(await window.webContents.executeJavaScript("[...document.querySelector('#hub-reviewer').options].some(option => /auto/i.test(option.textContent))"), false, 'and no Auto');
+  await tick('#hub-reviewer-on', true);
+  assert.deepEqual((await reviewerRow()), [true, false, true, 'Choose a model'], 'ticked with no model yet: Choose a model, the tick stays');
+  assert.equal(controller.data.settings.reviewerModel || 'off', 'off', 'and it stays off until a model is picked');
+  const reviewerPick = await window.webContents.executeJavaScript(`(() => {
+    const option = [...document.querySelector('#hub-reviewer').options].find(option => option.value && !option.disabled);
+    return [option.value, presetGroups(state.presets).find(group => group.key === option.value).variants];
+  })()`);
+  await pick('#hub-reviewer', reviewerPick[0]);
+  const reviewerSaved = (reviewerPick[1].find(p => p.effort === 'high') || reviewerPick[1][0]).id;
+  await until(() => controller.data.settings.reviewerModel === reviewerSaved, 'picking a Reviewer model saves it, at high effort when offered');
+  assert.equal((await reviewerRow())[0], true);
+  await tick('#hub-reviewer-on', false);
+  await until(() => controller.data.settings.reviewerModel === 'off', 'unticking the Reviewer saves Off');
+  assert.equal(await window.webContents.executeJavaScript("document.querySelector('#hub-reviewer').value"), reviewerPick[0], 'unticked, it keeps the last model');
   await pick('#hub-effort-cap', 'medium');
   await until(() => controller.data.settings.effortCap === 'medium', 'Hub’s effort cap saves');
   await pick('#hub-router', 'off');
@@ -2486,7 +2505,7 @@ app.whenReady().then(async () => {
   const mainConversationId = agents.conversation(controller).id;
   oldConversation.items.push({ id: 'clear-history', type: 'agentMessage', text: 'Earlier agent history.' });
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
-  const commandNames = ['/help', '/compact', '/clear', '/stop', '/agents', '/settings', '/context', '/model', '/effort', '/access', '/switch', '/export', '/status', '/suggestion', '/wiki', '/tldr', '/advisor', '/goal'];
+  const commandNames = ['/help', '/compact', '/clear', '/stop', '/agents', '/settings', '/context', '/model', '/effort', '/access', '/switch', '/export', '/status', '/suggestion', '/wiki', '/tldr', '/advisor', '/goal', '/review'];
   const sentBeforeCommands = sent.length;
   let previewsBeforeCommands = previews;
   const typeCommand = text => window.webContents.executeJavaScript(`(() => {

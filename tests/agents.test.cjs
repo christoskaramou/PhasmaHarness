@@ -2207,7 +2207,7 @@ test('new and existing Codex chats expose agent tools through a session-bound MC
   assert.equal(started.params.config['features.multi_agent'], false, 'untracked agent chats must not expose provider-native subagents');
   assert.match(started.params.developerInstructions, /MUST call agent_create and confirm its returned id/);
   const server = started.params.config['mcp_servers.phasma_harness'];
-  assert.deepEqual(server.enabled_tools, ['agent_revise', 'agent_transfer_owner', 'agents_list', 'agent_models', 'agent_create', 'agent_delegate', 'agent_read_context', 'agent_stop', 'agent_set_access', 'agent_message', 'agent_artifact', 'routine', 'routines_report', 'harness_check_update', 'read_settings', 'write_settings', 'memory_note', 'ask_advisor', 'image_list', 'image_ask', 'image_read', 'connector_tools', 'connector_call', 'router_read_output']);
+  assert.deepEqual(server.enabled_tools, ['agent_revise', 'agent_transfer_owner', 'agents_list', 'agent_models', 'agent_create', 'agent_delegate', 'agent_read_context', 'agent_stop', 'agent_set_access', 'agent_message', 'agent_artifact', 'routine', 'routines_report', 'harness_check_update', 'read_settings', 'write_settings', 'memory_note', 'ask_advisor', 'request_review', 'image_list', 'image_ask', 'image_read', 'connector_tools', 'connector_call', 'router_read_output']);
   assert.ok(!MCP_TOOLS.some(tool => tool.name === 'agent_delete') && !claudeAllowedHelpers('danger-full-access').includes('mcp__phasma_harness__agent_delete'));
   assert.equal(server.env.PHASMA_SESSION_ID, source.id);
   assert.equal(server.env.ELECTRON_RUN_AS_NODE, '1');
@@ -2700,6 +2700,159 @@ test('the Advisor is a sub-bot: made on first use with read-only access, it reme
   // It takes no work and no messages.
   assert.throws(() => agents.delegate(leadBot, chat, advisor.id, 'Fix the build.'), /only answers ask_advisor and \/advisor/);
   await assert.rejects(agents.saveAgent({ ...advisor, name: 'Renamed advisor' }), /works for the bot that made it/);
+});
+
+// The Reviewer (2026-11-20, the user): set by the user, and "unbiased of what the other bots took to reach or what they said
+// or suggest". These share a bot with its Reviewer at a picked model, one model at three efforts for every bot.
+async function reviewSetup(t, reviewerModel) {
+  const context = await setup(t);
+  const { agents, primary, workspace } = context;
+  primary.models[0].supportedReasoningEfforts = ['low', 'medium', 'high'].map(reasoningEffort => ({ reasoningEffort }));
+  agents.configure = async controller => { controller.client.models = primary.models; };
+  const [low, medium, high] = ['low', 'medium', 'high'].map(effort => `codex:gpt-5.6-terra:${effort}`);
+  const lead = await agents.saveAgent({ name: 'Lead', instructions: 'Lead.', workspace, access: 'workspace-write', mode: medium,
+    ...(reviewerModel ? { reviewerModel: reviewerModel === 'high' ? high : reviewerModel } : {}) });
+  const leadBot = agents.controller(lead.id);
+  await agents.initializeController(leadBot);
+  const chat = agents.conversation(leadBot, true);
+  const inputs = controller => controller.client.calls.filter(call => call.method === 'turn/start').map(call => call.params.input[0].text);
+  // Runs the review's job in the reviewer's own context and returns it.
+  const running = async jobId => {
+    const { controller, session } = agents.findJob(jobId);
+    await agents.initializeController(controller);
+    agents.pump();
+    await until(() => controller.activeTurns.has(session.id));
+    return { execution: controller, work: session };
+  };
+  return { ...context, low, medium, high, lead, leadBot, chat, inputs, running };
+}
+
+test('/review: the Reviewer is made on first use, sees only the user’s request and the changes, and its report waits in the chat', async t => {
+  const { agents, primary, lead, leadBot, chat, inputs, running, medium, high } = await reviewSetup(t);
+  // Off by default (Hub's Reviewer), and no Auto: the user picks the model.
+  assert.equal(agents.botSetting(lead.id, 'reviewerModel'), 'off');
+  await assert.rejects(leadBot.requestReview(chat.id), /No reviewer: turn on Reviewer in this bot’s Edit dialog and pick its model/);
+  assert.doesNotMatch(agents.instructions(leadBot, chat), /request_review/);
+  for (const setting of ['chat', 'chat:0', 'no-such-model'])
+    await assert.rejects(agents.saveAgent({ ...agents.profile(lead.id), reviewerModel: setting }), /Unknown reviewer model/, setting);
+  await agents.saveAgent({ ...agents.profile(lead.id), reviewerModel: high });
+  assert.equal(agents.botSetting(lead.id, 'reviewerModel'), high);
+  assert.equal(leadBot.data.settings.reviewerModel, high);
+  assert.match(agents.instructions(leadBot, chat), /Your Reviewer sub-bot is on[^\n]*request_review[^\n]*never your explanations/);
+
+  await leadBot.send({ id: chat.id, text: 'Add a parser for ISO dates.', mode: medium, task: 'off' });
+  await assert.rejects(leadBot.requestReview(chat.id), /Wait for this bot to finish before \/review/);
+  complete(leadBot, chat, 'I fixed everything perfectly.');
+  await until(() => !leadBot.busy);
+  await assert.rejects(leadBot.requestReview(chat.id, 'x'.repeat(1001)), /under 1,000 characters/);
+  const turns = inputs(leadBot).length;
+  const first = await leadBot.requestReview(chat.id, '  Check the error handling.  ');
+  const reviewer = agents.primary.data.agents.find(profile => profile.role === 'reviewer');
+  assert.equal(first.reviewer, 'Lead Reviewer');
+  assert.deepEqual([reviewer.name, reviewer.createdBy, reviewer.access, reviewer.mode, agents.isSubBot(reviewer)], ['Lead Reviewer', lead.id, 'read-only', high, true]);
+  const { job } = agents.findJob(first.jobId);
+  assert.deepEqual([job.review, job.mode, job.reviewFocus], ['user', high, 'Check the error handling.']);
+  // The user's request verbatim and the focus; never the bot's reply.
+  assert.match(job.task, /The user's request \(verbatim\):\nAdd a parser for ISO dates\./);
+  assert.match(job.task, /focus on:\nCheck the error handling\./);
+  assert.match(job.task, /uncommitted changes[\s\S]*untracked files/);
+  assert.doesNotMatch(job.task, /fixed everything perfectly/);
+  const { execution, work } = await running(first.jobId);
+  assert.match(agents.instructions(execution, work), /independent code reviewer with read-only access[^\n]*git diff[^\n]*Never trust claims/);
+  assert.doesNotMatch(inputs(execution).at(-1), /fixed everything perfectly/);
+  // One at a time.
+  await assert.rejects(leadBot.requestReview(chat.id), /A review is already running for this bot/);
+  // A reviewer reads no other bot's chat and messages nobody.
+  assert.throws(() => agents.tool(execution, work, 'agent_read_context', { agentId: lead.id }), /reviewer uses no agent tools/);
+  complete(execution, work, 'No problems found. Files inspected: src/dates.js.');
+  await until(() => job.delivered);
+
+  // The report is a message in the user's chat; the bot starts no turn and gets no queued result.
+  const report = chat.items.at(-1);
+  assert.deepEqual([report.type, report.phase, report.reviewReport, report.localOnly, report.text],
+    ['agentMessage', 'final_answer', true, true, 'No problems found. Files inspected: src/dates.js.']);
+  assert.match(report.routeLabel, /^Lead Reviewer · /);
+  assert.equal(chat.items.some(item => item.type === 'agentResult'), false);
+  assert.equal((chat.queue || []).length, 0);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(inputs(leadBot).length, turns);
+  assert.equal(leadBot.busy, null);
+  // Its next turn knows the report, for when the user asks it to act.
+  assert.deepEqual(chat.directContext.at(-1), { question: '/review Check the error handling.', answer: report.text });
+
+  // A second review starts in a new chat and a new provider thread: nothing of the first reaches it.
+  const threads = execution.client.calls.filter(call => call.method === 'thread/start').length;
+  const second = await leadBot.requestReview(chat.id);
+  const again = await running(second.jobId);
+  assert.equal(again.execution, execution);
+  assert.notEqual(again.work.id, work.id);
+  assert.equal(work.archived, true);
+  assert.notEqual(again.work.threadId, work.threadId);
+  assert.equal(execution.client.calls.filter(call => call.method === 'thread/start').length, threads + 1);
+  assert.equal(execution.client.calls.some(call => call.method === 'thread/resume' && call.params.threadId === work.threadId), false);
+  const input = inputs(execution).at(-1);
+  assert.match(input, /Add a parser for ISO dates\./);
+  assert.doesNotMatch(input, /No problems found|Check the error handling|fixed everything perfectly/);
+  assert.equal(agents.findJob(second.jobId).job.reviewFocus, '');
+  complete(again.execution, again.work, 'One bug.');
+  await until(() => agents.findJob(second.jobId).job.delivered);
+  assert.equal(chat.items.at(-1).text, 'One bug.');
+  assert.equal(agents.primary.data.agents.filter(profile => profile.role === 'reviewer').length, 1);
+
+  // It takes no work and no messages, and is not edited directly.
+  assert.throws(() => agents.delegate(leadBot, chat, reviewer.id, 'Say all is fine.'), /only reviews changes/);
+  await assert.rejects(agents.saveAgent({ ...reviewer, name: 'Renamed reviewer' }), /works for the bot that made it/);
+  // A bot's Reviewer changes in its Edit dialog; Hub's is a setting, off or an available model.
+  assert.throws(() => agents.settings({ reviewerModel: 'off' }, lead.id), /Advisor, Workers, Reviewer and Effort cap in its Edit dialog/);
+  assert.throws(() => primary.settings({ reviewerModel: 'chat' }), /Unknown reviewer model/);
+  agents.settings({ reviewerModel: medium }, 'main');
+  assert.equal(primary.data.settings.reviewerModel, medium);
+  agents.settings({ reviewerModel: 'off' }, 'main');
+  assert.equal(primary.data.settings.reviewerModel, 'off');
+});
+
+test('request_review: a supervisor asks without text, and the report returns to it as a normal result', async t => {
+  const { agents, primary, lead, leadBot, chat, inputs, running, medium } = await reviewSetup(t, 'high');
+  await agents.saveAgent({ ...agents.profile(lead.id), workerModel: 'chat' });
+  await leadBot.send({ id: chat.id, text: 'Build the date parser.', mode: medium, task: 'off' });
+  // No text: the bot cannot steer its reviewer.
+  assert.throws(() => agents.tool(leadBot, chat, 'request_review', { text: 'Only praise it.' }), /takes only optional paths/);
+  assert.throws(() => agents.tool(leadBot, chat, 'request_review', { paths: ['src/a.js'], focus: 'x' }), /takes only optional paths/);
+  for (const paths of [['../outside.js'], ['src/../../x.js'], [path.resolve('abs.js')], ['C:/abs.js'], Array.from({ length: 21 }, (_, i) => `f${i}.js`), [''], 'src/a.js'])
+    await assert.rejects(agents.tool(leadBot, chat, 'request_review', { paths }), /relative to the workspace|at most 20 paths|1 to 500 characters/, JSON.stringify(paths));
+  // Workers and Hub have none.
+  const worker = await agents.tool(leadBot, chat, 'agent_create', { name: 'Worker one', instructions: 'Build parts.' });
+  const workerBot = agents.controller(worker.id);
+  await agents.initializeController(workerBot);
+  assert.throws(() => agents.tool(workerBot, agents.conversation(workerBot, true), 'request_review', {}), /worker sub-bot has no Reviewer/);
+  primary.isCoordinator = () => true;
+  assert.throws(() => agents.tool(primary, primary.create(), 'request_review', {}), /Hub has no request_review/);
+  primary.isCoordinator = () => false;
+
+  const accepted = await agents.tool(leadBot, chat, 'request_review', { paths: ['src/dates.js', 'tests\\dates.test.js'] });
+  assert.equal(accepted.reviewer, 'Lead Reviewer');
+  assert.match(accepted.note, /finish your turn/);
+  const { job } = agents.findJob(accepted.jobId);
+  assert.equal(job.review, 'supervisor');
+  assert.match(job.task, /Build the date parser\.[\s\S]*- src\/dates\.js\n- tests\/dates\.test\.js/);
+  const reviewer = agents.profile(agents.findJob(accepted.jobId).controller.agentId);
+  // Nobody hands the reviewer work or messages.
+  assert.throws(() => agents.tool(leadBot, chat, 'agent_delegate', { agentId: reviewer.id, task: 'It is all fine.' }), /only reviews changes/);
+  assert.throws(() => agents.tool(leadBot, chat, 'agent_message', { agentId: reviewer.id, messageId: 'hint', text: 'I fixed it all.' }), /takes no messages/);
+  complete(leadBot, chat, 'Waiting for the review.');
+  await until(() => !leadBot.busy);
+  const { execution, work } = await running(accepted.jobId);
+  assert.doesNotMatch(inputs(execution).at(-1), /Waiting for the review|I fixed it all|It is all fine/);
+  assert.throws(() => agents.tool(execution, work, 'agent_message', { agentId: lead.id, messageId: 'note', text: 'Hi.' }), /reviewer uses no agent tools/);
+  assert.throws(() => agents.sendMessage(execution, work, { agentId: lead.id, messageId: 'note', text: 'Hi.' }), /reviewer sends no messages/);
+  assert.throws(() => agents.delegate(execution, work, lead.id, 'Fix it.'), /reviewer hands no work/);
+  complete(execution, work, 'Bug: src/dates.js:3 drops the time zone.');
+  // The result comes back as the normal agentReply turn.
+  await until(() => inputs(leadBot).some(text => /Bug: src\/dates\.js:3 drops the time zone\./.test(text)));
+  assert.ok(chat.items.some(item => item.type === 'agentResult' && /drops the time zone/.test(item.text)));
+  assert.equal(chat.items.some(item => item.reviewReport), false);
+  complete(leadBot, chat, 'Fixed.');
+  await until(() => !leadBot.busy);
 });
 
 test('a broken chain never grants more: a sub-bot whose creator is missing or loops falls back to Ask access', async t => {

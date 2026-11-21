@@ -1,7 +1,7 @@
 /** Shared by the runner and renderer so ownership and inheritance cannot diverge. */
 var HarnessAgentState = (() => {
   /** @typedef {'read-only'|'workspace-write'|'danger-full-access'} Access */
-  /** @typedef {{id:string, name?:string, createdBy?:string, temporaryBatch?:string, role?:'advisor'|'worker', workspace?:string, access?:Access, mode?:string, inheritWorkspace?:boolean, inheritAccess?:boolean, inheritMode?:boolean}} Profile */
+  /** @typedef {{id:string, name?:string, createdBy?:string, temporaryBatch?:string, role?:'advisor'|'worker'|'reviewer', workspace?:string, access?:Access, mode?:string, inheritWorkspace?:boolean, inheritAccess?:boolean, inheritMode?:boolean}} Profile */
   /** @typedef {{id:string, delegation?:{owner?:string, source?:string, delivered?:boolean}}} Chat */
   /** @typedef {{conversationId?:string, sessions:Chat[]}} Context */
   /** @typedef {{agents?:Profile[], agentStates?:Record<string, Context>, executionStates?:Record<string, Context>}} Fleet */
@@ -35,8 +35,8 @@ var HarnessAgentState = (() => {
 
   /** @param {Profile|null|undefined} profile */
   function isSubBot(profile) {
-    // An advisor sub-bot is one also when Hub made it (agent-roles.cjs): it takes no work and no messages.
-    return (!!profile?.createdBy && profile.createdBy !== 'main' && !profile.temporaryBatch) || profile?.role === 'advisor';
+    // An advisor or reviewer sub-bot is one also when Hub made it (agent-roles.cjs): it takes no work and no messages.
+    return (!!profile?.createdBy && profile.createdBy !== 'main' && !profile.temporaryBatch) || profile?.role === 'advisor' || profile?.role === 'reviewer';
   }
 
   /** @param {Profile} profile @param {keyof typeof INHERITED} key @param {Profile[]} profiles @param {string} mainWorkspace */

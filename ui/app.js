@@ -1183,7 +1183,9 @@ function editAgent(profile) {
   dialog.dataset.secondary = profile?.secondaryModel || 'inherit';
   dialog.dataset.advisor = profile?.advisorModel || 'inherit';
   dialog.dataset.workers = profile?.workerModel || 'inherit';
-  $('#agent-advisor').dataset.signature = ''; $('#agent-workers').dataset.signature = '';
+  dialog.dataset.reviewer = profile?.reviewerModel || 'inherit';
+  delete dialog.dataset.reviewerLast; delete dialog.dataset.reviewerChoosing;
+  $('#agent-advisor').dataset.signature = ''; $('#agent-workers').dataset.signature = ''; $('#agent-reviewer').dataset.signature = '';
   dialog.dataset.router = profile?.router || 'inherit';
   dialog.dataset.cap = profile?.effortCap || 'inherit';
   $('#agent-secondary').dataset.signature = '';
@@ -1223,7 +1225,7 @@ const CAP_LABELS = { low: 'Up to low', medium: 'Up to medium', high: 'Up to high
 // Up the creator chain: a creator's live state holds its resolved values; without one (a browser before the fleet state
 // arrives, a creator just deleted), its saved values, else its own creator's. Never the open chat's unless it is that
 // creator's. Unknown stays undefined: the option then reads just "Inherit".
-const SAVED_KEYS = { router: 'router', secondary: 'secondaryModel', advisor: 'advisorModel', workers: 'workerModel', cap: 'effortCap' };
+const SAVED_KEYS = { router: 'router', secondary: 'secondaryModel', advisor: 'advisorModel', workers: 'workerModel', reviewer: 'reviewerModel', cap: 'effortCap' };
 function inheritedSettings(dialog) {
   const profiles = state.agents || [];
   const result = {}, seen = new Set();
@@ -1232,7 +1234,7 @@ function inheritedSettings(dialog) {
     seen.add(id);
     const live = fleetState?.agentStates?.[id] || (selectedAgent === id ? state : null);
     const values = live ? { router: live.routerKind || 'secondary', secondary: live.secondaryId || 'off', advisor: live.settings?.advisorModel || 'chat',
-      workers: live.settings?.workerModel || 'off', cap: live.settings?.effortCap || 'high' }
+      workers: live.settings?.workerModel || 'off', reviewer: live.settings?.reviewerModel || 'off', cap: live.settings?.effortCap || 'high' }
       : Object.fromEntries(Object.entries(SAVED_KEYS).map(([key, saved]) => [key, profiles.find(agent => agent.id === id)?.[saved]]));
     for (const key of Object.keys(SAVED_KEYS)) result[key] ??= values[key];
     if (live || id === 'main') break;
@@ -1271,6 +1273,26 @@ function renderRoleRow(prefix, key, from, inheritOption) {
   select.disabled = !on.checked;
   effort.disabled = !on.checked || select.value === 'inherit';
 }
+// A bot's Reviewer (2026-11-20, the user): an independent sub-bot that reviews the uncommitted changes on /review or when
+// the bot asks. Off by default and no Auto: the user always picks its model, a worker model (presets). Hub's value is
+// the default for its bots (Inherit). Ticked with no model picked yet, it shows "Choose a model" and stays as saved until
+// one is picked (data-reviewer-choosing); unticked, it keeps the last model so ticking brings it back.
+const reviewerModel = id => !!id && !['off', 'inherit'].includes(id);
+const reviewerLabel = id => (state.presets || []).find(p => p.id === id)?.label || id;
+function renderReviewerRow(prefix, from, inheritOption) {
+  const d = $(`#${prefix}-dialog`).dataset, on = $(`#${prefix}-reviewer-on`), select = $(`#${prefix}-reviewer`), effort = $(`#${prefix}-reviewer-effort`);
+  const inheritedOn = reviewerModel(from?.reviewer);
+  on.checked = d.reviewer === 'inherit' && inheritedOn || reviewerModel(d.reviewer) || !!d.reviewerChoosing;
+  if (providersConnecting().active) { showConnecting(select); effort.disabled = true; return; }
+  // Unticked, the picker shows what ticking brings back.
+  const shown = reviewerModel(d.reviewer) ? d.reviewer : inheritedOn ? 'inherit' : d.reviewerLast || '';
+  const placeholder = new Option('Choose a model', '');
+  placeholder.disabled = true;
+  fillModelEffort(select, effort, state.presets || [], shown, [...(inheritedOn ? inheritOption(reviewerLabel(from.reviewer)) : []), ...(shown ? [] : [placeholder])]);
+  if (select.value === 'inherit') effort.replaceChildren(new Option('—', ''));
+  select.disabled = !on.checked;
+  if (!on.checked || select.value === 'inherit') effort.disabled = true;
+}
 function renderBotSettings(prefix) {
   const dialog = $(`#${prefix}-dialog`), d = dialog.dataset, inherit = prefix === 'agent';
   const from = inherit ? inheritedSettings(dialog) : null;
@@ -1288,6 +1310,7 @@ function renderBotSettings(prefix) {
   } else
     fillModelEffort(select, effort, state.chatScanPresets || [], d.secondary, [...inheritOption(secondaryLabel(from?.secondary)), new Option('Off', 'off')]);
   for (const key of Object.keys(ROLE_ROWS)) renderRoleRow(prefix, key, from, inheritOption);
+  renderReviewerRow(prefix, from, inheritOption);
   // Without a router, Auto effort runs the model's default effort; say why.
   const value = (key, inherited) => (d[key] === 'inherit' ? inherited : d[key]);
   const routerNow = value('router', from?.router), secondaryNow = value('secondary', from?.secondary);
@@ -1310,10 +1333,15 @@ for (const prefix of ['agent', 'hub']) {
   $(`#${prefix}-effort-cap`).onchange = () => { dialog.dataset.cap = $(`#${prefix}-effort-cap`).value; renderBotSettings(prefix); };
   for (const key of Object.keys(ROLE_ROWS)) {
     for (const picker of [`#${prefix}-${key}`, `#${prefix}-${key}-effort`]) {
-      $(picker).onchange = () => {
+      $(picker).onchange = event => {
         const select = $(`#${prefix}-${key}`), effort = $(`#${prefix}-${key}-effort`);
-        // Auto keeps the step picked beside it; switching to Auto from a model starts at the default step.
-        dialog.dataset[key] = select.value === 'chat' ? (roleStep(key, effort.value) ? effort.value : 'chat') : modelEffortChoice(select, effort, ROLE_ROWS[key].presets());
+        // Auto keeps the step picked beside it; switching to Auto from a model starts at the default step. A model just
+        // picked starts at the row's preferred effort when it offers it: the effort list beside it is still the old one,
+        // so it saved the model's lowest effort (found 2026-11-20).
+        const group = event.target === select && presetGroups(ROLE_ROWS[key].presets()).find(g => g.key === select.value);
+        dialog.dataset[key] = select.value === 'chat' ? (roleStep(key, effort.value) ? effort.value : 'chat')
+          : group ? (group.variants.find(p => p.effort === effort.dataset.preferred) || group.variants[0]).id
+          : modelEffortChoice(select, effort, ROLE_ROWS[key].presets());
         renderBotSettings(prefix);
       };
     }
@@ -1327,6 +1355,30 @@ for (const prefix of ['agent', 'hub']) {
       renderBotSettings(prefix);
     };
   }
+  for (const picker of [`#${prefix}-reviewer`, `#${prefix}-reviewer-effort`]) {
+    $(picker).onchange = event => {
+      const select = $(`#${prefix}-reviewer`), effort = $(`#${prefix}-reviewer-effort`);
+      // A model just picked starts at the preferred effort (high) when it offers it; the effort list beside it is the old model's.
+      const group = event.target === select && presetGroups(state.presets || []).find(g => g.key === select.value);
+      const choice = group ? (group.variants.find(p => p.effort === effort.dataset.preferred) || group.variants[0]).id
+        : modelEffortChoice(select, effort, state.presets || []);
+      if (choice) { dialog.dataset.reviewer = choice; delete dialog.dataset.reviewerChoosing; }
+      renderBotSettings(prefix);
+    };
+  }
+  // The Reviewer tick: off (remembering the model), or back to Inherit while the creator has one, else the last model,
+  // else "Choose a model" while the saved value stays as it is.
+  $(`#${prefix}-reviewer-on`).onchange = () => {
+    const d = dialog.dataset, from = prefix === 'agent' ? inheritedSettings(dialog) : null;
+    if (!$(`#${prefix}-reviewer-on`).checked) {
+      if (reviewerModel(d.reviewer)) d.reviewerLast = d.reviewer;
+      if (!d.reviewerChoosing || reviewerModel(d.reviewer)) d.reviewer = 'off';
+      delete d.reviewerChoosing;
+    } else if (reviewerModel(from?.reviewer)) d.reviewer = 'inherit';
+    else if (d.reviewerLast) d.reviewer = d.reviewerLast;
+    else d.reviewerChoosing = '1';
+    renderBotSettings(prefix);
+  };
   for (const picker of [`#${prefix}-secondary`, `#${prefix}-secondary-effort`]) {
     $(picker).onchange = () => {
       dialog.dataset.secondary = modelEffortChoice($(`#${prefix}-secondary`), $(`#${prefix}-secondary-effort`), state.chatScanPresets || []);
@@ -1421,7 +1473,9 @@ function editHub(profile) {
   $('#hub-dialog').dataset.secondary = main.secondaryId || 'off';
   $('#hub-dialog').dataset.advisor = main.settings.advisorModel || 'chat';
   $('#hub-dialog').dataset.workers = main.settings.workerModel || 'off';
-  $('#hub-advisor').dataset.signature = ''; $('#hub-workers').dataset.signature = '';
+  $('#hub-dialog').dataset.reviewer = main.settings.reviewerModel || 'off';
+  delete dialog.dataset.reviewerLast; delete dialog.dataset.reviewerChoosing;
+  $('#hub-advisor').dataset.signature = ''; $('#hub-workers').dataset.signature = ''; $('#hub-reviewer').dataset.signature = '';
   $('#hub-dialog').dataset.router = main.routerKind || 'secondary';
   $('#hub-dialog').dataset.cap = main.settings.effortCap || 'high';
   $('#hub-secondary').dataset.signature = '';
@@ -1438,18 +1492,18 @@ function editHub(profile) {
 const hubEditor = autosaveEditor($('#hub-dialog'), {
   read: () => ({ name: $('#hub-name').value, workspace: $('#hub-workspace').value.trim(), access: $('#hub-access').value,
     mode: $('#hub-dialog').dataset.mode, secondaryModel: $('#hub-dialog').dataset.secondary, advisorModel: $('#hub-dialog').dataset.advisor,
-    workerModel: $('#hub-dialog').dataset.workers, router: $('#hub-dialog').dataset.router,
+    workerModel: $('#hub-dialog').dataset.workers, reviewerModel: $('#hub-dialog').dataset.reviewer, router: $('#hub-dialog').dataset.router,
     effortCap: $('#hub-dialog').dataset.cap }),
   fill: saved => {
     $('#hub-name').value = saved.name;
     $('#hub-workspace').value = saved.workspace;
     $('#hub-access').value = saved.access;
     $('#hub-dialog').dataset.mode = saved.mode;
-    Object.assign($('#hub-dialog').dataset, { secondary: saved.secondaryModel, advisor: saved.advisorModel, workers: saved.workerModel, router: saved.router, cap: saved.effortCap });
+    Object.assign($('#hub-dialog').dataset, { secondary: saved.secondaryModel, advisor: saved.advisorModel, workers: saved.workerModel, reviewer: saved.reviewerModel, router: saved.router, cap: saved.effortCap });
     renderHubModels();
   },
   save: async (next, saved) => {
-    const changed = Object.fromEntries(['workspace', 'access', 'secondaryModel', 'advisorModel', 'workerModel', 'router', 'effortCap'].filter(key => next[key] !== saved[key]).map(key => [key, next[key]]));
+    const changed = Object.fromEntries(['workspace', 'access', 'secondaryModel', 'advisorModel', 'workerModel', 'reviewerModel', 'router', 'effortCap'].filter(key => next[key] !== saved[key]).map(key => [key, next[key]]));
     if (Object.keys(changed).length)
       applyState(await window.router.settings(changed, 'main'));
     // The model is checked only when it changed, so a rename still works while providers reconnect.
@@ -1493,6 +1547,7 @@ const agentForm = () => ({ id: $('#agent-dialog').dataset.agentId || undefined, 
   instructions: $('#agent-instructions').value, workspace: $('#agent-workspace').value, inheritWorkspace: $('#agent-inherit').checked,
   mode: $('#agent-dialog').dataset.mode, access: $('#agent-access').value, secondaryModel: $('#agent-dialog').dataset.secondary || 'inherit',
   advisorModel: $('#agent-dialog').dataset.advisor || 'inherit', workerModel: $('#agent-dialog').dataset.workers || 'inherit',
+  reviewerModel: $('#agent-dialog').dataset.reviewer || 'inherit',
   router: $('#agent-dialog').dataset.router || 'inherit', effortCap: $('#agent-dialog').dataset.cap || 'inherit' });
 const agentEditor = autosaveEditor($('#agent-dialog'), {
   read: agentForm,
@@ -1503,7 +1558,7 @@ const agentEditor = autosaveEditor($('#agent-dialog'), {
     $('#agent-inherit').checked = saved.inheritWorkspace;
     showInherit();
     $('#agent-dialog').dataset.mode = saved.mode;
-    Object.assign($('#agent-dialog').dataset, { secondary: saved.secondaryModel, advisor: saved.advisorModel, workers: saved.workerModel, router: saved.router, cap: saved.effortCap });
+    Object.assign($('#agent-dialog').dataset, { secondary: saved.secondaryModel, advisor: saved.advisorModel, workers: saved.workerModel, reviewer: saved.reviewerModel, router: saved.router, cap: saved.effortCap });
     renderAgentModels();
     $('#agent-access').value = saved.access;
   },
@@ -3645,6 +3700,11 @@ const COMMANDS = {
     if (text.toLowerCase() === 'clear') return clearGoal();
     await api.setGoal(selectedId, text);
     notify('Goal pinned; every message in this chat now includes it.');
+  } },
+  // Not awaited, like /wiki: the Reviewer's report appears in the chat later as a bot message (the runner posts it).
+  review: { args: 'optional', description: 'Ask the Reviewer for an independent review of the uncommitted changes: /review [focus]. It sees only your request and the changes.', run: text => {
+    if (!selectedId) throw new Error('Open a chat first.');
+    api.requestReview(selectedId, text || '').then(result => notify(`${result.reviewer} is reviewing the changes; its report will appear in this chat.`)).catch(notify);
   } },
 };
 // /goal clear and the Goal bar's ×.
