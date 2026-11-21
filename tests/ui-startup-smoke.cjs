@@ -3795,6 +3795,41 @@ app.whenReady().then(async () => {
   await motion('');
   window.webContents.debugger.detach();
   console.log(`Sending from a scrolled-up chat rolls to the newest message (${rolls.map(roll => `${roll.distance} px away: ${roll.ms} ms`).join(', ')})`);
+  phase = 'the chat keeps following its end until the user scrolls up';
+  // 2026-11-21, the user: "even if it is at the bottom, sending a new message will not auto scroll". Each render measured
+  // the end again, so content that grew after the last follow (here the last message, as when its image loads) left the
+  // chat a little above its end and nothing followed after that. A scroll up of any size must still stop it (2026-11-12).
+  const chatGap = `(() => { const chat = document.querySelector('#conversation'); return Math.round(chat.scrollHeight - chat.scrollTop - chat.clientHeight); })()`;
+  const settled = 'new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))';
+  const scrollChat = gap => window.webContents.executeJavaScript(`(async () => { const chat = document.querySelector('#conversation');
+    chat.scrollTo({ top: chat.scrollHeight - chat.clientHeight - ${gap}, behavior: 'instant' }); await ${settled}; return ${chatGap}; })()`);
+  const replyGap = async (id, busy = null) => {
+    controller.busy = busy;
+    ownerChat.items.push({ id, type: 'agentMessage', text: 'A reply arrives.', createdAt: Date.now() });
+    return window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + `); ${settled}.then(() => ${chatGap})`);
+  };
+  await window.webContents.executeJavaScript(`new Promise(resolve => setTimeout(resolve, 400))`);
+  assert.ok(await scrollChat(0) <= 1, 'the chat starts at its end');
+  // The last message grows after its follow: no render, no scroll event.
+  const grown = await window.webContents.executeJavaScript(`(async () => { const spacer = document.createElement('div'); spacer.id = 'follow-growth';
+    spacer.style.height = '200px'; [...document.querySelectorAll('#messages > div')].at(-1).append(spacer); await ${settled}; return ${chatGap}; })()`);
+  assert.ok(grown > 100, `the growth left the chat above its end: ${grown} px`);
+  const afterGrowth = await replyGap('follow-after-growth');
+  assert.ok(afterGrowth <= 1, `content that grew after the last follow (${grown} px) does not stop following: ${afterGrowth} px left`);
+  await window.webContents.executeJavaScript(`document.querySelector('#follow-growth').remove(); ${settled}`);
+  const withWorking = await replyGap('follow-working', ownerChat.id);
+  assert.ok(withWorking <= 1, `the reply and the Working line are followed: ${withWorking} px left`);
+  controller.busy = null;
+  await scrollChat(30);
+  const fromAbove = await replyGap('follow-from-above');
+  assert.ok(fromAbove > 30, `scrolled 30 px up, the chat stays where it is: ${fromAbove} px left`);
+  // Scrolling down a little is not the end; reaching the end follows again.
+  await scrollChat(10);
+  assert.ok(await replyGap('follow-not-end') > 10, 'scrolled back down but not to the end, it still stays');
+  await scrollChat(0);
+  assert.ok(await replyGap('follow-again') <= 1, 'back at the end, it follows again');
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
+  console.log(`The chat keeps following its end after late growth (${grown} px) and the Working line, and not after a 30 px scroll up`);
   phase = 'group chat controls';
   const groupMember = agents.primary.data.agents.find(bot => bot.name.includes(' '));
   assert.ok(groupMember, 'mention fixture includes a bot with spaces in its name');

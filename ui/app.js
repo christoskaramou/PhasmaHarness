@@ -1,20 +1,28 @@
 'use strict';
 const $ = selector => document.querySelector(selector);
-// Preserve bottom-following when the composer changes the conversation viewport.
+// The chat follows its end (new messages, composer resizes) from its very end until the user scrolls up, by any amount
+// (2026-11-12, the user: a 100 px margin snapped small scrolls back), and again once they are back at the end (2 px allows
+// sub-pixel rounding). Kept as what the user did, not measured on each render (2026-11-21, the user: at the end, a sent
+// message's reply was sometimes not followed): content that grew after the last follow, as a message's image loading, read
+// as scrolled up, and nothing followed after that. Growth fires no scroll event, so it never turns this off.
+let chatFollowing = true;
 {
   const conversation = $('#conversation');
   let height = conversation.clientHeight;
   let width = conversation.clientWidth;
-  let following = true;
+  let lastTop = conversation.scrollTop;
   conversation.addEventListener('scroll', () => {
+    const top = conversation.scrollTop;
     if (conversation.clientHeight === height && conversation.clientWidth === width) {
-      following = conversation.scrollHeight - conversation.scrollTop - height < 2;
+      if (conversation.scrollHeight - top - height < 2) chatFollowing = true;
+      else if (top < lastTop) chatFollowing = false;
     }
+    lastTop = top;
   }, { passive: true });
   new ResizeObserver(() => {
     height = conversation.clientHeight;
     width = conversation.clientWidth;
-    if (following) conversation.scrollTo({ top: conversation.scrollHeight, behavior: 'instant' });
+    if (chatFollowing) conversation.scrollTo({ top: conversation.scrollHeight, behavior: 'instant' });
   }).observe(conversation);
 }
 
@@ -3252,9 +3260,7 @@ function renderMessages(session) {
   const container = $('#conversation');
   // A different bot's chat opens at its end, whatever the old chat's scroll position was.
   const switched = renderedSession !== selectedId;
-  // Follows new content only from the very end (2 px allows sub-pixel rounding); a 100 px margin snapped small scrolls back (2026-11-12, the user).
-  const atBottom = switched || container.scrollHeight - container.scrollTop - container.clientHeight < 2;
-  if (switched) { $('#messages').replaceChildren(); messageNodes.clear(); renderedSession = selectedId; }
+  if (switched) { chatFollowing = true; $('#messages').replaceChildren(); messageNodes.clear(); renderedSession = selectedId; }
   const ids = new Set();
   const chats = chatSessions(session);
   const entries = chats.flatMap(chat => {
@@ -3474,7 +3480,7 @@ function renderMessages(session) {
   for (const [id, entry] of messageNodes) if (!ids.has(id)) { entry.node.remove(); entry.routeNode?.remove(); messageNodes.delete(id); }
   // During a send roll the roll follows the end itself; a smooth scroll started here would take over its frames.
   // Instant: the chat's CSS smooth scrolling would animate a scrollTop assignment.
-  if (atBottom && !rollingToEnd) requestAnimationFrame(() => container.scrollTo({ top: container.scrollHeight, behavior: 'instant' }));
+  if (chatFollowing && !rollingToEnd) requestAnimationFrame(() => container.scrollTo({ top: container.scrollHeight, behavior: 'instant' }));
 }
 
 async function selectSession(id) {
@@ -3985,8 +3991,10 @@ $('#composer').addEventListener('submit', async event => {
 const SEND_SCROLL_MS = 300;
 function scrollChatToEnd() {
   const chat = $('#conversation');
+  // At the end it follows again, even when a message lands before the scroll event says so.
   if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
     chat.scrollTo({ top: chat.scrollHeight, behavior: 'instant' });
+    chatFollowing = true;
     return;
   }
 
@@ -4002,8 +4010,10 @@ function scrollChatToEnd() {
     chat.scrollTo({ top: start + (chat.scrollHeight - chat.clientHeight - start) * eased, behavior: 'instant' });
     if (t < 1)
       requestAnimationFrame(step);
-    else
+    else {
       rollingToEnd = false;
+      chatFollowing = true;
+    }
   };
   requestAnimationFrame(step);
 }
