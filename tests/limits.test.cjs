@@ -114,19 +114,31 @@ test('Claude CLI/SDK and opaque model allowance windows remain explicit, with un
     seven_day_oauth_apps: { utilization: 12 },
     model_scoped: [{ display_name: 'Fable', utilization: 94 }, { display_name: 'Opus', utilization: 96 }],
   } }, 'account');
-  assert.match(limits.backgroundGuard('claude-cli', 90, 'claude-sonnet-5', 'account').reason, /Fable.*model scope is unavailable/);
+  // 2026-11-22, the user: a full Fable week paused bots running on Opus. A window named for a family limits only that family.
+  assert.equal(limits.backgroundGuard('claude-cli', 90, 'claude-sonnet-5', 'account'), null);
+  assert.match(limits.backgroundGuard('claude-cli', 90, 'claude-fable-5-2', 'account').reason, /Claude Code Fable weekly reported 94%/);
+  assert.doesNotMatch(limits.backgroundGuard('claude-cli', 90, 'claude-fable-5-2', 'account').reason, /model scope is unavailable/);
   assert.match(limits.backgroundGuard('claude-cli', 90, 'claude-opus-5', 'account').reason, /Opus/);
+  limits.setUsage('claude-cli', { rate_limits_available: true, rate_limits: {
+    model_scoped: [{ display_name: 'Fable', utilization: 100 }, { display_name: 'Claude Sonnet 4.5', utilization: 100 }],
+  } }, 'account');
+  assert.equal(limits.backgroundGuard('claude-cli', 100, 'claude-opus-5-5', 'account'), null, 'Opus runs while Fable and Sonnet are full');
+  assert.match(limits.backgroundGuard('claude-cli', 100, 'claude-sonnet-5-5', 'account').reason, /Sonnet 4\.5 weekly/);
+  limits.setUsage('claude-cli', { rate_limits_available: true, rate_limits: {
+    model_scoped: [{ display_name: 'Opus', utilization: 96 }, { display_name: 'Fable', utilization: 94 }],
+  } }, 'account');
   limits.setUsage('claude-cli', { rate_limits_available: true, rate_limits: {
     model_scoped: [{ display_name: 'Opus', utilization: 96 }, { display_name: 'Fable', utilization: 'unknown' }],
   } }, 'account');
-  assert.match(limits.backgroundGuard('claude-cli', 90, 'claude-sonnet-5', 'account').reason, /Fable/);
+  assert.match(limits.backgroundGuard('claude-cli', 90, 'claude-fable-5-2', 'account').reason, /Fable/, 'an incomplete report keeps the last Fable window');
   limits.setUsage('claude-cli', { rate_limits_available: true, rate_limits: {
     model_scoped: [{ display_name: 'Opus', utilization: 96 }],
   } }, 'other-account');
-  assert.match(limits.backgroundGuard('claude-cli', 90, 'claude-sonnet-5', 'account').reason, /Fable/);
+  assert.match(limits.backgroundGuard('claude-cli', 90, 'claude-fable-5-2', 'account').reason, /Fable/);
   limits.setUsage('claude-cli', { rate_limits_available: true, rate_limits: {
     model_scoped: [{ display_name: 'Opus', utilization: 96 }],
   } }, 'account');
+  assert.equal(limits.backgroundGuard('claude-cli', 90, 'claude-fable-5-2', 'account'), null);
   assert.equal(limits.backgroundGuard('claude-cli', 90, 'claude-sonnet-5', 'account'), null);
   assert.match(limits.backgroundGuard('claude-cli', 90, 'claude-opus-5', 'account').reason, /Opus/);
   limits.setUsage('claude-cli', { rate_limits_available: true, rate_limits: { model_scoped: [] } }, 'account');
@@ -135,6 +147,8 @@ test('Claude CLI/SDK and opaque model allowance windows remain explicit, with un
     model_scoped: [{ display_name: 'Opus' + ' '.repeat(100) + 'unmapped', utilization: 96 }],
   } }, 'account');
   assert.match(limits.backgroundGuard('claude-cli', 90, 'claude-sonnet-5', 'account').reason, /model scope is unavailable/);
+  limits.setUsage('claude-cli', { rate_limits_available: true, rate_limits: { model_scoped: [{ display_name: 'Claude', utilization: 96 }] } }, 'account');
+  assert.match(limits.backgroundGuard('claude-cli', 90, 'claude-opus-5', 'account').reason, /model scope is unavailable/, 'a window named only Claude names no family');
 });
 
 test('Cursor turns ending with its plan-limit line fail with a limit', async () => {

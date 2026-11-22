@@ -33,6 +33,12 @@ function codexWindowReset(snapshot, now = Date.now()) {
 }
 
 const covers = (entry, model) => !entry.family || String(model || '').toLowerCase().includes(entry.family);
+// A model-scoped window named for one family ("Fable", "Opus", "Claude Sonnet 4.5") limits only models whose id has that
+// name; any other name still protects all Claude background work (2026-11-22, the user: a full Fable week paused Opus bots).
+function scopedFamily(name) {
+  const family = String(name).trim().toLowerCase().match(/^(?:claude\s+)?([a-z]+)(?:\s+\d+(?:\.\d+)*)?$/)?.[1];
+  return family && family !== 'claude' ? family : null;
+}
 
 class ProviderLimits {
   constructor(store = {}, now = () => Date.now(), quotas = {}) {
@@ -96,8 +102,7 @@ class ProviderLimits {
           for (const window of value.rate_limits.model_scoped) {
             if (typeof window?.display_name !== 'string' || !window.display_name.trim()) { complete = false; continue; }
             const name = window.display_name.slice(0, 100);
-            const normalized = window.display_name.trim().toLowerCase();
-            const family = ['opus', 'sonnet'].includes(normalized) ? normalized : null;
+            const family = scopedFamily(window.display_name);
             const key = 'scoped:' + createHash('sha256').update(window.display_name).digest('hex');
             complete = add(key, window, name + ' weekly', family, !family) && complete;
           }
