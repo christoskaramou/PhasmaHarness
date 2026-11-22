@@ -21,7 +21,7 @@ const REMOTE_METHODS = new Set([
   'deleteSession', 'preview', 'send', 'stop', 'reviseJob', 'reconcileJob', 'jobBudget',
   'stopArtifactRun', 'artifactAction', 'artifactDownload', 'stopDownloads', 'appInfo', 'runnerInfo', 'updateStatus', 'queuedMessage', 'backgroundTask', 'replySuggestion', 'suggestWiki', 'summarizeLast', 'adviseChat', 'setGoal', 'requestReview', 'compact',
   'clearConversation', 'acknowledgeTask', 'applyCopy', 'undoComparison', 'undoRule', 'dreamNow', 'dismissSkillNotice', 'proposeWiki', 'answer', 'readDocument', 'answerConfirmation',
-  'providerConnection', 'renewModels', 'providerModels',
+  'providerConnection', 'renewModels', 'providerModels', 'providerUsage',
   'connectorList', 'connectorSave', 'connectorAction', 'openFile', 'linkImage', 'routineList',
 ]);
 

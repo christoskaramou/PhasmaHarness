@@ -63,6 +63,21 @@ function parseStatus(output) {
   return { installed: true, loggedIn: true, email: /@/.test(identity) ? identity : null, identity };
 }
 
+function parseAbout(output) {
+  const text = String(output || '').replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+  let tier = null, email = null, version = null;
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^\s*(Subscription Tier|User Email|CLI Version)(?:\s*:\s*|\t+|\s{2,})(.+?)\s*$/i.exec(line);
+    if (!match) continue;
+    const key = match[1].toLowerCase(), value = match[2].trim();
+    if (!value) continue;
+    if (key === 'subscription tier') tier = value;
+    else if (key === 'user email') email = value;
+    else if (key === 'cli version') version = value;
+  }
+  return { tier, email, version };
+}
+
 // A finished turn leaves its Cursor process running for the conversation's next turn, which then skips spawn,
 // initialize, session/load and model setup (about 6 s, measured 2026-10-25). An idle process tree is about 270 MB, so at
 // most three stay warm across all bots (every bot has its own CursorCLI), each for 10 minutes. Oldest first.
@@ -139,6 +154,9 @@ class CursorCLI {
     try { this.status = parseStatus(await this.command(['status'])); }
     catch (e) { this.status = { installed: e.code !== 'ENOENT', loggedIn: false, error: e.message }; }
     return this.status;
+  }
+  async readUsage() {
+    return parseAbout(await this.command(['about'], 10000));
   }
   async login() {
     if (this.loginPending) throw new Error('Cursor login is already running.');
@@ -440,4 +458,4 @@ class CursorCLI {
   }
   close() { this.closeWarm(); for (const c of this.children) stop(c); }
 }
-module.exports = { CursorCLI, launchCursor, parseStatus, compactDiff, toolOutput };
+module.exports = { CursorCLI, launchCursor, parseStatus, parseAbout, compactDiff, toolOutput };

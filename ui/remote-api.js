@@ -167,7 +167,7 @@
     'browseWorkspace', 'settings', 'create', 'permissions', 'load', 'image', 'stepDetail', 'rename',
     'archive', 'deleteSession', 'preview', 'send', 'stop', 'reviseJob', 'reconcileJob', 'jobBudget',
     'stopArtifactRun', 'artifactAction', 'stopDownloads', 'appInfo', 'runnerInfo', 'updateStatus', 'queuedMessage', 'backgroundTask', 'replySuggestion', 'suggestWiki', 'summarizeLast', 'adviseChat', 'setGoal', 'requestReview', 'compact',
-    'clearConversation', 'acknowledgeTask', 'applyCopy', 'undoComparison', 'undoRule', 'dreamNow', 'dismissSkillNotice', 'proposeWiki', 'answer', 'answerConfirmation', 'renewModels', 'providerModels', 'openFile', 'linkImage', 'routineList'])
+    'clearConversation', 'acknowledgeTask', 'applyCopy', 'undoComparison', 'undoRule', 'dreamNow', 'dismissSkillNotice', 'proposeWiki', 'answer', 'answerConfirmation', 'renewModels', 'providerModels', 'providerUsage', 'openFile', 'linkImage', 'routineList'])
     api[method] = (...args) => call(method, args);
   for (const method of ['nativeProviderAction',
     'runnerAutostart', 'quitRunner', 'exportConversation', 'cursorLogin',

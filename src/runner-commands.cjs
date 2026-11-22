@@ -27,6 +27,7 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
   handle('connectorAction', (id, action) => runner.connectors.action(id, action));
   handle('providerConnection', (id, action) => require('./provider-connection.cjs').providerConnection(runner, id, action));
   handle('renewModels', () => require('./provider-connection.cjs').renewModels(runner));
+  handle('providerUsage', filter => require('./provider-usage.cjs').readProviderUsage(runner, { filter }));
   handle('providerModels', async id => {
     if (controller.nativeCLIs.has(id)) {
       const backend = controller.nativeCLIs.get(id);

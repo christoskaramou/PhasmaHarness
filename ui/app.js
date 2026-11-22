@@ -3656,6 +3656,7 @@ const COMMANDS = {
   agents: { description: 'Open the agent overview.', run: () => $('#agents-overview').click() },
   settings: { description: 'Open Harness settings.', run: () => $('#settings').onclick() },
   context: { description: 'Show context usage, remaining capacity and last compaction.', run: () => openCommandPanel('context') },
+  usage: { args: 'optional', description: 'Show plan usage, rate limits and reset times across all connected providers: /usage [provider].', run: filter => openUsagePanel(filter) },
   model: { description: 'Choose a model for this agent.', run: () => openCommandPanel('model') },
   effort: { description: 'Choose this agent’s model and effort in its Edit dialog.', run: () => openCommandPanel('effort') },
   access: { description: 'Change access for this agent’s conversation.', run: () => openCommandPanel('access') },
@@ -3765,6 +3766,43 @@ function goalEditor(goal) {
   return [element('strong', '', 'Goal'), box, save, goalButton('chat-goal-action', 'Cancel', 'Cancel (Esc)', close)];
 }
 let commandPanel = null, commandPicking = false;
+let usagePanelState = { requestId: 0, loading: false, filter: '', data: null, error: null };
+function openUsagePanel(filter = '') {
+  const trimmed = String(filter || '').trim();
+  commandPanel = { name: 'usage', agent: selectedAgent, session: selectedId, filter: trimmed };
+  $('#command-title').textContent = trimmed ? `Provider usage · ${trimmed}` : 'Provider usage';
+  $('#command-description').textContent = COMMANDS.usage.description;
+  $('#command-search').hidden = true;
+  $('#command-search').value = ''; $('#command-error').textContent = '';
+  $('#command-content').dataset.signature = '';
+  usagePanelState = { requestId: usagePanelState.requestId, loading: true, filter: trimmed, data: null, error: null };
+  loadProviderUsage(trimmed);
+  const dialog = $('#command-dialog');
+  if (!dialog.open) dialog.showModal();
+  dialog.focus();
+}
+async function loadProviderUsage(filter = '') {
+  const requestId = ++usagePanelState.requestId;
+  usagePanelState.loading = true;
+  usagePanelState.filter = filter;
+  usagePanelState.error = null;
+  renderCommandPanel();
+  try {
+    if (typeof api.providerUsage !== 'function') throw new Error('Provider usage is unavailable in this version.');
+    const data = await api.providerUsage(filter);
+    if (requestId !== usagePanelState.requestId || commandPanel?.name !== 'usage') return;
+    usagePanelState.data = data;
+    usagePanelState.error = null;
+  } catch (error) {
+    if (requestId !== usagePanelState.requestId || commandPanel?.name !== 'usage') return;
+    usagePanelState.error = String(error?.message || error).replace(/^Error invoking remote method '[^']+': Error: /, '');
+  } finally {
+    if (requestId === usagePanelState.requestId) {
+      usagePanelState.loading = false;
+      if (commandPanel?.name === 'usage') renderCommandPanel();
+    }
+  }
+}
 function openCommandPanel(name) {
   if (['model', 'effort'].includes(name)) {
     if (subBotCreator())
@@ -3778,6 +3816,7 @@ function openCommandPanel(name) {
     (name === 'effort' && !effort.disabled ? effort : $(`#${dialog}-model`)).focus();
     return;
   }
+  usagePanelState.requestId++; usagePanelState.loading = false;
   commandPanel = { name, agent: selectedAgent, session: selectedId };
   $('#command-title').textContent = ({ context: 'Context usage', model: 'Choose model', effort: 'Choose effort', access: 'Conversation access', switch: 'Switch agent', status: 'Agent status' })[name];
   $('#command-description').textContent = COMMANDS[name].description;
@@ -3823,13 +3862,158 @@ function commandDetails(name) {
     ...(session?.error || state.error ? [['Error', session?.error || state.error]] : []),
   ];
 }
+function renderSessionUsageCard(usage) {
+  const total = usage?.total;
+  if (!total) return null;
+  const hasIO = Number.isFinite(total.inputTokens) && Number.isFinite(total.outputTokens);
+  const hasTotal = Number.isFinite(total.totalTokens);
+  if (!hasIO && !hasTotal) return null;
+  const card = element('section', 'usage-provider usage-session');
+  const head = element('div', 'usage-provider-head');
+  head.append(element('strong', '', 'This chat (session tokens)'));
+  card.append(head);
+  let summary;
+  if (hasIO) {
+    const hasCache = !usage.cacheUnknown && Number.isFinite(total.cachedInputTokens);
+    const inputPart = hasCache
+      ? `${total.inputTokens.toLocaleString()} input (${total.cachedInputTokens.toLocaleString()} cached, ${Math.max(0, total.inputTokens - total.cachedInputTokens).toLocaleString()} uncached)`
+      : `${total.inputTokens.toLocaleString()} input`;
+    summary = `${inputPart} · ${total.outputTokens.toLocaleString()} output`;
+  } else {
+    summary = `${total.totalTokens.toLocaleString()} total tokens`;
+  }
+  if (usage.incomplete) summary += ' · partial';
+  card.append(element('p', 'usage-meta', summary));
+  card.append(element('p', 'usage-note', 'Session token counts for this chat, not provider plan allowances.'));
+  return card;
+}
+function renderUsageProvider(provider) {
+  const card = element('section', 'usage-provider');
+  const head = element('div', 'usage-provider-head');
+  head.append(element('strong', '', provider.label || provider.id || 'Provider'));
+  const meta = element('div', 'usage-provider-meta');
+  if (provider.plan) meta.append(element('span', 'usage-badge', String(provider.plan)));
+  if (provider.account) meta.append(element('span', 'usage-badge', String(provider.account)));
+  if (provider.cached) meta.append(element('span', 'usage-badge', Number.isFinite(provider.observedAt) ? `Cached · ${clock(provider.observedAt)}` : 'Cached'));
+  if (meta.childNodes.length) head.append(meta);
+  card.append(head);
+  for (const limit of provider.limits || []) {
+    const who = limit.family ? `${limit.family[0].toUpperCase()}${limit.family.slice(1)} limit reached` : 'Usage limit reached';
+    const when = Number.isFinite(limit.until) ? ` · ${limit.known ? 'resets' : 'retried after'} ${clock(limit.until)}` : '';
+    const row = element('div', 'usage-limit', `${who}${when}`);
+    if (limit.reason) row.title = String(limit.reason);
+    card.append(row);
+  }
+  if (provider.windows?.length) {
+    const list = element('div', 'usage-windows');
+    for (const win of provider.windows) {
+      if (!Number.isFinite(win.usedPercent)) continue;
+      const pct = Math.max(0, win.usedPercent);
+      const row = element('div', 'usage-window');
+      const wHead = element('div', 'usage-window-head');
+      const pctText = `${Math.round(pct)}% used`;
+      const stats = pctText + (Number.isFinite(win.resetsAt) ? ` · resets ${clock(win.resetsAt)}` : '');
+      wHead.append(element('span', '', win.label || 'Usage'), element('span', 'usage-window-stats', stats));
+      const bar = element('div', 'usage-bar');
+      bar.setAttribute('role', 'progressbar');
+      bar.setAttribute('aria-valuemin', '0');
+      bar.setAttribute('aria-valuemax', '100');
+      bar.setAttribute('aria-valuenow', String(Math.round(Math.min(100, pct))));
+      bar.setAttribute('aria-label', `${win.label || 'Usage'}: ${pctText}`);
+      const fill = element('div', 'usage-bar-fill' + (pct >= 100 ? ' full' : pct >= 85 ? ' high' : ''));
+      fill.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+      bar.append(fill);
+      row.append(wHead, bar);
+      list.append(row);
+    }
+    if (list.childNodes.length) card.append(list);
+  }
+  for (const extra of provider.extra || []) {
+    if (extra) card.append(element('p', 'usage-meta', String(extra)));
+  }
+  if (provider.error) card.append(element('p', 'usage-error', String(provider.error)));
+  if (provider.note) card.append(element('p', 'usage-note', String(provider.note)));
+  return card;
+}
+function formatUsageReportText(data, sessionUsage) {
+  const lines = [];
+  for (const p of data?.providers || []) {
+    const meta = [p.plan, p.account, p.cached ? 'cached' : null].filter(Boolean).join(' · ');
+    lines.push(meta ? `${p.label} (${meta})` : (p.label || p.id || 'Provider'));
+    for (const limit of p.limits || []) {
+      const who = limit.family ? `${limit.family[0].toUpperCase()}${limit.family.slice(1)} limit reached` : 'Usage limit reached';
+      const when = Number.isFinite(limit.until) ? ` (${limit.known ? 'resets' : 'retried after'} ${clock(limit.until)})` : '';
+      lines.push(`  - ${who}${when}`);
+    }
+    for (const win of p.windows || []) {
+      if (!Number.isFinite(win.usedPercent)) continue;
+      const reset = Number.isFinite(win.resetsAt) ? ` · resets ${clock(win.resetsAt)}` : '';
+      lines.push(`  - ${win.label || 'Usage'}: ${Math.round(Math.max(0, win.usedPercent))}% used${reset}`);
+    }
+    for (const extra of p.extra || []) if (extra) lines.push(`  - ${extra}`);
+    if (p.error) lines.push(`  - Error: ${p.error}`);
+    if (p.note) lines.push(`  - ${p.note}`);
+  }
+  const total = sessionUsage?.total;
+  if (total && Number.isFinite(total.inputTokens) && Number.isFinite(total.outputTokens)) {
+    lines.push(`This chat (session tokens): ${total.inputTokens.toLocaleString()} input · ${total.outputTokens.toLocaleString()} output${sessionUsage.incomplete ? ' · partial' : ''}`);
+  }
+  return lines.join('\n');
+}
+function renderUsagePanel(content) {
+  const filter = commandPanel.filter || '';
+  const sessionUsage = !filter ? current()?.usage || null : null;
+  const { requestId, loading, data, error } = usagePanelState;
+  $('#command-error').textContent = error || '';
+  const signature = JSON.stringify(['usage', filter, requestId, loading, error, data, sessionUsage?.total || null, !!sessionUsage?.cacheUnknown, !!sessionUsage?.incomplete]);
+  if (content.dataset.signature === signature) return;
+  const refocusRefresh = content.contains(document.activeElement) && document.activeElement.classList.contains('usage-refresh');
+  content.dataset.signature = signature;
+  const nodes = [];
+  const toolbar = element('div', 'usage-toolbar');
+  const status = element('span', 'usage-status');
+  if (loading) status.append(spinner(), element('span', '', 'Checking provider usage…'));
+  else if (data && Number.isFinite(data.checkedAt)) status.textContent = 'Checked ' + new Date(data.checkedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  else if (error) status.textContent = 'Unable to load provider usage';
+  const actions = element('div', 'usage-toolbar-actions');
+  const copy = element('button', 'usage-copy', 'Copy');
+  copy.type = 'button';
+  copy.disabled = loading || !data?.providers?.length;
+  copy.onclick = () => {
+    const text = formatUsageReportText(data, sessionUsage);
+    if (!text) return;
+    Promise.resolve(api.copyText(text)).then(() => notify('Usage summary copied.')).catch(notify);
+  };
+  const refresh = element('button', 'usage-refresh', 'Refresh');
+  refresh.type = 'button';
+  refresh.disabled = loading;
+  refresh.onclick = () => { if (!usagePanelState.loading && commandPanel?.name === 'usage') loadProviderUsage(commandPanel.filter); };
+  actions.append(copy, refresh);
+  toolbar.append(status, actions);
+  nodes.push(toolbar);
+  if (loading && !data) {
+    nodes.push(element('p', 'muted', 'Checking connected providers for plan usage and reset times…'));
+  } else if (data) {
+    const providers = Array.isArray(data.providers) ? data.providers : [];
+    if (!providers.length) {
+      nodes.push(element('p', 'muted', data.filter ? `No provider matched "${data.filter}".` : 'No providers are connected. Connect one in Settings → Providers.'));
+    } else {
+      for (const provider of providers) nodes.push(renderUsageProvider(provider));
+    }
+  }
+  const sessionCard = renderSessionUsageCard(sessionUsage);
+  if (sessionCard) nodes.push(sessionCard);
+  content.replaceChildren(...nodes);
+  if (refocusRefresh) (refresh.disabled ? $('#command-dialog') : refresh).focus();
+}
 function renderCommandPanel() {
   if (!commandPanel) return;
   const dialog = $('#command-dialog');
-  if (commandPanel.agent !== selectedAgent || commandPanel.session !== selectedId) { dialog.close(); commandPanel = null; return; }
+  if (commandPanel.agent !== selectedAgent || commandPanel.session !== selectedId) { usagePanelState.requestId++; usagePanelState.loading = false; dialog.close(); commandPanel = null; return; }
   const name = commandPanel.name, search = $('#command-search'), content = $('#command-content');
   search.disabled = commandPicking;
   $('#command-dialog .close-dialog').disabled = commandPicking;
+  if (name === 'usage') { renderUsagePanel(content); return; }
   const query = search.value.trim().toLocaleLowerCase();
   const choices = !search.hidden;
   const rows = choices ? commandChoices(name).filter(row => `${row.label} ${row.detail}`.toLocaleLowerCase().includes(query)) : commandDetails(name);
@@ -3871,6 +4055,7 @@ $('#command-search').oninput = renderCommandPanel;
 $('#command-dialog').addEventListener('close', () => {
   // A queued close event can arrive after another command has reopened the dialog.
   if ($('#command-dialog').open) return;
+  usagePanelState.requestId++; usagePanelState.loading = false;
   commandPanel = null; $('#prompt').focus();
 });
 $('#command-dialog').addEventListener('cancel', event => { if (commandPicking) event.preventDefault(); });

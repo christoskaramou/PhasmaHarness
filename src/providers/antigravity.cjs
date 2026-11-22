@@ -94,7 +94,7 @@ function usageCounts(usage) {
 
 class AntigravityCLI {
   constructor(launch = spawn, find = () => findNativeCLI('antigravity-cli')) {
-    this.launch = launch; this.find = find; this.hosts = new Set();
+    this.launch = launch; this.find = find; this.hosts = new Set(); this.usageHosts = new Set();
     this.models = []; this.status = { installed: false, loggedIn: false };
   }
 
@@ -267,8 +267,64 @@ class AntigravityCLI {
     }
   }
 
+  async closeUsageHost(host) {
+    const survivors = await stopTree(host.child);
+    if (!survivors.length) this.usageHosts.delete(host);
+  }
+
+  async readUsage() {
+    const executable = this.find();
+    const { ELECTRON_RUN_AS_NODE, ...hostEnv } = process.env;
+    const child = spawnOwned(this.launch, executable.command, [...executable.args, '-p', '/usage', '--output-format', 'json'], {
+      cwd: os.tmpdir(), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...hostEnv, NO_BROWSER: 'true' },
+    });
+    const host = { child };
+    this.usageHosts.add(host);
+    child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
+    try {
+      const { output } = await deadline(new Promise((resolve, reject) => {
+        let output = '', diagnostic = '', settled = false;
+        const finish = (error, value) => {
+          if (settled) return;
+          settled = true;
+          error ? reject(error) : resolve(value);
+        };
+        const data = (text, stderr) => {
+          if (settled) return;
+          if (stderr) diagnostic += text; else output += text;
+          if (output.length + diagnostic.length > LIMIT) finish(new Error('Antigravity usage output is too large.'));
+        };
+        child.stdout.on('data', text => data(text, false));
+        child.stderr.on('data', text => data(text, true));
+        child.stdin.on('error', () => {});
+        child.once('error', error => finish(error));
+        child.once('close', code => code === 0
+          ? finish(null, { output, diagnostic })
+          : finish(new Error(diagnostic.trim()
+            ? `Antigravity usage failed (exit ${code}): ${diagnostic.trim().slice(0, 200)}`
+            : `Antigravity usage failed with exit code ${code}.`)));
+        child.stdin.end();
+      }), 15000, LABEL);
+      let parsed;
+      try { parsed = JSON.parse(output); }
+      catch { throw new Error('Antigravity returned invalid usage JSON.'); }
+      if (!parsed || typeof parsed !== 'object' || parsed.status !== 'SUCCESS') {
+        throw new Error(parsed?.error ? `Antigravity usage failed: ${parsed.error}` : 'Antigravity usage did not succeed.');
+      }
+      return parsed;
+    } finally {
+      await this.closeUsageHost(host);
+    }
+  }
+
   async login() { throw new Error('Run agy in your terminal to complete its native sign-in, then reconnect in Harness.'); }
-  close() { return Promise.all([...this.hosts].map(host => this.closeHost(host))); }
+  close() {
+    return Promise.all([
+      ...[...this.hosts].map(host => this.closeHost(host)),
+      ...[...this.usageHosts].map(host => this.closeUsageHost(host)),
+    ]);
+  }
 }
 
 module.exports = { AntigravityCLI, sweepAgentFiles, googleAccount, contextWindow };

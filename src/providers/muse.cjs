@@ -23,6 +23,7 @@ class MuseCLI {
     this.launch = launch;
     this.find = find;
     this.hosts = new Set();
+    this.usageChildren = new Set();
     this.models = [];
     this.status = { installed: false, loggedIn: false };
   }
@@ -316,7 +317,57 @@ class MuseCLI {
     return this.refresh();
   }
 
-  close() { return Promise.all([...this.hosts].map(host => this.closeHost(host))); }
+  async readUsage() {
+    const LIMIT = 1024 * 1024;
+    const executable = this.find();
+    const child = spawnOwned(this.launch, executable.command, [...executable.args, 'usage', '--json'], {
+      cwd: os.tmpdir(), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    this.usageChildren.add(child);
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    try {
+      const output = await deadline(new Promise((resolve, reject) => {
+        let stdout = '', stderr = '', settled = false;
+        const finish = (error, value) => {
+          if (settled) return;
+          settled = true;
+          error ? reject(error) : resolve(value);
+        };
+        const append = (chunk, isErr) => {
+          if (settled) return;
+          if (isErr) stderr += chunk; else stdout += chunk;
+          if (stdout.length + stderr.length > LIMIT) finish(new Error('Muse usage output is too large.'));
+        };
+        child.stdout.on('data', chunk => append(chunk, false));
+        child.stderr.on('data', chunk => append(chunk, true));
+        child.once('error', error => finish(error.code === 'ENOENT' ? error : new Error(`Muse usage lookup could not start: ${error.message}`)));
+        child.once('close', code => code === 0
+          ? finish(null, stdout)
+          : finish(new Error(stderr.trim()
+            ? `Muse usage failed (exit ${code}): ${stderr.trim().slice(0, 200)}`
+            : `Muse usage failed with exit code ${code}.`)));
+      }), 15000, LABEL);
+      let parsed;
+      try { parsed = JSON.parse(output); }
+      catch { throw new Error('Muse returned invalid usage JSON.'); }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('Muse returned invalid usage JSON.');
+      }
+      return parsed;
+    } finally {
+      if (!(await stopTree(child)).length) this.usageChildren.delete(child);
+    }
+  }
+
+  close() {
+    return Promise.all([
+      ...[...this.hosts].map(host => this.closeHost(host)),
+      ...[...this.usageChildren].map(async child => {
+        if (!(await stopTree(child)).length) this.usageChildren.delete(child);
+      }),
+    ]);
+  }
 }
 
 module.exports = { MuseCLI };

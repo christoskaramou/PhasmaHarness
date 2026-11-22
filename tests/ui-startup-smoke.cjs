@@ -2530,7 +2530,7 @@ app.whenReady().then(async () => {
   delete oldConversation.goal;
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
   assert.equal((await goalBar()).hidden, true);
-  const commandNames =['/help', '/compact', '/clear', '/stop', '/agents', '/settings', '/context', '/model', '/effort', '/access', '/switch', '/export', '/status', '/suggestion', '/wiki', '/tldr', '/advisor', '/goal', '/review'];
+  const commandNames =['/help', '/compact', '/clear', '/stop', '/agents', '/settings', '/context', '/usage', '/model', '/effort', '/access', '/switch', '/export', '/status', '/suggestion', '/wiki', '/tldr', '/advisor', '/goal', '/review'];
   const sentBeforeCommands = sent.length;
   let previewsBeforeCommands = previews;
   const typeCommand = text => window.webContents.executeJavaScript(`(() => {
@@ -2716,6 +2716,36 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
   assert.match(await panelText(), /No compaction time recorded/);
   await closeCommand(); oldConversation.activeProvider = 'codex';
+  const usageCalls = [];
+  ipcMain.handle('providerUsage', async (_event, filter = '') => {
+    usageCalls.push(filter);
+    const all = [
+      { id: 'codex', label: 'Codex CLI / ChatGPT', connected: true, status: 'ok', plan: 'Pro', account: 'user@example.com',
+        windows: [{ label: '5-hour', usedPercent: 45, remainingPercent: 55, resetsAt: Date.now() + 3600000 }],
+        extra: ['Credits balance: 12'], limits: [], note: null, error: null, cached: false, observedAt: null },
+      { id: 'claude-cli', label: 'Claude CLI', connected: true, status: 'ok', plan: 'Max', account: '<b>alice</b>',
+        windows: [{ label: 'Weekly', usedPercent: 100, remainingPercent: 0, resetsAt: Date.now() + 86400000 }],
+        extra: [], limits: [{ family: 'opus', reason: 'Limit', until: Date.now() + 3600000, known: true }],
+        note: null, error: null, cached: false, observedAt: null },
+      { id: 'cursor-cli', label: 'Cursor CLI', connected: true, status: 'unavailable', plan: 'Premium', account: 'user@example.com',
+        windows: [], extra: [], limits: [], note: 'Cursor CLI does not expose remaining plan usage here.', error: null, cached: false, observedAt: null },
+    ];
+    const needle = String(filter || '').trim().toLowerCase();
+    return { checkedAt: Date.now(), filter: needle || null,
+      providers: needle ? all.filter(p => p.id.includes(needle) || p.label.toLowerCase().includes(needle)) : all };
+  });
+  await openCommand('usage');
+  await until(async () => /Codex CLI \/ ChatGPT/.test(await panelText()), '/usage renders connected providers');
+  assert.match(await panelText(), /45% used/);
+  assert.match(await panelText(), /Opus limit reached/);
+  assert.match(await panelText(), /Cursor CLI does not expose remaining plan usage/);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#command-content b")'), null, 'usage data renders as text');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelectorAll("#command-content [role=progressbar]").length'), 2);
+  await closeCommand();
+  await submit('/usage claude', false);
+  await until(() => usageCalls.includes('claude'), '/usage <provider> passes filter');
+  await until(async () => /Claude CLI/.test(await panelText()) && !/Codex CLI/.test(await panelText()), '/usage <provider> shows filtered provider');
+  await closeCommand();
   oldConversation.tasks = [{ id: 'command-task', goal: 'Inspect <b>source</b>', state: 'running' }];
   oldConversation.queue = [{ id: 'command-queue', text: 'Review next', images: [] }];
   const child = [...agents.controllers.values()].find(c => c.agentId !== 'main' && c !== commandWorker);
