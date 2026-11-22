@@ -2499,13 +2499,7 @@ function render() {
   fitComposer();
   $('#welcome').hidden = chatSessions(session).some(chat => chat.items.length || chat.pendingMessage);
   renderSendButton();
-  const goal = current()?.goal || '';
-  $('#chat-goal').hidden = !goal;
-  const clearGoalButton = element('button', 'chat-goal-clear', '×');
-  clearGoalButton.type = 'button'; clearGoalButton.title = 'Clear goal'; clearGoalButton.setAttribute('aria-label', 'Clear goal');
-  clearGoalButton.onclick = () => clearGoal().catch(notify);
-  const goalText = element('span', '', goal); goalText.title = goal;
-  $('#chat-goal').replaceChildren(...(goal ? [element('strong', '', 'Goal'), goalText, clearGoalButton] : []));
+  renderGoalBar();
   $('#message-queue').replaceChildren();
   // The user's queued messages, also those the Secondary model reads or holds (2026-11-06, the user: they are the user's,
   // not its queue). Only the steps it split off show in the chat instead (renderMessages).
@@ -3718,6 +3712,57 @@ async function clearGoal() {
   if (!selectedId) throw new Error('Open a chat first.');
   await api.setGoal(selectedId, '');
   notify('Goal cleared.');
+}
+// The Goal bar above the composer (2026-11-22, the user: its text was cut off and × was its only action). A click on the
+// text shows all of it; Edit opens it in a box where Enter saves (empty clears), Shift+Enter adds a line and Esc cancels.
+// The bar is rebuilt only when its chat, goal or mode changes, so renders keep focus and an open box keeps its typing.
+let goalView = { chatId: null, expanded: false, editing: false };
+function goalButton(className, text, label, onclick) {
+  const button = element('button', className, text);
+  button.type = 'button'; button.title = label; button.setAttribute('aria-label', label); button.onclick = onclick;
+  return button;
+}
+function renderGoalBar() {
+  const bar = $('#chat-goal'), goal = current()?.goal || '';
+  if (goalView.chatId !== selectedId) goalView = { chatId: selectedId, expanded: false, editing: false };
+  const { expanded, editing } = goalView;
+  bar.hidden = !goal && !editing;
+  bar.classList.toggle('expanded', expanded && !editing);
+  const key = JSON.stringify([selectedId, editing || goal]);
+  if (bar.dataset.key !== key) {
+    bar.dataset.key = key;
+    bar.replaceChildren(...(editing ? goalEditor(goal) : goal ? goalDisplay(goal) : []));
+    if (editing) { const box = bar.querySelector('textarea'); box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
+  }
+  const text = bar.querySelector('.chat-goal-text');
+  if (text) { text.setAttribute('aria-expanded', String(expanded)); text.title = expanded ? 'Show less' : 'Show the full goal'; }
+}
+function goalDisplay(goal) {
+  const text = element('button', 'chat-goal-text', goal);
+  text.type = 'button';
+  text.onclick = () => { goalView.expanded = !goalView.expanded; renderGoalBar(); };
+  return [element('strong', '', 'Goal'), text,
+    goalButton('chat-goal-action', 'Edit', 'Edit goal', () => { goalView.editing = true; renderGoalBar(); }),
+    goalButton('chat-goal-clear', '×', 'Clear goal', () => clearGoal().catch(notify))];
+}
+function goalEditor(goal) {
+  const box = element('textarea', 'chat-goal-input');
+  box.value = goal; box.rows = 1; box.maxLength = 1000; box.placeholder = 'Goal for this chat; empty clears it';
+  box.setAttribute('aria-label', 'Goal');
+  const close = () => { goalView.editing = false; renderGoalBar(); };
+  const save = goalButton('chat-goal-action', 'Save', 'Save goal (Enter)', async () => {
+    const text = box.value.trim();
+    if (text === (current()?.goal || '')) return close();
+    save.disabled = true;
+    try { await api.setGoal(selectedId, text); close(); notify(text ? 'Goal updated.' : 'Goal cleared.'); }
+    catch (error) { save.disabled = false; notify(error); }
+  });
+  // preventDefault also keeps the window's Escape (stop the running turn) from firing.
+  box.onkeydown = event => {
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); save.click(); }
+    else if (event.key === 'Escape') { event.preventDefault(); close(); }
+  };
+  return [element('strong', '', 'Goal'), box, save, goalButton('chat-goal-action', 'Cancel', 'Cancel (Esc)', close)];
 }
 let commandPanel = null, commandPicking = false;
 function openCommandPanel(name) {

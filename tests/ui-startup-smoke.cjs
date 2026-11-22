@@ -2489,6 +2489,7 @@ app.whenReady().then(async () => {
   phase = 'slash commands';
   const compacted = [];
   ipcMain.handle('compact', (_event, id) => { compacted.push(id); });
+  ipcMain.handle('setGoal', (_event, id, text) => agents.owner(id).setGoal(id, text));
   let clearPrompts = 0;
   ipcMain.handle('clearConversation', async (_event, id, groupId) => {
     const fresh = await agents.clearConversation(id, name => {
@@ -2504,8 +2505,32 @@ app.whenReady().then(async () => {
   const oldConversation = agents.conversation(agents.controller(commandAgent), true);
   const mainConversationId = agents.conversation(controller).id;
   oldConversation.items.push({ id: 'clear-history', type: 'agentMessage', text: 'Earlier agent history.' });
+  // 2026-11-22, the user: the Goal bar cut its text off and had only ×. A click shows all of it; Edit changes it in place.
+  oldConversation.goal = `Ship the release ${'with every check passing '.repeat(12)}`.trim();
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
-  const commandNames = ['/help', '/compact', '/clear', '/stop', '/agents', '/settings', '/context', '/model', '/effort', '/access', '/switch', '/export', '/status', '/suggestion', '/wiki', '/tldr', '/advisor', '/goal', '/review'];
+  const goalBar = () => window.webContents.executeJavaScript(`(() => { const bar = document.querySelector('#chat-goal'), text = bar.querySelector('.chat-goal-text');
+    return { hidden: bar.hidden, expanded: bar.classList.contains('expanded'), text: text?.textContent ?? null, wraps: text ? getComputedStyle(text).whiteSpace : null,
+      box: bar.querySelector('textarea')?.value ?? null, focused: document.activeElement === bar.querySelector('textarea') }; })()`);
+  assert.deepEqual(await goalBar(), { hidden: false, expanded: false, text: oldConversation.goal, wraps: 'nowrap', box: null, focused: false });
+  await window.webContents.executeJavaScript(`document.querySelector('#chat-goal .chat-goal-text').click(); true`);
+  assert.equal((await goalBar()).wraps, 'pre-wrap', 'a click on the goal shows all of it');
+  await window.webContents.executeJavaScript(`[...document.querySelectorAll('#chat-goal button')].find(button => button.textContent === 'Edit').click(); true`);
+  assert.deepEqual(await goalBar(), { hidden: false, expanded: false, text: null, wraps: null, box: oldConversation.goal, focused: true });
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
+  await window.webContents.executeJavaScript(`(() => { const box = document.querySelector('#chat-goal textarea'); box.value = 'Edited goal';
+    box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); })(); true`);
+  assert.equal((await goalBar()).text, oldConversation.goal, 'Esc keeps the goal');
+  await window.webContents.executeJavaScript(`[...document.querySelectorAll('#chat-goal button')].find(button => button.textContent === 'Edit').click();
+    (() => { const box = document.querySelector('#chat-goal textarea'); box.value = '  Edited goal  ';
+    box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); })(); true`);
+  for (let i = 0; i < 100 && oldConversation.goal !== 'Edited goal'; i++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(oldConversation.goal, 'Edited goal', 'Enter saves the edited goal');
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
+  assert.equal((await goalBar()).text, 'Edited goal');
+  delete oldConversation.goal;
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
+  assert.equal((await goalBar()).hidden, true);
+  const commandNames =['/help', '/compact', '/clear', '/stop', '/agents', '/settings', '/context', '/model', '/effort', '/access', '/switch', '/export', '/status', '/suggestion', '/wiki', '/tldr', '/advisor', '/goal', '/review'];
   const sentBeforeCommands = sent.length;
   let previewsBeforeCommands = previews;
   const typeCommand = text => window.webContents.executeJavaScript(`(() => {

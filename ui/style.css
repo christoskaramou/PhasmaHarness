@@ -556,9 +556,13 @@ h2 {
 }
 .chat-goal strong { color:var(--text); font-weight:500 }
 .chat-goal:not([hidden]) { align-items:center }
-.chat-goal span { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-.chat-goal-clear { border:0; background:none; color:var(--muted); cursor:pointer; padding:0 4px; font-size:inherit; line-height:1 }
-.chat-goal-clear:hover, .chat-goal-clear:focus-visible { color:var(--text) }
+.chat-goal-text { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; border:0; background:none; color:inherit; font:inherit; text-align:left; padding:0; cursor:pointer }
+.chat-goal.expanded { align-items:flex-start }
+.chat-goal.expanded .chat-goal-text { white-space:pre-wrap; overflow-wrap:anywhere; text-overflow:clip; max-height:30vh; overflow-y:auto }
+.chat-goal-clear, .chat-goal-action { border:0; background:none; color:var(--muted); cursor:pointer; padding:0 4px; font-size:inherit; line-height:1 }
+.chat-goal-clear:hover, .chat-goal-clear:focus-visible, .chat-goal-action:hover, .chat-goal-action:focus-visible, .chat-goal-text:hover { color:var(--text) }
+.chat-goal-action:disabled { opacity:.5; cursor:default }
+.chat-goal-input { flex:1; min-width:0; field-sizing:content; min-height:1lh; max-height:8lh; overflow-y:auto; resize:none; font:inherit; line-height:1.5; color:var(--text); background:transparent; border:1px solid var(--border-strong); border-radius:6px; padding:3px 6px; outline:none }
 
 .route-preview strong {
   color:var(--text);
