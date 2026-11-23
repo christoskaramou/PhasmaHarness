@@ -243,12 +243,12 @@ app.whenReady().then(async () => {
       const scrolls = prompt.scrollHeight > prompt.clientHeight;
       prompt.value = 'short'; resizeComposer();
       const shrunk = prompt.getBoundingClientRect().height;
-      const controls = ['#attach-files', '.composer-access', '#dictate', '#context-meter', '#send']
+      const controls = ['#attach-files', '.composer-access', '#usage-widget-toggle', '#dictate', '#context-meter', '#send']
         .map(selector => document.querySelector(selector).getBoundingClientRect());
       const centers = controls.map(rect => rect.top + rect.height / 2);
       const inputRect = prompt.getBoundingClientRect();
       centers.push(inputRect.top + inputRect.height / 2);
-      const order = ['#attach-files', '.composer-access', '#prompt', '.context-meter-wrap', '#dictate', '#send']
+      const order = ['#attach-files', '.composer-access', '#prompt', '.usage-widget-wrap', '.context-meter-wrap', '#dictate', '#send']
         .map(selector => document.querySelector(selector).getBoundingClientRect());
       const ordered = order.every((rect, i) => !i || rect.left >= order[i - 1].right - 1);
       const access = document.querySelector('#permissions');
@@ -2746,6 +2746,24 @@ app.whenReady().then(async () => {
   await until(() => usageCalls.includes('claude'), '/usage <provider> passes filter');
   await until(async () => /Claude CLI/.test(await panelText()) && !/Codex CLI/.test(await panelText()), '/usage <provider> shows filtered provider');
   await closeCommand();
+  assert.deepEqual(await window.webContents.executeJavaScript('[document.querySelector("#usage-widget").hidden, document.querySelector("#usage-widget-toggle").getAttribute("aria-expanded")]'), [true, 'false'], 'usage widget starts hidden');
+  await window.webContents.executeJavaScript('document.querySelector("#usage-widget-toggle").click(); true');
+  assert.deepEqual(await window.webContents.executeJavaScript('[document.querySelector("#usage-widget").hidden, document.querySelector("#usage-widget-toggle").getAttribute("aria-expanded")]'), [false, 'true'], 'clicking the usage button shows the widget');
+  await until(async () => /Codex CLI \/ ChatGPT/.test(await window.webContents.executeJavaScript('document.querySelector("#usage-widget-body").textContent')), 'usage widget displays connected providers');
+  const callsBeforeWidgetRefresh = usageCalls.length;
+  await window.webContents.executeJavaScript('document.querySelector("#usage-widget-refresh").click(); true');
+  await until(() => usageCalls.length > callsBeforeWidgetRefresh, 'widget Refresh button fetches fresh usage');
+  await window.webContents.executeJavaScript('document.querySelector("#usage-widget-body").dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })); true');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#usage-widget").hidden'), false, 'clicking inside the usage widget keeps it open');
+  await window.webContents.executeJavaScript('document.querySelector("#messages").dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })); true');
+  assert.deepEqual(await window.webContents.executeJavaScript('[document.querySelector("#usage-widget").hidden, document.querySelector("#usage-widget-toggle").getAttribute("aria-expanded")]'), [true, 'false'], 'clicking outside the usage widget closes it');
+  await window.webContents.executeJavaScript('document.querySelector("#usage-widget-toggle").click(); true');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#usage-widget").hidden'), false, 'widget reopens on toggle click');
+  await window.webContents.executeJavaScript('document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); true');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#usage-widget").hidden'), true, 'Escape closes the usage widget');
+  await window.webContents.executeJavaScript('document.querySelector("#usage-widget-toggle").click(); true');
+  await window.webContents.executeJavaScript('document.querySelector("#usage-widget-toggle").click(); true');
+  assert.deepEqual(await window.webContents.executeJavaScript('[document.querySelector("#usage-widget").hidden, document.querySelector("#usage-widget-toggle").getAttribute("aria-expanded")]'), [true, 'false'], 'clicking the usage button again hides the widget');
   oldConversation.tasks = [{ id: 'command-task', goal: 'Inspect <b>source</b>', state: 'running' }];
   oldConversation.queue = [{ id: 'command-queue', text: 'Review next', images: [] }];
   const child = [...agents.controllers.values()].find(c => c.agentId !== 'main' && c !== commandWorker);
@@ -4521,18 +4539,20 @@ app.whenReady().then(async () => {
     assert.ok(Math.abs(window.webContents.getZoomFactor() - percent / 100) < .001);
     await window.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
     const zoomLayout = await window.webContents.executeJavaScript(`(() => {
-      const icons = ['.composer-access svg', '.context-ring', '#dictate svg', '#send svg']
+      const icons = ['.composer-access svg', '#usage-widget-toggle svg', '.context-ring', '#dictate svg', '#send svg']
         .map(selector => document.querySelector(selector).getBoundingClientRect().width);
       const send = document.querySelector('#send').getBoundingClientRect();
       const ring = document.querySelector('.context-ring').getBoundingClientRect();
+      const usageIcon = document.querySelector('#usage-widget-toggle svg').getBoundingClientRect();
       const microphone = document.querySelector('#dictate svg').getBoundingClientRect();
       const attach = document.querySelector('#attach-files').getBoundingClientRect();
       const shield = document.querySelector('.composer-access').getBoundingClientRect();
       const rightGapDifference = Math.abs((microphone.left - ring.right) - (send.left - microphone.right));
+      const usageGapDifference = Math.abs((ring.left - usageIcon.right) - (microphone.left - ring.right));
       const leftGap = shield.left - attach.right;
       const sizeRatio = send.width / attach.width;
       const plus = document.querySelector('#attach-files svg').getBoundingClientRect().width;
-      return { icons, plus, rightGapDifference, leftGap, sizeRatio, plusFont: parseFloat(getComputedStyle(document.querySelector('#attach-files')).fontSize),
+      return { icons, plus, rightGapDifference, usageGapDifference, leftGap, sizeRatio, plusFont: parseFloat(getComputedStyle(document.querySelector('#attach-files')).fontSize),
         fits: send.right <= innerWidth && send.bottom <= innerHeight,
         fontScale: document.documentElement.style.getPropertyValue('--font-scale') };
     })()`);
@@ -4540,6 +4560,7 @@ app.whenReady().then(async () => {
     assert.ok(Math.abs(zoomLayout.plus - zoomLayout.plusFont * .75) < .1, 'plus icon is 25% smaller');
     assert.equal(zoomLayout.fits, true, 'composer controls remain inside the zoomed window');
     assert.ok(zoomLayout.rightGapDifference < 1, 'visible gaps between context ring, microphone and Send are equal');
+    assert.ok(zoomLayout.usageGapDifference < 1, 'visible gap between usage icon and context ring matches context/microphone/Send: ' + JSON.stringify(zoomLayout));
     assert.ok(Math.abs(zoomLayout.leftGap) < 1, 'shield sits next to plus without extra gap');
     assert.ok(Math.abs(zoomLayout.sizeRatio - 1) < .01, 'composer buttons have consistent hit areas');
     assert.equal(zoomLayout.fontScale, '1', 'whole-page zoom does not also multiply text size');

@@ -19,6 +19,7 @@ function formatPlanName(value) {
       const lower = word.toLowerCase();
       if (lower === 'chatgpt') return 'ChatGPT';
       if (lower === 'api') return 'API';
+      if (lower === 'ai') return 'AI';
       if (/[a-z]/.test(word) && /[A-Z]/.test(word)) return word;
       return word[0].toUpperCase() + word.slice(1).toLowerCase();
     })
@@ -163,8 +164,9 @@ function normalizeClaudeUsage(report) {
   return { available: true, plan, windows, extra };
 }
 
-function normalizeAntigravityUsage(report) {
-  const groups = report?.command?.data?.groups;
+function normalizeAntigravityUsage(report, creditsReport = null) {
+  const data = report?.command?.data;
+  const groups = data?.groups;
   const windows = [];
   if (Array.isArray(groups)) {
     for (const group of groups) {
@@ -196,10 +198,16 @@ function normalizeAntigravityUsage(report) {
       }
     }
   }
-  const note = windows.length
+  const plan = formatPlanName(data?.tier_display_name || data?.plan_name || data?.plan || data?.tier || creditsReport?.command?.data?.plan_name || creditsReport?.command?.data?.tier);
+  const extra = [];
+  const credits = creditsReport?.command?.data?.remaining_credits ?? data?.remaining_credits;
+  if (Number.isFinite(credits) && credits >= 0) {
+    extra.push(`G1 credits: ${credits.toLocaleString('en-US')}`);
+  }
+  const note = windows.length || extra.length
     ? null
     : (typeof report?.response === 'string' && report.response.trim()) || 'Antigravity did not return usage windows.';
-  return { windows, note };
+  return { plan, windows, extra, note };
 }
 
 function parseMuseResetMs(window) {
@@ -466,19 +474,27 @@ async function queryCursor(primary, base) {
 async function queryAntigravity(antigravity, base) {
   const account = antigravity?.status?.account || null;
   try {
-    const report = await antigravity.readUsage();
-    const norm = normalizeAntigravityUsage(report);
-    if (!norm.windows.length) {
+    const [usageResult, creditsResult] = await Promise.allSettled([
+      antigravity.readUsage(),
+      typeof antigravity.readCredits === 'function' ? antigravity.readCredits() : Promise.resolve(null),
+    ]);
+    if (usageResult.status === 'rejected') throw usageResult.reason;
+    const creditsReport = creditsResult.status === 'fulfilled' ? creditsResult.value : null;
+    const norm = normalizeAntigravityUsage(usageResult.value, creditsReport);
+    if (!norm.windows.length && !norm.extra.length) {
       return providerEntry(base, {
         status: 'unavailable',
+        plan: norm.plan,
         account,
         note: norm.note,
       });
     }
     return providerEntry(base, {
       status: 'ok',
+      plan: norm.plan,
       account,
       windows: norm.windows,
+      extra: norm.extra,
     });
   } catch (error) {
     return providerEntry(base, {

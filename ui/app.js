@@ -2576,6 +2576,7 @@ function render() {
   renderMessages(session);
   renderRequest();
   renderCommandPanel();
+  renderUsageWidget();
   renderSuggestion();
 }
 
@@ -3767,6 +3768,7 @@ function goalEditor(goal) {
 }
 let commandPanel = null, commandPicking = false;
 let usagePanelState = { requestId: 0, loading: false, filter: '', data: null, error: null };
+let usageWidgetState = { open: false, requestId: 0, loading: false, data: null, error: null };
 function openUsagePanel(filter = '') {
   const trimmed = String(filter || '').trim();
   commandPanel = { name: 'usage', agent: selectedAgent, session: selectedId, filter: trimmed };
@@ -3790,6 +3792,11 @@ async function loadProviderUsage(filter = '') {
   try {
     if (typeof api.providerUsage !== 'function') throw new Error('Provider usage is unavailable in this version.');
     const data = await api.providerUsage(filter);
+    if (!filter) {
+      usageWidgetState.data = data;
+      usageWidgetState.error = null;
+      renderUsageWidget();
+    }
     if (requestId !== usagePanelState.requestId || commandPanel?.name !== 'usage') return;
     usagePanelState.data = data;
     usagePanelState.error = null;
@@ -3802,6 +3809,74 @@ async function loadProviderUsage(filter = '') {
       if (commandPanel?.name === 'usage') renderCommandPanel();
     }
   }
+}
+async function refreshUsageWidget() {
+  const requestId = ++usageWidgetState.requestId;
+  usageWidgetState.loading = true;
+  usageWidgetState.error = null;
+  renderUsageWidget();
+  try {
+    if (typeof api.providerUsage !== 'function') throw new Error('Provider usage is unavailable in this version.');
+    const data = await api.providerUsage('');
+    if (requestId !== usageWidgetState.requestId) return;
+    usageWidgetState.data = data;
+    usageWidgetState.error = null;
+    if (commandPanel?.name === 'usage' && !commandPanel.filter) {
+      usagePanelState.data = data;
+      usagePanelState.error = null;
+      renderCommandPanel();
+    }
+  } catch (error) {
+    if (requestId !== usageWidgetState.requestId) return;
+    usageWidgetState.error = String(error?.message || error).replace(/^Error invoking remote method '[^']+': Error: /, '');
+  } finally {
+    if (requestId === usageWidgetState.requestId) {
+      usageWidgetState.loading = false;
+      renderUsageWidget();
+    }
+  }
+}
+function closeUsageWidget() {
+  if (!usageWidgetState.open) return;
+  usageWidgetState.open = false;
+  renderUsageWidget();
+}
+function toggleUsageWidget() {
+  usageWidgetState.open = !usageWidgetState.open;
+  renderUsageWidget();
+  if (usageWidgetState.open && !usageWidgetState.data && !usageWidgetState.loading) {
+    refreshUsageWidget();
+  }
+}
+function renderUsageWidget() {
+  const toggle = $('#usage-widget-toggle'), widget = $('#usage-widget');
+  if (!toggle || !widget) return;
+  const hasLimit = Object.values(state?.providerLimits || {}).some(limit => limit?.until > Date.now());
+  toggle.classList.toggle('limited', hasLimit);
+  toggle.setAttribute('aria-expanded', String(usageWidgetState.open));
+  toggle.setAttribute('aria-pressed', String(usageWidgetState.open));
+  widget.hidden = !usageWidgetState.open;
+  if (!usageWidgetState.open) return;
+  const status = $('#usage-widget-status'), refresh = $('#usage-widget-refresh'), body = $('#usage-widget-body'), errorNode = $('#usage-widget-error');
+  const { requestId, loading, data, error } = usageWidgetState;
+  refresh.disabled = loading;
+  errorNode.textContent = error || '';
+  const signature = JSON.stringify([requestId, loading, error, data]);
+  if (body.dataset.signature === signature) return;
+  body.dataset.signature = signature;
+  if (loading) status.replaceChildren(spinner(), element('span', '', 'Checking…'));
+  else if (data && Number.isFinite(data.checkedAt)) status.textContent = new Date(data.checkedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  else if (error) status.textContent = 'Unavailable';
+  else status.textContent = '';
+  const nodes = [];
+  if (loading && !data) {
+    nodes.push(element('p', 'muted', 'Checking connected providers…'));
+  } else if (data) {
+    const providers = Array.isArray(data.providers) ? data.providers : [];
+    if (!providers.length) nodes.push(element('p', 'muted', 'No providers are connected.'));
+    else for (const provider of providers) nodes.push(renderUsageProvider(provider));
+  }
+  body.replaceChildren(...nodes);
 }
 function openCommandPanel(name) {
   if (['model', 'effort'].includes(name)) {
@@ -4168,7 +4243,7 @@ for (const [name, command] of Object.entries(COMMANDS)) {
   $('#commands-list').append(button);
 }
 $('#composer').addEventListener('pointerdown', event => {
-  if (event.button !== 0 || event.target.closest('button, input, textarea, select, label, details, a, #slash-menu, .image-preview')) return;
+  if (event.button !== 0 || event.target.closest('button, input, textarea, select, label, details, a, #slash-menu, #usage-widget, .image-preview')) return;
   event.preventDefault();
   $('#prompt').focus({ preventScroll: true });
 });
@@ -4819,6 +4894,8 @@ async function closeSettings() {
   }
 }
 $('#settings-dialog').addEventListener('cancel', event => { event.preventDefault(); closeSettings(); });
+$('#usage-widget-toggle').onclick = toggleUsageWidget;
+$('#usage-widget-refresh').onclick = () => { if (!usageWidgetState.loading) refreshUsageWidget(); };
 $('#context-meter').onclick = () => {
   if ($('#context-meter').getAttribute('aria-disabled') !== 'true') runCommand('compact');
 };
@@ -4887,12 +4964,16 @@ $('#job-dialog').addEventListener('close', () => {
   viewedJob = null;
 });
 document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && usageWidgetState.open && !document.querySelector('dialog:modal')) {
+    event.preventDefault(); closeUsageWidget(); return;
+  }
   if (event.key === 'Escape' && $('#job-dialog').open && !document.querySelector('dialog:modal')) {
     event.preventDefault(); $('#job-dialog').close();
   }
 });
 document.addEventListener('pointerdown', event => {
   if ($('#job-dialog').open && !event.target.closest('dialog')) $('#job-dialog').close();
+  if (usageWidgetState.open && !event.target.closest('#usage-widget, #usage-widget-toggle')) closeUsageWidget();
 });
 $('#job-update-text').addEventListener('input', () => { if (viewedJob) viewedJob.amendmentId = null; });
 for (const id of ['#job-budget-limit', '#job-budget-attempts', '#job-budget-tokens'])

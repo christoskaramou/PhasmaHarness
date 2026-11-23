@@ -272,10 +272,10 @@ class AntigravityCLI {
     if (!survivors.length) this.usageHosts.delete(host);
   }
 
-  async readUsage() {
+  async readCommand(command, label = 'usage') {
     const executable = this.find();
     const { ELECTRON_RUN_AS_NODE, ...hostEnv } = process.env;
-    const child = spawnOwned(this.launch, executable.command, [...executable.args, '-p', '/usage', '--output-format', 'json'], {
+    const child = spawnOwned(this.launch, executable.command, [...executable.args, '-p', command, '--output-format', 'json'], {
       cwd: os.tmpdir(), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...hostEnv, NO_BROWSER: 'true' },
     });
@@ -293,7 +293,7 @@ class AntigravityCLI {
         const data = (text, stderr) => {
           if (settled) return;
           if (stderr) diagnostic += text; else output += text;
-          if (output.length + diagnostic.length > LIMIT) finish(new Error('Antigravity usage output is too large.'));
+          if (output.length + diagnostic.length > LIMIT) finish(new Error(`Antigravity ${label} output is too large.`));
         };
         child.stdout.on('data', text => data(text, false));
         child.stderr.on('data', text => data(text, true));
@@ -302,21 +302,24 @@ class AntigravityCLI {
         child.once('close', code => code === 0
           ? finish(null, { output, diagnostic })
           : finish(new Error(diagnostic.trim()
-            ? `Antigravity usage failed (exit ${code}): ${diagnostic.trim().slice(0, 200)}`
-            : `Antigravity usage failed with exit code ${code}.`)));
+            ? `Antigravity ${label} failed (exit ${code}): ${diagnostic.trim().slice(0, 200)}`
+            : `Antigravity ${label} failed with exit code ${code}.`)));
         child.stdin.end();
       }), 15000, LABEL);
       let parsed;
       try { parsed = JSON.parse(output); }
-      catch { throw new Error('Antigravity returned invalid usage JSON.'); }
+      catch { throw new Error(`Antigravity returned invalid ${label} JSON.`); }
       if (!parsed || typeof parsed !== 'object' || parsed.status !== 'SUCCESS') {
-        throw new Error(parsed?.error ? `Antigravity usage failed: ${parsed.error}` : 'Antigravity usage did not succeed.');
+        throw new Error(parsed?.error ? `Antigravity ${label} failed: ${parsed.error}` : `Antigravity ${label} did not succeed.`);
       }
       return parsed;
     } finally {
       await this.closeUsageHost(host);
     }
   }
+
+  readUsage() { return this.readCommand('/usage', 'usage'); }
+  readCredits() { return this.readCommand('/credits', 'credits'); }
 
   async login() { throw new Error('Run agy in your terminal to complete its native sign-in, then reconnect in Harness.'); }
   close() {

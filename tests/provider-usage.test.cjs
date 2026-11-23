@@ -93,6 +93,23 @@ test('AntigravityCLI.readUsage parses groups/buckets, isolates usageHosts from h
     assert.equal(cli.usageHosts.size, 0);
     assert.equal(launches[0].child.exitCode, 0);
 
+    // readCredits() runs /credits --output-format json isolated from hosts
+    const creditsPayload = { status: 'SUCCESS', command: { name: 'credits', data: { remaining_credits: 250 } } };
+    const creditsCli = new AntigravityCLI((cmd, args) => {
+      launches.push({ cmd, args });
+      const child = mockChild();
+      queueMicrotask(() => {
+        child.stdout.write(JSON.stringify(creditsPayload) + '\n');
+        child.exitCode = 0;
+        child.emit('close', 0);
+      });
+      return child;
+    }, () => ({ command: 'agy-bin', args: [] }));
+    assert.deepEqual(await creditsCli.readCredits(), creditsPayload);
+    assert.deepEqual(launches.at(-1).args, ['-p', '/credits', '--output-format', 'json']);
+    assert.equal(creditsCli.hosts.size, 0);
+    assert.equal(creditsCli.usageHosts.size, 0);
+
     // close() cleans up in-flight usageHosts too
     const stuckCli = new AntigravityCLI(() => mockChild(), () => ({ command: 'agy-bin', args: [] }));
     const stuckPromise = stuckCli.readUsage();
@@ -332,6 +349,17 @@ test('normalizers handle Codex, Claude, Antigravity, and Muse payloads accuratel
     { label: 'Gemini · 5-hour', usedPercent: 18, remainingPercent: 82, resetsAt: Date.parse('2026-11-23T06:00:00Z') },
     { label: 'Gemini · Weekly', usedPercent: 75, remainingPercent: 25, resetsAt: Date.parse('2026-11-30T00:00:00Z') },
   ]);
+  assert.deepEqual(agy.extra, []);
+  const agyWithCredits = normalizeAntigravityUsage(
+    { status: 'SUCCESS', command: { data: { plan_name: 'google_ai_pro', groups: [{ name: 'Gemini', buckets: [{ window: '5h', remaining_fraction: 0.9 }] }] } } },
+    { status: 'SUCCESS', command: { data: { remaining_credits: 1250 } } },
+  );
+  assert.equal(agyWithCredits.plan, 'Google AI Pro');
+  assert.deepEqual(agyWithCredits.extra, ['G1 credits: 1,250']);
+  assert.deepEqual(
+    normalizeAntigravityUsage({ status: 'SUCCESS', command: { data: { groups: [] } } }, { status: 'SUCCESS', command: { data: { remaining_credits: 0 } } }).extra,
+    ['G1 credits: 0'],
+  );
   assert.equal(normalizeAntigravityUsage({ status: 'SUCCESS', response: 'Quota ready' }).note, 'Quota ready');
 
   // Muse (snake_case & no_allowance)
@@ -418,6 +446,10 @@ function makeRunnerFixture(overrides = {}) {
               groups: [{ name: 'Gemini', buckets: [{ window: '5h', remaining_fraction: 0.6, reset_time: '2026-11-23T06:00:00Z' }] }],
             },
           },
+        }),
+        readCredits: async () => ({
+          status: 'SUCCESS',
+          command: { name: 'credits', data: { remaining_credits: 420 } },
         }),
       }],
       ['native:muse', {
@@ -520,6 +552,14 @@ test('readProviderUsage queries all connected providers in parallel and surfaces
     remainingPercent: 60,
     resetsAt: Date.parse('2026-11-23T06:00:00Z'),
   });
+  assert.deepEqual(byId['native:antigravity'].extra, ['G1 credits: 420']);
+
+  // A failing /credits lookup must not break Antigravity's /usage windows
+  primary.nativeCLIs.get('native:antigravity').readCredits = async () => { throw new Error('credits offline'); };
+  const agyOnly = await readProviderUsage(runner, { filter: 'antigravity' });
+  assert.equal(agyOnly.providers[0].status, 'ok');
+  assert.equal(agyOnly.providers[0].windows.length, 1);
+  assert.deepEqual(agyOnly.providers[0].extra, []);
 
   assert.equal(byId['native:muse'].status, 'ok');
   assert.equal(byId['native:muse'].plan, 'Standard');

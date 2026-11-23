@@ -4180,7 +4180,7 @@ main > header {
   --composer-control-size: 40px;
 }
 
-#attach-files, #context-meter, #dictate, #send, #stop {
+#attach-files, #usage-widget-toggle, #context-meter, #dictate, #send, #stop {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -4276,7 +4276,7 @@ main > header {
 
 .composer-bottom {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) repeat(4, auto);
+  grid-template-columns: auto minmax(0, 1fr) repeat(5, auto);
   align-items: end;
 }
 
@@ -4286,9 +4286,10 @@ main > header {
 
 .composer-controls { grid-column: 1; }
 .composer textarea { grid-column: 2; width: 100%; align-self: center; }
-#dictate { grid-column: 4; }
-#send { grid-column: 5; }
-#stop { grid-column: 6; }
+.composer-bottom > .usage-widget-wrap { grid-column: 3; flex: none; }
+#dictate { grid-column: 5; }
+#send { grid-column: 6; }
+#stop { grid-column: 7; }
 
 .composer-expanded .composer-bottom > * {
   grid-row: 2;
@@ -4304,7 +4305,7 @@ main > header {
   height: .75em;
 }
 
-.composer-access svg, .context-ring, #dictate svg, #send svg, #stop svg {
+.composer-access svg, #usage-widget-toggle svg, .context-ring, #dictate svg, #send svg, #stop svg {
   width: 15px;
   height: 15px;
 }
@@ -4321,7 +4322,7 @@ main > header {
   align-items: center;
 }
 
-.composer-access, #context-meter, #dictate, #send, #stop {
+.composer-access, #usage-widget-toggle, #context-meter, #dictate, #send, #stop {
   width: var(--composer-small-control-size);
   height: var(--composer-small-control-size);
   min-height: var(--composer-small-control-size);
@@ -4337,13 +4338,101 @@ main > header {
 }
 
 .composer-bottom > .context-meter-wrap {
-  grid-column: 3;
+  grid-column: 4;
   flex: none;
 }
 
-/* Match the visible gaps between context, microphone and Send. */
-#context-meter {
+/* Match the visible gaps between usage, context, microphone and Send. */
+#usage-widget-toggle, #context-meter {
   transform: translateX(calc((var(--composer-small-control-size) - 15px) / 2));
+}
+
+#usage-widget-toggle {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  justify-content: flex-end;
+}
+
+#usage-widget-toggle:hover {
+  background: transparent;
+  color: var(--text);
+}
+
+#usage-widget-toggle[aria-expanded=true] {
+  color: var(--accent);
+}
+
+#usage-widget-toggle.limited {
+  color: var(--error);
+}
+
+#usage-widget {
+  position: absolute;
+  z-index: 5;
+  right: 0;
+  bottom: calc(100% + 8px);
+  width: min(380px, 100%);
+  max-height: min(440px, 55vh);
+  overflow-y: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--raised);
+  box-shadow: 0 12px 36px #0005;
+  display: grid;
+  gap: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) var(--raised);
+}
+
+#usage-widget[hidden] {
+  display: none;
+}
+
+.usage-widget-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.usage-widget-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.usage-widget-title strong {
+  font-size: calc(13px * var(--font-scale, 1));
+  color: var(--text);
+}
+
+.usage-widget-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  font-size: calc(11.5px * var(--font-scale, 1));
+  border-radius: 7px;
+  flex: none;
+}
+
+.usage-widget-body {
+  display: grid;
+  gap: 7px;
+}
+
+.usage-widget .usage-provider {
+  padding: 9px 11px;
+  gap: 6px;
+}
+
+.usage-widget .usage-error:empty {
+  display: none;
 }
 
 @media (max-width:720px) {
@@ -4397,10 +4486,10 @@ main > header {
 
 /* Its own column between the microphone and Send, on touch screens only, so the desktop row keeps its columns. */
 @media (pointer: coarse) {
-  .composer-bottom { grid-template-columns: auto minmax(0, 1fr) repeat(5, auto); }
-  #suggestion-accept { grid-column: 5; }
-  #send { grid-column: 6; }
-  #stop { grid-column: 7; }
+  .composer-bottom { grid-template-columns: auto minmax(0, 1fr) repeat(6, auto); }
+  #suggestion-accept { grid-column: 6; }
+  #send { grid-column: 7; }
+  #stop { grid-column: 8; }
 }
 
 /* A tip on the new-chat screen (ui/tips.js). */
