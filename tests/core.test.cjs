@@ -592,6 +592,13 @@ test('every Cursor model counts as able to see images, at each of its reasoning 
   controller.cursor.models = [];
   assert.deepEqual(controller.catalog().filter(p => p.provider === 'cursor-cli').map(p => [p.id, p.images]), [['cursor-cli:grok-4.7:default', true]]);
   assert.equal(controller.data.settings.providerModels[0].images, false, 'the saved entry is left as it was');
+  // Saved and newly enabled API provider models also count as image-capable by default.
+  controller.data.settings.providers = [{ id: 'openrouter', name: 'OpenRouter', kind: 'openai-responses', baseUrl: 'https://openrouter.ai/api/v1', enabled: true }];
+  controller.data.settings.providerModels = [{ id: 'openrouter:gpt-5:default', provider: 'openrouter', model: 'gpt-5', label: 'GPT-5',
+    effort: null, rank: 40, enabled: true, worker: true, router: true, images: false, description: '' }];
+  assert.equal(controller.catalog().find(p => p.id === 'openrouter:gpt-5:default')?.images, true);
+  controller.providerSettings({ action: 'enableDiscovered', provider: 'openrouter', model: 'gemini-pro', label: 'Gemini Pro' });
+  assert.equal(controller.data.settings.providerModels.find(p => p.model === 'gemini-pro')?.images, true);
 });
 
 // 2026-10-30: images sent to a model without image input failed the turn; with Jev image assist it gets their numbers instead.

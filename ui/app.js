@@ -4042,6 +4042,27 @@ function renderSessionUsageCard(usage) {
   card.append(element('p', 'usage-note', 'Session token counts for this chat, not provider plan allowances.'));
   return card;
 }
+function resetCountdown(ms, now = Date.now()) {
+  if (!Number.isFinite(ms)) return '';
+  const diff = ms - now;
+  if (diff <= 0) return '';
+  const totalMins = Math.max(1, Math.round(diff / 60000));
+  const days = Math.floor(totalMins / 1440);
+  const hours = Math.floor((totalMins % 1440) / 60);
+  const mins = totalMins % 60;
+  const parts = [];
+  if (days) parts.push(`${days}d`);
+  if (hours) parts.push(`${hours}h`);
+  if (mins || !parts.length) parts.push(`${mins}m`);
+  return parts.join(' ');
+}
+function appendResetTime(parent, ms, verb = 'Resets') {
+  const left = resetCountdown(ms);
+  if (!left) return;
+  const time = element('strong', 'usage-reset-time', left);
+  time.title = `${verb} ${clock(ms)}`;
+  parent.append(document.createTextNode(' · '), time, document.createTextNode(' left'));
+}
 function renderUsageProvider(provider) {
   const card = element('section', 'usage-provider');
   const head = element('div', 'usage-provider-head');
@@ -4054,8 +4075,8 @@ function renderUsageProvider(provider) {
   card.append(head);
   for (const limit of provider.limits || []) {
     const who = limit.family ? `${limit.family[0].toUpperCase()}${limit.family.slice(1)} limit reached` : 'Usage limit reached';
-    const when = Number.isFinite(limit.until) ? ` · ${limit.known ? 'resets' : 'retried after'} ${clock(limit.until)}` : '';
-    const row = element('div', 'usage-limit', `${who}${when}`);
+    const row = element('div', 'usage-limit', who);
+    if (Number.isFinite(limit.until)) appendResetTime(row, limit.until, limit.known ? 'Resets' : 'Retried after');
     if (limit.reason) row.title = String(limit.reason);
     card.append(row);
   }
@@ -4067,18 +4088,48 @@ function renderUsageProvider(provider) {
       const row = element('div', 'usage-window');
       const wHead = element('div', 'usage-window-head');
       const pctText = `${Math.round(pct)}% used`;
-      const stats = pctText + (Number.isFinite(win.resetsAt) ? ` · resets ${clock(win.resetsAt)}` : '');
-      wHead.append(element('span', '', win.label || 'Usage'), element('span', 'usage-window-stats', stats));
+      const stats = element('span', 'usage-window-stats', pctText);
+      if (Number.isFinite(win.resetsAt)) appendResetTime(stats, win.resetsAt);
+      wHead.append(element('span', '', win.label || 'Usage'), stats);
       const bar = element('div', 'usage-bar');
       bar.setAttribute('role', 'progressbar');
       bar.setAttribute('aria-valuemin', '0');
       bar.setAttribute('aria-valuemax', '100');
       bar.setAttribute('aria-valuenow', String(Math.round(Math.min(100, pct))));
       bar.setAttribute('aria-label', `${win.label || 'Usage'}: ${pctText}`);
-      const fill = element('div', 'usage-bar-fill' + (pct >= 100 ? ' full' : pct >= 85 ? ' high' : ''));
+      const isShareWindow = Number.isFinite(win.allowancePercentOfWeekly) || Number.isFinite(win.usedPercentOfWeekly);
+      const fill = element('div', 'usage-bar-fill' + (pct >= 100 ? ' full' : pct >= 85 ? ' high' : isShareWindow ? ' share' : ''));
       fill.style.width = `${Math.max(0, Math.min(100, pct))}%`;
       bar.append(fill);
+      const shares = Array.isArray(win.shares) ? win.shares.filter(s => s && s.label) : [];
+      let shareOffset = 0;
+      const totalClamped = Math.max(0, Math.min(100, pct));
+      for (const share of shares) {
+        const hasUsed = Number.isFinite(share.usedPercentOfWeekly) && share.usedPercentOfWeekly >= 0;
+        const hasCap = Number.isFinite(share.allowancePercentOfWeekly) && share.allowancePercentOfWeekly > 0;
+        if (hasUsed && share.usedPercentOfWeekly > 0 && shareOffset < totalClamped) {
+          const width = Math.min(totalClamped - shareOffset, share.usedPercentOfWeekly);
+          const seg = element('div', 'usage-bar-share');
+          seg.style.left = `${shareOffset}%`;
+          seg.style.width = `${width}%`;
+          seg.title = `${share.label}: ${Math.round(share.usedPercentOfWeekly)}% of weekly` + (hasCap ? ` (up to ${Math.round(share.allowancePercentOfWeekly)}% cap)` : '');
+          bar.append(seg);
+          shareOffset += width;
+        }
+        if (hasCap && share.allowancePercentOfWeekly < 100) {
+          const cap = element('div', 'usage-bar-cap');
+          cap.style.left = `${Math.max(0, Math.min(100, share.allowancePercentOfWeekly))}%`;
+          cap.title = `${share.label} cap: ${Math.round(share.allowancePercentOfWeekly)}% of weekly limit`;
+          bar.append(cap);
+        }
+      }
       row.append(wHead, bar);
+      if (Number.isFinite(win.allowancePercentOfWeekly) || Number.isFinite(win.usedPercentOfWeekly)) {
+        const parts = [];
+        if (Number.isFinite(win.allowancePercentOfWeekly)) parts.push(`Up to ${Math.round(win.allowancePercentOfWeekly)}% of weekly limit`);
+        if (Number.isFinite(win.usedPercentOfWeekly)) parts.push(`${Math.round(win.usedPercentOfWeekly)}% of weekly used`);
+        if (parts.length) row.append(element('div', 'usage-window-sub', parts.join(' · ')));
+      }
       list.append(row);
     }
     if (list.childNodes.length) card.append(list);
@@ -4097,13 +4148,25 @@ function formatUsageReportText(data, sessionUsage) {
     lines.push(meta ? `${p.label} (${meta})` : (p.label || p.id || 'Provider'));
     for (const limit of p.limits || []) {
       const who = limit.family ? `${limit.family[0].toUpperCase()}${limit.family.slice(1)} limit reached` : 'Usage limit reached';
-      const when = Number.isFinite(limit.until) ? ` (${limit.known ? 'resets' : 'retried after'} ${clock(limit.until)})` : '';
+      const left = resetCountdown(limit.until);
+      const when = left ? ` (${left} left)` : '';
       lines.push(`  - ${who}${when}`);
     }
     for (const win of p.windows || []) {
       if (!Number.isFinite(win.usedPercent)) continue;
-      const reset = Number.isFinite(win.resetsAt) ? ` · resets ${clock(win.resetsAt)}` : '';
-      lines.push(`  - ${win.label || 'Usage'}: ${Math.round(Math.max(0, win.usedPercent))}% used${reset}`);
+      const left = resetCountdown(win.resetsAt);
+      const reset = left ? ` · ${left} left` : '';
+      const shareNote = Array.isArray(win.shares) && win.shares.length
+        ? ' · ' + win.shares.map(s => {
+          const parts = [];
+          if (Number.isFinite(s.usedPercentOfWeekly)) parts.push(`${Math.round(s.usedPercentOfWeekly)}% of weekly`);
+          if (Number.isFinite(s.allowancePercentOfWeekly)) parts.push(`${Math.round(s.allowancePercentOfWeekly)}% cap`);
+          return parts.length ? `${s.label} ${parts.join(', ')}` : '';
+        }).filter(Boolean).join('; ')
+        : Number.isFinite(win.allowancePercentOfWeekly)
+          ? ` · up to ${Math.round(win.allowancePercentOfWeekly)}% of weekly`
+          : '';
+      lines.push(`  - ${win.label || 'Usage'}: ${Math.round(Math.max(0, win.usedPercent))}% used${reset}${shareNote}`);
     }
     for (const extra of p.extra || []) if (extra) lines.push(`  - ${extra}`);
     if (p.error) lines.push(`  - Error: ${p.error}`);

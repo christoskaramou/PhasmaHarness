@@ -22,7 +22,7 @@ function validateModel(value, providers) {
   if (value.provider === 'cursor-cli' && value.effort) throw new Error('Cursor effort is part of its model ID. Choose Provider default.');
   const effort = value.effort || null;
   return { id: `${value.provider}:${value.model}:${effort || 'default'}`, provider: value.provider, model: value.model, label: value.label.trim(), effort,
-    description: value.description.trim(), rank: value.rank, enabled: value.enabled !== false, router: value.router !== false, worker: value.worker !== false, images: value.images === true };
+    description: value.description.trim(), rank: value.rank, enabled: value.enabled !== false, router: value.router !== false, worker: value.worker !== false, images: value.images !== false };
 }
 
 class Providers {

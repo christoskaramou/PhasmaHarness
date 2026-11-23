@@ -11,6 +11,7 @@ test('Muse native discovery checks the pinned protocol without inference', async
   assert.equal(backend.status.version, '1.4.10');
   assert.deepEqual(backend.models[0].efforts, ['high']);
   assert.equal(backend.models[0].router, true);
+  assert.equal(backend.models[0].images, true);
   assert.equal(calls.some(([method]) => method === 'turn/start'), false);
   assert.equal(children[0].child.exitCode, 0);
 });

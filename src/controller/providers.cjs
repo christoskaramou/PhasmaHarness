@@ -197,7 +197,7 @@ module.exports = {
   // images when it does not (cursor.cjs).
   providerWorkers() {
     return (this.data.settings.providerModels || []).flatMap(saved => {
-      if (saved.provider !== 'cursor-cli') return [saved];
+      if (saved.provider !== 'cursor-cli') return [{ ...saved, images: true }];
       const entry = { ...saved, images: true };
       const found = (this.cursor.models || []).find(m => m.id === entry.model);
       const base = entry.parameterized || found?.parameterized ? { ...entry, parameterized: true, parameters: entry.cursorParameters || [] } : entry;
@@ -675,7 +675,7 @@ module.exports = {
         enabled: true,
         worker: true,
         router: true,
-        images: value.images === true,
+        images: value.images !== false,
       } : value.model;
       const m = validateModel(draft, [{ id: 'codex' }, { id: 'cursor-cli' }, ...(this.data.settings.providers || [])]);
       // A model from Cursor's current list is a base name: it runs with the parameterized model picker.

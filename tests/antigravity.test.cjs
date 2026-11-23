@@ -20,7 +20,7 @@ test('Antigravity metadata checks native setup without inference, and its models
   assert.equal(f.backend.models.length, 1);
   assert.equal(f.backend.models[0].provider, 'native:antigravity');
   assert.equal(f.backend.models[0].router, true);
-  assert.equal(f.backend.models[0].images, false);
+  assert.equal(f.backend.models[0].images, true);
   assert.deepEqual(f.calls, []);
   assert.equal(f.backend.hosts.size, 0);
   const missing = await antigravityFixture(t, { authError: true });
@@ -30,14 +30,25 @@ test('Antigravity metadata checks native setup without inference, and its models
   await assert.rejects(missing.backend.login(), /Run agy in your terminal/);
 });
 
-test('unsupported permissions and images fail before configuration or provider submission', async t => {
+test('unsupported permissions and invalid/structured images fail before configuration or provider submission, while worker turns stage valid images and clean up', async t => {
   const cwd = workspace(t), f = await antigravityFixture(t);
   for (const access of ['read-only', 'workspace-write', undefined]) await assert.rejects(f.backend.run({ ...turn(cwd), access }), /requires Full access/);
-  await assert.rejects(f.backend.run({ ...turn(cwd), images: ['image'] }), /text only/);
+  await assert.rejects(f.backend.run({ ...turn(cwd), images: ['image'] }), /Invalid image/);
+  await assert.rejects(f.backend.run({ ...turn(cwd), schema: { type: 'object' }, images: ['data:image/png;base64,iVBORw0KGgo='] }), /structured tool-free replies/);
   const abort = new AbortController(); abort.abort();
   await assert.rejects(f.backend.run({ ...turn(cwd), signal: abort.signal }), { name: 'AbortError' });
   assert.equal(f.children.length, 0);
   assert.equal(fs.existsSync(path.join(cwd, '.agents')), false);
+
+  const img = 'data:image/png;base64,iVBORw0KGgo=';
+  await f.backend.run({ ...turn(cwd), images: [img] });
+  assert.equal(f.children.length, 1);
+  const addDirIdx = f.children[0].args.indexOf('--add-dir');
+  assert.ok(addDirIdx > -1, 'worker turn with direct images passes --add-dir for the temp image directory');
+  const tempDir = f.children[0].args[addDirIdx + 1];
+  assert.match(f.calls[0].message.content, /Attached image files \(inspect with read_file or view_file\):/);
+  assert.ok(f.calls[0].message.content.includes(path.join(tempDir, 'image-1.png')));
+  assert.equal(fs.existsSync(tempDir), false, 'temporary staged image directory is cleaned up after the turn');
 });
 
 // 2026-10-31, the user: no blocks nobody tested. Antigravity answers Hub and routing replies as DeepSeek and Cursor do: the

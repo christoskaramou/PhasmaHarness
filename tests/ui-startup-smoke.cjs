@@ -2911,7 +2911,12 @@ app.whenReady().then(async () => {
         windows: [{ label: '5-hour', usedPercent: 45, remainingPercent: 55, resetsAt: Date.now() + 3600000 }],
         extra: ['Credits balance: 12'], limits: [], note: null, error: null, cached: false, observedAt: null },
       { id: 'claude-cli', label: 'Claude CLI', connected: true, status: 'ok', plan: 'Max', account: '<b>alice</b>',
-        windows: [{ label: 'Weekly', usedPercent: 100, remainingPercent: 0, resetsAt: Date.now() + 86400000 }],
+        windows: [
+          { label: 'Weekly', usedPercent: 100, remainingPercent: 0, resetsAt: Date.now() + 86400000,
+            shares: [{ label: 'Fable', usedPercentOfWeekly: 19, allowancePercentOfWeekly: 50 }] },
+          { label: 'Fable weekly', usedPercent: 37, remainingPercent: 63, resetsAt: Date.now() + ((2 * 1440 + 3 * 60 + 15) * 60000),
+            usedPercentOfWeekly: 19, allowancePercentOfWeekly: 50 },
+        ],
         extra: [], limits: [{ family: 'opus', reason: 'Limit', until: Date.now() + 3600000, known: true }],
         note: null, error: null, cached: false, observedAt: null },
       { id: 'cursor-cli', label: 'Cursor CLI', connected: true, status: 'unavailable', plan: 'Premium', account: 'user@example.com',
@@ -2927,7 +2932,46 @@ app.whenReady().then(async () => {
   assert.match(await panelText(), /Opus limit reached/);
   assert.match(await panelText(), /Cursor CLI does not expose remaining plan usage/);
   assert.equal(await window.webContents.executeJavaScript('document.querySelector("#command-content b")'), null, 'usage data renders as text');
-  assert.equal(await window.webContents.executeJavaScript('document.querySelectorAll("#command-content [role=progressbar]").length'), 2);
+  assert.equal(await window.webContents.executeJavaScript('document.querySelectorAll("#command-content [role=progressbar]").length'), 3);
+  const fableShareUi = await window.webContents.executeJavaScript(`({
+    shareWidth: document.querySelector('#command-content .usage-bar-share')?.style.width || '',
+    capLeft: document.querySelector('#command-content .usage-bar-cap')?.style.left || '',
+    shareDot: document.querySelector('#command-content .usage-share-dot'),
+    subs: [...document.querySelectorAll('#command-content .usage-window-sub')].map(el => el.textContent),
+    colors: {
+      defaultFill: getComputedStyle(document.querySelector('#command-content .usage-bar-fill:not(.share)')).backgroundColor,
+      shareSeg: getComputedStyle(document.querySelector('#command-content .usage-bar-share')).backgroundColor,
+      shareFill: getComputedStyle(document.querySelector('#command-content .usage-bar-fill.share')).backgroundColor,
+    },
+  })`);
+  assert.deepEqual(fableShareUi, {
+    shareWidth: '19%',
+    capLeft: '50%',
+    shareDot: null,
+    subs: ['Up to 50% of weekly limit · 19% of weekly used'],
+    colors: {
+      defaultFill: 'rgb(44, 125, 214)',
+      shareSeg: 'rgb(114, 169, 234)',
+      shareFill: 'rgb(114, 169, 234)',
+    },
+  }, 'Claude weekly limit shows Fable share segment, cap marker, Claude-site colors, and no redundant Weekly legend line');
+  const resetUi = await window.webContents.executeJavaScript(`({
+    stats: [...document.querySelectorAll('#command-content .usage-window-stats')].map(el => el.textContent),
+    bolds: [...document.querySelectorAll('#command-content .usage-window-stats .usage-reset-time')].map(el => ({
+      text: el.textContent,
+      weight: getComputedStyle(el).fontWeight,
+    })),
+    limitBold: document.querySelector('#command-content .usage-limit .usage-reset-time')?.textContent || '',
+  })`);
+  assert.equal(resetUi.bolds.length, 3, 'every usage window with resetsAt renders a bold countdown');
+  for (const item of resetUi.bolds) {
+    assert.equal(item.weight, '700', 'reset countdown is bold');
+    assert.doesNotMatch(item.text, /resets|left/i, 'only the countdown value is bold');
+  }
+  assert.match(resetUi.stats[0], /^45% used · 1h left$/, '1-hour window shows only countdown left');
+  assert.match(resetUi.stats[1], /^100% used · 1d left$/, '1-day window shows only countdown left');
+  assert.match(resetUi.stats[2], /^37% used · 2d 3h 1[45]m left$/, 'multi-day window shows only days/hours/mins left');
+  assert.equal(resetUi.limitBold, '1h', 'active limit row shows only bold countdown');
   await closeCommand();
   await submit('/usage claude', false);
   await until(() => usageCalls.includes('claude'), '/usage <provider> passes filter');

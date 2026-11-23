@@ -119,19 +119,65 @@ function normalizeClaudeUsage(report) {
   }
 
   const limits = report.rate_limits;
+  const scopedSharesByName = new Map();
+  const weeklyShares = [];
+  if (Array.isArray(limits.weekly_scoped_shares) && Array.isArray(limits.limits)) {
+    for (const share of limits.weekly_scoped_shares.slice(0, 100)) {
+      if (!share || !Number.isInteger(share.limit_index) || share.limit_index < 0 || share.limit_index >= limits.limits.length) continue;
+      const entry = limits.limits[share.limit_index];
+      const rawName = entry?.scope?.model?.display_name || entry?.scope?.surface?.display_name;
+      if (typeof rawName !== 'string' || !rawName.trim()) continue;
+      const label = rawName.trim().slice(0, 100);
+      const usedPercentOfWeekly = Number.isFinite(share.used_percent_of_weekly) && share.used_percent_of_weekly >= 0
+        ? share.used_percent_of_weekly : null;
+      const allowancePercentOfWeekly = Number.isFinite(share.allowance_percent_of_weekly) && share.allowance_percent_of_weekly > 0
+        ? share.allowance_percent_of_weekly : null;
+      if (usedPercentOfWeekly === null && allowancePercentOfWeekly === null) continue;
+      const info = {
+        label,
+        ...(usedPercentOfWeekly !== null ? { usedPercentOfWeekly } : {}),
+        ...(allowancePercentOfWeekly !== null ? { allowancePercentOfWeekly } : {}),
+      };
+      weeklyShares.push(info);
+      scopedSharesByName.set(label.toLowerCase(), info);
+    }
+  }
+
   const windows = [];
   for (const [key, label] of CLAUDE_STANDARD_WINDOWS) {
     const w = limits[key];
     if (!w || typeof w !== 'object' || !Number.isFinite(w.utilization) || w.utilization < 0) continue;
-    windows.push(makeWindow(label, w.utilization, parseIsoMs(w.resets_at)));
+    const win = makeWindow(label, w.utilization, parseIsoMs(w.resets_at));
+    if (key === 'seven_day' && weeklyShares.length) win.shares = weeklyShares;
+    windows.push(win);
   }
+
+  const seenScoped = new Set();
+  const addScopedWindow = (rawName, utilization, resetsAt) => {
+    if (typeof rawName !== 'string' || !rawName.trim()) return;
+    if (!Number.isFinite(utilization) || utilization < 0) return;
+    const name = rawName.trim().slice(0, 100);
+    const key = name.toLowerCase();
+    if (seenScoped.has(key)) return;
+    seenScoped.add(key);
+    const win = makeWindow(`${name} weekly`, utilization, parseIsoMs(resetsAt));
+    const share = scopedSharesByName.get(key);
+    if (share) {
+      if (share.usedPercentOfWeekly !== undefined) win.usedPercentOfWeekly = share.usedPercentOfWeekly;
+      if (share.allowancePercentOfWeekly !== undefined) win.allowancePercentOfWeekly = share.allowancePercentOfWeekly;
+    }
+    windows.push(win);
+  };
 
   if (Array.isArray(limits.model_scoped)) {
     for (const w of limits.model_scoped.slice(0, 100)) {
-      if (!w || typeof w.display_name !== 'string' || !w.display_name.trim()) continue;
-      if (!Number.isFinite(w.utilization) || w.utilization < 0) continue;
-      const name = w.display_name.trim().slice(0, 100);
-      windows.push(makeWindow(`${name} weekly`, w.utilization, parseIsoMs(w.resets_at)));
+      addScopedWindow(w?.display_name, w?.utilization, w?.resets_at);
+    }
+  }
+  if (Array.isArray(limits.limits)) {
+    for (const entry of limits.limits.slice(0, 100)) {
+      if (entry?.kind !== 'weekly_scoped') continue;
+      addScopedWindow(entry?.scope?.model?.display_name || entry?.scope?.surface?.display_name, entry?.percent, entry?.resets_at);
     }
   }
 
@@ -164,6 +210,11 @@ function normalizeClaudeUsage(report) {
   return { available: true, plan, windows, extra };
 }
 
+const antigravityWindowRank = bucket => {
+  const w = typeof bucket?.window === 'string' ? bucket.window.trim().toLowerCase() : '';
+  return w === '5h' ? 0 : w === 'weekly' ? 2 : 1;
+};
+
 function normalizeAntigravityUsage(report, creditsReport = null) {
   const data = report?.command?.data;
   const groups = data?.groups;
@@ -172,13 +223,14 @@ function normalizeAntigravityUsage(report, creditsReport = null) {
     for (const group of groups) {
       if (!group || typeof group !== 'object') continue;
       const groupName = typeof group.name === 'string' && group.name.trim() ? group.name.trim() : '';
-      const buckets = Array.isArray(group.buckets)
+      const rawBuckets = Array.isArray(group.buckets)
         ? group.buckets
         : Array.isArray(group.windows)
           ? group.windows
           : typeof group.remaining_fraction === 'number'
             ? [group]
             : [];
+      const buckets = [...rawBuckets].sort((a, b) => antigravityWindowRank(a) - antigravityWindowRank(b));
       for (const bucket of buckets) {
         if (!bucket || typeof bucket !== 'object') continue;
         const remaining = bucket.remaining_fraction;

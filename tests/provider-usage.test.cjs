@@ -328,7 +328,50 @@ test('normalizers handle Codex, Claude, Antigravity, and Muse payloads accuratel
   });
   assert.match(claudeEur.extra[0], /12\.50 EUR spent/);
 
-  // Antigravity
+  // Claude weekly_scoped_shares attaches Fable's share & cap to Weekly and to Fable weekly (and falls back to limits[] if model_scoped is absent)
+  const claudeFable = normalizeClaudeUsage({
+    rate_limits_available: true,
+    subscription_type: 'max',
+    rate_limits: {
+      five_hour: { utilization: 2, resets_at: '2026-11-23T15:40:00Z' },
+      seven_day: { utilization: 23, resets_at: '2026-11-29T08:00:00Z' },
+      limits: [
+        { kind: 'session', group: 'session', percent: 2, resets_at: '2026-11-23T15:40:00Z', scope: null },
+        { kind: 'weekly_all', group: 'weekly', percent: 23, resets_at: '2026-11-29T08:00:00Z', scope: null },
+        { kind: 'weekly_scoped', group: 'weekly', percent: 37, resets_at: '2026-11-29T08:00:00Z', scope: { model: { id: null, display_name: 'Fable' }, surface: null } },
+      ],
+      weekly_scoped_shares: [
+        { limit_index: 2, used_percent_of_weekly: 19, allowance_percent_of_weekly: 50 },
+      ],
+      model_scoped: [
+        { display_name: 'Fable', utilization: 37, resets_at: '2026-11-29T08:00:00Z' },
+      ],
+    },
+  });
+  assert.deepEqual(claudeFable.windows.find(w => w.label === 'Weekly').shares, [
+    { label: 'Fable', usedPercentOfWeekly: 19, allowancePercentOfWeekly: 50 },
+  ]);
+  const fableWin = claudeFable.windows.find(w => w.label === 'Fable weekly');
+  assert.equal(fableWin.usedPercent, 37);
+  assert.equal(fableWin.usedPercentOfWeekly, 19);
+  assert.equal(fableWin.allowancePercentOfWeekly, 50);
+  // Deduplicated: Fable appears once even when listed in both model_scoped and limits[]
+  assert.equal(claudeFable.windows.filter(w => w.label === 'Fable weekly').length, 1);
+  // Fallback when model_scoped is absent
+  const claudeLimitsOnly = normalizeClaudeUsage({
+    rate_limits_available: true,
+    rate_limits: {
+      seven_day: { utilization: 23, resets_at: '2026-11-29T08:00:00Z' },
+      limits: [
+        { kind: 'weekly_all', group: 'weekly', percent: 23, resets_at: '2026-11-29T08:00:00Z', scope: null },
+        { kind: 'weekly_scoped', group: 'weekly', percent: 37, resets_at: '2026-11-29T08:00:00Z', scope: { model: { display_name: 'Fable' } } },
+      ],
+      weekly_scoped_shares: [{ limit_index: 1, used_percent_of_weekly: 19, allowance_percent_of_weekly: 50 }],
+    },
+  });
+  assert.equal(claudeLimitsOnly.windows.find(w => w.label === 'Fable weekly')?.allowancePercentOfWeekly, 50);
+
+  // Antigravity (places 5-hour before Weekly even when agy returns Weekly first)
   const agy = normalizeAntigravityUsage({
     status: 'SUCCESS',
     command: {
@@ -337,8 +380,15 @@ test('normalizers handle Codex, Claude, Antigravity, and Muse payloads accuratel
           {
             name: 'Gemini',
             buckets: [
-              { window: '5h', remaining_fraction: 0.82, reset_time: '2026-11-23T06:00:00Z' },
               { window: 'weekly', remaining_fraction: 0.25, reset_time: '2026-11-30T00:00:00Z' },
+              { window: '5h', remaining_fraction: 0.82, reset_time: '2026-11-23T06:00:00Z' },
+            ],
+          },
+          {
+            name: 'Claude and GPT models',
+            buckets: [
+              { window: 'weekly', remaining_fraction: 1, reset_time: '2026-11-30T00:00:00Z' },
+              { window: '5h', remaining_fraction: 1, reset_time: '2026-11-23T06:00:00Z' },
             ],
           },
         ],
@@ -348,6 +398,8 @@ test('normalizers handle Codex, Claude, Antigravity, and Muse payloads accuratel
   assert.deepEqual(agy.windows, [
     { label: 'Gemini · 5-hour', usedPercent: 18, remainingPercent: 82, resetsAt: Date.parse('2026-11-23T06:00:00Z') },
     { label: 'Gemini · Weekly', usedPercent: 75, remainingPercent: 25, resetsAt: Date.parse('2026-11-30T00:00:00Z') },
+    { label: 'Claude and GPT models · 5-hour', usedPercent: 0, remainingPercent: 100, resetsAt: Date.parse('2026-11-23T06:00:00Z') },
+    { label: 'Claude and GPT models · Weekly', usedPercent: 0, remainingPercent: 100, resetsAt: Date.parse('2026-11-30T00:00:00Z') },
   ]);
   assert.deepEqual(agy.extra, []);
   const agyWithCredits = normalizeAntigravityUsage(

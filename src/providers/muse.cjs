@@ -90,7 +90,7 @@ class MuseCLI {
       const profile = catalog.profileId || null;
       this.models = (catalog.models || []).filter(model => model.modelId && model.providerId === 'meta' && (model.profileId || null) === profile)
         .map(model => ({ id: `native:muse:${model.modelId}`, model: model.modelId, profileId: profile,
-          label: model.displayLabel || model.modelId, provider: 'native:muse', rank: 35, worker: true, router: true,
+          label: model.displayLabel || model.modelId, provider: 'native:muse', rank: 35, worker: true, router: true, images: true,
           efforts: (model.reasoningEffortVariants || []).map(variant => variant.tier).filter(Boolean),
           effort: model.defaultReasoningEffort || null,
           // The catalog's context limit (null when undeclared) is the model's window.

@@ -5,6 +5,7 @@ const { randomUUID } = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { spawnOwned, stopTree } = require('../process-tree.cjs');
 const { findNativeCLI, deadline, takeTurn } = require('./native-cli.cjs');
+const { imageData } = require('../image-input.cjs');
 const { invalidResponse } = require('./structured.cjs');
 
 // agy signs in with the Google account the Gemini tools share; its own log confirms "authenticated successfully as"
@@ -156,7 +157,7 @@ class AntigravityCLI {
         const match = row.match(/^\s*([a-z][a-z0-9._/-]*-[a-z0-9._/-]+)(?:\t+| {2,})(.+?)\s*$/);
         if (!match) continue;
         models.set(match[1], { id: `native:antigravity:${match[1]}`, model: match[1], label: match[2],
-          provider: 'native:antigravity', rank: 35, worker: true, router: true, efforts: [], effort: null, images: false });
+          provider: 'native:antigravity', rank: 35, worker: true, router: true, efforts: [], effort: null, images: true });
       }
       this.models = [...models.values()];
       if (!this.models.length) throw new Error('Antigravity returned no recognized models. Update it, then reconnect.');
@@ -176,14 +177,30 @@ class AntigravityCLI {
     if (this.hosts.size) { release(); throw new Error('Antigravity already has an active process or pending cleanup.'); }
     // A Hub or routing reply is tool-free (a tool step below rejects it), so only worker turns need Full access.
     if (!options.schema && options.access !== 'danger-full-access') { release(); throw new Error('Antigravity currently requires Full access. Ask and Workspace permissions are not verified for its headless interface.'); }
-    if (options.images?.length) { release(); throw new Error('Antigravity headless input accepts text only. Choose another worker for images.'); }
+    let parsedImages = [];
+    if (options.images?.length) {
+      if (options.schema) { release(); throw new Error('Antigravity structured tool-free replies cannot inspect direct image attachments; use a worker turn or Jev image assist.'); }
+      try { parsedImages = options.images.map(imageData); }
+      catch (error) { release(); throw error; }
+    }
     if (options.signal?.aborted) { release(); throw Object.assign(new Error('Antigravity stopped.'), { name: 'AbortError' }); }
-    let host, agent, succeeded = false;
+    let host, agent, imageDir = null, imagePaths = [], succeeded = false;
     try {
       agent = agentFile(options.cwd, options.helpers);
+      if (parsedImages.length) {
+        imageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-agy-img-'));
+        try { fs.chmodSync(imageDir, 0o700); } catch { /* Windows ignores POSIX mode bits */ }
+        imagePaths = parsedImages.map(({ mime, data }, index) => {
+          const ext = mime === 'image/jpeg' ? 'jpg' : mime === 'image/webp' ? 'webp' : 'png';
+          const file = path.join(imageDir, `image-${index + 1}.${ext}`);
+          fs.writeFileSync(file, Buffer.from(data, 'base64'), { mode: 0o600 });
+          return file;
+        });
+      }
       // A tool-free reply runs without auto-approve, so a tool agy reaches for asks (agy 2026-10-31: "request-review") instead of running.
       const args = ['--agent', agent.name, '--input-format', 'stream-json', '--output-format', 'stream-json',
         '--disable-slash-commands', ...(options.schema ? [] : ['--dangerously-skip-permissions'])];
+      if (imageDir) args.push('--add-dir', imageDir);
       if (options.model) args.push('--model', options.model);
       if (options.resume) args.push('--conversation', options.resume);
       if (options.effort) args.push('--effort', options.effort);
@@ -208,9 +225,11 @@ class AntigravityCLI {
                 (options.resume && value.conversation_id !== options.resume)) throw new Error('Antigravity did not confirm the requested worker, session and permission mode.');
             initialized = true; sessionId = value.conversation_id;
             onEvent({ type: 'system', session_id: sessionId });
+            const imageNote = imagePaths.length
+              ? `Attached image files (inspect with read_file or view_file):\n${imagePaths.map(file => `- ${file}`).join('\n')}` : '';
             const content = [options.instructions, options.helpers?.instructions,
               options.schema && !(options.resume && options.schemaInHistory) ? `Return only a JSON object matching this schema. No tools are available.\n${JSON.stringify(options.schema)}` : '',
-              options.prompt].filter(Boolean).join('\n\n');
+              options.prompt, imageNote].filter(Boolean).join('\n\n');
             host.child.stdin.write(JSON.stringify({ event: 'user', message: { content } }) + '\n');
           } else if (value.event === 'step_update') {
             const step = value.step_update;
@@ -263,7 +282,10 @@ class AntigravityCLI {
       // A confirmed result stands; an unconfirmed stop keeps the host pending, so the next run refuses until it is resolved.
       try { if (host) await this.closeHost(host); else agent?.remove(); }
       catch (error) { if (!succeeded) throw error; }
-      finally { release(); }
+      finally {
+        if (imageDir) try { fs.rmSync(imageDir, { recursive: true, force: true }); } catch { /* Best-effort temp image cleanup. */ }
+        release();
+      }
     }
   }
 
