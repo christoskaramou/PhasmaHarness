@@ -24,7 +24,7 @@ const LIMIT = 16 * 1024 * 1024;
 
 function agentText(name, mcpServers) {
   const definition = { name, description: 'Current PhasmaHarness worker', mainAgent: true, subagent: false,
-    tools: ['view_file', 'grep_search', 'run_command', 'write_to_file', 'replace_file_content'], commandExecutionPolicy: 'eager', mcpServers };
+    tools: ['view_file', 'grep_search', 'run_command', 'write_to_file', 'replace_file_content', 'generate_image', 'search_web'], commandExecutionPolicy: 'eager', mcpServers };
   return '---\n' + Object.entries(definition).map(([key, value]) => key + ': ' + JSON.stringify(value)).join('\n') +
     '\n---\nFollow the current Harness assignment. Coordinate through the assigned Harness tools.\n';
 }
@@ -244,8 +244,13 @@ class AntigravityCLI {
                 tools.add(id);
                 onEvent({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: step.tool_name, input: step.tool_info?.parameters || {} }] } });
               }
-              if (step.state === 'DONE') onEvent({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id,
-                is_error: !!step.tool_info?.error, content: step.tool_info?.error || step.tool_info?.output || '' }] } });
+              const failed = ['ERROR', 'FAILED', 'CANCELED', 'CANCELLED', 'REJECTED'].includes(step.state);
+              if (step.state === 'DONE' || failed) {
+                const err = step.tool_info?.error;
+                const errText = typeof err === 'string' ? err : typeof err?.message === 'string' ? err.message : err ? JSON.stringify(err) : '';
+                onEvent({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id,
+                  is_error: failed || !!err, content: errText || step.tool_info?.output || (failed ? step.state : '') }] } });
+              }
             }
           } else if (value.event === 'result') {
             const result = value.result;

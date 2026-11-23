@@ -482,6 +482,7 @@ app.whenReady().then(async () => {
     for (let i = 0; ${wait} && i < 100 && submitting; i++) await new Promise(resolve => setTimeout(resolve, 20));
   })()`);
   const until = async (condition, what) => { for (let i = 0; i < 100 && !condition(); i++) await new Promise(r => setTimeout(r, 20)); assert.ok(condition(), what); };
+  await require('./composer-list-ui-check.cjs')(window, sent);
   phase = 'dictation checks';
   // A tone stands in for the microphone, so the page's real capture path (worklet, resampling, PCM) runs.
   await window.webContents.executeJavaScript(`navigator.mediaDevices.getUserMedia = async () => {

@@ -4400,7 +4400,10 @@ $('#composer').addEventListener('submit', async event => {
     catch (error) { notify(error); return; }
     finally { submitting = false; render(); }
   }
-  const text = $('#prompt').value.trim();
+  const raw = $('#prompt').value;
+  const trimmed = raw.trim();
+  const stripped = raw.replace(/^(?:[ \t]*\n)+/, '').trimEnd();
+  const text = trimmed && /^[ \t]+\d+\.[ \t]/.test(stripped) ? stripped : trimmed;
   if (text.length > $('#prompt').maxLength) { notify(new Error('Your draft is over the message limit. Shorten it before sending.')); return; }
   const command = knownCommand(text);
   if (command) { await runCommand(command, text); return; }
@@ -4506,6 +4509,36 @@ function restoreDraft(id, text, images, error, files = []) {
   if (key === draftKey()) { renderImages(); updatePreview(); }
   notify(error);
 }
+const LIST_INDENT = '  ';
+function numberedListEdit(value, start, end, key, shiftKey) {
+  const lineStart = start === 0 ? 0 : value.lastIndexOf('\n', start - 1) + 1;
+  const rawLineEnd = value.indexOf('\n', start);
+  const lineEnd = rawLineEnd === -1 ? value.length : rawLineEnd;
+  if (key === ' ') {
+    const match = value.slice(lineStart, start).match(/^(\d+)\.$/);
+    return match ? { from: lineStart, to: end, text: `${LIST_INDENT}${match[1]}. ` } : null;
+  }
+  if (key === 'Enter' && shiftKey && end <= lineEnd) {
+    const line = value.slice(lineStart, lineEnd);
+    const match = line.match(/^([ \t]*)(\d+)\.([ \t]+)/);
+    if (!match) return null;
+    const prefixEnd = lineStart + match[0].length;
+    if (start < prefixEnd) return null;
+    if (!line.slice(match[0].length).trim()) return { from: lineStart, to: lineEnd, text: '' };
+    const next = Number(match[2]) + 1;
+    return Number.isSafeInteger(next) ? { from: start, to: end, text: `\n${match[1]}${next}. ` } : null;
+  }
+  return null;
+}
+function applyPromptEdit(prompt, edit) {
+  prompt.setSelectionRange(edit.from, edit.to);
+  if (document.activeElement === prompt && typeof document.execCommand === 'function') {
+    const ok = edit.text ? document.execCommand('insertText', false, edit.text) : document.execCommand('delete');
+    if (ok) return;
+  }
+  prompt.setRangeText(edit.text, edit.from, edit.to, 'end');
+  prompt.dispatchEvent(new Event('input', { bubbles: true }));
+}
 $('#prompt').addEventListener('input', () => { sentHistory = null; sentHistoryIndex = -1; slashIndex = 0; slashDismissed = false; updatePreview(); });
 $('#prompt').addEventListener('focus', () => { slashDismissed = false; renderSlashMenu(); });
 $('#prompt').addEventListener('blur', hideSlashMenu);
@@ -4549,6 +4582,11 @@ $('#prompt').addEventListener('keydown', event => {
       showSuggestion();
       return;
     }
+  }
+  const prompt = $('#prompt');
+  if (!event.isComposing && !event.ctrlKey && !event.metaKey && !event.altKey && !prompt.readOnly && !prompt.disabled) {
+    const edit = numberedListEdit(prompt.value, prompt.selectionStart, prompt.selectionEnd, event.key, event.shiftKey);
+    if (edit) { event.preventDefault(); applyPromptEdit(prompt, edit); return; }
   }
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); $('#composer').requestSubmit(); }
 });

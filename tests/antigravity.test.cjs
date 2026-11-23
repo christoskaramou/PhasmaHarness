@@ -81,6 +81,8 @@ test('one native turn streams public text and generic helper events, keeps crede
   const record = f.children[0];
   assert.match(record.definition, /phasma_harness/);
   assert.doesNotMatch(record.definition, /private-fixture-token|this-worker/);
+  assert.ok(record.config.tools.includes('generate_image'), 'Antigravity worker keeps built-in generate_image');
+  assert.ok(record.config.tools.includes('search_web'), 'Antigravity worker keeps built-in search_web');
   assert.equal(record.options.env.PHASMA_BRIDGE_TOKEN, 'private-fixture-token');
   assert.equal(fs.existsSync(record.file), false);
   assert.equal(record.child.exitCode, 0);
@@ -215,4 +217,24 @@ test('Antigravity context table: published sizes by model family, none for an un
   assert.equal(contextWindow('gpt-oss-120b-medium'), 131072);
   assert.equal(contextWindow('mystery-model'), undefined);
   assert.equal(contextWindow(undefined), undefined);
+});
+
+test('failed Antigravity tool steps emit is_error tool_result events with readable error text', async t => {
+  const cwd = workspace(t), session = 'agy-fixture-session', events = [];
+  const line = value => JSON.stringify(value) + '\n';
+  const raw =
+    line({ event: 'step_update', step_update: { conversation_id: session, step_index: 2, state: 'ACTIVE', step_type: 'tool', tool_name: 'read_file', tool_info: { parameters: { Path: 'missing.txt' } } } }) +
+    line({ event: 'step_update', step_update: { conversation_id: session, step_index: 2, state: 'ERROR', step_type: 'tool', tool_name: 'read_file', tool_info: { parameters: { Path: 'missing.txt' }, error: { type: 'TOOL_ERROR', message: 'file does not exist' } } } }) +
+    line({ event: 'step_update', step_update: { conversation_id: session, step_index: 3, state: 'CANCELED', step_type: 'tool', tool_name: 'generate_image', tool_info: { parameters: { ImageName: 'icon' } } } }) +
+    line({ event: 'result', result: { conversation_id: session, status: 'SUCCESS', response: 'Done', num_turns: 1, usage: { input_tokens: 5, output_tokens: 2 } } });
+  const f = await antigravityFixture(t, { raw });
+  const result = await f.backend.run({ ...turn(cwd), onEvent: event => events.push(event) });
+  assert.equal(result.result, 'Done');
+  const uses = events.flatMap(e => e.type === 'assistant' ? (e.message?.content || []).filter(c => c.type === 'tool_use') : []);
+  const results = events.flatMap(e => e.type === 'user' ? (e.message?.content || []).filter(c => c.type === 'tool_result') : []);
+  assert.deepEqual(uses.map(u => [u.id, u.name]), [[session + ':2', 'read_file'], [session + ':3', 'generate_image']]);
+  assert.deepEqual(results, [
+    { type: 'tool_result', tool_use_id: session + ':2', is_error: true, content: 'file does not exist' },
+    { type: 'tool_result', tool_use_id: session + ':3', is_error: true, content: 'CANCELED' },
+  ]);
 });
