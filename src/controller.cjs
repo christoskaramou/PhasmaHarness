@@ -40,7 +40,7 @@ const { EFFORT_CAPS, DEFAULT_EFFORT_CAP } = require('./routing/effort-cap.cjs');
 const JEV_UNSURE = 0.5;
 const processTree = require('./process-tree.cjs');
 const { prepare: prepareFiles } = require('../ui/attachments.js');
-const { CONTEXT_INSTRUCTIONS, ACCESS_MODES, sameEffort, DEFAULT_ROUTER, sessionAllowKey, accessMode, isMcpConfirmation } = require('./controller/shared.cjs');
+const { CONTEXT_INSTRUCTIONS, ACCESS_MODES, sameEffort, DEFAULT_ROUTER, PROVIDER_NAMES, sessionAllowKey, accessMode, isMcpConfirmation } = require('./controller/shared.cjs');
 const groupChats = require('./group-chats.cjs');
 const { normalizedUsage } = require('./job-budgets.cjs');
 
@@ -362,6 +362,10 @@ class Controller extends EventEmitter {
     // Built once per snapshot: every bot's snapshot runs on each window update, and the plan check reads the catalog too.
     const catalog = this.catalog();
     const plan = this.planPreset(catalog);
+    const effectiveRoles = this.canStepEffort() ? {} : {
+      ...(autoStep('advisorModel', this.data.settings.advisorModel || 'chat') !== null ? { advisorModel: 'off' } : {}),
+      ...(autoStep('workerModel', this.data.settings.workerModel || 'off') !== null ? { workerModel: 'off' } : {}),
+    };
     return {
       cursor: { ...this.cursor.status, enabled: this.data.settings.cursorEnabled !== false },
       claude: { ...this.claude.status, enabled: !!this.data.settings.claudeEnabled, quotaAccountKey: this.claude.accountKey?.() || null },
@@ -373,7 +377,7 @@ class Controller extends EventEmitter {
       coordinator: this.isCoordinator(), hubMode: this.data.hubMode || null, routerKind: this.routerKindSaved(), secondaryId: this.secondaryId(), chatChecker: this.chatScanner()?.id || null,
       connectingProviders: [...new Set([...this.connectingProviders.keys(), ...(this.chatgptLoginPending ? ['codex'] : [])])],
       chatgptLoginPending: this.chatgptLoginPending,
-      ...visibleData, settings: { ...this.data.settings, mode: plan ? 'auto' : this.data.settings.mode }, planRouting: plan, connection: this.connection, error: this.error, account: this.account, busy: this.busy,
+      ...visibleData, settings: { ...this.data.settings, ...effectiveRoles, mode: plan ? 'auto' : this.data.settings.mode }, planRouting: plan, connection: this.connection, error: this.error, account: this.account, busy: this.busy,
       // directContext (history quoted to Codex) is never shown and was 14-18% of a busy chat's state, resent on every
       // streamed update (2026-11-12).
       sessions: this.data.sessions.map(({ groupChatContext, coordinatorConversation, directContext, items, ...session }) => ({
@@ -461,9 +465,12 @@ class Controller extends EventEmitter {
   }
 
   // Whether this bot has an advisor (ask_advisor, /advisor): then it never escalates (task-gate.cjs). Each bot's own
-  // setting (its Edit dialog; Agents.sync resolves Inherit), on unless set to Off.
+  // setting (its Edit dialog; Agents.sync resolves Inherit), on unless set to Off or Auto on a model without effort levels.
   hasAdvisor() {
-    return this.data.settings.advisorModel !== 'off';
+    const picked = this.data.settings.advisorModel;
+    if (picked === 'off') return false;
+    if (autoStep('advisorModel', picked || 'chat') !== null && !this.canStepEffort()) return false;
+    return true;
   }
 
   // /review [focus] (2026-11-20, the user): this bot's Reviewer reviews the uncommitted changes; its report shows in this
@@ -2007,7 +2014,11 @@ class Controller extends EventEmitter {
     if (this.busy) throw new Error('Wait for the current task to finish before compacting.');
     const session = this.session(id);
     if (this.isCoordinator()) return this.compactCoordinator(session);
-    if (!capabilities(session.activeProvider).compact) throw new Error('Cursor manages its context automatically and has no manual compaction.');
+    if (!capabilities(session.activeProvider).compact) {
+      const provider = PROVIDER_NAMES[session.activeProvider] || NATIVE_CLI_INFO[session.activeProvider]?.label ||
+        this.data.settings.providers?.find(p => p.id === session.activeProvider)?.name || 'This provider';
+      throw new Error(`${provider} manages its context automatically and has no manual compaction in Harness.`);
+    }
     if (session.activeProvider === 'claude-cli') return this.compactClaude(session);
     if (!session.threadId || !session.items.some(item => item.type === 'userMessage')) throw new Error('Send a message before compacting this chat.');
     if (this.loading.has(id)) throw new Error('Wait for this chat to finish loading.');

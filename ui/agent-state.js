@@ -15,7 +15,8 @@ var HarnessAgentState = (() => {
   /** @param {unknown} mode */
   function parseAutoEffort(mode) {
     if (typeof mode !== 'string' || !mode.startsWith(AUTO_EFFORT)) return null;
-    const rest = mode.slice(AUTO_EFFORT.length), at = rest.indexOf(':');
+    const rest = mode.slice(AUTO_EFFORT.length);
+    const at = rest.startsWith('native:') ? rest.indexOf(':', 'native:'.length) : rest.indexOf(':');
     return at > 0 && at < rest.length - 1 ? { provider: rest.slice(0, at), model: rest.slice(at + 1) } : null;
   }
   // Settings each bot has, or takes from its creator (Hub, for a top-level bot) on Inherit, the default.
@@ -31,6 +32,49 @@ var HarnessAgentState = (() => {
   function autoStep(key, value) {
     const entry = ROLE_STEPS[key]?.find(([id]) => id === value);
     return entry ? entry[2] : null;
+  }
+
+  const EFFORT_ORDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+
+  /** Resolve a mode string (autoeffort, preset id, baseId or alias) to matching catalog entries.
+   * @param {Array<{id?:string, baseId?:string, aliases?:string[], provider?:string, model?:string, effort?:string|null, effortsUnknown?:boolean}>} list
+   * @param {string} target */
+  function matchEffortMode(list, target) {
+    const auto = parseAutoEffort(target);
+    if (auto) return list.filter(p => (p.provider || 'codex') === auto.provider && p.model === auto.model);
+    const direct = list.filter(p => p.id === target);
+    if (direct.length) return direct;
+    return list.filter(p => p.baseId === target || p.aliases?.includes(target));
+  }
+
+  /** Separate effort variants sharing the same provider and exact model, sorted by EFFORT_ORDER.
+   * Returns >= 2 variants only; models without a separate effort level return [].
+   * @param {Array<{id?:string, baseId?:string, aliases?:string[], provider?:string, model?:string, effort?:string|null}>} list
+   * @param {string|{id?:string, provider?:string, model?:string, effort?:string|null}|null|undefined} target */
+  function effortVariants(list, target) {
+    if (!Array.isArray(list) || !target) return [];
+    let ref = null;
+    if (typeof target === 'string') {
+      const auto = parseAutoEffort(target);
+      ref = auto ? { provider: auto.provider, model: auto.model, effort: null }
+        : matchEffortMode(list, target)[0] || null;
+    } else ref = target;
+    if (!ref?.model) return [];
+    const provider = ref.provider || 'codex';
+    const explicit = list.filter(p => (p.provider || 'codex') === provider && p.model === ref.model && p.effort);
+    if (explicit.length < 2) return [];
+    return explicit.slice().sort((a, b) => EFFORT_ORDER.indexOf(a.effort || '') - EFFORT_ORDER.indexOf(b.effort || ''));
+  }
+
+  /** Whether `mode` refers to a model with separate effort levels (>= 2 explicit efforts) in `list`.
+   * Returns true when `list` is empty, `mode` is absent/legacy 'auto', or its effort capabilities are not yet discovered.
+   * @param {Array<{id?:string, baseId?:string, aliases?:string[], provider?:string, model?:string, effort?:string|null, effortsUnknown?:boolean}>} list
+   * @param {string|null|undefined} mode */
+  function hasSeparateEffort(list, mode) {
+    if (!Array.isArray(list) || !list.length || !mode || mode === 'auto') return true;
+    const matches = matchEffortMode(list, mode);
+    if (!matches.length || matches.some(p => p.effortsUnknown)) return true;
+    return effortVariants(list, matches[0]).length >= 2;
   }
 
   /** @param {Profile|null|undefined} profile */
@@ -291,6 +335,6 @@ var HarnessAgentState = (() => {
     return chat;
   }
 
-  return { INHERITED, AUTO_EFFORT, autoEffortMode, parseAutoEffort, BOT_SETTINGS, ROLE_STEPS, autoStep, isSubBot, inheritedSource, backgroundView, trimFleet, keepSessions, stateStream, acceptState, FULL_STATE_MS };
+  return { INHERITED, AUTO_EFFORT, autoEffortMode, parseAutoEffort, BOT_SETTINGS, ROLE_STEPS, autoStep, EFFORT_ORDER, effortVariants, hasSeparateEffort, isSubBot, inheritedSource, backgroundView, trimFleet, keepSessions, stateStream, acceptState, FULL_STATE_MS };
 })();
 if (typeof module !== 'undefined') module.exports = HarnessAgentState;

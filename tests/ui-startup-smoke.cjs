@@ -1784,6 +1784,193 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript("document.querySelector('#agent-dialog').close(); document.querySelector('#settings-dialog').showModal(); true");
 
   await window.webContents.executeJavaScript("document.querySelector('#settings-dialog').close(); true");
+  // Only models with separate explicit effort levels keep Auto step options for Advisor and Workers; models without
+  // separate effort (Antigravity gemini-4-neon-*, standalone gpt-oss-120b-medium, deepseek-chat) hide Auto, stay unset
+  // until an explicit model is picked, clear Auto on model switch, and never propagate Auto through inheritance.
+  const roleAutoResult = await window.webContents.executeJavaScript(`(async () => {
+    const main = fleetState?.agentStates?.main || state;
+    const savedPresets = state.presets;
+    const savedChatScan = state.chatScanPresets;
+    const savedMainPresets = main.presets;
+    const savedMainSettings = { ...main.settings };
+    const savedHubMode = main.hubMode;
+    const savedSaveAgent = api.saveAgent;
+    const savedRouterSettings = window.router.settings;
+    const dialog = document.querySelector('#agent-dialog');
+    const hubDialog = document.querySelector('#hub-dialog');
+    const extra = [
+      { id: 'codex:gpt-6-sol:low', provider: 'codex', model: 'gpt-6-sol', effort: 'low', label: 'GPT-6 Sol (Low)', available: true },
+      { id: 'codex:gpt-6-sol:high', provider: 'codex', model: 'gpt-6-sol', effort: 'high', label: 'GPT-6 Sol (High)', available: true },
+      ...['low', 'medium', 'high', 'xhigh'].map(e => ({ id: 'native:antigravity:gemini-4-neon-' + e, provider: 'native:antigravity', model: 'gemini-4-neon-' + e, effort: null, label: 'Gemini 4 Neon (' + e + ')', available: true })),
+      { id: 'native:antigravity:gpt-oss-120b-medium', provider: 'native:antigravity', model: 'gpt-oss-120b-medium', effort: null, label: 'GPT-OSS 120B (Medium)', available: true },
+      { id: 'native:deepseek:deepseek-chat', provider: 'native:deepseek', model: 'deepseek-chat', effort: null, label: 'DeepSeek Chat', available: true },
+    ];
+    const saveCalls = [];
+    const hubSettingsCalls = [];
+    const readRow = (key, prefix = 'agent') => {
+      const on = document.querySelector('#' + prefix + '-' + key + '-on');
+      const select = document.querySelector('#' + prefix + '-' + key);
+      const effort = document.querySelector('#' + prefix + '-' + key + '-effort');
+      return {
+        checked: on.checked,
+        selectDisabled: select.disabled,
+        effortDisabled: effort.disabled,
+        value: select.value,
+        selectedText: select.selectedOptions[0]?.textContent || '',
+        hasAuto: [...select.options].some(o => o.value === 'chat' || /auto/i.test(o.textContent)),
+        hasInherit: [...select.options].some(o => o.value === 'inherit'),
+        effortOptions: [...effort.options].map(o => o.textContent),
+      };
+    };
+    try {
+      state.presets = [...savedPresets, ...extra];
+      state.chatScanPresets = [...(savedChatScan || []), ...extra];
+      main.presets = state.presets;
+      api.saveAgent = async payload => { saveCalls.push(payload); return payload; };
+      window.router.settings = async (patch, id) => { hubSettingsCalls.push({ patch, id }); return savedRouterSettings(patch, id); };
+
+      // 1. Model with separate explicit effort levels keeps Auto and One higher/One lower steps.
+      main.settings.mode = 'codex:gpt-6-sol:high';
+      main.settings.advisorModel = 'chat';
+      main.settings.workerModel = 'off';
+      editAgent({ id: 'effort-separate-test', name: 'Sol Bot', workspace: state.settings.workspace, mode: 'codex:gpt-6-sol:high', advisorModel: 'chat', workerModel: 'off' });
+      const separateRows = { advisor: readRow('advisor'), workers: readRow('workers') };
+      dialog.close();
+
+      // 2. Antigravity gemini-4-neon-high (siblings have effort: null -> NO separate effort): no Auto, opens unset, ticking waits, explicit pick saves.
+      editAgent({ id: 'effort-neon-test', name: 'Neon Bot', workspace: state.settings.workspace, mode: 'native:antigravity:gemini-4-neon-high', advisorModel: 'chat', workerModel: 'chat' });
+      const neonInitial = { advisor: readRow('advisor'), workers: readRow('workers') };
+      const advOn = document.querySelector('#agent-advisor-on');
+      advOn.checked = true;
+      advOn.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise(r => setTimeout(r, 50));
+      const neonTicked = readRow('advisor');
+      const savesAfterTick = saveCalls.length;
+      const advSelect = document.querySelector('#agent-advisor');
+      const explicitOption = [...advSelect.options].find(o => o.value && !o.disabled);
+      advSelect.value = explicitOption.value;
+      advSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise(r => setTimeout(r, 50));
+      const neonPicked = { row: readRow('advisor'), dataset: dialog.dataset.advisor, saved: saveCalls.at(-1)?.advisorModel || null };
+      dialog.close();
+
+      // 3. Standalone no-effort models (gpt-oss-120b-medium, deepseek-chat): unset, no Auto.
+      editAgent({ id: 'effort-oss-saved', name: 'OSS Bot', workspace: state.settings.workspace, mode: 'native:antigravity:gpt-oss-120b-medium', advisorModel: 'chat', workerModel: 'chat' });
+      const ossRows = { advisor: readRow('advisor'), workers: readRow('workers') };
+      dialog.close();
+      editAgent({ id: 'effort-deepseek-saved', name: 'DeepSeek Bot', workspace: state.settings.workspace, mode: 'native:deepseek:deepseek-chat', advisorModel: 'chat', workerModel: 'chat' });
+      const deepseekRows = { advisor: readRow('advisor'), workers: readRow('workers') };
+      dialog.close();
+
+      // 4. Switching from separate-effort model (Advisor = Auto) to no-effort Antigravity model clears Advisor to off and removes Auto.
+      saveCalls.length = 0;
+      editAgent({ id: 'effort-switch-test', name: 'Switch Bot', workspace: state.settings.workspace, mode: 'codex:gpt-6-sol:high', advisorModel: 'chat', workerModel: 'off' });
+      const beforeSwitch = readRow('advisor');
+      const modelSelect = document.querySelector('#agent-model');
+      modelSelect.value = 'native:antigravity|gemini-4-neon-high';
+      modelSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise(r => setTimeout(r, 50));
+      const afterSwitch = { row: readRow('advisor'), dataset: dialog.dataset.advisor, saved: saveCalls.at(-1)?.advisorModel || null };
+      dialog.close();
+
+      // 5a. Inheritance: Hub (separate effort, Auto) -> Bot (no separate effort, inherit): unticked/unset, no Inherit, no Auto,
+      // and saving an unrelated edit (e.g. rename) preserves 'inherit' rather than rewriting it to 'off'.
+      main.settings.mode = 'codex:gpt-6-sol:high';
+      main.settings.advisorModel = 'chat';
+      main.settings.workerModel = 'chat';
+      editAgent({ id: 'inherit-hub-auto-bot-none', name: 'Neon Inherit', workspace: state.settings.workspace, mode: 'native:antigravity:gemini-4-neon-high', advisorModel: 'inherit', workerModel: 'inherit' });
+      const inheritHubAutoBotNone = { advisor: readRow('advisor'), workers: readRow('workers') };
+      document.querySelector('#agent-name').value = 'Neon Inherit Renamed';
+      document.querySelector('#agent-form').dispatchEvent(new Event('submit', { cancelable: true }));
+      await new Promise(r => setTimeout(r, 50));
+      inheritHubAutoBotNone.savedAdvisor = saveCalls.at(-1)?.advisorModel;
+      inheritHubAutoBotNone.savedWorkers = saveCalls.at(-1)?.workerModel;
+      dialog.close();
+
+      // 5b. Inheritance: Hub (no separate effort, stale Auto) -> Bot (separate effort, inherit): unticked, no Inherit (does not inherit Auto from no-effort Hub).
+      main.settings.mode = 'native:antigravity:gemini-4-neon-high';
+      main.settings.advisorModel = 'chat';
+      main.settings.workerModel = 'chat';
+      editAgent({ id: 'inherit-hub-none-bot-sep', name: 'Sol Inherit', workspace: state.settings.workspace, mode: 'codex:gpt-6-sol:high', advisorModel: 'inherit', workerModel: 'inherit' });
+      const inheritHubNoneBotSep = { advisor: readRow('advisor'), workers: readRow('workers') };
+      dialog.close();
+
+      // 5b-hub. Hub edit dialog on no-effort model with stale Auto opens unticked/unset with no Auto and no spurious autosave on close.
+      editHub({ id: 'main', name: 'Main' });
+      const hubNoEffortRows = { advisor: readRow('advisor', 'hub'), workers: readRow('workers', 'hub') };
+      await hubDialog.closeEditor();
+      const hubSavesOnClose = hubSettingsCalls.length;
+
+      // 5c. Inheritance: Hub (no separate effort, EXPLICIT advisorModel) -> Bot (no separate effort, inherit): ticked, inherits explicit model.
+      main.settings.mode = 'native:antigravity:gemini-4-neon-high';
+      main.settings.advisorModel = 'codex:gpt-6-sol:high';
+      main.settings.workerModel = 'off';
+      editAgent({ id: 'inherit-hub-explicit', name: 'Neon Explicit', workspace: state.settings.workspace, mode: 'native:antigravity:gemini-4-neon-high', advisorModel: 'inherit', workerModel: 'inherit' });
+      const inheritHubExplicit = readRow('advisor');
+      dialog.close();
+
+      return { separateRows, neonInitial, neonTicked, savesAfterTick, neonPicked, ossRows, deepseekRows, beforeSwitch, afterSwitch, inheritHubAutoBotNone, inheritHubNoneBotSep, hubNoEffortRows, hubSavesOnClose, inheritHubExplicit };
+    } finally {
+      if (dialog.open) dialog.close();
+      if (hubDialog.open) hubDialog.close();
+      state.presets = savedPresets;
+      state.chatScanPresets = savedChatScan;
+      main.presets = savedMainPresets;
+      main.settings = savedMainSettings;
+      main.hubMode = savedHubMode;
+      api.saveAgent = savedSaveAgent;
+      window.router.settings = savedRouterSettings;
+    }
+  })()`);
+  assert.deepEqual(
+    [roleAutoResult.separateRows.advisor.checked, roleAutoResult.separateRows.advisor.selectDisabled, roleAutoResult.separateRows.advisor.value, roleAutoResult.separateRows.advisor.hasAuto, roleAutoResult.separateRows.advisor.effortDisabled, roleAutoResult.separateRows.advisor.effortOptions],
+    [true, false, 'chat', true, false, ['One higher', 'Two higher', 'Highest', 'Same as bot']],
+    'model with separate effort levels keeps Auto and One higher steps for Advisor');
+  assert.deepEqual(
+    [roleAutoResult.separateRows.workers.checked, roleAutoResult.separateRows.workers.hasAuto, roleAutoResult.separateRows.workers.effortOptions],
+    [false, true, ['One lower', 'Two lower', 'Lowest', 'Same as bot']],
+    'model with separate effort levels keeps Auto and One lower steps for Workers');
+  for (const [label, rows] of [['Antigravity neon', roleAutoResult.neonInitial], ['OSS standalone', roleAutoResult.ossRows], ['DeepSeek standalone', roleAutoResult.deepseekRows]]) {
+    for (const key of ['advisor', 'workers']) {
+      assert.deepEqual(
+        [rows[key].checked, rows[key].selectDisabled, rows[key].effortDisabled, rows[key].selectedText, rows[key].hasAuto],
+        [false, true, true, 'Choose a model', false],
+        `${label} saved as Auto shows ${key} unset and hides Auto`);
+    }
+  }
+  assert.deepEqual(
+    [roleAutoResult.neonTicked.checked, roleAutoResult.neonTicked.selectDisabled, roleAutoResult.neonTicked.effortDisabled, roleAutoResult.neonTicked.selectedText, roleAutoResult.neonTicked.effortOptions, roleAutoResult.savesAfterTick],
+    [true, false, true, 'Choose a model', ['—'], 0],
+    'ticking Advisor on Antigravity neon shows Choose a model with disabled effort and waits to save');
+  assert.equal(roleAutoResult.neonPicked.row.checked, true, 'picking an explicit Advisor model keeps it ticked');
+  assert.ok(roleAutoResult.neonPicked.dataset && roleAutoResult.neonPicked.dataset !== 'chat' && roleAutoResult.neonPicked.dataset !== 'off', 'explicit Advisor pick stores a model id');
+  assert.equal(roleAutoResult.neonPicked.saved, roleAutoResult.neonPicked.dataset, 'and autosaves the explicit Advisor model');
+  assert.deepEqual([roleAutoResult.beforeSwitch.checked, roleAutoResult.beforeSwitch.value, roleAutoResult.beforeSwitch.hasAuto], [true, 'chat', true], 'starts on Auto before switching model');
+  assert.deepEqual(
+    [roleAutoResult.afterSwitch.row.checked, roleAutoResult.afterSwitch.row.hasAuto, roleAutoResult.afterSwitch.row.selectedText, roleAutoResult.afterSwitch.dataset, roleAutoResult.afterSwitch.saved],
+    [false, false, 'Choose a model', 'off', 'off'],
+    'switching from separate-effort model to Antigravity neon clears Advisor Auto to off and removes Auto');
+  for (const key of ['advisor', 'workers']) {
+    assert.deepEqual(
+      [roleAutoResult.inheritHubAutoBotNone[key].checked, roleAutoResult.inheritHubAutoBotNone[key].selectDisabled, roleAutoResult.inheritHubAutoBotNone[key].effortDisabled, roleAutoResult.inheritHubAutoBotNone[key].selectedText, roleAutoResult.inheritHubAutoBotNone[key].hasAuto, roleAutoResult.inheritHubAutoBotNone[key].hasInherit],
+      [false, true, true, 'Choose a model', false, false],
+      `no-effort bot inheriting separate-effort Hub Auto shows ${key} unset with no Auto or Inherit`);
+    assert.deepEqual(
+      [roleAutoResult.inheritHubNoneBotSep[key].checked, roleAutoResult.inheritHubNoneBotSep[key].selectDisabled, roleAutoResult.inheritHubNoneBotSep[key].effortDisabled, roleAutoResult.inheritHubNoneBotSep[key].hasInherit],
+      [false, true, true, false],
+      `separate-effort bot does not inherit Auto ${key} from a no-effort Hub`);
+    assert.deepEqual(
+      [roleAutoResult.hubNoEffortRows[key].checked, roleAutoResult.hubNoEffortRows[key].selectDisabled, roleAutoResult.hubNoEffortRows[key].effortDisabled, roleAutoResult.hubNoEffortRows[key].selectedText, roleAutoResult.hubNoEffortRows[key].hasAuto],
+      [false, true, true, 'Choose a model', false],
+      `Hub on no-effort model with stale Auto shows ${key} unset with no Auto`);
+  }
+  assert.deepEqual([roleAutoResult.inheritHubAutoBotNone.savedAdvisor, roleAutoResult.inheritHubAutoBotNone.savedWorkers], ['inherit', 'inherit'],
+    'renaming a no-effort bot inheriting Auto preserves inherit in storage instead of overwriting with off');
+  assert.equal(roleAutoResult.hubSavesOnClose, 0, 'closing Hub dialog without changes does not trigger a spurious autosave');
+  assert.deepEqual(
+    [roleAutoResult.inheritHubExplicit.checked, roleAutoResult.inheritHubExplicit.selectDisabled, roleAutoResult.inheritHubExplicit.value, roleAutoResult.inheritHubExplicit.hasInherit, roleAutoResult.inheritHubExplicit.hasAuto],
+    [true, false, 'inherit', true, false],
+    'no-effort bot inherits an explicit Advisor model from a no-effort Hub');
   // Jev failing: the Jev section says since when and which saved settings are on their fallbacks.
   const savedRanking = controller.data.settings.contextRanking;
   controller.data.settings.contextRanking = 'jev';
@@ -2750,6 +2937,23 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('document.querySelector("#usage-widget-toggle").click(); true');
   assert.deepEqual(await window.webContents.executeJavaScript('[document.querySelector("#usage-widget").hidden, document.querySelector("#usage-widget-toggle").getAttribute("aria-expanded")]'), [false, 'true'], 'clicking the usage button shows the widget');
   await until(async () => /Codex CLI \/ ChatGPT/.test(await window.webContents.executeJavaScript('document.querySelector("#usage-widget-body").textContent')), 'usage widget displays connected providers');
+  const widgetScroll = await window.webContents.executeJavaScript(`(() => {
+    const widget = document.querySelector('#usage-widget'), head = widget.querySelector('.usage-widget-head'), scroll = document.querySelector('#usage-widget-scroll'), body = document.querySelector('#usage-widget-body'), errorNode = document.querySelector('#usage-widget-error');
+    const prevMax = widget.style.maxHeight, prevError = errorNode.textContent;
+    widget.style.maxHeight = '100px';
+    errorNode.textContent = Array.from({ length: 8 }, (_, i) => 'Refresh error line ' + (i + 1)).join('\\n');
+    const beforeHeadTop = head.getBoundingClientRect().top;
+    const bodyVisible = body.getBoundingClientRect().height > 0 && scroll.getBoundingClientRect().height > 0;
+    scroll.scrollTop = 400;
+    const afterHeadTop = head.getBoundingClientRect().top;
+    const result = { widgetScrolls: widget.scrollHeight > widget.clientHeight + 1, scrollMoved: scroll.scrollTop > 0, bodyVisible, headDrift: Math.abs(afterHeadTop - beforeHeadTop) };
+    scroll.scrollTop = 0;
+    errorNode.textContent = prevError;
+    widget.style.maxHeight = prevMax;
+    return result;
+  })()`);
+  assert.deepEqual({ widgetScrolls: widgetScroll.widgetScrolls, scrollMoved: widgetScroll.scrollMoved, bodyVisible: widgetScroll.bodyVisible, headPinned: widgetScroll.headDrift < 0.5 },
+    { widgetScrolls: false, scrollMoved: true, bodyVisible: true, headPinned: true }, 'scrolling the usage widget scrolls body and error together and keeps the header fixed: ' + JSON.stringify(widgetScroll));
   const callsBeforeWidgetRefresh = usageCalls.length;
   await window.webContents.executeJavaScript('document.querySelector("#usage-widget-refresh").click(); true');
   await until(() => usageCalls.length > callsBeforeWidgetRefresh, 'widget Refresh button fetches fresh usage');
@@ -2764,6 +2968,38 @@ app.whenReady().then(async () => {
   await window.webContents.executeJavaScript('document.querySelector("#usage-widget-toggle").click(); true');
   await window.webContents.executeJavaScript('document.querySelector("#usage-widget-toggle").click(); true');
   assert.deepEqual(await window.webContents.executeJavaScript('[document.querySelector("#usage-widget").hidden, document.querySelector("#usage-widget-toggle").getAttribute("aria-expanded")]'), [true, 'false'], 'clicking the usage button again hides the widget');
+  // Stopping with Escape requires two presses less than 500 ms apart in the same chat (single press, key repeat, >= 500 ms delay, and switching chats do not stop).
+  const doubleEscapeStop = await window.webContents.executeJavaScript(`(() => {
+    const savedBusy = state.busy, savedStop = api.stop, savedNow = Date.now, savedSelectedId = selectedId;
+    let now = 10000;
+    const stopped = [];
+    try {
+      state.busy = selectedId;
+      api.stop = async id => { stopped.push(id); return {}; };
+      Date.now = () => now;
+      const press = (repeat = false) => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', repeat, bubbles: true, cancelable: true }));
+      press();
+      const afterOne = stopped.length;
+      now += 100; press(true);
+      const afterRepeat = stopped.length;
+      now += 400; press(); // 500 ms after first press: must not stop, arms new window
+      const afterSlow = stopped.length;
+      now += 400; press(); // 400 ms (< 500 ms) after previous press: stops
+      const afterFast = stopped.length;
+      now += 100; press(); // window reset after stopping: single press arms chat A
+      const afterReset = stopped.length;
+      selectedId = 'other-busy-chat';
+      state.busy = selectedId;
+      now += 100; press(); // switching to busy chat B within 500 ms: single press in B must NOT stop B
+      const afterSwitchOne = stopped.length;
+      now += 100; press(); // second press in chat B within 500 ms: stops B
+      return { afterOne, afterRepeat, afterSlow, afterFast, afterReset, afterSwitchOne, afterSwitchTwo: stopped.length, stoppedFirst: stopped[0] === savedSelectedId, stoppedSecond: stopped[1] === 'other-busy-chat' };
+    } finally {
+      selectedId = savedSelectedId; state.busy = savedBusy; api.stop = savedStop; Date.now = savedNow;
+    }
+  })()`);
+  assert.deepEqual(doubleEscapeStop, { afterOne: 0, afterRepeat: 0, afterSlow: 0, afterFast: 1, afterReset: 1, afterSwitchOne: 1, afterSwitchTwo: 2, stoppedFirst: true, stoppedSecond: true },
+    'Escape stops only when pressed twice within 500 ms in the same chat: ' + JSON.stringify(doubleEscapeStop));
   oldConversation.tasks = [{ id: 'command-task', goal: 'Inspect <b>source</b>', state: 'running' }];
   oldConversation.queue = [{ id: 'command-queue', text: 'Review next', images: [] }];
   const child = [...agents.controllers.values()].find(c => c.agentId !== 'main' && c !== commandWorker);
@@ -4542,6 +4778,10 @@ app.whenReady().then(async () => {
       const icons = ['.composer-access svg', '#usage-widget-toggle svg', '.context-ring', '#dictate svg', '#send svg']
         .map(selector => document.querySelector(selector).getBoundingClientRect().width);
       const send = document.querySelector('#send').getBoundingClientRect();
+      const usageBtn = document.querySelector('#usage-widget-toggle').getBoundingClientRect();
+      const contextWrap = document.querySelector('.context-meter-wrap').getBoundingClientRect();
+      const contextBtn = document.querySelector('#context-meter').getBoundingClientRect();
+      const dictateBtn = document.querySelector('#dictate').getBoundingClientRect();
       const ring = document.querySelector('.context-ring').getBoundingClientRect();
       const usageIcon = document.querySelector('#usage-widget-toggle svg').getBoundingClientRect();
       const microphone = document.querySelector('#dictate svg').getBoundingClientRect();
@@ -4549,10 +4789,13 @@ app.whenReady().then(async () => {
       const shield = document.querySelector('.composer-access').getBoundingClientRect();
       const rightGapDifference = Math.abs((microphone.left - ring.right) - (send.left - microphone.right));
       const usageGapDifference = Math.abs((ring.left - usageIcon.right) - (microphone.left - ring.right));
+      const hoverAreasSeparate = usageBtn.right < contextWrap.left - 1 && usageBtn.right < contextBtn.left - 1
+        && contextBtn.right < dictateBtn.left - 1 && dictateBtn.right < send.left - 1
+        && Math.abs(contextWrap.left - contextBtn.left) < 1 && Math.abs(contextWrap.right - contextBtn.right) < 1;
       const leftGap = shield.left - attach.right;
       const sizeRatio = send.width / attach.width;
       const plus = document.querySelector('#attach-files svg').getBoundingClientRect().width;
-      return { icons, plus, rightGapDifference, usageGapDifference, leftGap, sizeRatio, plusFont: parseFloat(getComputedStyle(document.querySelector('#attach-files')).fontSize),
+      return { icons, plus, rightGapDifference, usageGapDifference, hoverAreasSeparate, leftGap, sizeRatio, plusFont: parseFloat(getComputedStyle(document.querySelector('#attach-files')).fontSize),
         fits: send.right <= innerWidth && send.bottom <= innerHeight,
         fontScale: document.documentElement.style.getPropertyValue('--font-scale') };
     })()`);
@@ -4561,6 +4804,7 @@ app.whenReady().then(async () => {
     assert.equal(zoomLayout.fits, true, 'composer controls remain inside the zoomed window');
     assert.ok(zoomLayout.rightGapDifference < 1, 'visible gaps between context ring, microphone and Send are equal');
     assert.ok(zoomLayout.usageGapDifference < 1, 'visible gap between usage icon and context ring matches context/microphone/Send: ' + JSON.stringify(zoomLayout));
+    assert.equal(zoomLayout.hoverAreasSeparate, true, 'composer button hover areas stay separate without overlapping neighbors: ' + JSON.stringify(zoomLayout));
     assert.ok(Math.abs(zoomLayout.leftGap) < 1, 'shield sits next to plus without extra gap');
     assert.ok(Math.abs(zoomLayout.sizeRatio - 1) < .01, 'composer buttons have consistent hit areas');
     assert.equal(zoomLayout.fontScale, '1', 'whole-page zoom does not also multiply text size');

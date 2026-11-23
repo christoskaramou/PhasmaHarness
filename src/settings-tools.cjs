@@ -109,6 +109,8 @@ class SettingsTools {
       throw new Error('Choose off, an Auto step (chat, chat:2, chat:max, chat:0) or an available model ID for advisorModel.');
     if (name === 'workerModel' && value !== 'off' && autoStep(name, value) === null && !available(primary.resolveWorker(value)))
       throw new Error('Choose off, an Auto step (chat, chat:-2, chat:min, chat:0) or an available model ID for workerModel.');
+    if ((name === 'advisorModel' || name === 'workerModel') && autoStep(name, value) !== null && target.canStepEffort && !target.canStepEffort())
+      throw new Error(`This bot’s model has no separate effort levels for Auto ${name === 'advisorModel' ? 'Advisor' : 'Workers'}. Choose a specific model ID or off.`);
     if (name === 'reviewerModel' && value !== 'off' && !available(primary.resolveWorker(value)))
       throw new Error('Choose off or an available model ID for reviewerModel.');
     if (name === 'dreamModel' && value !== 'hub' && !available(primary.catalog().find(p => p.worker && p.id === value)))

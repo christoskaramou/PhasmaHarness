@@ -175,9 +175,8 @@ module.exports = {
     const auto = parseAutoEffort(mode);
     const model = auto || (mode && mode !== 'auto' ? this.resolveWorker(mode) : last);
     if (!model?.model) return null;
-    const sameModel = p => p && (p.provider || 'codex') === (model.provider || 'codex') && p.model === model.model;
-    const current = auto ? (sameModel(last) ? last : null) : model;
-    const top = this.ownVariants(`autoeffort:${model.provider || 'codex'}:${model.model}`).filter(hubEffortAllowed).at(-1);
+    const current = auto ? (last?.model === model.model && (last.provider || 'codex') === (model.provider || 'codex') ? last : null) : model;
+    const top = this.ownVariants(auto ? mode : `autoeffort:${model.provider || 'codex'}:${model.model}`).filter(hubEffortAllowed).at(-1);
     return top && (!current || EFFORT_ORDER.indexOf(top.effort) > EFFORT_ORDER.indexOf(current.effort)) ? top : null;
   },
 

@@ -41,7 +41,7 @@
     { id: 'groups', text: () => `Overview → New group puts several bots in one chat. Start a message with @Name to talk to one member; anything else goes to ${hub()}.` },
     { id: 'enter', text: 'Enter sends; Shift+Enter starts a new line. In an empty message box, ↑ and ↓ bring back what you sent before.' },
     { id: 'queue', text: 'While a chat is working, Send becomes "Queue message": line up to 10 messages. "Send now" on a queued one delivers it straight away.' },
-    { id: 'stop', text: 'Press Escape, or type /stop, to stop the running turn in the chat you are looking at.' },
+    { id: 'stop', text: 'Press Escape twice quickly, or type /stop, to stop the running turn in the chat you are looking at.' },
     { id: 'access', text: 'The shield in the message box sets what a bot may do: Ask (read only), Workspace access, or Full access (red). New bots start on Ask.' },
     { id: 'commands', text: 'Type / in the message box for commands: /context shows how full the model\'s memory is, /compact frees it, /export saves the chat as Markdown.' },
     { id: 'context-ring', text: 'The small ring next to the microphone shows how full the model\'s memory is. Hover for the numbers; click it to compact.' },

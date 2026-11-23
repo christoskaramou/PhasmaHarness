@@ -344,6 +344,8 @@ test('Claude turns feed the context meter and support manual compaction', async 
   assert.ok(Number.isFinite(session.lastCompactedAt), 'successful Claude compaction records its time');
   controller.data.sessions.find(s => s.id === session.id).activeProvider = 'cursor-cli';
   await assert.rejects(controller.compact(session.id), /Cursor manages its context automatically/);
+  controller.data.sessions.find(s => s.id === session.id).activeProvider = 'native:antigravity';
+  await assert.rejects(controller.compact(session.id), /Antigravity CLI manages its context automatically and has no manual compaction in Harness/);
 });
 
 test('every Auto message is routed from the full catalog with the current worker known to the pick, so it can upgrade', async t => {

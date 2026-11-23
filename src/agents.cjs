@@ -417,7 +417,14 @@ class Agents extends EventEmitter {
     const previous = this.primary.data.hubName;
     const previousSettings = this.primary.data.settings;
     this.primary.data.hubName = name;
-    if (mode !== undefined) this.primary.data.settings = { ...previousSettings, mode };
+    if (mode !== undefined) {
+      const nextSettings = { ...previousSettings, mode };
+      if (!this.primary.canStepEffort(mode)) {
+        if (autoStep('advisorModel', previousSettings.advisorModel || 'chat') !== null) nextSettings.advisorModel = 'off';
+        if (autoStep('workerModel', previousSettings.workerModel || 'off') !== null) nextSettings.workerModel = 'off';
+      }
+      this.primary.data.settings = nextSettings;
+    }
     try {
       this.primary.save();
     } catch (error) {
@@ -426,6 +433,8 @@ class Agents extends EventEmitter {
       throw error;
     }
 
+    for (const other of this.allControllers()) if (other !== this.primary && !other.busy) this.sync(other);
+    this.applyInherited();
     this.primary.changed();
     return name;
   }
@@ -732,22 +741,42 @@ class Agents extends EventEmitter {
     return this.snapshot();
   }
 
+  canStepEffort(agentId = 'main') {
+    if (agentId === 'main') {
+      const mode = this.primary.data.settings.mode;
+      return this.primary.canStepEffort(mode === 'auto' ? this.primary.data.hubMode : mode);
+    }
+    const profile = this.profile(agentId);
+    return profile ? (this.controllers.get(agentId) || this.primary).canStepEffort(profile.mode) : true;
+  }
+
   // A bot's router, Secondary model, advisor or effort cap: its own, or on Inherit (the default) its creator's, up to Hub's.
   // Hub's advisor is on by default ('chat', 2026-11-13, the user; since 2026-11-20 Auto: one effort above the turn's).
   // Workers and the Reviewer are off until the user ticks them (2026-11-20).
+  // Walks top-down from Hub so a model without separate effort levels turns an Auto Advisor/Workers into 'off' for itself
+  // and any bot that inherits from it.
   botSetting(agentId, key) {
     const hub = { router: () => this.primary.data.settings.router, secondaryModel: () => this.primary.secondarySaved() || undefined,
       advisorModel: () => this.primary.data.settings.advisorModel || 'chat', workerModel: () => this.primary.data.settings.workerModel || 'off',
       reviewerModel: () => this.primary.data.settings.reviewerModel || 'off',
       effortCap: () => this.primary.data.settings.effortCap || DEFAULT_EFFORT_CAP }[key];
+    const chain = [];
     for (let id = agentId, seen = new Set(); id && id !== 'main' && !seen.has(id); ) {
       seen.add(id);
       const profile = this.profile(id);
       if (!profile) break;
-      if (profile[key] !== undefined && !['inherit', 'auto'].includes(profile[key])) return profile[key];
+      chain.push(profile);
       id = profile.createdBy || 'main';
     }
-    return hub();
+    let value = hub();
+    const isRole = key === 'advisorModel' || key === 'workerModel';
+    if (isRole && autoStep(key, value) !== null && !this.canStepEffort('main')) value = 'off';
+    for (let i = chain.length - 1; i >= 0; i--) {
+      const profile = chain[i];
+      if (profile[key] !== undefined && !['inherit', 'auto'].includes(profile[key])) value = profile[key];
+      if (isRole && autoStep(key, value) !== null && !this.canStepEffort(profile.id)) value = 'off';
+    }
+    return value;
   }
 
   // Hub's model with Auto effort: what a bot gets when nothing else names its model.
@@ -921,7 +950,8 @@ class Agents extends EventEmitter {
     // Router, Secondary model and effort cap: kept when an edit does not mention them (agent_update, renames); Inherit,
     // the default, is not stored.
     const own = key => { const v = value[key] ?? existing?.[key] ?? 'inherit'; return v === 'auto' ? 'inherit' : v; };
-    const router = own('router'), secondary = own('secondaryModel'), advisor = own('advisorModel'), workers = own('workerModel'), reviewer = own('reviewerModel'), effortCap = own('effortCap');
+    const router = own('router'), secondary = own('secondaryModel'), reviewer = own('reviewerModel'), effortCap = own('effortCap');
+    let advisor = own('advisorModel'), workers = own('workerModel');
     // A sub-bot's role is set when it is made (agent-roles.cjs) and kept.
     const role = existing ? existing.role : value.role;
     if (role !== undefined && !roles.ROLES.includes(role)) throw new Error('Unknown agent role.');
@@ -936,6 +966,10 @@ class Agents extends EventEmitter {
     if (secondary !== existing?.secondaryModel && !['inherit', 'off'].includes(secondary) && !this.primary.chatScanChoices().some(p => p.id === secondary))
       throw new Error('Unknown secondary model.');
     if (effortCap !== 'inherit' && !BOT_SETTINGS.effortCap.includes(effortCap)) throw new Error('Unknown effort cap.');
+    if (!this.primary.canStepEffort(mode)) {
+      if (autoStep('advisorModel', advisor) !== null) advisor = 'off';
+      if (autoStep('workerModel', workers) !== null) workers = 'off';
+    }
     const profile = { id, name: value.name.trim(), instructions: value.instructions.trim(), workspace: this.primary.workspace(pick('workspace')), mode, access,
       createdBy, ...(role ? { role } : {}), ...Object.fromEntries(Object.values(INHERITED).map(flag => [flag, draft[flag]])),
       ...Object.fromEntries(Object.entries({ router, secondaryModel: secondary, advisorModel: advisor, workerModel: workers, reviewerModel: reviewer, effortCap }).filter(([, v]) => v !== 'inherit')) };
@@ -997,13 +1031,29 @@ class Agents extends EventEmitter {
     if (!local && this.busy) throw new Error('Stop all agents before changing shared settings.');
     if (agentId !== 'main' && ['router', 'secondaryModel', 'advisorModel', 'workerModel', 'reviewerModel', 'effortCap'].some(key => values[key] !== undefined))
       throw new Error('Change a bot’s Router, Secondary model, Advisor, Workers, Reviewer and Effort cap in its Edit dialog.');
-    if (agentId === 'main') this.primary.settings(values);
-    else {
+    if (agentId === 'main') {
+      this.primary.settings(values);
+      if (values.mode !== undefined && !this.primary.canStepEffort(this.primary.data.settings.mode)) {
+        let cleared = false;
+        if (autoStep('advisorModel', this.primary.data.settings.advisorModel || 'chat') !== null) {
+          this.primary.data.settings.advisorModel = 'off'; cleared = true;
+        }
+        if (autoStep('workerModel', this.primary.data.settings.workerModel || 'off') !== null) {
+          this.primary.data.settings.workerModel = 'off'; cleared = true;
+        }
+        if (cleared) this.primary.save();
+      }
+    } else {
       const { workspace, mode, access, ...shared } = values;
       const own = Object.fromEntries(Object.entries({ workspace, mode, access }).filter(([, value]) => value !== undefined));
       controller.settings(own);
-      Object.assign(this.profile(agentId), Object.fromEntries(Object.keys(own).map(key => [key, controller.data.settings[key]])),
+      const profile = this.profile(agentId);
+      Object.assign(profile, Object.fromEntries(Object.keys(own).map(key => [key, controller.data.settings[key]])),
         own.workspace !== undefined ? { inheritWorkspace: false } : {});
+      if (values.mode !== undefined && !controller.canStepEffort(controller.data.settings.mode)) {
+        if (autoStep('advisorModel', profile.advisorModel) !== null) profile.advisorModel = 'off';
+        if (autoStep('workerModel', profile.workerModel) !== null) profile.workerModel = 'off';
+      }
       if (Object.keys(shared).length) this.primary.settings(shared);
       this.primary.save();
     }
@@ -2592,7 +2642,7 @@ class Agents extends EventEmitter {
       const inheritance = { inheritWorkspace: !batch && sameFolder(own, session.workspace),
         ...(creator && !batch ? { inheritAccess: session.access === creator.access, inheritMode: !asked } : {}) };
       // With Workers on, a bot's new sub-bot is a worker unless the model was asked for (agent-roles.cjs workerMode).
-      const worker = !!creator && !batch && !asked && this.botSetting(createdBy, 'workerModel') !== 'off';
+      const worker = !!creator && !batch && !asked && roles.workersEnabled(this, controller, session);
       return this.saveAgent({ ...args, mode, workspace: session.workspace, access: session.access, createdBy, ...inheritance, ...(worker ? { role: 'worker' } : {}) }, batch);
     }
     if (name === 'agent_delegate' && Object.keys(args).every(key => ['agentId', 'task'].includes(key)))

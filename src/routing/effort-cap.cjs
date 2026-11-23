@@ -1,6 +1,6 @@
 // Effort cap for Auto effort (each bot's Edit dialog). Smart and Jev routing are only offered efforts at or below the
 // cap, so both routers and escalation choose within it; a task that continues keeps its model at the highest effort still allowed. Manual picks are not capped.
-const EFFORT_ORDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+const { EFFORT_ORDER } = require('../../ui/agent-state.js');
 const EFFORT_CAPS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const DEFAULT_EFFORT_CAP = 'high'; // also the recommended level
 const rank = effort => EFFORT_ORDER.indexOf(effort);
@@ -32,7 +32,10 @@ function capCatalog(list, cap) {
 
 // The same model at the highest effort the list still offers (a continued task after the cap was lowered).
 function sameModel(worker, list) {
-  return list.filter(p => modelKey(p) === modelKey(worker)).sort((a, b) => rank(a.effort) - rank(b.effort)).at(-1) || null;
+  if (!worker?.model || !Array.isArray(list)) return null;
+  const provider = worker.provider || 'codex';
+  return list.filter(p => (p.provider || 'codex') === provider && p.model === worker.model)
+    .sort((a, b) => rank(a.effort) - rank(b.effort)).at(-1) || null;
 }
 
 module.exports = { EFFORT_ORDER, EFFORT_CAPS, DEFAULT_EFFORT_CAP, withinCap, capCatalog, sameModel, hubEffortAllowed };

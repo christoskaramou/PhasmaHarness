@@ -18,7 +18,7 @@ function askedEffort(text) {
   const word = match[1].toLowerCase();
   return ['low', 'medium', 'high', 'xhigh'].includes(word) ? word : 'top';
 }
-const { parseAutoEffort } = require('../../ui/agent-state.js');
+const { parseAutoEffort, effortVariants, hasSeparateEffort } = require('../../ui/agent-state.js');
 const { DEFAULT_ROUTER, LEGACY_CLAUDE_ROUTERS, PROVIDER_NAMES, cheapRouter } = require('./shared.cjs');
 
 module.exports = {
@@ -201,7 +201,8 @@ module.exports = {
       const entry = { ...saved, images: true };
       const found = (this.cursor.models || []).find(m => m.id === entry.model);
       const base = entry.parameterized || found?.parameterized ? { ...entry, parameterized: true, parameters: entry.cursorParameters || [] } : entry;
-      const plain = !found?.efforts?.length ? [base] : found.efforts.map((effort, i) => ({ ...base, baseId: entry.id, id: `cursor-cli:${found.id}:${effort}`,
+      // Before Cursor discovery loads a model's parameters, its effort support is unknown (not known-empty).
+      const plain = !found?.efforts?.length ? [found ? base : { ...base, effortsUnknown: true }] : found.efforts.map((effort, i) => ({ ...base, baseId: entry.id, id: `cursor-cli:${found.id}:${effort}`,
         effort, effortOption: found.effortOption, preferred: effort === entry.cursorEffort,
         label: `${entry.label} · ${found.effortNames?.[effort] || effort}`, modelLabel: entry.label, rank: entry.rank + i / 100 }));
       // Where Cursor offers fast mode it is on by default (the user, 2026-11-06), and every model selection can turn it off:
@@ -429,8 +430,27 @@ module.exports = {
     const auto = parseAutoEffort(mode);
     const base = auto || (mode === 'auto' && this.isCoordinator?.() ? this.resolveWorker(this.data.hubMode) : this.resolveWorker(mode));
     if (!base?.model) return [];
-    const same = this.catalog().filter(p => p.worker && (p.provider || 'codex') === (base.provider || 'codex') && p.model === base.model && this.available(p));
+    const same = this.catalog().filter(p => p.worker && this.available(p) &&
+      (p.provider || 'codex') === (base.provider || 'codex') && p.model === base.model);
     return capCatalog(same, this.data.settings.effortCap).sort((a, b) => EFFORT_ORDER.indexOf(a.effort) - EFFORT_ORDER.indexOf(b.effort));
+  },
+
+  // Whether this bot's model has >= 2 separate explicit effort levels in the catalog for Auto stepping.
+  // Checks catalogued capability (not transient availability) and treats undiscovered Cursor models as unknown
+  // so a temporary disconnect or pre-discovery save never wipes saved Auto.
+  canStepEffort(mode = this.data.settings.mode, session = null) {
+    const allWorkers = this.catalog().filter(p => p.worker);
+    if (!allWorkers.length) return true;
+    if (!mode || mode === 'auto') {
+      const base = (session?.routes || []).findLast(route => !route.directAnswer && route.model) ||
+        (this.isCoordinator?.() ? this.resolveWorker(this.data.hubMode) : null);
+      if (!base?.model) return true;
+      const matches = allWorkers.filter(p => p.id === base.id ||
+        ((p.provider || 'codex') === (base.provider || 'codex') && p.model === base.model));
+      if (!matches.length || matches.some(p => p.effortsUnknown)) return true;
+      return effortVariants(allWorkers, base).length >= 2;
+    }
+    return hasSeparateEffort(allWorkers, mode);
   },
 
   // Auto effort without a router: the model's preferred effort, else medium, else its highest, within the bot's cap.
@@ -453,20 +473,26 @@ module.exports = {
   // The bot's model at the effort asked for ('low' … 'xhigh', or 'top': the highest within the cap), or null.
   effortVariant(asked, mode, session) {
     const last = (session?.routes || []).findLast(route => !route.directAnswer && route.model);
-    const base = parseAutoEffort(mode) || (mode === 'auto' ? last : this.resolveWorker(mode));
+    const auto = parseAutoEffort(mode);
+    const base = auto || (mode === 'auto' ? last : this.resolveWorker(mode));
     if (!base?.model) return null;
-    const variants = this.ownVariants(`autoeffort:${base.provider || 'codex'}:${base.model}`).filter(p => p.effort);
+    const variants = this.ownVariants(auto ? mode : `autoeffort:${base.provider || 'codex'}:${base.model}`).filter(p => p.effort);
     if (!variants.length) return null;
     if (asked === 'top') return variants.at(-1);
-    return variants.find(p => p.effort === asked) || variants.filter(p => EFFORT_ORDER.indexOf(p.effort) <= EFFORT_ORDER.indexOf(asked)).at(-1) || variants[0];
+    return variants.find(p => p.effort === asked) ||
+      variants.filter(p => EFFORT_ORDER.indexOf(p.effort) <= EFFORT_ORDER.indexOf(asked)).at(-1) ||
+      variants[0];
   },
 
   // Auto Advisor and Workers (2026-11-20, the user): the bot's model one effort above (step 1) or below (step -1) the
   // effort `route` ran at, within the bot's cap; the same effort when there is none further. An unknown effort takes the
-  // highest (advisor) or lowest (workers). Null without a model.
+  // highest (advisor) or lowest (workers). Null without a model or when the model has fewer than 2 separate effort levels.
   stepEffort(route, step) {
     if (!route?.model) return null;
+    const allWorkers = this.catalog().filter(p => p.worker);
+    if (allWorkers.length && effortVariants(allWorkers, route).length < 2) return null;
     const variants = this.ownVariants(`autoeffort:${route.provider || 'codex'}:${route.model}`).filter(p => p.effort);
+    if (!allWorkers.length && variants.length < 2) return null;
     if (!variants.length) return null;
     const at = variants.findIndex(p => p.effort === route.effort);
     return variants[at < 0 ? (step > 0 ? variants.length - 1 : 0) : Math.min(variants.length - 1, Math.max(0, at + step))];
@@ -482,8 +508,9 @@ module.exports = {
   // Escalation: the bot's model at its highest effort within its cap, when that is higher than `route`'s. None while its
   // provider is at a usage limit, so a repair, rule writer or dream does not start a call that cannot run.
   higherEffort(route) {
-    const top = this.ownVariants(route ? `autoeffort:${route.provider || 'codex'}:${route.model}` : undefined).at(-1);
-    if (!top || this.limits.limited(top.provider || 'codex', top.model)) return null;
+    const variants = this.ownVariants(route ? `autoeffort:${route.provider || 'codex'}:${route.model}` : undefined);
+    const top = variants.at(-1);
+    if (!top || !top.effort || this.limits.limited(top.provider || 'codex', top.model)) return null;
     return !route || EFFORT_ORDER.indexOf(top.effort) > EFFORT_ORDER.indexOf(route.effort) ? top : null;
   },
 
@@ -493,8 +520,9 @@ module.exports = {
     // Auto effort: only that model's efforts. Images do not filter it out: its one model runs, and a text-only one is
     // refused after routing unless Jev image assist describes the images (send), as with its router off.
     const auto = parseAutoEffort(mode);
-    const usable = capCatalog(this.catalog().filter(p => p.worker && this.available(p) && (!images.length || p.images || auto) &&
-      (!auto || ((p.provider || 'codex') === auto.provider && p.model === auto.model))), this.data.settings.effortCap);
+    const all = this.catalog().filter(p => p.worker && this.available(p) && (!images.length || p.images || auto));
+    const pool = auto ? all.filter(p => (p.provider || 'codex') === auto.provider && p.model === auto.model) : all;
+    const usable = capCatalog(pool, this.data.settings.effortCap);
     const unlimited = usable.filter(p => !this.limits.limited(p.provider || 'codex', p.model));
     return unlimited.length ? unlimited : usable;
   },

@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { EFFORT_ORDER, withinCap } = require('../routing/effort-cap.cjs');
-const { parseAutoEffort, autoStep } = require('../../ui/agent-state.js');
+const { parseAutoEffort, autoStep, effortVariants } = require('../../ui/agent-state.js');
 const roles = require('../agent-roles.cjs');
 
 const SCHEMA = { type: 'object', properties: { suggestion: { type: 'string' } }, required: ['suggestion'], additionalProperties: false };
@@ -49,7 +49,8 @@ function advisorModel(controller, session) {
   if (picked === 'off') return { reason: 'This bot’s Advisor is Off (its Edit dialog).' };
   // Auto: 'chat' (one higher) or 'chat:<step>' (2026-11-20, the user: the step can be changed).
   const step = autoStep('advisorModel', picked || 'chat');
-  const chosen = step === null ? controller.catalog?.().find(p => p.id === picked) : null;
+  const catalog = controller.catalog?.() || [];
+  const chosen = step === null ? catalog.find(p => p.id === picked) : null;
   if (chosen && controller.available(chosen)) return { choice: chosen };
   const note = step === null ? `The picked advisor (${chosen?.label || picked}) is unavailable` : '';
   const route = (session.routes || []).findLast(entry => !entry.directAnswer);
@@ -57,10 +58,21 @@ function advisorModel(controller, session) {
   // Auto (2026-11-20, the user; was the highest effort): the chat's model at the picked step from the effort it runs at
   // (one higher by default), within the bot's effort cap; a picked advisor is a manual pick, never capped.
   const current = controller.currentRoute?.(session);
+  if (step !== null) {
+    const matches = current ? catalog.filter(p => p.id === current.id ||
+      ((p.provider || 'codex') === (current.provider || 'codex') && p.model === current.model)) : [];
+    if (matches.some(p => p.effortsUnknown)) {
+      return { reason: 'Still loading this model’s effort levels from its provider. Wait a moment and try again, or pick a specific Advisor model in the bot’s Edit dialog.' };
+    }
+    if ((controller.canStepEffort && !controller.canStepEffort(undefined, session)) ||
+        (matches.length && effortVariants(catalog, current).length < 2)) {
+      return { reason: 'This bot’s model has no separate effort levels for Auto Advisor. Pick an Advisor model in the bot’s Edit dialog.' };
+    }
+  }
   const higher = current && controller.stepEffort?.(current, step ?? 1);
   const level = p => (EFFORT_ORDER.includes(p.effort) ? EFFORT_ORDER.indexOf(p.effort) : -1);
   const cap = controller.data?.settings?.effortCap;
-  const same = used ? (controller.catalog?.() || []).filter(p => p.model === used.model && (p.provider || 'codex') === (used.provider || 'codex') &&
+  const same = used ? catalog.filter(p => p.model === used.model && (p.provider || 'codex') === (used.provider || 'codex') &&
     controller.available(p) && withinCap(p, cap)) : [];
   const choice = (higher && controller.available(higher) ? higher : null) || same.sort((a, b) => level(b) - level(a))[0] ||
     (used && controller.available(used) ? used : null);
@@ -99,8 +111,7 @@ function quickModel(controller, session) {
   if (own) return own;
   const route = (session.routes || []).findLast(entry => !entry.directAnswer);
   const used = route && (controller.resolveWorker?.(route.id) || route);
-  const same = used ? (controller.catalog?.() || []).filter(p => p.model === used.model &&
-    (p.provider || 'codex') === (used.provider || 'codex') && controller.available(p)) : [];
+  const same = used ? (controller.catalog?.() || []).filter(p => p.model === used.model && (p.provider || 'codex') === (used.provider || 'codex') && controller.available(p)) : [];
   // A preset without a level runs at the CLI default, which may be high; known low levels come first.
   const level = p => (EFFORT_ORDER.includes(p.effort) ? EFFORT_ORDER.indexOf(p.effort) : EFFORT_ORDER.length);
   const choice = same.sort((a, b) => level(a) - level(b))[0] || used;

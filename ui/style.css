@@ -4312,6 +4312,7 @@ main > header {
 
 .composer {
   --composer-small-control-size: var(--composer-control-size);
+  --composer-icon-button-width: 28px;
 }
 
 .composer-controls {
@@ -4342,16 +4343,19 @@ main > header {
   flex: none;
 }
 
-/* Match the visible gaps between usage, context, microphone and Send. */
-#usage-widget-toggle, #context-meter {
-  transform: translateX(calc((var(--composer-small-control-size) - 15px) / 2));
+/* Keep each icon button's hit/hover area separate while matching visible gaps between usage, context, microphone and Send. */
+#usage-widget-toggle, #context-meter, #dictate {
+  width: var(--composer-icon-button-width);
+}
+
+#send, #stop {
+  margin-left: calc((var(--composer-icon-button-width) - 15px) / 2);
 }
 
 #usage-widget-toggle {
   border: 0;
   background: transparent;
   color: var(--muted);
-  justify-content: flex-end;
 }
 
 #usage-widget-toggle:hover {
@@ -4374,16 +4378,15 @@ main > header {
   bottom: calc(100% + 8px);
   width: min(380px, 100%);
   max-height: min(440px, 55vh);
-  overflow-y: auto;
+  overflow: hidden;
   padding: 10px 12px;
   border: 1px solid var(--border-strong);
   border-radius: 12px;
   background: var(--raised);
   box-shadow: 0 12px 36px #0005;
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 8px;
-  scrollbar-width: thin;
-  scrollbar-color: var(--border-strong) var(--raised);
 }
 
 #usage-widget[hidden] {
@@ -4391,6 +4394,7 @@ main > header {
 }
 
 .usage-widget-head {
+  flex: none;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -4421,6 +4425,17 @@ main > header {
   flex: none;
 }
 
+.usage-widget-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) var(--raised);
+}
+
 .usage-widget-body {
   display: grid;
   gap: 7px;
@@ -4429,6 +4444,10 @@ main > header {
 .usage-widget .usage-provider {
   padding: 9px 11px;
   gap: 6px;
+}
+
+.usage-widget .usage-error {
+  margin: 0;
 }
 
 .usage-widget .usage-error:empty {

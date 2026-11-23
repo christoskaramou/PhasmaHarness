@@ -94,6 +94,14 @@ async function ensureReviewer(agents, owner, model) {
   try { return await creation; } finally { agents.reviewerCreations.delete(owner); }
 }
 
+// Whether Workers is effectively on for `controller`: off when set to Off, or when Auto on a model without effort levels.
+function workersEnabled(agents, controller, source = null) {
+  const setting = agents.botSetting(controller.agentId || 'main', 'workerModel');
+  if (!setting || setting === 'off') return false;
+  if (autoStep('workerModel', setting) !== null && controller.canStepEffort && !controller.canStepEffort(undefined, source)) return false;
+  return true;
+}
+
 // A worker job's model: the Workers model the supervisor picked, or on Auto its own model at the picked step (one lower by
 // default) from the effort its chat runs at now. Null keeps the worker's own (Workers off since, or the pick is unavailable).
 function workerMode(agents, sourceController, source, profile) {
@@ -104,6 +112,7 @@ function workerMode(agents, sourceController, source, profile) {
     const choice = sourceController.resolveWorker(setting);
     return choice && sourceController.available(choice) ? choice.id : null;
   }
+  if (sourceController.canStepEffort && !sourceController.canStepEffort(undefined, source)) return null;
   return sourceController.stepEffort(sourceController.currentRoute(source), step)?.id || null;
 }
 
@@ -139,7 +148,7 @@ function roleInstructions(agents, controller, profile) {
       `Only for a question you cannot proceed without, use agent_message with agentId ${JSON.stringify(supervisor)}; ` +
       'never message main or other bots. Your supervisor reviews and combines the results.\n' + advisor;
   }
-  if (controller.isCoordinator?.() || agents.botSetting(controller.agentId || 'main', 'workerModel') === 'off') return advisor + review;
+  if (controller.isCoordinator?.() || !workersEnabled(agents, controller)) return advisor + review;
   // 2026-11-20, third live run: still alone, as the Harness defaults and the workflow skill say "one agent unless delegation
   // requested". The user turning Workers on is that request; the rule itself stays as the user wrote it.
   return '\nWorker sub-bots are on for you: the user turned on Workers for this bot, which is their explicit request for delegation ' +
@@ -150,20 +159,21 @@ function roleInstructions(agents, controller, profile) {
     'Workers see only the task you send, not the user\'s request: give each a complete, self-contained task with the user\'s exact ' +
     'requirements for its part (exports, behavior, edge cases, file paths and tests), and say that missing folders are new. ' +
     'Any number may work at once: dispatch every part, then finish your turn; each result comes back to you as a new turn. Review and ' +
-    'check their results before you report: you own the final answer. Your advisor sub-bot only answers ask_advisor; never delegate ' +
-    'to it or message it.\n' + advisor + review;
+    'check their results before you report: you own the final answer.' +
+    (advisor ? ' Your advisor sub-bot only answers ask_advisor; never delegate to it or message it.' : '') + '\n' + advisor + review;
 }
 
 // The same rule as a short note on each of the user's own turns (2026-11-20, fourth live run: the supervisor text was in
 // the instructions Codex got, about 4,000 characters in, and gpt-5.6-terra still did four features alone).
 function supervisorTurnNote(agents, controller) {
   const profile = agents.profile(controller.agentId || 'main');
-  if (profile?.role || controller.isCoordinator?.() || agents.botSetting(controller.agentId || 'main', 'workerModel') === 'off') return '';
+  if (profile?.role || controller.isCoordinator?.() || !workersEnabled(agents, controller)) return '';
+  const advisorNote = controller.hasAdvisor?.() ? ' Use ask_advisor only when stuck, never to review a plan.' : '';
   return '[Harness: Workers are on for this bot, the user\'s request for delegation. Before editing, list this request\'s independent ' +
     'parts. If two or more each need more than a few edits, give each to a worker (agents_list, agent_create, agent_delegate) with a ' +
     'complete task: the user\'s exact requirements for that part, since workers never see this message. Then finish your turn; do ' +
-    'only small single-part edits yourself. Use ask_advisor only when stuck, never to review a plan.]\n\n';
+    `only small single-part edits yourself.${advisorNote}]\n\n`;
 }
 
-module.exports = { ROLES, supervisorTurnNote, advisorOwner, advisorProfile, advisorMemory, ensureAdvisor, recordAdvice, workerMode, roleInstructions,
+module.exports = { ROLES, workersEnabled, supervisorTurnNote, advisorOwner, advisorProfile, advisorMemory, ensureAdvisor, recordAdvice, workerMode, roleInstructions,
   reviewerProfile, ensureReviewer };

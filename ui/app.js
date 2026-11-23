@@ -1192,6 +1192,8 @@ function editAgent(profile) {
   dialog.dataset.advisor = profile?.advisorModel || 'inherit';
   dialog.dataset.workers = profile?.workerModel || 'inherit';
   dialog.dataset.reviewer = profile?.reviewerModel || 'inherit';
+  delete dialog.dataset.advisorLast; delete dialog.dataset.advisorChoosing;
+  delete dialog.dataset.workersLast; delete dialog.dataset.workersChoosing;
   delete dialog.dataset.reviewerLast; delete dialog.dataset.reviewerChoosing;
   $('#agent-advisor').dataset.signature = ''; $('#agent-workers').dataset.signature = ''; $('#agent-reviewer').dataset.signature = '';
   dialog.dataset.router = profile?.router || 'inherit';
@@ -1232,21 +1234,42 @@ const ROUTER_LABELS = { off: 'Off', jev: 'Jev', secondary: 'Secondary model' };
 const CAP_LABELS = { low: 'Up to low', medium: 'Up to medium', high: 'Up to high', xhigh: 'Up to xhigh', max: 'No cap' };
 // Up the creator chain: a creator's live state holds its resolved values; without one (a browser before the fleet state
 // arrives, a creator just deleted), its saved values, else its own creator's. Never the open chat's unless it is that
-// creator's. Unknown stays undefined: the option then reads just "Inherit".
+// creator's. Auto Advisor/Workers on an ancestor whose model has no separate effort resolves to Off. Unknown stays undefined.
 const SAVED_KEYS = { router: 'router', secondary: 'secondaryModel', advisor: 'advisorModel', workers: 'workerModel', reviewer: 'reviewerModel', cap: 'effortCap' };
 function inheritedSettings(dialog) {
   const profiles = state.agents || [];
-  const result = {}, seen = new Set();
+  const chain = [], seen = new Set();
   let id = profiles.find(agent => agent.id === dialog.dataset.agentId)?.createdBy || 'main';
-  while (id && !seen.has(id) && Object.keys(SAVED_KEYS).some(key => result[key] === undefined)) {
+  while (id && !seen.has(id)) {
     seen.add(id);
     const live = fleetState?.agentStates?.[id] || (selectedAgent === id ? state : null);
-    const values = live ? { router: live.routerKind || 'secondary', secondary: live.secondaryId || 'off', advisor: live.settings?.advisorModel || 'chat',
-      workers: live.settings?.workerModel || 'off', reviewer: live.settings?.reviewerModel || 'off', cap: live.settings?.effortCap || 'high' }
-      : Object.fromEntries(Object.entries(SAVED_KEYS).map(([key, saved]) => [key, profiles.find(agent => agent.id === id)?.[saved]]));
-    for (const key of Object.keys(SAVED_KEYS)) result[key] ??= values[key];
+    const profile = profiles.find(agent => agent.id === id);
+    chain.push({ id, live, profile });
     if (live || id === 'main') break;
-    id = profiles.find(agent => agent.id === id)?.createdBy || 'main';
+    id = profile?.createdBy || 'main';
+  }
+  const result = {};
+  for (const { live, profile } of chain.reverse()) {
+    if (live) {
+      Object.assign(result, {
+        router: live.routerKind || 'secondary',
+        secondary: live.secondaryId || 'off',
+        advisor: live.settings?.advisorModel || 'chat',
+        workers: live.settings?.workerModel || 'off',
+        reviewer: live.settings?.reviewerModel || 'off',
+        cap: live.settings?.effortCap || 'high',
+      });
+      const liveMode = live.settings?.mode === 'auto' ? live.hubMode : (live.settings?.mode || profile?.mode);
+      if (!modeHasSeparateEffort(liveMode, live.presets || state.presets))
+        for (const key of Object.keys(ROLE_ROWS)) if (roleStep(key, result[key])) result[key] = 'off';
+    } else if (profile) {
+      for (const [key, saved] of Object.entries(SAVED_KEYS)) {
+        if (profile[saved] !== undefined && !['inherit', 'auto'].includes(profile[saved]))
+          result[key] = profile[saved];
+      }
+      if (!modeHasSeparateEffort(profile.mode, state.presets))
+        for (const key of Object.keys(ROLE_ROWS)) if (roleStep(key, result[key])) result[key] = 'off';
+    }
   }
   return result;
 }
@@ -1262,24 +1285,60 @@ const roleSteps = key => HarnessAgentState.ROLE_STEPS[ROLE_ROWS[key].setting];
 const roleStep = (key, id) => roleSteps(key).find(([value]) => value === id);
 const roleLabel = (key, id) => id === 'off' ? 'Off' : roleStep(key, id) ? `${ROLE_ROWS[key].auto} · ${roleStep(key, id)[1].toLowerCase()}`
   : ROLE_ROWS[key].presets().find(p => p.id === id)?.label || id;
+function modeHasSeparateEffort(mode, presets) {
+  if (providersConnecting().active) return true;
+  return HarnessAgentState.hasSeparateEffort(presets || [], mode);
+}
+function botCanStepEffort(prefix) {
+  return modeHasSeparateEffort($(`#${prefix}-dialog`).dataset.mode, prefix === 'hub' ? (fleetState?.agentStates?.main || state).presets : state.presets);
+}
+function clearUnsupportedAuto(prefix) {
+  if (botCanStepEffort(prefix)) return;
+  const dialog = $(`#${prefix}-dialog`), d = dialog.dataset;
+  for (const key of Object.keys(ROLE_ROWS)) {
+    // Clear only an explicit Auto value; keep 'inherit' intact so a later explicit pick on the creator still inherits.
+    if (roleStep(key, d[key])) d[key] = 'off';
+    if (roleStep(key, d[`${key}Last`])) delete d[`${key}Last`];
+    delete d[`${key}Choosing`];
+  }
+}
 function renderRoleRow(prefix, key, from, inheritOption) {
   const d = $(`#${prefix}-dialog`).dataset, on = $(`#${prefix}-${key}-on`), select = $(`#${prefix}-${key}`), effort = $(`#${prefix}-${key}-effort`);
-  const inheritedOn = !!from?.[key] && from[key] !== 'off';
-  on.checked = d[key] === 'inherit' ? inheritedOn : !!d[key] && d[key] !== 'off';
+  const canAuto = botCanStepEffort(prefix);
+  const inheritedAuto = !!roleStep(key, from?.[key]);
+  const inheritedExplicit = !!from?.[key] && from[key] !== 'off' && !inheritedAuto;
+  const inheritedOn = inheritedExplicit || (canAuto && inheritedAuto);
+  const ownAuto = !!roleStep(key, d[key]);
+  const ownExplicit = !!d[key] && !['off', 'inherit'].includes(d[key]) && !ownAuto;
+  on.checked = canAuto
+    ? (d[key] === 'inherit' ? inheritedOn : ownExplicit || ownAuto)
+    : ((d[key] === 'inherit' && inheritedExplicit) || ownExplicit || !!d[`${key}Choosing`]);
   if (providersConnecting().active) { showConnecting(select); effort.disabled = true; return; }
   // Unticked, the picker keeps showing what ticking brings back.
-  const shown = d[key] === 'off' || (d[key] === 'inherit' && !inheritedOn) ? d[`${key}Last`] || 'chat' : d[key];
-  const auto = !!roleStep(key, shown);
-  fillModelEffort(select, effort, ROLE_ROWS[key].presets(), auto ? 'chat' : shown, [...(inheritedOn ? inheritOption(roleLabel(key, from[key])) : []), new Option(ROLE_ROWS[key].auto, 'chat')]);
-  // Auto: its steps, rebuilt only when they differ, so a live update never closes an open list. Inherit: the creator's.
+  const shown = canAuto
+    ? (d[key] === 'off' || (d[key] === 'inherit' && !inheritedOn) ? d[`${key}Last`] || 'chat' : d[key])
+    : (ownExplicit ? d[key] : (d[key] === 'inherit' && inheritedExplicit) ? 'inherit' : (!roleStep(key, d[`${key}Last`]) ? d[`${key}Last`] : '') || '');
+  const auto = canAuto && !!roleStep(key, shown);
+  const first = [...(inheritedOn ? inheritOption(roleLabel(key, from[key])) : [])];
+  if (canAuto) first.push(new Option(ROLE_ROWS[key].auto, 'chat'));
+  else if (!shown) {
+    const placeholder = new Option('Choose a model', '');
+    placeholder.disabled = true;
+    first.push(placeholder);
+  }
+  fillModelEffort(select, effort, ROLE_ROWS[key].presets(), auto ? 'chat' : shown, first);
+  // Auto: its steps, rebuilt only when they differ, so a live update never closes an open list. Inherit/unset: —.
   if (select.value === 'chat') {
     const steps = roleSteps(key);
     if ([...effort.options].map(o => o.value).join('|') !== steps.map(([value]) => value).join('|'))
       effort.replaceChildren(...steps.map(([value, label]) => new Option(label, value)));
     effort.value = auto ? shown : 'chat';
-  } else if (select.value === 'inherit') effort.replaceChildren(new Option('—', ''));
+    effort.disabled = !on.checked;
+  } else {
+    if (select.value === 'inherit' || !select.value) effort.replaceChildren(new Option('—', ''));
+    if (!on.checked || select.value === 'inherit' || !select.value) effort.disabled = true;
+  }
   select.disabled = !on.checked;
-  effort.disabled = !on.checked || select.value === 'inherit';
 }
 // A bot's Reviewer (2026-11-20, the user): an independent sub-bot that reviews the uncommitted changes on /review or when
 // the bot asks. Off by default and no Auto: the user always picks its model, a worker model (presets). Hub's value is
@@ -1347,19 +1406,33 @@ for (const prefix of ['agent', 'hub']) {
         // picked starts at the row's preferred effort when it offers it: the effort list beside it is still the old one,
         // so it saved the model's lowest effort (found 2026-11-20).
         const group = event.target === select && presetGroups(ROLE_ROWS[key].presets()).find(g => g.key === select.value);
-        dialog.dataset[key] = select.value === 'chat' ? (roleStep(key, effort.value) ? effort.value : 'chat')
+        const choice = select.value === 'chat' ? (roleStep(key, effort.value) ? effort.value : 'chat')
           : group ? (group.variants.find(p => p.effort === effort.dataset.preferred) || group.variants[0]).id
           : modelEffortChoice(select, effort, ROLE_ROWS[key].presets());
+        if (choice) { dialog.dataset[key] = choice; delete dialog.dataset[`${key}Choosing`]; }
         renderBotSettings(prefix);
       };
     }
-    // The tick: off, or back to the last pick (Inherit while the creator has it on, else Auto).
+    // The tick: off, or back to the last pick (Inherit while the creator has it on, else Auto when the model steps efforts).
     $(`#${prefix}-${key}-on`).onchange = () => {
       const d = dialog.dataset, from = prefix === 'agent' ? inheritedSettings(dialog) : null;
+      const canAuto = botCanStepEffort(prefix);
+      const inheritedExplicit = !!from?.[key] && from[key] !== 'off' && !roleStep(key, from[key]);
+      const hadExplicit = !['off', 'inherit'].includes(d[key]) && !roleStep(key, d[key]);
       if (!$(`#${prefix}-${key}-on`).checked) {
-        if (!['off', 'inherit'].includes(d[key])) d[`${key}Last`] = d[key];
-        d[key] = 'off';
-      } else d[key] = from?.[key] && from[key] !== 'off' ? 'inherit' : d[`${key}Last`] || 'chat';
+        if (hadExplicit || (canAuto && roleStep(key, d[key]))) d[`${key}Last`] = d[key];
+        if (!d[`${key}Choosing`] || hadExplicit || (!canAuto && (roleStep(key, d[key]) || (d[key] === 'inherit' && roleStep(key, from?.[key])))))
+          d[key] = 'off';
+        delete d[`${key}Choosing`];
+      } else if (canAuto) {
+        d[key] = from?.[key] && from[key] !== 'off' ? 'inherit' : d[`${key}Last`] || 'chat';
+      } else if (inheritedExplicit) {
+        d[key] = 'inherit';
+      } else if (d[`${key}Last`] && !roleStep(key, d[`${key}Last`])) {
+        d[key] = d[`${key}Last`];
+      } else {
+        d[`${key}Choosing`] = '1';
+      }
       renderBotSettings(prefix);
     };
   }
@@ -1428,6 +1501,7 @@ function agentChoice() {
 for (const picker of ['#agent-model', '#agent-effort']) {
   $(picker).onchange = () => {
     $('#agent-dialog').dataset.mode = agentChoice();
+    clearUnsupportedAuto('agent');
     if (!$('#agent-dialog').dataset.editing) $('#agent-error').textContent = '';
     renderAgentModels();
   };
@@ -1463,6 +1537,7 @@ function hubChoice() {
 for (const picker of ['#hub-model', '#hub-effort']) {
   $(picker).onchange = () => {
     $('#hub-dialog').dataset.mode = hubChoice();
+    clearUnsupportedAuto('hub');
     renderHubModels();
   };
 }
@@ -1482,6 +1557,8 @@ function editHub(profile) {
   $('#hub-dialog').dataset.advisor = main.settings.advisorModel || 'chat';
   $('#hub-dialog').dataset.workers = main.settings.workerModel || 'off';
   $('#hub-dialog').dataset.reviewer = main.settings.reviewerModel || 'off';
+  delete dialog.dataset.advisorLast; delete dialog.dataset.advisorChoosing;
+  delete dialog.dataset.workersLast; delete dialog.dataset.workersChoosing;
   delete dialog.dataset.reviewerLast; delete dialog.dataset.reviewerChoosing;
   $('#hub-advisor').dataset.signature = ''; $('#hub-workers').dataset.signature = ''; $('#hub-reviewer').dataset.signature = '';
   $('#hub-dialog').dataset.router = main.routerKind || 'secondary';
@@ -1584,7 +1661,10 @@ $('#agent-form').onsubmit = async event => {
 
   $('#agent-save').disabled = true; $('#agent-save').textContent = 'Saving…';
   try {
-    const profile = await api.saveAgent({ ...agentForm(), mode: agentChoice() });
+    const mode = agentChoice();
+    $('#agent-dialog').dataset.mode = mode;
+    clearUnsupportedAuto('agent');
+    const profile = await api.saveAgent({ ...agentForm(), mode });
     $('#agent-dialog').close(); applyState(await api.bootstrap()); await selectAgent(profile.id);
   } catch (error) { $('#agent-error').textContent = error.message; }
   finally { $('#agent-save').disabled = false; $('#agent-save').textContent = 'Create agent'; }
@@ -5036,10 +5116,23 @@ document.addEventListener('click', event => {
   if (target) api.openFile(target).catch(notify);
   else if (/^https?:\/\//i.test(link.href)) api.openLink(link.href).catch(notify);
 });
+let lastStopEscape = { at: 0, agent: null, session: null };
 document.addEventListener('keydown', event => {
-  if (event.defaultPrevented) return;
+  if (event.defaultPrevented) { lastStopEscape.at = 0; return; }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'n' && !document.querySelector('dialog[open]')) { event.preventDefault(); editAgent(); }
-  if (event.key === 'Escape' && (state?.busy === selectedId || current()?.groupTurn) && !document.querySelector('dialog[open]')) stopBot(selectedId).catch(notify);
+  if (event.key !== 'Escape') { lastStopEscape.at = 0; return; }
+  if (event.repeat || !(state?.busy === selectedId || current()?.groupTurn) || document.querySelector('dialog[open]')) {
+    if (!event.repeat) lastStopEscape.at = 0;
+    return;
+  }
+  const now = Date.now();
+  const sameChat = lastStopEscape.agent === selectedAgent && lastStopEscape.session === selectedId;
+  if (sameChat && now - lastStopEscape.at < 500) {
+    lastStopEscape = { at: 0, agent: null, session: null };
+    stopBot(selectedId).catch(notify);
+  } else {
+    lastStopEscape = { at: now, agent: selectedAgent, session: selectedId };
+  }
 });
 // Ctrl+F finds text in the shown chat. Matches are painted with the CSS Highlight API, so the rendered messages are not
 // changed. ponytail: a match must sit inside one text node; words split by inline formatting are not found.
