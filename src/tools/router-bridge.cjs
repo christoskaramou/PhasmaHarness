@@ -6,13 +6,14 @@ const { TOOL: CONTEXT_TOOL } = require('../workspace/context-search.cjs');
 const { TOOLS: HELPER_TOOLS, INSTRUCTIONS: HELPER_INSTRUCTIONS } = require('./tool-helpers.cjs');
 const { TOOLS: AGENT_TOOLS } = require('./agent-tools.cjs');
 const { TOOLS: CONNECTOR_TOOLS, INSTRUCTIONS: CONNECTOR_INSTRUCTIONS } = require('../connectors/tools.cjs');
+const { TOOL: DESKTOP_TOOL, INSTRUCTIONS: DESKTOP_INSTRUCTIONS } = require('./desktop-launcher.cjs');
 
 const SERVER_NAME = 'phasma_harness';
 const SHARED_TOOLS = [...AGENT_TOOLS, ...CONNECTOR_TOOLS, HELPER_TOOLS.find(tool => tool.name === 'router_read_output')];
-const MCP_TOOLS = [CONTEXT_TOOL, ...HELPER_TOOLS, ...AGENT_TOOLS, ...CONNECTOR_TOOLS].map(({ type, ...tool }) => tool);
+const MCP_TOOLS = [CONTEXT_TOOL, ...HELPER_TOOLS, ...AGENT_TOOLS, ...CONNECTOR_TOOLS, DESKTOP_TOOL].map(({ type, ...tool }) => tool);
 const CLI_HELPER_INSTRUCTIONS =
   ' For project investigation, use project_context from the bundled phasma_harness MCP server when useful. It is a partial search: read project instructions normally, verify important claims in live source, and search further for missing or conflicting evidence. Do not repeat identical searches unless files or the question changed.' +
-  HELPER_INSTRUCTIONS + CONNECTOR_INSTRUCTIONS +
+  HELPER_INSTRUCTIONS + CONNECTOR_INSTRUCTIONS + DESKTOP_INSTRUCTIONS +
   ' These helpers are provided by the local phasma_harness MCP server bundled with this app. They do not replace Claude Code or Cursor native tools. router_find_tools and router_call_tool target Codex-connected MCP servers when this chat has a Codex thread; otherwise they return a clear unsupported note. Large-output capture applies to helper/gateway responses from this server, not to native CLI tools. This app does not rewrite project MCP configs or silently elevate MCP approvals.';
 
 function mcpConfig(command, args, env) {
@@ -37,7 +38,9 @@ function claudeAllowedHelpers(access) {
     ...AGENT_TOOLS.map(tool => `mcp__${SERVER_NAME}__${tool.name}`),
     ...CONNECTOR_TOOLS.map(tool => `mcp__${SERVER_NAME}__${tool.name}`),
   ];
-  return access === 'read-only' ? read : [...read, `mcp__${SERVER_NAME}__router_call_tool`];
+  if (access === 'read-only') return read;
+  const write = [...read, `mcp__${SERVER_NAME}__router_call_tool`];
+  return access === 'danger-full-access' ? [...write, `mcp__${SERVER_NAME}__${DESKTOP_TOOL.name}`] : write;
 }
 
 class RouterBridge {

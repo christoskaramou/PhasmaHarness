@@ -6,6 +6,7 @@ const { isCLI } = require('../providers/capabilities.cjs');
 const { TOOL: CONTEXT_TOOL } = require('../workspace/context-search.cjs');
 const { TOOLS: HELPER_TOOLS } = require('../tools/tool-helpers.cjs');
 const { TOOLS: AGENT_TOOLS } = require('../tools/agent-tools.cjs');
+const { TOOL: DESKTOP_TOOL, launchDesktopApp } = require('../tools/desktop-launcher.cjs');
 // A stronger-model request is done by Hub's own chat: no agent is started for it.
 const NO_AGENT_NOTE = 'Hub does this request itself on its stronger model; no agent is started for it.';
 
@@ -36,6 +37,12 @@ module.exports = {
     }
     if (signal?.aborted || this.cliAbort?.signal.aborted) throw new Error('Helper call stopped.');
     if (['connector_tools', 'connector_call'].includes(tool)) return this.connectorTool(session, tool, args, signal);
+    if (tool === DESKTOP_TOOL.name) {
+      if (session.access !== 'danger-full-access' || session.agentReplyCancelledActive) {
+        throw new Error('launch_desktop_app requires Full access.');
+      }
+      return launchDesktopApp(args, { workspace: this.workspace(session.workspace), signal });
+    }
     if (tool === 'router_read_output' && this.connectors) return this.toolHelpers.read(session, args);
     if (session.hubStronger && AGENT_TOOLS.some(item => item.name === tool)) throw new Error(NO_AGENT_NOTE);
     if (this.agents && AGENT_TOOLS.some(item => item.name === tool)) return this.agents.tool(this, session, tool, args);
