@@ -170,7 +170,7 @@
     'clearConversation', 'acknowledgeTask', 'applyCopy', 'undoComparison', 'undoRule', 'dreamNow', 'dismissSkillNotice', 'proposeWiki', 'answer', 'answerConfirmation', 'renewModels', 'providerModels', 'providerUsage', 'openFile', 'linkImage', 'routineList'])
     api[method] = (...args) => call(method, args);
   for (const method of ['nativeProviderAction',
-    'runnerAutostart', 'quitRunner', 'exportConversation', 'cursorLogin',
+    'runnerAutostart', 'quitRunner', 'restartRunner','exportConversation', 'cursorLogin',
     'cursorRefresh', 'cursorLogout', 'claudeLogin', 'claudeRefresh', 'claudeLogout', 'connectChatGPT', 'logoutChatGPT',
     'installProvider', 'providerSettings', 'providerKey', 'localModel', 'jevSaveKey',
     'jevRemoveKey', 'jevTest', 'checks', 'phasmaGameChecks', 'diagnostics', 'openLogs', 'checkUpdates', 'installUpdate', 'chooseWorkspace',

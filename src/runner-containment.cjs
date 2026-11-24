@@ -46,6 +46,11 @@ function containRunner(scope) {
         throw error;
       });
       return installerPromise;
+    }, relaunch(file, args, cwd) {
+      // /restart: the monitor starts the runner again once it has gone; a process started from here would die with the job.
+      if (typeof file !== 'string' || !Array.isArray(args) || args.some(value => typeof value !== 'string' || value.includes('"')))
+        return Promise.reject(new Error('Invalid restart request.'));
+      return handoff(monitor, { type: 'restart', file, args, cwd }, 'restart-accepted', 'Restart');
     } };
   });
   return pending;
@@ -129,6 +134,11 @@ function waitForContainment(monitor, timeoutMs = 10000) {
 
 function handoffInstaller(monitor, file, timeoutMs = 10000) {
   if (typeof file !== 'string' || !path.isAbsolute(file) || !/^Phasma-Harness-Setup-.+\.exe$/i.test(path.basename(file))) return Promise.reject(new Error('Invalid installer path.'));
+  return handoff(monitor, { type: 'installer', file, args: INSTALL_ARGS }, 'installer-accepted', 'Installer', timeoutMs);
+}
+
+// One request to the monitor, for after this runner has gone: the installer, or this runner again.
+function handoff(monitor, request, accepted, what, timeoutMs = 10000) {
   return new Promise((resolve, reject) => {
     let buffer = '', settled = false;
     const finish = error => {
@@ -137,20 +147,20 @@ function handoffInstaller(monitor, file, timeoutMs = 10000) {
       monitor.stdout.off('data', onData); monitor.off('close', onClosed); monitor.off('error', onClosed); monitor.stdin.off('error', onClosed);
       if (error) reject(error); else resolve();
     };
-    const onClosed = () => finish(Object.assign(new Error('Installer handoff was not confirmed. Keep the runner paused and review the update.'), { launchUncertain: true }));
+    const onClosed = () => finish(Object.assign(new Error(what === 'Installer' ? 'Installer handoff was not confirmed. Keep the runner paused and review the update.' : 'Restart handoff was not confirmed.'), { launchUncertain: true }));
     const onData = text => {
       buffer += text;
       if (buffer.length > 4096) return onClosed();
       const end = buffer.indexOf('\n');
       if (end < 0) return;
       const line = buffer.slice(0, end).trim();
-      if (line === 'installer-accepted') finish();
+      if (line === accepted) finish();
       else if (/^installer-error:[A-Za-z0-9+/=]+$/.test(line)) finish(new Error(Buffer.from(line.slice(16), 'base64').toString('utf8')));
       else onClosed();
     };
     const timer = setTimeout(onClosed, timeoutMs);
     monitor.stdout.on('data', onData); monitor.once('close', onClosed); monitor.once('error', onClosed); monitor.stdin.once('error', onClosed);
-    monitor.stdin.write(JSON.stringify({ type: 'installer', file, args: INSTALL_ARGS }) + '\n', error => { if (error) onClosed(); });
+    monitor.stdin.write(JSON.stringify(request) + '\n', error => { if (error) onClosed(); });
   });
 }
 

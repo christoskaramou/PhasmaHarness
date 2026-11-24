@@ -6,6 +6,7 @@ api.runnerOnExit = value => ipcRenderer.invoke('runnerOnExit', value);
 api.runnerInfo = () => ipcRenderer.invoke('runnerInfo');
 api.runnerAutostart = enabled => ipcRenderer.invoke('runnerAutostart', enabled);
 api.quitRunner = () => ipcRenderer.invoke('quitRunner');
+api.restartRunner = () => ipcRenderer.invoke('restartRunner');
 api.setAppearance = mode => ipcRenderer.invoke('setAppearance', mode);
 api.onAppearance = callback => {
   const listener = (_event, mode) => callback(mode);

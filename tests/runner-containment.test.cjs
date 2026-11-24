@@ -24,6 +24,10 @@ async function containedFixture() {
   process.on('message', async command => {
     if (command === 'exit') process.exit(0);
     if (command === 'lose-lease') info.detach();
+    if (command?.restart) {
+      try { await info.relaunch(process.execPath, command.restart, __dirname); process.exit(0); }
+      catch (error) { process.stderr.write(error.stack + '\n'); process.exit(1); }
+    }
     if (command?.installer) {
       try { await info.launchInstaller(command.installer); process.exit(0); }
       catch (error) { process.stderr.write(error.stack + '\n'); process.exit(1); }
@@ -115,7 +119,7 @@ if (process.argv.includes('--contained-root')) {
       known.push(...table.filter(row => nextIds.includes(row.pid)).map(row => ({ pid: row.pid, startedMs: row.startedMs, exact: true })));
     });
 
-  for (const ending of ['runner crash', 'graceful exit', 'monitor crash', 'installer handoff', 'control-lease loss']) {
+  for (const ending of ['runner crash', 'graceful exit', 'monitor crash', 'installer handoff', 'restart handoff', 'control-lease loss']) {
     test(`Windows job contains detached descendants after ${ending}`, { skip: process.platform !== 'win32', timeout: 30000 }, async t => {
       const env = { ...process.env }; delete env.NODE_TEST_CONTEXT;
       let directory, installer;
@@ -137,6 +141,13 @@ if (process.argv.includes('--contained-root')) {
         assert.equal(probe.status, 0, probe.stderr);
         assert.ok(fs.existsSync(env.HARNESS_INSTALL_MARKER), 'the private installer fixture can start');
         fs.unlinkSync(env.HARNESS_INSTALL_MARKER);
+      }
+      // 2026-11-24: /restart closed the app and nothing started. The monitor starts the runner's program again.
+      let restartScript;
+      if (ending === 'restart handoff') {
+        directory = fs.mkdtempSync(path.join(os.tmpdir(), 'harness restart fixture-'));
+        restartScript = path.join(directory, 'again.cjs');
+        fs.writeFileSync(restartScript, "require('node:fs').writeFileSync(process.argv[2], process.pid + '|' + process.argv[3]); setTimeout(() => {}, 20000);");
       }
       const child = fork(__filename, ['--contained-root'], { execArgv: [], env, windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
@@ -164,6 +175,7 @@ if (process.argv.includes('--contained-root')) {
       const exited = once(child, 'exit');
       if (ending === 'control-lease loss') child.send('lose-lease');
       else if (ending === 'installer handoff') child.send({ installer });
+      else if (ending === 'restart handoff') child.send({ restart: [restartScript, path.join(directory, 'started.txt'), 'kept arg'] });
       else if (ending === 'runner crash') child.kill();
       else if (ending === 'graceful exit') child.send('exit');
       else tree.stopRecord({ id: 'monitor-fixture', roots: [], tags: [], children: known.filter(row => row.pid === info.helperPid) }, 2000);
@@ -179,6 +191,18 @@ if (process.argv.includes('--contained-root')) {
         const process = tree.windowsTable().find(row => row.pid === Number(pid));
         assert.ok(process, 'the installer survives the old runner job');
         known.push({ pid: process.pid, startedMs: process.startedMs, exact: true });
+      }
+      if (restartScript) {
+        assert.equal(child.exitCode, 0, errors);
+        const marker = path.join(directory, 'started.txt');
+        for (let attempt = 0; attempt < 200 && !fs.existsSync(marker); attempt++) await new Promise(resolve => setTimeout(resolve, 50));
+        assert.equal(fs.existsSync(marker), true, 'the runner program started again after the old one exited: ' + errors);
+        const [pid, arg] = fs.readFileSync(marker, 'utf8').split('|');
+        assert.equal(arg, 'kept arg');
+        await new Promise(resolve => setTimeout(resolve, 500));
+        const again = tree.windowsTable().find(row => row.pid === Number(pid));
+        assert.ok(again, 'the restarted runner survives the old runner job');
+        known.push({ pid: again.pid, startedMs: again.startedMs, exact: true });
       }
       for (let attempt = 0; attempt < 5; attempt++) {
         const after = tree.windowsTable();

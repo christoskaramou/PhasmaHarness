@@ -2207,7 +2207,7 @@ test('new and existing Codex chats expose agent tools through a session-bound MC
   assert.equal(started.params.config['features.multi_agent'], false, 'untracked agent chats must not expose provider-native subagents');
   assert.match(started.params.developerInstructions, /MUST call agent_create and confirm its returned id/);
   const server = started.params.config['mcp_servers.phasma_harness'];
-  assert.deepEqual(server.enabled_tools, ['agent_revise', 'agent_transfer_owner', 'agents_list', 'agent_models', 'agent_create', 'agent_delegate', 'agent_read_context', 'agent_stop', 'agent_set_access', 'agent_message', 'agent_artifact', 'routine', 'routines_report', 'harness_check_update', 'read_settings', 'write_settings', 'memory_note', 'ask_advisor', 'request_review', 'image_list', 'image_ask', 'image_read', 'connector_tools', 'connector_call', 'router_read_output']);
+  assert.deepEqual(server.enabled_tools, ['agent_revise', 'agent_transfer_owner', 'agents_list', 'agent_models', 'agent_create', 'agent_delegate', 'agent_read_context', 'agent_stop', 'agent_set_access', 'agent_message', 'agent_artifact', 'routine', 'routines_report', 'harness_check_update', 'harness_restart', 'read_settings', 'write_settings', 'memory_note', 'ask_advisor', 'request_review', 'image_list', 'image_ask', 'image_read', 'connector_tools', 'connector_call', 'router_read_output']);
   assert.ok(!MCP_TOOLS.some(tool => tool.name === 'agent_delete') && !claudeAllowedHelpers('danger-full-access').includes('mcp__phasma_harness__agent_delete'));
   assert.equal(server.env.PHASMA_SESSION_ID, source.id);
   assert.equal(server.env.ELECTRON_RUN_AS_NODE, '1');
@@ -4481,4 +4481,56 @@ test('review fixes: Auto effort without a router keeps the cap, a disabled Secon
   delete primary.chatScanChoices; // emptied above for the rename check
   primary.data.settings.chatScanModel = picked.id; // the checker was one setting for the whole app
   assert.equal(fresh.secondaryPick()?.id, picked.id, 'the chat checker picked before Secondary models stands in');
+});
+
+test('agent_read_context on own agentId from a foreground chat reads the active foreground thread, not a stale execution context', async t => {
+  const { agents, primary, add } = await setup(t);
+  const bot = await add('ATH', undefined, 'danger-full-access');
+  const foreground = agents.conversation(bot, true);
+  foreground.items.push({ id: randomUUID(), type: 'userMessage', content: [{ type: 'text', text: 'ACTIVE_FOREGROUND_THREAD_MARKER' }] });
+  bot.save();
+
+  // Create a separate execution context (as if another bot had delegated to ATH earlier).
+  const execution = agents.execution(bot.agentId);
+  const execSession = agents.conversation(execution, true);
+  execSession.items.push({ id: randomUUID(), type: 'userMessage', content: [{ type: 'text', text: 'STALE_EXECUTION_THREAD_MARKER' }] });
+  execution.save();
+
+  const fromForeground = agents.readContext(foreground, { agentId: bot.agentId });
+  assert.equal(fromForeground.origin.sessionId, foreground.id, 'foreground self-read targets active foreground thread');
+  assert.match(JSON.stringify(fromForeground), /ACTIVE_FOREGROUND_THREAD_MARKER/);
+  assert.doesNotMatch(JSON.stringify(fromForeground), /STALE_EXECUTION_THREAD_MARKER/);
+
+  const fromExecution = agents.readContext(execSession, { agentId: bot.agentId });
+  assert.equal(fromExecution.origin.sessionId, execSession.id, 'execution self-read still targets its own execution session');
+  assert.match(JSON.stringify(fromExecution), /STALE_EXECUTION_THREAD_MARKER/);
+});
+
+// 2026-11-24, the user: an agent can restart Harness; the restart waits until no bot is working.
+test('harness_restart restarts once no bot is working, and only where the desktop app can', async t => {
+  const { agents, primary } = await setup(t);
+  const session = { access: 'read-only' };
+  assert.throws(() => agents.tool(primary, session, 'harness_restart', {}), /Restart is unavailable/);
+  const restarts = [];
+  agents.restart = why => restarts.push(why);
+  assert.throws(() => agents.tool(primary, session, 'harness_restart', { now: true }), /no arguments/);
+  primary.busy = 'chat';
+  assert.equal(agents.tool(primary, session, 'harness_restart', {}).restarting, 'when no bot is working');
+  agents.tool(primary, session, 'harness_restart', {});
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  assert.equal(restarts.length, 0, 'a working bot holds the restart');
+  primary.busy = null;
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  assert.equal(restarts.length, 1, 'asked twice, restarted once');
+  assert.match(restarts[0], /asked$/);
+  assert.ok(MCP_TOOLS.some(tool => tool.name === 'harness_restart'));
+  // Another bot is working: the user is asked, and only a yes restarts (at once).
+  t.mock.method(agents, 'workingBots', except => except === primary ? ['Other'] : []);
+  const asked = [];
+  agents.ask = async question => { asked.push(question); return asked.length > 1; };
+  await assert.rejects(agents.tool(primary, session, 'harness_restart', {}), /did not confirm stopping Other/);
+  assert.equal((await agents.tool(primary, session, 'harness_restart', {})).restarting, 'now');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(restarts.length, 2);
+  assert.equal(asked[0].details[0].text, 'Other');
 });

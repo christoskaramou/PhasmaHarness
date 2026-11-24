@@ -93,9 +93,20 @@ process.on('unhandledRejection', reason => log.error('Unhandled rejection', { me
   });
 }
 
+// /restart and harness_restart: the app starts again once this one has shut down (before-quit), with its window shown.
+// On Windows the runner's lifetime monitor starts it (runner-containment.cjs): app.relaunch() starts the new app from
+// this one, inside the runner's job, and it died with the old app (2026-11-24: closed but did not start again).
+async function restart() {
+  const args = process.argv.slice(1).filter(value => value !== '--background');
+  if (runner?.containment?.relaunch) await runner.containment.relaunch(process.execPath, args, process.cwd());
+  else app.relaunch({ args });
+  quitting = true;
+  setImmediate(() => app.quit());
+}
+
 async function start() {
   runner = await createRunner({ app, safeStorage, fetch: (...args) => net.fetch(...args), log,
-    quit: () => { quitting = true; app.quit(); } });
+    quit: () => { quitting = true; app.quit(); }, restart });
   ({ controller, agents } = runner);
   if (installQuitRequested) { app.quit(); return; }
   const { updater, voice } = runner;
@@ -201,6 +212,7 @@ async function start() {
   handle('runnerOnExit', value => desktop.setOnExit(value));
   handle('runnerAutostart', enabled => desktop.setAutostart(enabled));
   handle('quitRunner', () => { setImmediate(() => app.quit()); });
+  // restartRunner (/restart) is in runner-commands.cjs.
   handle('setAppearance', mode => {
     if (!['system', 'dark', 'light'].includes(mode)) throw new Error('Invalid appearance.');
     fs.writeFileSync(appearanceFile, JSON.stringify(mode));

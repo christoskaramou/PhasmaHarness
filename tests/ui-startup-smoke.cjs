@@ -1401,6 +1401,15 @@ app.whenReady().then(async () => {
   })()`);
 
 
+  const chatStepsOption = label => window.webContents.executeJavaScript(`[...document.querySelector('#settings-chat-steps').options].find(option => option.text === ${JSON.stringify(label)}).value`);
+  const chatStepsValue = () => window.webContents.executeJavaScript("document.querySelector('#settings-chat-steps').selectedOptions[0].text");
+  assert.equal(await chatStepsValue(), 'On', 'previously visible steps map to On');
+  await changeSetting('settings-chat-steps', await chatStepsOption('Off'));
+  assert.equal(controller.data.settings.hideSteps, true);
+  assert.equal(await chatStepsValue(), 'Off');
+  await changeSetting('settings-chat-steps', await chatStepsOption('On'));
+  assert.equal(controller.data.settings.hideSteps, false);
+
   // The Main Bot's workspace is chosen in its Edit dialog (Settings has none); Browse fills the field and saves it.
   await window.webContents.executeJavaScript("editHub({ name: 'Hub' }); document.querySelector('#hub-browse').onclick()");
   assert.equal(await window.webContents.executeJavaScript("document.querySelector('#hub-workspace').value"), root, 'Browse fills in the chosen folder');
@@ -1461,15 +1470,6 @@ app.whenReady().then(async () => {
       select.value = '${choice}';
       await select.onchange({ target: select });
     })()`);
-  const chatStepsOption = label => window.webContents.executeJavaScript(`[...document.querySelector('#settings-chat-steps').options].find(option => option.text === ${JSON.stringify(label)}).value`);
-  const chatStepsValue = () => window.webContents.executeJavaScript("document.querySelector('#settings-chat-steps').selectedOptions[0].text");
-  assert.equal(await chatStepsValue(), 'On', 'previously visible steps map to On');
-  await changeSetting('settings-chat-steps', await chatStepsOption('Off'));
-  assert.equal(controller.data.settings.hideSteps, true);
-  assert.equal(await chatStepsValue(), 'Off');
-  await changeSetting('settings-chat-steps', await chatStepsOption('On'));
-  assert.equal(controller.data.settings.hideSteps, false);
-
     assert.equal(runnerExit, choice);
     assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-runner-exit').value"), choice);
   }
@@ -2787,7 +2787,7 @@ app.whenReady().then(async () => {
   delete oldConversation.goal;
   await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
   assert.equal((await goalBar()).hidden, true);
-  const commandNames =['/help', '/compact', '/clear', '/stop', '/agents', '/settings', '/context', '/usage', '/model', '/effort', '/access', '/switch', '/export', '/status', '/suggestion', '/wiki', '/tldr', '/advisor', '/goal', '/review'];
+  const commandNames =['/help', '/compact', '/clear', '/stop', '/restart', '/agents', '/settings', '/context', '/usage', '/model', '/effort', '/access', '/switch', '/export', '/status', '/suggestion', '/wiki', '/tldr', '/advisor', '/goal', '/review'];
   const sentBeforeCommands = sent.length;
   let previewsBeforeCommands = previews;
   const typeCommand = text => window.webContents.executeJavaScript(`(() => {
@@ -2860,6 +2860,44 @@ app.whenReady().then(async () => {
   await submit('/compact'); await until(() => compacted.length === 1, 'slash compact uses existing compaction');
   assert.equal(compacted[0], oldConversation.id);
   stoppedAgent = null; await submit('/stop'); await until(() => stoppedAgent === commandAgent, 'slash stop targets the selected named agent, not Main');
+  // 2026-11-24, the user: a command that waits on a model shows that it runs, and its failure stays and keeps the text.
+  assert.match(await window.webContents.executeJavaScript('document.querySelector("#toast").textContent'), /Nothing in this chat showed as working/, '/stop with nothing running says so');
+  // /restart: a declined confirmation keeps the typed command; a restart clears it.
+  let restartAnswer = false, restartCalls = 0;
+  ipcMain.handle('restartRunner', () => { restartCalls++; return { restarted: restartAnswer }; });
+  await submit('/restart');
+  assert.deepEqual([restartCalls, await window.webContents.executeJavaScript('document.querySelector("#prompt").value')], [1, '/restart']);
+  restartAnswer = true; await submit('/restart');
+  assert.deepEqual([restartCalls, await window.webContents.executeJavaScript('document.querySelector("#prompt").value')], [2, '']);
+  ipcMain.removeHandler('restartRunner');
+  let failAdvice;
+  ipcMain.handle('adviseChat', () => new Promise((_resolve, reject) => { failAdvice = reject; }));
+  const workingLine = () => window.webContents.executeJavaScript('(() => { const line = document.querySelector("#working"); return line.hidden ? "" : line.textContent; })()');
+  await submit('/advisor why is this slow'); await until(() => !!failAdvice, '/advisor reaches the runner');
+  assert.equal(await workingLine(), 'Asking the advisor…', 'a running command shows in the chat');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), '');
+  failAdvice(new Error('Keep the question under 1000 characters.'));
+  for (let i = 0; i < 100 && await workingLine(); i++) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(await workingLine(), '', 'the line goes when the command ends');
+  assert.deepEqual(await window.webContents.executeJavaScript('(() => { const toast = document.querySelector("#toast"); return [toast.hidden, toast.textContent, toast.classList.contains("sticky")]; })()'),
+    [false, '/advisor failed: Keep the question under 1000 characters.', true], 'a failed command leaves a note that stays');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#prompt").value'), '/advisor why is this slow', 'the failed command is put back');
+  await window.webContents.executeJavaScript('document.querySelector("#toast").click(); document.querySelector("#prompt").value = ""; document.querySelector("#prompt").dispatchEvent(new Event("input")); true');
+  assert.equal(await window.webContents.executeJavaScript('document.querySelector("#toast").hidden'), true, 'a click dismisses the note');
+  ipcMain.removeHandler('adviseChat');
+  // The runner wrote the failure into the chat ({ failed }): a bubble shown even with steps hidden, no toast, text put back.
+  ipcMain.handle('adviseChat', () => ({ failed: true }));
+  await submit('/advisor too long');
+  for (let i = 0; i < 100 && !await window.webContents.executeJavaScript('document.querySelector("#prompt").value'); i++) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(await window.webContents.executeJavaScript('[document.querySelector("#prompt").value, document.querySelector("#toast").hidden]'), ['/advisor too long', true]);
+  ipcMain.removeHandler('adviseChat');
+  oldConversation.items.push({ id: 'command-failure', type: 'notice', localOnly: true, createdAt: Date.now(), commandFailure: true, text: '**/advisor failed:** Keep the question under 1000 characters.' });
+  controller.data.settings.hideSteps = true;
+  await window.webContents.executeJavaScript('document.querySelector("#prompt").value = ""; applyState(' + JSON.stringify(agents.snapshot()) + '); true');
+  assert.deepEqual(await window.webContents.executeJavaScript('(() => { const bubble = [...document.querySelectorAll("#conversation .message.assistant")].at(-1); return [bubble.querySelector(".message-label").firstChild.textContent, bubble.querySelector(".message-body").textContent.trim()]; })()'),
+    ['Harness', '/advisor failed: Keep the question under 1000 characters.'], 'a failed command is a chat bubble');
+  oldConversation.items.pop(); controller.data.settings.hideSteps = false;
+  await window.webContents.executeJavaScript('applyState(' + JSON.stringify(agents.snapshot()) + '); true');
   await submit('/agents'); assert.equal(await window.webContents.executeJavaScript('document.querySelector("#agents-dialog").open'), true);
   await window.webContents.executeJavaScript('document.querySelector("#agents-dialog").close(); true');
   await submit('/settings');

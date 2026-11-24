@@ -35,7 +35,7 @@ function wikisFolder(base, log) {
   }
 }
 
-async function createRunner({ app, data = app?.getPath('userData'), safeStorage, fetch = globalThis.fetch, log, quit }) {
+async function createRunner({ app, data = app?.getPath('userData'), safeStorage, fetch = globalThis.fetch, log, quit, restart }) {
   if (!data || !path.isAbsolute(data)) throw new Error('Choose an absolute runner data directory.');
   const version = app?.getVersion() || require('../package.json').version;
   const wikiStore = new WikiStore(wikisFolder(data, log));
@@ -90,6 +90,11 @@ async function createRunner({ app, data = app?.getPath('userData'), safeStorage,
     quit: () => { log.info('Installing update', { from: version, to: updater.state.latest }); quit(); },
   });
   agents.checkUpdate = () => updater.checkFromAgent();
+  if (restart) agents.restart = async why => {
+    log.info('Restarting', { why });
+    try { await restart(); }
+    catch (error) { log.error('Restart failed', { message: error.message }); throw error; }
+  };
   return { controller, agents, wikiStore, updater, voice, documents, containment, connectors,
     async initialize() {
       sweepAgentFiles([...agents.allControllers().flatMap(context => [context.data.settings.workspace,

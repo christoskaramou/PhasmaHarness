@@ -98,6 +98,7 @@ public static class HarnessJob
 $job = [IntPtr]::Zero
 $runnerHandle = [IntPtr]::Zero
 $installer = $null
+$relaunch = $null
 $control = $null
 try {
     $deadline = [DateTime]::UtcNow.AddSeconds(5)
@@ -126,6 +127,7 @@ try {
     }
     $runnerHandle = [HarnessJob]::OpenProcess(0x100101, $false, $RunnerPid)
     if ($runnerHandle -eq [IntPtr]::Zero) { throw [ComponentModel.Win32Exception]::new() }
+    $runnerPath = (Get-Process -Id $RunnerPid).Path
 
     $user = [Security.Principal.WindowsIdentity]::GetCurrent().User
     $security = [IO.Pipes.PipeSecurity]::new()
@@ -163,6 +165,17 @@ try {
         if ($null -eq $command) { break }
         try {
             $request = $command | ConvertFrom-Json
+            if ($request.type -ceq 'restart') {
+                # /restart and harness_restart: only the runner's own program, started again below once it has gone.
+                if ($request.file -isnot [string] -or $request.file -ine $runnerPath -or $request.args -isnot [array] -or
+                    @($request.args | Where-Object { $_ -isnot [string] -or $_ -match '"' }).Count -ne 0 -or
+                    $request.cwd -isnot [string] -or -not [IO.Directory]::Exists($request.cwd)) {
+                    throw 'Invalid restart handoff.'
+                }
+                $relaunch = $request
+                try { $writer.WriteLine('restart-accepted') } catch { }
+                break
+            }
             if ($request.type -cne 'installer' -or $request.file -isnot [string] -or
                 $request.args -isnot [array] -or $request.args.Count -ne 3 -or
                 -not [IO.Path]::IsPathRooted($request.file) -or
@@ -180,7 +193,8 @@ try {
         }
     }
     # Losing the control lease must not leave a detached background service running indefinitely.
-    $wait = [HarnessJob]::WaitForSingleObject($runnerHandle, 5000)
+    # A restarting runner first stops its bots (about 12 s at most), so it gets longer before it is ended.
+    $wait = [HarnessJob]::WaitForSingleObject($runnerHandle, $(if ($null -ne $relaunch) { 30000 } else { 5000 }))
     if ($wait -eq 258) {
         if (-not [HarnessJob]::TerminateProcess($runnerHandle, 0)) { throw [ComponentModel.Win32Exception]::new() }
         $wait = [HarnessJob]::WaitForSingleObject($runnerHandle, 5000)
@@ -188,7 +202,7 @@ try {
     if ($wait -ne 0) {
         throw 'Runner process wait failed.'
     }
-    if ($null -ne $installer) {
+    if ($null -ne $installer -or $null -ne $relaunch) {
         if (-not [HarnessJob]::TerminateJobObject($job, 1)) { throw [ComponentModel.Win32Exception]::new() }
         $accounting = [HarnessJob+Accounting]::new()
         $accountingSize = [Runtime.InteropServices.Marshal]::SizeOf($accounting)
@@ -210,6 +224,22 @@ try {
     if ($runnerHandle -ne [IntPtr]::Zero) { [HarnessJob]::CloseHandle($runnerHandle) | Out-Null }
     if ($job -ne [IntPtr]::Zero) { [HarnessJob]::CloseHandle($job) | Out-Null }
     if ($null -ne $control) { $control.Dispose() }
+}
+
+# The runner starts again outside the old job (a process the runner started itself would die with that job). Through
+# the shell, so it does not inherit this monitor's closed pipes.
+if ($null -ne $relaunch) {
+    try {
+        $start = [Diagnostics.ProcessStartInfo]::new()
+        $start.FileName = $relaunch.file
+        $start.Arguments = (@($relaunch.args) | ForEach-Object { '"' + ($_ -replace '(\\+)$', '$1$1') + '"' }) -join ' '
+        $start.WorkingDirectory = $relaunch.cwd
+        $start.UseShellExecute = $true
+        [Diagnostics.Process]::Start($start) | Out-Null
+    } catch {
+        [Console]::Error.WriteLine($_.Exception.Message)
+        exit 1
+    }
 }
 
 # The verified update starts outside the old job, after its runner and child trees are gone.

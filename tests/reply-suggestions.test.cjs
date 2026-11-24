@@ -217,7 +217,7 @@ test('/advisor asks about the chat with an optional question, shown as a bubble;
   const sent = JSON.parse(calls[0].request.prompt);
   assert.deepEqual(sent, { question: 'Is the parser safe?', latestRequest: 'Write a parser.', latestAnswer: 'Here is the parser.' });
   assert.equal(session.items.at(-1).text, '**Advisor (you asked: Is the parser safe?):** 1. Add a test.');
-  await assert.rejects(controller.adviseChat('s', 'x'.repeat(1001)), /under 1000 characters/);
+  await assert.rejects(controller.adviseChat('s', 'x'.repeat(4001)), /under 4000 characters/);
 
   const empty = chat({ items: [], route: null, reply: { advice: '1. Start small.' } });
   empty.controller.catalog = () => [{ id: 'f:high', model: 'f', provider: 'claude-cli', effort: 'high' }, { id: 'f:xhigh', model: 'f', provider: 'claude-cli', effort: 'xhigh', label: 'F xhigh' }];
@@ -237,4 +237,10 @@ test('the default advisor is the bot’s model at the highest effort its Effort 
   controller.data.settings.advisorModel = 'off';
   await assert.rejects(controller.adviseChat('s', 'Why?'), /No advisor is available: This bot’s Advisor is Off/);
   assert.equal(calls.length, 2);
+  // 2026-11-24, the user: a failed slash command says why in its chat, as a local bubble.
+  controller.save = () => {};
+  assert.equal(controller.commandFailed('s', 'advisor', new Error('No advisor is available.')), true);
+  const failure = session.items.at(-1);
+  assert.deepEqual([failure.type, failure.localOnly, failure.commandFailure, failure.text], ['notice', true, true, '**/advisor failed:** No advisor is available.']);
+  assert.equal(controller.commandFailed('missing', 'advisor', new Error('x')), false, 'no chat to write in');
 });

@@ -713,14 +713,48 @@ function subBotsOf(id) {
   return found;
 }
 
-function notify(error) {
-  $('#toast').textContent = String(error.message || error).replace(/^Error invoking remote method '[^']+': Error: /, '');
+function errorText(error) {
+  return String(error.message || error).replace(/^Error invoking remote method '[^']+': Error: /, '');
+}
+// `sticky`: the note stays until it is clicked or replaced, for a failure that arrives after the user looked away.
+function notify(error, sticky = false) {
+  $('#toast').textContent = errorText(error);
+  $('#toast').title = sticky ? 'Click to dismiss' : '';
+  $('#toast').classList.toggle('sticky', sticky);
+  $('#toast').onclick = () => { $('#toast').hidden = true; };
   // At the top of the visible chat history, never over the message box; the stylesheet's place when no chat is shown.
   const history = $('#conversation').getBoundingClientRect();
   $('#toast').style.top = history.height ? `${history.top + 12}px` : '';
   $('#toast').style.left = history.width ? `${history.left + history.width / 2}px` : '';
   $('#toast').hidden = false;
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => { $('#toast').hidden = true; }, 9000);
+  clearTimeout(toastTimer);
+  if (!sticky) toastTimer = setTimeout(() => { $('#toast').hidden = true; }, 9000);
+}
+// A slash command that waits on a model (/suggestion, /wiki, /tldr, /advisor, /review): its chat's working line names it
+// until it ends, so it never runs unseen (2026-11-24, the user).
+const commandWork = new Map(); // chat id -> labels of the commands running in it
+function duringCommand(label, promise) {
+  const id = selectedId;
+  commandWork.set(id, [...(commandWork.get(id) || []), label]);
+  render();
+  return promise.finally(() => {
+    const labels = commandWork.get(id) || [];
+    labels.splice(labels.indexOf(label), 1);
+    if (!labels.length) commandWork.delete(id);
+    render();
+  });
+}
+// One that is not awaited (the message box stays free): the runner writes its failure into the chat ({ failed }), or it
+// is thrown when there is no chat to write in and then stays up until clicked. Either way the typed command goes back
+// into an empty message box, so a long /advisor question is not lost. `done` gets a successful result.
+function backgroundCommand(name, rest, label, promise, done) {
+  const key = draftKey();
+  const restore = () => {
+    const prompt = $('#prompt');
+    if (rest && draftKey() === key && !prompt.value.trim()) { prompt.value = `/${name} ${rest}`; prompt.dispatchEvent(new Event('input')); }
+  };
+  return duringCommand(label, promise).then(result => { if (result?.failed) restore(); else done?.(result); },
+    error => { notify(`/${name} failed: ${errorText(error)}`, true); restore(); });
 }
 
 function current() { return state?.sessions.find(s => s.id === selectedId); }
@@ -1885,6 +1919,18 @@ function toolAlertTitle(item, level) {
   const status = level === 'info' ? '' : ` · ${item.status === 'declined' ? 'declined' : 'failed'}`;
   return `${item.tool}${subject ? ' · ' + subject.replace(/\s+/g, ' ').trim().slice(0, 200) : ''}${status}`;
 }
+function imageGenerationFailureText(failure) {
+  if (!failure) return 'Image generation failed.';
+  if (failure.type === 'usageLimitExceeded') {
+    if (Number.isFinite(failure.resetsAt)) {
+      const ms = failure.resetsAt < 1e12 ? failure.resetsAt * 1000 : failure.resetsAt;
+      return `Image generation limit reached (resets ${new Date(ms).toLocaleString()}).`;
+    }
+    return 'Image generation limit reached.';
+  }
+  return failure.message || 'Image generation failed.';
+}
+const IMAGE_GEN_RUNNING = new Set(['inProgress', 'in_progress', 'generating', 'running', 'pending']);
 function alertOf(item) {
   const failed = ALERT_FAILED.test(item.status || '') || !!item.error || !!item.failure;
   const level = failed ? 'error' : item.status === 'declined' ? 'warning' : 'info';
@@ -1893,6 +1939,9 @@ function alertOf(item) {
     case 'fileChange': return { level, title: `${item.status === 'inProgress' ? 'Editing' : 'Changed'} ${item.changes?.length || 0} file${item.changes?.length === 1 ? '' : 's'}` };
     case 'mcpToolCall': case 'dynamicToolCall': return { level, title: toolAlertTitle(item, level) };
     case 'webSearch': return { level, title: `Web search · ${item.query || item.action?.query || ''}` };
+    case 'imageGeneration': return { level, title: failed ? imageGenerationFailureText(item.failure)
+      : IMAGE_GEN_RUNNING.has(item.status) ? 'Generating image…'
+      : `Generated image${item.revisedPrompt ? ' · ' + item.revisedPrompt.replace(/\s+/g, ' ').trim().slice(0, 160) : ''}` };
     case 'toolStep': return { level, title: item.title };
     case 'contextCompaction': return { level: 'info', title: 'Conversation context compacted' };
     case 'agentMail': return { level: 'info', title: `${item.kind === 'answer' ? 'Answer' : item.kind === 'question' ? 'Question' : 'Message'} from ${item.fromName}` };
@@ -1919,18 +1968,6 @@ function chatAlertEntries(chat) {
     at = Math.max(at, item.createdAt || 0);
     const alert = !item.internal && alertOf(item);
     // Tool calls show only when they fail or are declined; messages, notices and Harness's own steps show in grey.
-function imageGenerationFailureText(failure) {
-  if (!failure) return 'Image generation failed.';
-  if (failure.type === 'usageLimitExceeded') {
-    if (Number.isFinite(failure.resetsAt)) {
-      const ms = failure.resetsAt < 1e12 ? failure.resetsAt * 1000 : failure.resetsAt;
-      return `Image generation limit reached (resets ${new Date(ms).toLocaleString()}).`;
-    }
-    return 'Image generation limit reached.';
-  }
-  return failure.message || 'Image generation failed.';
-}
-const IMAGE_GEN_RUNNING = new Set(['inProgress', 'in_progress', 'generating', 'running', 'pending']);
     if (alert?.title && !(ALERT_TOOLS.has(item.type) && alert.level === 'info')) entries.push({ ...alert, key: item.id, at, chat: chat.title });
   }
   const result = { title: chat.title, created: chat.created, entries, at };
@@ -1939,9 +1976,6 @@ const IMAGE_GEN_RUNNING = new Set(['inProgress', 'in_progress', 'generating', 'r
 }
 function allAlertEntries(id) {
   const worker = fleetState?.agentStates?.[id] || state, background = fleetState?.executionStates?.[id];
-    case 'imageGeneration': return { level, title: failed ? imageGenerationFailureText(item.failure)
-      : IMAGE_GEN_RUNNING.has(item.status) ? 'Generating image…'
-      : `Generated image${item.revisedPrompt ? ' · ' + item.revisedPrompt.replace(/\s+/g, ' ').trim().slice(0, 160) : ''}` };
   const key = [worker.sessions, worker.sessions.length, background?.sessions, background?.sessions.length, !!worker.requests?.length, worker.connection, worker.error];
   const kept = botAlertLists.get(id);
   if (kept?.key.every((value, index) => value === key[index])) return kept.entries;
@@ -2635,15 +2669,18 @@ function render() {
   renderBackgroundTasks();
   $('#send').disabled = ((!ready || (state.coordinator && !currentMode())) && !knownCommand($('#prompt').value)) || missingMessage($('#prompt').value) || !!session?.queueSending || !!session?.compacting || (state.busy && state.busy !== selectedId && !state.coordinator) || changingPermissions || submitting || readingImages || (!$('#prompt').value.trim() && !attachedImages().length && !attachedFiles().length);
   renderImages();
-  $('#working').hidden = !session?.groupTurn && (!state.busy || state.busy !== selectedId || !!session?.pendingMessage);
+  const commands = commandWork.get(selectedId) || [];
+  const botWorking = !!session?.groupTurn || (!!state.busy && state.busy === selectedId && !session?.pendingMessage);
+  $('#working').hidden = !botWorking && !commands.length;
   const turnError = state.busy === selectedId ? '' : session?.error || '';
   const warning = state.busy === selectedId ? '' : turnWarning(session);
   $('#turn-error').textContent = turnError ? `${session.status === 'interrupted' ? 'Stopped' : 'Turn failed'}: ${turnError}`
     : warning ? `Warning: ${warning}` : '';
   $('#turn-error').hidden = !turnError && !warning;
   renderModelFetching();
-  $('#working-text').textContent = (session?.groupTurn ? `${session.groupTurn.round > 1 ? `Round ${session.groupTurn.round} · ` : ''}${session.groupTurn.name} ${session.groupTurn.state === 'needs-input' ? 'needs your input' : session.groupTurn.state === 'waiting' ? 'is waiting to reply' : 'is replying'}…` : '') || session?.waitingForAgent || (session?.compacting ? 'Compacting conversation context…' : state.routing === selectedId && state.routing
+  const botText = (session?.groupTurn ? `${session.groupTurn.round > 1 ? `Round ${session.groupTurn.round} · ` : ''}${session.groupTurn.name} ${session.groupTurn.state === 'needs-input' ? 'needs your input' : session.groupTurn.state === 'waiting' ? 'is waiting to reply' : 'is replying'}…` : '') || session?.waitingForAgent || (session?.compacting ? 'Compacting conversation context…' : state.routing === selectedId && state.routing
     ? '' : `${session?.routes.at(-1)?.label || 'Codex CLI'} ${backgroundWait(session) || 'is working'}…`);
+  $('#working-text').textContent = [...commands, ...(botWorking && botText ? [botText] : [])].join(' · ');
   const usage = session?.usage;
   const total = usage?.total;
   const { contextWindow, contextTokens, contextKnown } = contextUsage(session);
@@ -3290,6 +3327,7 @@ const WRITERS = { codex: 'Codex CLI', 'claude-cli': 'Claude CLI', 'cursor-cli': 
 function writer(item, session) {
   if (item.groupSpeaker) return item.groupSpeaker.name;
   if (item.type === 'plan') return 'Plan';
+  if (item.commandFailure) return 'Harness';
   if (item.tldr || item.advisor) return WRITERS[item.provider || 'codex'] || 'Codex CLI';
   if (item.routeLabel === 'Jev · quick answer') return 'Jev';
   const route = item.turnId ? (session.routes || []).find(r => r.turnId === item.turnId) : null;
@@ -3346,44 +3384,6 @@ function secondaryQueued(chat) {
   }));
 }
 
-function renderMessages(session) {
-  const container = $('#conversation');
-  // A different bot's chat opens at its end, whatever the old chat's scroll position was.
-  const switched = renderedSession !== selectedId;
-  if (switched) { chatFollowing = true; $('#messages').replaceChildren(); messageNodes.clear(); renderedSession = selectedId; }
-  const ids = new Set();
-  const chats = chatSessions(session);
-  const entries = chats.flatMap(chat => {
-    let at = chat.created || 0;
-    return [...chat.items, ...(chat.pendingMessage ? [chat.pendingMessage] : []), ...(chat.pendingMessage && chat.pendingColdStep ? [chat.pendingColdStep] : []),
-      ...secondaryQueued(chat)].map(item => {
-      at = Math.max(at, item.createdAt || 0);
-      return { item, session: chat, at };
-    });
-  });
-  if (chats.length > 1) entries.sort((a, b) => a.at - b.at);
-  // Settings > General > Tool and helper steps in chat off: only the conversation shows; the rest stays in the activity log.
-  const hideSteps = state.settings.hideSteps !== false; // steps are hidden by default
-  for (const { item, session } of entries) {
-    const maintenance = (session.routes || []).filter(route => route.wikiMaintenanceTaskId);
-    // bellOnly: a notification (e.g. the test pool's passed and skipped tests) listed in the bot's bell, not the chat.
-    if (item.internal || item.agentReply || item.bellOnly || maintenance.some(route => route.messageId === (item.clientId || item.id) || (route.turnId && route.turnId === item.turnId))) continue;
-    // A /tldr summary and an advisor's advice show even with steps hidden.
-    if (hideSteps && !CHAT_ITEM_TYPES.has(item.type) && !item.tldr && !item.advisor) continue;
-    ids.add(item.id);
-    let entry = messageNodes.get(item.id);
-    const selected = item.type === 'userMessage' ? session.routes.find(r => r.messageId === (item.clientId || item.id)) : null;
-    const routine = item.routineRun?.id === 'test-pool' ? 'Test pool' : 'Routine · ' + item.routineRun?.name;
-    const who = item.type === 'userMessage' ? item.routineRun ? routine : 'You' : writer(item, session);
-    // A comparison's batch report is replaced by its comparison card.
-    const batch = item.hubBatch && !item.comparisonId && fleetState?.batchReports?.[item.hubBatch.id];
-    // Updates carry only the messages and routes that changed (chatDelta), so an unchanged one is the object drawn last
-    // time: encoding every message took 3.4-4.9 ms per render on a 5,500-message chat (2026-11-12).
-    const parts = [item, selected, who, batch, hideSteps];
-    if (entry?.parts?.every((part, index) => part === parts[index])) continue;
-    const signature = JSON.stringify(parts);
-    if (entry?.signature === signature) { entry.parts = parts; continue; }
-    if (!entry) {
 function renderImageGeneration(item, node, session, who) {
   const detailsOpened = node.querySelector('details')?.open || false;
   node.className = 'message assistant';
@@ -3440,6 +3440,44 @@ function renderImageGeneration(item, node, session, who) {
   node.replaceChildren(label, body, ...(actions.childNodes.length ? [actions] : []));
 }
 
+function renderMessages(session) {
+  const container = $('#conversation');
+  // A different bot's chat opens at its end, whatever the old chat's scroll position was.
+  const switched = renderedSession !== selectedId;
+  if (switched) { chatFollowing = true; $('#messages').replaceChildren(); messageNodes.clear(); renderedSession = selectedId; }
+  const ids = new Set();
+  const chats = chatSessions(session);
+  const entries = chats.flatMap(chat => {
+    let at = chat.created || 0;
+    return [...chat.items, ...(chat.pendingMessage ? [chat.pendingMessage] : []), ...(chat.pendingMessage && chat.pendingColdStep ? [chat.pendingColdStep] : []),
+      ...secondaryQueued(chat)].map(item => {
+      at = Math.max(at, item.createdAt || 0);
+      return { item, session: chat, at };
+    });
+  });
+  if (chats.length > 1) entries.sort((a, b) => a.at - b.at);
+  // Settings > General > Tool and helper steps in chat off: only the conversation shows; the rest stays in the activity log.
+  const hideSteps = state.settings.hideSteps !== false; // steps are hidden by default
+  for (const { item, session } of entries) {
+    const maintenance = (session.routes || []).filter(route => route.wikiMaintenanceTaskId);
+    // bellOnly: a notification (e.g. the test pool's passed and skipped tests) listed in the bot's bell, not the chat.
+    if (item.internal || item.agentReply || item.bellOnly || maintenance.some(route => route.messageId === (item.clientId || item.id) || (route.turnId && route.turnId === item.turnId))) continue;
+    // A /tldr summary and an advisor's advice show even with steps hidden.
+    if (hideSteps && !CHAT_ITEM_TYPES.has(item.type) && !item.tldr && !item.advisor && !item.commandFailure) continue;
+    ids.add(item.id);
+    let entry = messageNodes.get(item.id);
+    const selected = item.type === 'userMessage' ? session.routes.find(r => r.messageId === (item.clientId || item.id)) : null;
+    const routine = item.routineRun?.id === 'test-pool' ? 'Test pool' : 'Routine · ' + item.routineRun?.name;
+    const who = item.type === 'userMessage' ? item.routineRun ? routine : 'You' : writer(item, session);
+    // A comparison's batch report is replaced by its comparison card.
+    const batch = item.hubBatch && !item.comparisonId && fleetState?.batchReports?.[item.hubBatch.id];
+    // Updates carry only the messages and routes that changed (chatDelta), so an unchanged one is the object drawn last
+    // time: encoding every message took 3.4-4.9 ms per render on a 5,500-message chat (2026-11-12).
+    const parts = [item, selected, who, batch, hideSteps];
+    if (entry?.parts?.every((part, index) => part === parts[index])) continue;
+    const signature = JSON.stringify(parts);
+    if (entry?.signature === signature) { entry.parts = parts; continue; }
+    if (!entry) {
       const node = document.createElement('div');
       entry = { node }; messageNodes.set(item.id, entry); $('#messages').append(node);
     }
@@ -3463,7 +3501,7 @@ function renderImageGeneration(item, node, session, who) {
       node.replaceChildren(details);
     } else if (item.type === 'agentResult') renderAgentResult(item, node, session);
     // A /tldr summary reads like a normal answer: bubble, Copy, time and model label.
-    else if (item.type === 'notice' && !item.tldr && !item.advisor) renderNotice(item, node, session);
+    else if (item.type === 'notice' && !item.tldr && !item.advisor && !item.commandFailure) renderNotice(item, node, session);
     else if (item.type === 'agentArtifact' && item.localOnly) {
       node.className = 'message';
       node.replaceChildren(element('div', 'message-label', 'Artifact available'), renderArtifacts([item.artifact], session.id, item.id));
@@ -3805,7 +3843,12 @@ const COMMANDS = {
     return api.compact(selectedId);
   } },
   clear: { description: 'Start fresh after confirmation; archive the current chat locally.', run: clearConversation },
-  stop: { description: 'Stop this agent and the sub-bots working for it.', run: () => stopBot() },
+  stop: { description: 'Stop this agent and the sub-bots working for it.', run: async () => {
+    const working = !$('#working').hidden;
+    const result = await stopBot();
+    if (!working && !result?.stoppedSubBots?.length) notify('Stop sent. Nothing in this chat showed as working.');
+  } },
+  restart: { description: 'Restart Harness; asks first when a bot is working. Chats and settings are kept.', run: async () => (await api.restartRunner()).restarted },
   agents: { description: 'Open the agent overview.', run: () => $('#agents-overview').click() },
   settings: { description: 'Open Harness settings.', run: () => $('#settings').onclick() },
   context: { description: 'Show context usage, remaining capacity and last compaction.', run: () => openCommandPanel('context') },
@@ -3823,7 +3866,7 @@ const COMMANDS = {
   status: { description: 'Show the current task, queued work and child agents.', run: () => openCommandPanel('status') },
   suggestion: { description: 'Suggest your next message from the last answer, even when Reply suggestions is off.', run: async () => {
     if (!selectedId) throw new Error('Open a chat first.');
-    const result = await api.suggestNext(selectedId);
+    const result = await duringCommand('Writing a suggestion…', api.suggestNext(selectedId));
     if (!result) { notify('No suggestion yet: wait for the bot to finish its answer, and check that its model is available.'); return false; }
     forcedSuggestionItem = result.itemId;
     suggestion = result;
@@ -3833,20 +3876,17 @@ const COMMANDS = {
   // Not awaited: the suggestion call can take a while, and a waiting command keeps the composer locked.
   wiki: { description: 'Suggest wiki updates from this chat; nothing is written until you click Apply.', run: () => {
     if (!selectedId) throw new Error('Open a chat first.');
-    notify('Looking for wiki updates in this chat…');
-    api.suggestWiki(selectedId).catch(notify);
+    backgroundCommand('wiki', '', 'Looking for wiki updates in this chat…', api.suggestWiki(selectedId));
   } },
   // Not awaited, like /wiki: the summary appears as a notice when the call returns.
   tldr: { description: 'Summarize the last answer in a few lines, shown only to you.', run: () => {
     if (!selectedId) throw new Error('Open a chat first.');
-    notify('Summarizing the last answer…');
-    api.summarizeLast(selectedId).catch(notify);
+    backgroundCommand('tldr', '', 'Summarizing the last answer…', api.summarizeLast(selectedId));
   } },
   advisor: { args: 'required', description: 'Ask the advisor model about this chat: /advisor <message>. Shown only to you.', run: question => {
     if (!selectedId) throw new Error('Open a chat first.');
     if (!question) throw new Error('Type your message after /advisor, then press Enter.');
-    notify('Asking the advisor…');
-    api.adviseChat(selectedId, question).catch(notify);
+    backgroundCommand('advisor', question, 'Asking the advisor…', api.adviseChat(selectedId, question));
   } },
   goal: { args: 'optional', description: 'Pin a goal to this chat: /goal <text>; /goal shows it, /goal clear removes it.', run: async text => {
     if (!selectedId) throw new Error('Open a chat first.');
@@ -3858,7 +3898,8 @@ const COMMANDS = {
   // Not awaited, like /wiki: the Reviewer's report appears in the chat later as a bot message (the runner posts it).
   review: { args: 'optional', description: 'Ask the Reviewer for an independent review of the uncommitted changes: /review [focus]. It sees only your request and the changes.', run: text => {
     if (!selectedId) throw new Error('Open a chat first.');
-    api.requestReview(selectedId, text || '').then(result => notify(`${result.reviewer} is reviewing the changes; its report will appear in this chat.`)).catch(notify);
+    backgroundCommand('review', text, 'Starting the review…',
+      api.requestReview(selectedId, text || ''), result => notify(`${result.reviewer} is reviewing the changes; its report will appear in this chat.`));
   } },
 };
 // /goal clear and the Goal bar's ×.
@@ -4684,6 +4725,7 @@ $('#permissions').onchange = () => changeAccess($('#permissions').value).catch(n
 function stopBot(id) {
   return api.stop(id).then(result => {
     if (result?.stoppedSubBots?.length) notify(`Also stopped its sub-bots: ${result.stoppedSubBots.join(', ')}.`);
+    return result;
   });
 }
 $('#stop').onclick = () => stopBot().catch(notify);

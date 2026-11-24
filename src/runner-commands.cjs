@@ -134,6 +134,14 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
     if (id) agents.owner(id).stopSecondaryQueue?.(id);
     return agents.stop(id);
   });
+  // /restart (2026-11-24, the user): at once when nothing is running; otherwise the user confirms stopping the work first.
+  handle('restartRunner', async () => {
+    if (!agents.restart) throw new Error('Restart is unavailable: this Harness runs without the desktop app.');
+    const working = agents.workingBots();
+    if (working.length && !await ask(agents.restartQuestion(working, 'Restarting now stops the work in progress.'))) return { restarted: false };
+    await agents.restart('/restart');
+    return { restarted: true };
+  });
   handle('reviseJob', args => agents.reviseUserJob(args));
   handle('reconcileJob', args => agents.reconcileJob(args));
   handle('updateStatus', () => updater.state);
@@ -148,12 +156,23 @@ function registerRunnerCommands(handle, { runner, ask, normalizeImage, openFolde
   });
   handle('compact', id => agents.owner(id).compact(id));
   handle('setGoal', (id, text) => agents.owner(id).setGoal(id, text));
-  handle('requestReview', (id, focus) => agents.owner(id).requestReview(id, focus));
+  // These commands answer later, so a failure is written into the chat (commandFailed) and the window gets { failed }
+  // to put the typed command back; it is thrown only when there is no chat to write in.
+  const noted = (name, call) => async (id, ...args) => {
+    try { return await call(id, ...args); }
+    catch (error) {
+      let written = false;
+      try { written = agents.owner(id).commandFailed(id, name, error); } catch { /* no such chat: throw the failure */ }
+      if (!written) throw error;
+      return { failed: true };
+    }
+  };
+  handle('requestReview', noted('review', (id, focus) => agents.owner(id).requestReview(id, focus)));
   handle('replySuggestion', id => agents.owner(id).replySuggestion(id));
   handle('suggestNext', id => agents.owner(id).suggestNext(id));
-  handle('suggestWiki', id => agents.owner(id).suggestWiki(id));
-  handle('summarizeLast', id => agents.owner(id).summarizeLast(id));
-  handle('adviseChat', (id, question) => agents.owner(id).adviseChat(id, question));
+  handle('suggestWiki', noted('wiki', id => agents.owner(id).suggestWiki(id)));
+  handle('summarizeLast', noted('tldr', id => agents.owner(id).summarizeLast(id)));
+  handle('adviseChat', noted('advisor', (id, question) => agents.owner(id).adviseChat(id, question)));
   handle('clearConversation', async (agentId, groupId) => {
     const session = await agents.clearConversation(agentId, name => ask({
       title: 'Start a fresh conversation?', message: `Clear the current context for ${name} and start with a blank chat.`,
