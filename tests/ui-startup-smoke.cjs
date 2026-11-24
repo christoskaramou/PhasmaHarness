@@ -1401,6 +1401,15 @@ app.whenReady().then(async () => {
       select.value = '${choice}';
       await select.onchange({ target: select });
     })()`);
+  const chatStepsOption = label => window.webContents.executeJavaScript(`[...document.querySelector('#settings-chat-steps').options].find(option => option.text === ${JSON.stringify(label)}).value`);
+  const chatStepsValue = () => window.webContents.executeJavaScript("document.querySelector('#settings-chat-steps').selectedOptions[0].text");
+  assert.equal(await chatStepsValue(), 'On', 'previously visible steps map to On');
+  await changeSetting('settings-chat-steps', await chatStepsOption('Off'));
+  assert.equal(controller.data.settings.hideSteps, true);
+  assert.equal(await chatStepsValue(), 'Off');
+  await changeSetting('settings-chat-steps', await chatStepsOption('On'));
+  assert.equal(controller.data.settings.hideSteps, false);
+
     assert.equal(runnerExit, choice);
     assert.equal(await window.webContents.executeJavaScript("document.querySelector('#settings-runner-exit').value"), choice);
   }
@@ -3302,13 +3311,13 @@ app.whenReady().then(async () => {
   ipcMain.removeHandler('queuedMessage');
   background[0].chat.queue = background[0].chat.queue.filter(message => !['ui-held', 'ui-reading', 'ui-step'].includes(message.id));
   background[0].chat.items = background[0].chat.items.filter(item => item !== stoppedItem);
-  // Settings > General > Hide tool and helper steps: only the conversation shows; steps stay in the activity log.
+  // Settings > General > Tool and helper steps in chat off: only the conversation shows; steps stay in the activity log.
   const stepItem = { id: 'ui-hidden-step', type: 'commandExecution', status: 'completed', command: 'npm run hidden-step', aggregatedOutput: 'ok', exitCode: 0 };
   const replyItem = { id: 'ui-visible-reply', type: 'agentMessage', phase: 'final_answer', text: 'Visible reply.' };
   background[0].chat.items.push(stepItem, replyItem);
   const chatText = () => window.webContents.executeJavaScript('document.querySelector("#messages").textContent');
   await publish();
-  assert.match(await chatText(), /npm run hidden-step[\s\S]*Visible reply\./, 'turned off, steps show');
+  assert.match(await chatText(), /npm run hidden-step[\s\S]*Visible reply\./, 'turned on, steps show');
   for (const c of agents.allControllers()) delete c.data.settings.hideSteps;
   await publish();
   assert.doesNotMatch(await chatText(), /npm run hidden-step/, 'hidden by default');

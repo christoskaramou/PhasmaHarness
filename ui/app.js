@@ -3347,8 +3347,8 @@ function renderMessages(session) {
     });
   });
   if (chats.length > 1) entries.sort((a, b) => a.at - b.at);
-  // Settings > General > Hide tool and helper steps: only the conversation shows; the rest stays in the activity log.
-  const hideSteps = state.settings.hideSteps !== false; // on by default (2026-11-06, the user)
+  // Settings > General > Tool and helper steps in chat off: only the conversation shows; the rest stays in the activity log.
+  const hideSteps = state.settings.hideSteps !== false; // steps are hidden by default
   for (const { item, session } of entries) {
     const maintenance = (session.routes || []).filter(route => route.wikiMaintenanceTaskId);
     // bellOnly: a notification (e.g. the test pool's passed and skipped tests) listed in the bot's bell, not the chat.
@@ -4786,7 +4786,7 @@ $('#settings').onclick = async () => {
   $('#settings-jev-images').value = state.settings.jevImages !== false && state.jev?.configured ? 'on' : 'off';
   $('#settings-jev-images').disabled = !state.jev?.configured;
   $('#settings-reply-suggestions').value = state.settings.replySuggestions === false ? 'off' : 'on';
-  $('#settings-hide-steps').value = state.settings.hideSteps === false ? 'off' : 'on';
+  $('#settings-chat-steps').value = state.settings.hideSteps === false ? 'off' : 'on';
   $('#settings-cold-start-minutes').value = state.settings.coldStartMinutes ?? 30;
   $('#settings-cold-start-percent').value = state.settings.coldStartPercent ?? 60;
   $('#settings-show-tips').value = state.settings.showTips === false ? 'off' : 'on';
@@ -5009,7 +5009,7 @@ async function saveSetting(control, key, value, agentId = selectedAgent) {
     if (agentId === selectedAgent) {
       const saved = ((key === 'workspace' || key === 'access') ? current()?.[key] ?? state.settings[key] : state.settings[key])
         ?? { effortCap: 'high', contextRanking: 'local', toolSelection: 'off',
- showTips: true, ...Object.fromEntries(Object.values(ON_SWITCHES).map(name => [name, true])) }[key];
+ showTips: true, hideSteps: true, ...Object.fromEntries(Object.values(ON_SWITCHES).map(name => [name, true])) }[key];
       control.value = typeof value === 'boolean' ? (saved ? 'on' : 'off') : String(saved ?? '');
       control.onchange?.();
     }
@@ -5032,7 +5032,7 @@ const settingsFields = {
   ...ON_SWITCHES,
   'settings-context': 'contextRanking', 'settings-tools': 'toolSelection',
   'settings-jev-images': 'jevImages',
-  'settings-reply-suggestions': 'replySuggestions', 'settings-show-tips': 'showTips', 'settings-hide-steps': 'hideSteps',
+  'settings-reply-suggestions': 'replySuggestions', 'settings-show-tips': 'showTips', 'settings-chat-steps': 'hideSteps',
   'settings-cold-start-minutes': 'coldStartMinutes', 'settings-cold-start-percent': 'coldStartPercent',
   'settings-dream-model': 'dreamModel', 'settings-dream-effort': 'dreamModel',
 };
