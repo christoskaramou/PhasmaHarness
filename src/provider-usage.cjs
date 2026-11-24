@@ -438,13 +438,25 @@ async function queryCodex(primary, base) {
   }
 }
 
+const CLAUDE_USAGE_RETRY_MS = process.env.NODE_TEST_CONTEXT ? 10 : 1500;
 async function queryClaude(primary, base) {
   const status = primary.claude?.status || {};
   const fallbackPlan = formatPlanName(status.subscriptionType);
   const account = status.email || status.authMethod || null;
   const accountKey = primary.claude?.accountKey?.() || null;
   try {
-    const report = await primary.claude.readUsage();
+    // 2026-11-24, the user: a Max account often showed "not available" until Refresh was pressed again. Claude Code
+    // sometimes answers without its plan windows; one more read after a moment is that second press. What it answered
+    // is logged (flags only), since the cause on Claude's side is not known.
+    const usable = value => value?.rate_limits_available === true && !!value.rate_limits;
+    let report = await primary.claude.readUsage();
+    if (!usable(report) && fallbackPlan) {
+      primary.log?.info('Claude returned no plan usage; reading once more', { available: report?.rate_limits_available ?? null, limits: report?.rate_limits == null ? 'none' : 'present',
+        keys: report && typeof report === 'object' ? Object.keys(report).slice(0, 12) : null });
+      await new Promise(resolve => setTimeout(resolve, CLAUDE_USAGE_RETRY_MS));
+      const again = await primary.claude.readUsage();
+      if (usable(again)) report = again;
+    }
     const currentKey = primary.claude?.accountKey?.() || null;
     if (accountKey !== currentKey) {
       const nextStatus = primary.claude?.status || {};
@@ -466,7 +478,8 @@ async function queryClaude(primary, base) {
         status: 'unavailable',
         plan,
         account,
-        note: 'Plan usage windows are not available for this Claude account.',
+        note: fallbackPlan ? 'Claude did not return its plan usage this time. Refresh to try again.'
+          : 'Plan usage windows are not available for this Claude account.',
       });
     }
     return providerEntry(base, {

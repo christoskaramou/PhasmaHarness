@@ -681,7 +681,7 @@ test('readProviderUsage handles error fallbacks, unavailable accounts, and provi
   assert.match(r2.providers[0].note, /ChatGPT sign-in/);
   const r3 = await readProviderUsage(fresh.runner, { filter: 'claude' });
   assert.equal(r3.providers[0].status, 'unavailable');
-  assert.match(r3.providers[0].note, /not available for this Claude account/);
+  assert.match(r3.providers[0].note, /did not return its plan usage this time/);
 
   // Claude error without cache -> status: 'error'
   fresh.primary.claude.readUsage = async () => { throw new Error('hard failure'); };
@@ -826,4 +826,23 @@ test('providerUsage is registered in runner-commands, allowed on sub-bots, and w
   const remoteApi = fs.readFileSync(path.join(__dirname, '..', 'ui', 'remote-api.js'), 'utf8');
   assert.match(preload, /'providerUsage'/);
   assert.match(remoteApi, /'providerUsage'/);
+});
+
+// 2026-11-24, the user: Claude (Max) showed "not available" until Refresh was pressed again.
+test('a Claude answer without plan usage is read once more before the panel says so', async () => {
+  const good = { rate_limits_available: true, subscription_type: 'max', rate_limits: { five_hour: { utilization: 19, resets_at: '2026-11-24T04:39:59Z' } } };
+  const empty = { rate_limits_available: false, subscription_type: 'max', rate_limits: null };
+  const first = makeRunnerFixture(), answers = [empty, good];
+  first.primary.claude.status.subscriptionType = 'max';
+  let reads = 0;
+  first.primary.claude.readUsage = async () => answers[reads++];
+  const fixed = (await readProviderUsage(first.runner, { filter: 'claude' })).providers[0];
+  assert.deepEqual([reads, fixed.status, fixed.windows[0].usedPercent], [2, 'ok', 19]);
+  const second = makeRunnerFixture();
+  second.primary.claude.status.subscriptionType = 'max';
+  reads = 0;
+  second.primary.claude.readUsage = async () => { reads++; return empty; };
+  const still = (await readProviderUsage(second.runner, { filter: 'claude' })).providers[0];
+  assert.deepEqual([reads, still.status], [2, 'unavailable']);
+  assert.match(still.note, /did not return its plan usage this time/);
 });
