@@ -466,7 +466,7 @@ class AntigravityCLI {
             finish(error);
           }
         }
-      }), options.timeoutMs || 30 * 60 * 1000, LABEL, options.signal);
+      }), options.timeoutMs || 0, LABEL, options.signal);
       resolvedSessionId = result.session_id;
       succeeded = true;
       return result;

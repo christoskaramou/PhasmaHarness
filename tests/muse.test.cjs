@@ -532,3 +532,28 @@ test('at most three Muse processes stay warm across bots, expire after 10 idle m
   assert.equal(botB.backend.warmCount(), 0, 'idle timer expires after 10 minutes');
   assert.ok([...botA.children, ...botB.children].every(c => c.child.exitCode === 0));
 });
+
+test('Muse turns have no 30-minute default timeout when timeoutMs is omitted, while explicit timeoutMs still applies', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let release, finishPrompt;
+  const started = new Promise(resolve => { release = resolve; });
+  const f = await fixture(t, {
+    onPrompt: () => { release(); return new Promise(resolve => { finishPrompt = resolve; }); },
+  });
+  const pending = f.backend.run(runOptions());
+  await started;
+  await new Promise(r => setImmediate(r));
+  t.mock.timers.tick(2 * 60 * 60 * 1000);
+  finishPrompt('long muse turn ok');
+  const res = await pending;
+  assert.equal(res.result, 'long muse turn ok');
+
+  let slowReady;
+  const slowStarted = new Promise(resolve => { slowReady = resolve; });
+  const slow = await fixture(t, { onPrompt: () => { slowReady(); return new Promise(() => {}); } });
+  const timed = slow.backend.run({ ...runOptions(), timeoutMs: 50 });
+  await slowStarted;
+  await new Promise(r => setImmediate(r));
+  t.mock.timers.tick(50);
+  await assert.rejects(timed, { code: 'DELIVERY_UNCERTAIN', message: /timed out/ });
+});

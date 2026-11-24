@@ -299,3 +299,22 @@ test('Antigravity preserves its session on pre-flight errors, runs cancelled-res
   assert.match(freshRun.prompt, /HIST_089_/, 'newest history survives');
   assert.doesNotMatch(freshRun.prompt, /HIST_000_/, 'oldest history was dropped to fit');
 });
+
+test('deadline allows unbounded turns when milliseconds is 0/omitted, while honoring AbortSignal and positive timeouts', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { deadline } = require('../src/providers/native-cli.cjs');
+  let finish;
+  const open = deadline(new Promise(resolve => { finish = resolve; }), 0, 'Test CLI');
+  t.mock.timers.tick(2 * 60 * 60 * 1000);
+  finish('completed-after-2h');
+  assert.equal(await open, 'completed-after-2h');
+
+  const abort = new AbortController();
+  const stopped = deadline(new Promise(() => {}), 0, 'Test CLI', abort.signal);
+  abort.abort();
+  await assert.rejects(stopped, { name: 'AbortError', message: 'Test CLI stopped.' });
+
+  const bounded = deadline(new Promise(() => {}), 50, 'Test CLI');
+  t.mock.timers.tick(50);
+  await assert.rejects(bounded, { code: 'DELIVERY_UNCERTAIN', message: /timed out/ });
+});

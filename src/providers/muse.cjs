@@ -553,7 +553,7 @@ class MuseCLI {
         for (let index = 0; ;) {
           if (index < turns.length) {
             last = turns[index++];
-            const outcome = await deadline(Promise.race([last.completed, host.failure]), options.timeoutMs || 30 * 60 * 1000, LABEL, options.signal);
+            const outcome = await deadline(Promise.race([last.completed, host.failure]), options.timeoutMs || 0, LABEL, options.signal);
             if (outcome.kind !== 'completed' || outcome.params.terminal !== 'completed') {
               // Muse reports why a turn ended (a model, billing or account error); show that instead of a generic failure.
               const reason = String(outcome.params?.error?.message || outcome.params?.reason || '').slice(0, 1000);
@@ -576,7 +576,7 @@ class MuseCLI {
         waiting.clear();
       }
 
-      if (host.gapView) await deadline(Promise.race([host.gapView, host.failure]), options.timeoutMs || 30 * 60 * 1000, LABEL, options.signal);
+      if (host.gapView) await deadline(Promise.race([host.gapView, host.failure]), options.timeoutMs || 0, LABEL, options.signal);
       const text = session.fold.items.list().filter(item => item.turnId === last.turnId && item.kind === 'agentMessage'
         && (host.messages.get(item.itemId)?.phase || item.messagePhase) !== 'commentary')
         .map(item => host.messages.get(item.itemId)?.text || item.text || '').join('\n\n');

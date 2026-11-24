@@ -513,3 +513,20 @@ test('at most three Antigravity processes stay warm across bots, expire after 10
   assert.equal(b.backend.warmCount(), 0, 'idle warm processes expire after 10 minutes');
   assert.ok(b.children.every(rec => rec.child.exitCode === 0));
 });
+
+test('Antigravity turns have no 30-minute default timeout when timeoutMs is omitted', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const cwd = workspace(t);
+  let release;
+  const started = new Promise(resolve => { release = resolve; });
+  let finishPrompt;
+  const f = await antigravityFixture(t, {
+    onPrompt: () => { release(); return new Promise(resolve => { finishPrompt = resolve; }); },
+  });
+  const pending = f.backend.run(turn(cwd));
+  await started;
+  t.mock.timers.tick(2 * 60 * 60 * 1000);
+  finishPrompt('long turn ok');
+  const res = await pending;
+  assert.equal(res.result, 'long turn ok');
+});

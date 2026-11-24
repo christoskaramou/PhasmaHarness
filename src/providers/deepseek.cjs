@@ -217,7 +217,7 @@ class DeepSeekCLI {
       try {
         for (;;) {
           const mine = current;
-          result = await deadline(mine, options.timeoutMs || 30 * 60 * 1000, LABEL, options.signal);
+          result = await deadline(mine, options.timeoutMs || 0, LABEL, options.signal);
           if (steering)
             await steering.catch(() => {});
           if (current === mine)

@@ -87,11 +87,15 @@ function deadline(promise, milliseconds, label, signal) {
     let settled = false;
     const finish = (error, value) => {
       if (settled) return;
-      settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort);
+      settled = true;
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
       error ? reject(error) : resolve(value);
     };
     const abort = () => finish(Object.assign(new Error(`${label} stopped.`), { name: 'AbortError' }));
-    const timer = setTimeout(() => finish(Object.assign(new Error(`${label} timed out; delivery was not confirmed.`), { code: 'DELIVERY_UNCERTAIN' })), milliseconds);
+    const timer = milliseconds > 0
+      ? setTimeout(() => finish(Object.assign(new Error(`${label} timed out; delivery was not confirmed.`), { code: 'DELIVERY_UNCERTAIN' })), milliseconds)
+      : null;
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
     Promise.resolve(promise).then(value => finish(null, value), error => finish(error));

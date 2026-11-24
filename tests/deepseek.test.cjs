@@ -436,3 +436,24 @@ test('a second DeepSeek call waits for the first instead of failing, and Stop en
   assert.equal(owner.active, null);
   (await takeTurn(owner, undefined, 'Test CLI'))();
 });
+
+test('DeepSeek turns have no 30-minute default timeout when timeoutMs is omitted, while explicit timeoutMs still applies', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let release, finishPrompt;
+  const started = new Promise(resolve => { release = resolve; });
+  const { backend } = await fixture(t, {
+    onPrompt: () => { release(); return new Promise(resolve => { finishPrompt = resolve; }); },
+  });
+  const pending = backend.run(runOptions());
+  await started;
+  t.mock.timers.tick(2 * 60 * 60 * 1000);
+  finishPrompt('long deepseek turn ok');
+  const res = await pending;
+  assert.equal(res.result, 'long deepseek turn ok');
+
+  const slow = await fixture(t, { wait: true });
+  const timed = slow.backend.run({ ...runOptions(), timeoutMs: 50 });
+  for (let i = 0; i < 50 && !methodCalls(slow.calls, 'prompt').length; i++) await new Promise(r => setImmediate(r));
+  t.mock.timers.tick(50);
+  await assert.rejects(timed, { code: 'DELIVERY_UNCERTAIN', message: /timed out/ });
+});
