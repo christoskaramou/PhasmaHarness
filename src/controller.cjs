@@ -1418,7 +1418,9 @@ class Controller extends EventEmitter {
     const history = session.items.filter((item, index) => index >= from || (item.delegatedFrom && !seenHistory.has(item.id)));
     const contextText = session.pendingMessage?.contextText || '';
     const numbered = this.jevImageAssist() ? imageNumbers(session) : null;
-    const prompt = this.withTaskLessons(task, (cold?.text || '') + handoff(history, undefined, numbered) + contextText, text);
+    const maxMessageBytes = capabilities(selected.provider).maxMessageBytes;
+    const noTools = selected.provider === 'native:antigravity' && session.agentReplyCancelledActive && session.access === 'danger-full-access';
+    let prompt = maxMessageBytes ? '' : this.withTaskLessons(task, (cold?.text || '') + handoff(history, undefined, numbered) + contextText, text);
     const recoveryPrompt = api && session[sessionKey] ? () => this.withTaskLessons(task,
       handoff(session.items.filter(item => item.id !== clientId && item.clientId !== clientId), undefined, numbered) + contextText, text) : undefined;
     if (!session.items.some(i => i.type === 'userMessage')) session.title = text.trim().replace(/\s+/g, ' ').slice(0, 65);
@@ -1479,6 +1481,17 @@ class Controller extends EventEmitter {
         provider: selected.provider, bridge,
         ...(capabilities(selected.provider).liveQueue || capabilities(selected.provider).liveSteer ? { onInput: (input, control) => {
           if (session.submission !== submission) return;
+      if (maxMessageBytes) {
+        // Reserve budget for instructions + current prompt first so history trims oldest-first and never truncates the live request.
+        const sentInstructions = keptInstructions ? '' : fullInstructions;
+        const sentHelperInstructions = !noTools && !keptInstructions && helpers?.instructions ? helpers.instructions : '';
+        const basePrompt = this.withTaskLessons(task, (cold?.text || '') + contextText, text);
+        const imageBytes = images.length ? images.length * 160 + 80 : 0;
+        const overhead = Buffer.byteLength(sentInstructions, 'utf8') + Buffer.byteLength(sentHelperInstructions, 'utf8') +
+          Buffer.byteLength(basePrompt, 'utf8') + imageBytes + 1024;
+        const boundedHistory = handoff(history, Math.max(0, maxMessageBytes - overhead), numbered, { trim: true });
+        prompt = this.withTaskLessons(task, (cold?.text || '') + boundedHistory + contextText, text);
+      }
           this.liveInput = input;
           this.liveControl = input && control || null;
           this.liveInputCaps = capabilities(selected.provider);
@@ -1486,9 +1499,9 @@ class Controller extends EventEmitter {
           if (input) setImmediate(() => this.flushLiveQueue(session));
         } } : {}),
         cwd: this.workspace(session.workspace), model: selected.model, effort: selected.effort || null, effortOption: selected.effortOption, parameterized: selected.parameterized, parameters: selected.parameters,
-        prompt, recoveryPrompt, images, instructions: keptInstructions ? '' : fullInstructions, managedInstructions: true,
+        prompt, recoveryPrompt, images, instructions: keptInstructions ? '' : fullInstructions, managedInstructions: true, noTools,
         resume: session[sessionKey], access: session.agentReplyCancelledActive ? 'read-only' : session.access, signal: abort.signal, noSubagents: session.hubStronger === true,
-        helpers: keptInstructions && helpers ? { ...helpers, instructions: '' } : helpers,
+        helpers: noTools ? null : (keptInstructions && helpers ? { ...helpers, instructions: '' } : helpers),
         approve: (tool, options = {}) => new Promise(resolve => {
           if (abort.signal.aborted || turnOver || options.signal?.aborted) return resolve(false);
           const allowKey = sessionAllowKey(tool);
@@ -1614,17 +1627,17 @@ class Controller extends EventEmitter {
       if (route && Number.isFinite(costUsd) && costUsd >= 0)
         route.providerEstimateUsd = costUsd;
       if (result.permission_denials?.length) outcome.warning = deniedCallsWarning(result.permission_denials);
-    } catch (error) { outcome = { status: abort.signal.aborted ? 'interrupted' : 'failed', error: error.message, limit: abort.signal.aborted ? null : error.limit }; }
+    } catch (error) { outcome = { status: abort.signal.aborted ? 'interrupted' : 'failed', error: error.message, limit: abort.signal.aborted ? null : error.limit, preserveSession: !!error.preserveSession }; }
     finally {
       const answer = session.items.filter(i => assistantIds.has(i.id)).map(i => stripTaskStatus(i.text)).join('\n');
       this.rememberDirect(session, { question: contextText + text, answer: answer || `[${backend} turn ${outcome.status}]` });
       if (outcome.status === 'completed') {
         session[lastKey] = session.items.at(-1)?.id;
         session[backend + 'TurnEndedAt'] = Date.now();
-        session[backend + 'InstructionHash'] = instructionHash;
+        if (!noTools) session[backend + 'InstructionHash'] = instructionHash;
         session[historyKey] = [...new Set([...seenHistory, ...history.filter(item => item.delegatedFrom).map(item => item.id)])];
       }
-      else if ((outcome.status === 'interrupted' || outcome.limit) && session[sessionKey]) {
+      else if ((outcome.status === 'interrupted' || outcome.limit || outcome.preserveSession) && session[sessionKey]) {
         // A usage limit or Stop ends the turn, not the CLI's session, which it saved. Dropping the link made the next turn
         // hand a new session the whole chat, more than a long chat's handoff allows, so it could never go on (2026-11-12,
         // the user's PhasmaProjects chat). The next turn hands this turn's message over again, in case the CLI never got

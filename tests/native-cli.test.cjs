@@ -231,3 +231,71 @@ test('a native worker with connectors and helper tools gets the connector note o
   const text = run.instructions + (run.helpers?.instructions || '');
   assert.equal(text.split('Shared services are configured in Harness Settings').length - 1, 1);
 });
+
+test('Antigravity preserves its session on pre-flight errors, runs cancelled-result replies tool-free, and bounds fresh handoffs to keep newest history and the live prompt', async t => {
+  const { capabilities } = require('../src/providers/capabilities.cjs');
+  const root = directory(t), runs = [];
+  const backend = {
+    models: [{ id: 'native:antigravity:gemini-4-neon-xhigh', model: 'gemini-4-neon-xhigh', label: 'Gemini 4 Neon (XHigh)',
+      provider: 'native:antigravity', worker: true, router: true, efforts: [], effort: null, rank: 35 }],
+    status: { installed: true, loggedIn: true },
+    inspect() { return this.status; },
+    async refresh() { return this.status; },
+    async run(options) {
+      runs.push(options);
+      if (!options.schema && !options.noTools && options.access !== 'danger-full-access') {
+        throw Object.assign(new Error('Antigravity currently requires Full access.'), { preserveSession: true });
+      }
+      options.onEvent?.({ type: 'system', session_id: options.resume || 'agy-session-1' });
+      return { result: 'Acknowledged.' };
+    },
+    close() {},
+  };
+  const controller = new Controller(path.join(root, 'state.json'), root, new NoCodex(), { cancel() {}, close() {}, jev: null },
+    { nativeCLIs: new Map([['native:antigravity', backend]]) });
+  controller.data.settings.antigravityEnabled = true;
+  controller.claude.refresh = async () => (controller.claude.status = { installed: false, loggedIn: false });
+  controller.cursor.refresh = async () => (controller.cursor.status = { installed: false, loggedIn: false });
+  await controller.initialize();
+  t.after(() => controller.close());
+
+  const session = controller.create(root, 'danger-full-access');
+  await controller.send({ id: session.id, text: 'Initial work', mode: 'native:antigravity:gemini-4-neon-xhigh', task: 'off' });
+  const savedSession = session['native:antigravitySessionId'];
+  const savedLast = session['native:antigravityLastItem'];
+  assert.equal(savedSession, 'agy-session-1');
+
+  // 1. Cancelled subagent reply runs tool-free on the SAME resumed session instead of failing with "requires Full access".
+  await controller.send({ id: session.id, text: 'Subagent cancelled. Record outcome.', mode: 'native:antigravity:gemini-4-neon-xhigh', task: 'off', agentReply: true, agentReplyCancelled: true });
+  assert.equal(session.status, 'completed');
+  assert.equal(runs.at(-1).noTools, true);
+  assert.equal(runs.at(-1).helpers, null);
+  assert.equal(runs.at(-1).resume, 'agy-session-1');
+  assert.equal(session['native:antigravitySessionId'], 'agy-session-1', 'cancelled reply preserves the native session');
+
+  // 2. A pre-flight error (e.g. non-full-access user chat) fails without wiping a saved session link.
+  session.access = 'workspace-write';
+  const beforeErrorLast = session['native:antigravityLastItem'];
+  await controller.send({ id: session.id, text: 'Should fail preflight', mode: 'native:antigravity:gemini-4-neon-xhigh', task: 'off' });
+  assert.equal(session.status, 'failed');
+  assert.equal(session['native:antigravitySessionId'], 'agy-session-1', 'pre-flight error preserves the session');
+  assert.equal(session['native:antigravityLastItem'], beforeErrorLast);
+
+  // 3. When a fresh session must carry a 490 KB chat, handoff is bounded inside maxMessageBytes, keeping newest history + live prompt.
+  session.access = 'danger-full-access';
+  session['native:antigravitySessionId'] = null;
+  session['native:antigravityLastItem'] = null;
+  for (let i = 0; i < 90; i++) {
+    session.items.push({ id: `hist-${i}`, type: i % 2 === 0 ? 'userMessage' : 'agentMessage', phase: 'final_answer',
+      content: [{ type: 'text', text: `HIST_${String(i).padStart(3, '0')}_` + 'z'.repeat(5500) }],
+      text: `HIST_${String(i).padStart(3, '0')}_` + 'z'.repeat(5500) });
+  }
+  const livePrompt = 'USER_LIVE_PROMPT_MUST_SURVIVE';
+  await controller.send({ id: session.id, text: livePrompt, mode: 'native:antigravity:gemini-4-neon-xhigh', task: 'off' });
+  const freshRun = runs.at(-1);
+  const totalBytes = Buffer.byteLength([freshRun.instructions, freshRun.helpers?.instructions, freshRun.prompt].filter(Boolean).join('\n\n'), 'utf8');
+  assert.ok(totalBytes <= capabilities('native:antigravity').maxMessageBytes, `total message (${totalBytes} bytes) fits within Antigravity safe budget`);
+  assert.ok(freshRun.prompt.endsWith(livePrompt), 'live user prompt stays intact at the end');
+  assert.match(freshRun.prompt, /HIST_089_/, 'newest history survives');
+  assert.doesNotMatch(freshRun.prompt, /HIST_000_/, 'oldest history was dropped to fit');
+});

@@ -12,7 +12,9 @@ const CAPABILITIES = Object.freeze({
   'cursor-cli': Object.freeze({ cli: true, steer: false, compact: false, usage: false, liveSteer: true }),
   'native:deepseek': Object.freeze({ cli: true, steer: false, compact: false, usage: false, liveSteer: true }),
   'native:muse': Object.freeze({ cli: true, steer: false, compact: false, usage: true, liveQueue: true, liveSteer: true }),
-  'native:antigravity': Object.freeze({ cli: true, steer: false, compact: false, usage: true }),
+  // agy hard-truncates a single user message from the tail around ~256 KiB (observed 2026-11-23: 257,546 bytes kept),
+  // which drops newest history and the live prompt. Keep fresh handoffs and messages safely below 200 KiB.
+  'native:antigravity': Object.freeze({ cli: true, steer: false, compact: false, usage: true, maxMessageBytes: 200 * 1024 }),
 });
 
 // A native CLI Harness no longer ships (a stale saved selection) stays on the CLI path, where it is refused as unavailable.

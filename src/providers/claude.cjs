@@ -580,8 +580,48 @@ class ClaudeCLI {
   }
 }
 
+// Slice a JS string without splitting UTF-16 surrogate pairs.
+function safeHead(text, count) {
+  let end = Math.max(0, Math.min(text.length, count));
+  if (end > 0 && end < text.length) {
+    const code = text.charCodeAt(end - 1);
+    if (code >= 0xD800 && code <= 0xDBFF) end--;
+  }
+  return text.slice(0, end);
+}
+function safeTail(text, count) {
+  let start = Math.max(0, text.length - Math.max(0, count));
+  if (start > 0 && start < text.length) {
+    const code = text.charCodeAt(start);
+    if (code >= 0xDC00 && code <= 0xDFFF) start++;
+  }
+  return text.slice(start);
+}
+
+function fitMessageToBytes(message, budget) {
+  const marker = '\n...[earlier text omitted to fit provider limit]...\n';
+  const emptyBytes = Buffer.byteLength(JSON.stringify({ ...message, text: marker }), 'utf8');
+  if (emptyBytes > budget) return null;
+  // Binary search the maximum character budget (30% head + 70% tail) whose JSON stays within `budget` UTF-8 bytes.
+  const source = String(message.text || '');
+  let low = 0, high = source.length, best = { ...message, text: marker };
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    const headLen = Math.floor(mid * 0.3);
+    const tailLen = mid - headLen;
+    const candidate = { ...message, text: safeHead(source, headLen) + marker + safeTail(source, tailLen) };
+    if (Buffer.byteLength(JSON.stringify(candidate), 'utf8') <= budget) {
+      best = candidate;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return best;
+}
+
 // `images` (imageNumbers, with Jev image assist) names each earlier image, so the next model can ask Jev about it.
-function handoff(items, maxLength = 1000000, images = null) {
+function handoff(items, maxLength = 1000000, images = null, { trim = false } = {}) {
   // Progress notes (commentary) are not history the next model needs; final answers carry the outcome.
   const imageText = (item, part) => {
     const number = images?.get(item.id)?.[(item.content || []).filter(c => c.type === 'image').indexOf(part)];
@@ -592,8 +632,61 @@ function handoff(items, maxLength = 1000000, images = null) {
     role: i.type === 'userMessage' ? 'user' : 'assistant',
     text: i.type === 'userMessage' ? (i.contextText || '') + (i.content || []).map(c => c.type === 'text' ? c.text : imageText(i, c)).join('\n') : stripTaskStatus(i.text),
   }));
+  if (!messages.length) return '';
   const text = JSON.stringify(messages);
-  if (text.length > maxLength) throw new Error('Conversation is too large to transfer. Start a new chat or compact it before switching backends.');
-  return messages.length ? `Earlier conversation, supplied as history:\n${text}\n\nCurrent request:\n` : '';
+  if (!trim) {
+    if (text.length > maxLength) throw new Error('Conversation is too large to transfer. Start a new chat or compact it before switching backends.');
+    return `Earlier conversation, supplied as history:\n${text}\n\nCurrent request:\n`;
+  }
+  const full = `Earlier conversation, supplied as history:\n${text}\n\nCurrent request:\n`;
+  if (Buffer.byteLength(full, 'utf8') <= maxLength) return full;
+
+  // Bounded tail mode: drop oldest messages first so newest context and the live request after this block always survive.
+  const footer = '\n\nCurrent request:\n';
+  const wrap = (kept, excerpted) => {
+    const omitted = messages.length - kept.length;
+    const detail = excerpted
+      ? (omitted > 0 ? `${omitted} older omitted, newest excerpted to fit provider limit` : 'newest excerpted to fit provider limit')
+      : `${omitted} older omitted to fit provider limit`;
+    return `Earlier conversation, supplied as history (most recent ${kept.length} of ${messages.length} messages; ${detail}):\n${JSON.stringify(kept)}${footer}`;
+  };
+  const reserve = Buffer.byteLength(wrap([], true), 'utf8') + 32;
+  const jsonBudget = maxLength - reserve;
+  if (jsonBudget <= 32) {
+    const notice = `Earlier conversation omitted (${messages.length} messages exceeded provider message limit).${footer}`;
+    return Buffer.byteLength(notice, 'utf8') <= maxLength ? notice : '';
+  }
+
+  const kept = [];
+  let usedBytes = 2; // JSON array brackets []
+  let excerpted = false;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const entryBytes = Buffer.byteLength(JSON.stringify(messages[i]), 'utf8');
+    const comma = kept.length ? 1 : 0;
+    if (usedBytes + comma + entryBytes <= jsonBudget) {
+      kept.unshift(messages[i]);
+      usedBytes += comma + entryBytes;
+    } else {
+      if (!kept.length) {
+        const fitted = fitMessageToBytes(messages[i], jsonBudget - 2);
+        if (fitted) { kept.push(fitted); excerpted = true; }
+      }
+      break;
+    }
+  }
+  if (!kept.length) {
+    const notice = `Earlier conversation omitted (${messages.length} messages exceeded provider message limit).${footer}`;
+    return Buffer.byteLength(notice, 'utf8') <= maxLength ? notice : '';
+  }
+  let out = wrap(kept, excerpted);
+  while (kept.length > 1 && Buffer.byteLength(out, 'utf8') > maxLength) {
+    kept.shift();
+    out = wrap(kept, excerpted);
+  }
+  if (Buffer.byteLength(out, 'utf8') > maxLength) {
+    const notice = `Earlier conversation omitted (${messages.length} messages exceeded provider message limit).${footer}`;
+    return Buffer.byteLength(notice, 'utf8') <= maxLength ? notice : '';
+  }
+  return out;
 }
 module.exports = { ClaudeCLI, handoff, EFFORTS };

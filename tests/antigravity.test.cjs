@@ -187,7 +187,7 @@ test('a confirmed result survives unconfirmed cleanup, which still removes the w
   const { AntigravityCLI } = require(modulePath);
   tree.stopTree = stopTree; delete require.cache[modulePath];
   const cwd = workspace(t), f = await antigravityFixture(t), backend = new AntigravityCLI(f.backend.launch, f.backend.find);
-  assert.equal((await backend.run(turn(cwd))).result, 'Hello world');
+  assert.equal((await backend.run({ ...turn(cwd), images: ['data:image/png;base64,iVBORw0KGgo='] })).result, 'Hello world');
   assert.deepEqual(fs.readdirSync(path.join(cwd, '.agents', 'agents')), []);
   assert.equal(backend.hosts.size, 1);
   await assert.rejects(backend.run(turn(cwd)), /pending cleanup/);
@@ -237,4 +237,213 @@ test('failed Antigravity tool steps emit is_error tool_result events with readab
     { type: 'tool_result', tool_use_id: session + ':2', is_error: true, content: 'file does not exist' },
     { type: 'tool_result', tool_use_id: session + ':3', is_error: true, content: 'CANCELED' },
   ]);
+});
+
+test('Antigravity noTools mode runs tool-free without Full access, rejects tool steps, and pre-flight errors preserve the session', async t => {
+  const cwd = workspace(t), session = 'agy-fixture-session';
+  const line = value => JSON.stringify(value) + '\n';
+  const textOnly = await antigravityFixture(t, { raw:
+    line({ event: 'step_update', step_update: { conversation_id: session, step_index: 1, state: 'DONE', step_type: 'agent_response', text_delta: 'Cancelled noted.' } }) +
+    line({ event: 'result', result: { conversation_id: session, status: 'SUCCESS', response: 'Cancelled noted.', num_turns: 1, usage: { input_tokens: 10, output_tokens: 3 } } }) });
+  const helpers = { serverName: 'phasma_harness', command: process.execPath, args: ['helper.cjs'], env: { TOKEN: 'x' }, instructions: 'Helper instructions.' };
+  const result = await textOnly.backend.run({ ...turn(cwd), access: 'read-only', noTools: true, helpers });
+  assert.equal(result.result, 'Cancelled noted.');
+  assert.ok(!textOnly.children[0].args.includes('--dangerously-skip-permissions'), 'noTools never auto-approves tools');
+  assert.deepEqual(textOnly.children[0].config.mcpServers, [], 'noTools mounts no MCP servers');
+  assert.match(textOnly.calls[0].message.content, /No tools are available/);
+
+  const tooled = await antigravityFixture(t); // fixture stream attempts a tool call
+  await assert.rejects(tooled.backend.run({ ...turn(cwd), access: 'read-only', noTools: true }), error => /cannot use tools/.test(error.message) && error.preserveSession === true);
+
+  // Ordinary read-only turns still fail pre-flight with preserveSession so an existing session is not wiped.
+  const denied = await antigravityFixture(t);
+  await assert.rejects(denied.backend.run({ ...turn(cwd), access: 'read-only' }), error => /requires Full access/.test(error.message) && error.preserveSession === true);
+  assert.equal(denied.children.length, 0);
+});
+
+test('Antigravity pre-flight rejects oversized single messages before spawn and bounded handoff keeps the newest messages', async t => {
+  const { handoff } = require('../src/providers/claude.cjs');
+  const { MAX_MESSAGE_BYTES } = require('../src/providers/antigravity.cjs');
+  assert.ok(Number.isSafeInteger(MAX_MESSAGE_BYTES) && MAX_MESSAGE_BYTES > 0 && MAX_MESSAGE_BYTES <= 220 * 1024);
+
+  const cwd = workspace(t), f = await antigravityFixture(t);
+  await assert.rejects(f.backend.run({ ...turn(cwd), prompt: 'a'.repeat(MAX_MESSAGE_BYTES + 100) }),
+    error => /single-message limit/.test(error.message) && error.preserveSession === true);
+  assert.equal(f.children.length, 0, 'oversized prompt is rejected before spawning agy');
+
+  // Trim mode keeps newest messages, drops oldest, and handles an oversized single message with surrogate pairs cleanly.
+  const items = Array.from({ length: 80 }, (_, i) => ({
+    id: `m-${i}`, type: i % 2 === 0 ? 'userMessage' : 'agentMessage', phase: 'final_answer',
+    content: [{ type: 'text', text: `MSG_${String(i).padStart(3, '0')}_` + 'x'.repeat(6000) }],
+    text: `MSG_${String(i).padStart(3, '0')}_` + 'x'.repeat(6000),
+  }));
+  const trimmed = handoff(items, 50000, null, { trim: true });
+  assert.ok(Buffer.byteLength(trimmed, 'utf8') <= 50000, 'bounded handoff stays within byte budget');
+  assert.match(trimmed, /MSG_079_/, 'newest message is preserved');
+  assert.doesNotMatch(trimmed, /MSG_000_/, 'oldest message is dropped first');
+  assert.match(trimmed, /older omitted to fit provider limit/);
+
+  const singleHuge = [{ id: 'big', type: 'agentMessage', phase: 'final_answer', text: '🚀'.repeat(20000) + 'TAIL_MARKER' }];
+  const clipped = handoff(singleHuge, 4000, null, { trim: true });
+  assert.ok(Buffer.byteLength(clipped, 'utf8') <= 4000);
+  assert.match(clipped, /TAIL_MARKER/, 'oversized newest message preserves its tail');
+  assert.ok(!/[\uD800-\uDFFF]/.test(clipped.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, '')), 'no unpaired UTF-16 surrogates');
+});
+
+test('a finished Antigravity worker turn parks and reuses its process on matching resumed turns', async t => {
+  const cwd = workspace(t), f = await antigravityFixture(t);
+  const helpers = { serverName: 'phasma_harness', command: process.execPath, args: ['helper.cjs'],
+    env: { PHASMA_BRIDGE_TOKEN: 'tok-1', ELECTRON_RUN_AS_NODE: '1' }, instructions: 'Initial helper instructions.' };
+  const events1 = [], events2 = [];
+  const first = await f.backend.run({ ...turn(cwd), helpers, effort: 'medium', onEvent: e => events1.push(e) });
+  assert.equal(f.children.length, 1);
+  assert.equal(f.backend.warmCount(), 1);
+  assert.equal(f.backend.hosts.size, 0, 'an idle warm host does not block hosts.size');
+  assert.equal(f.children[0].child.exitCode, null);
+  assert.deepEqual(fs.readdirSync(path.join(cwd, '.agents', 'agents')), [], 'agent file is removed before parking');
+
+  const second = await f.backend.run({
+    ...turn(cwd),
+    resume: first.session_id,
+    effort: 'medium',
+    instructions: 'Updated turn instructions.',
+    helpers: { ...helpers, instructions: 'Updated helper instructions.' },
+    prompt: 'Second turn',
+    onEvent: e => events2.push(e),
+  });
+  assert.equal(f.children.length, 1, 'reuses the parked process instead of spawning a second one');
+  assert.equal(f.backend.warmCount(), 1);
+  assert.equal(f.backend.hosts.size, 0);
+  assert.equal(f.calls.length, 2, 'both prompts were written to the same process stdin');
+  assert.match(f.calls[1].message.content, /Updated turn instructions.*Updated helper instructions.*Second turn/s);
+  assert.equal(second.session_id, first.session_id);
+  assert.equal(second.usage, undefined, 'resumed turn keeps usage unknown');
+  assert.equal(second.cacheUsageUnknown, true);
+  assert.ok(events2.some(e => e.type === 'system' && e.session_id === first.session_id));
+  assert.ok(events2.some(e => e.type === 'stream_event'));
+  assert.ok(events2.some(e => e.type === 'assistant' && e.message?.content?.some(c => c.type === 'text')));
+});
+
+test('changing model, effort, cwd, helpers, or adding images closes the parked Antigravity host and starts fresh', async t => {
+  const cwd1 = workspace(t), cwd2 = workspace(t), f = await antigravityFixture(t);
+  const baseHelpers = { serverName: 'phasma_harness', command: process.execPath, args: ['h1.cjs'], env: { TOKEN: 'a' } };
+  let res = await f.backend.run({ ...turn(cwd1), helpers: baseHelpers, effort: 'low' });
+  assert.equal(f.children.length, 1);
+
+  // Model change
+  res = await f.backend.run({ ...turn(cwd1), resume: res.session_id, helpers: baseHelpers, effort: 'low', model: 'claude-sonnet-4-6' });
+  assert.equal(f.children[0].child.exitCode, 0);
+  assert.equal(f.children.length, 2);
+  assert.ok(f.children[1].args.includes('--conversation'));
+
+  // Effort change
+  res = await f.backend.run({ ...turn(cwd1), resume: res.session_id, helpers: baseHelpers, effort: 'high', model: 'claude-sonnet-4-6' });
+  assert.equal(f.children[1].child.exitCode, 0);
+  assert.equal(f.children.length, 3);
+
+  // Helpers env change
+  const helpers2 = { ...baseHelpers, env: { TOKEN: 'b' } };
+  res = await f.backend.run({ ...turn(cwd1), resume: res.session_id, helpers: helpers2, effort: 'high', model: 'claude-sonnet-4-6' });
+  assert.equal(f.children[2].child.exitCode, 0);
+  assert.equal(f.children.length, 4);
+
+  // Cwd change
+  res = await f.backend.run({ ...turn(cwd2), resume: res.session_id, helpers: helpers2, effort: 'high', model: 'claude-sonnet-4-6' });
+  assert.equal(f.children[3].child.exitCode, 0);
+  assert.equal(f.children.length, 5);
+
+  // Images turn (not poolable) closes previous parked host and does not park itself
+  await f.backend.run({ ...turn(cwd2), resume: res.session_id, helpers: helpers2, effort: 'high', model: 'claude-sonnet-4-6',
+    images: ['data:image/png;base64,iVBORw0KGgo='] });
+  assert.equal(f.children[4].child.exitCode, 0);
+  assert.equal(f.children[5].child.exitCode, 0);
+  assert.equal(f.children.length, 6);
+  assert.equal(f.backend.warmCount(), 0);
+});
+
+test('failed, aborted, timed-out, schema, noTools, and image turns never park in Antigravity', async t => {
+  const cwd = workspace(t);
+
+  // Schema
+  const schemaF = await antigravityFixture(t, { raw: JSON.stringify({ event: 'result', result: { conversation_id: 'agy-fixture-session', status: 'SUCCESS', response: '{"ok":true}', num_turns: 1 } }) + '\n' });
+  await schemaF.backend.run({ cwd, model: 'gemini-fixture-high', prompt: 'json', schema: { type: 'object' } });
+  assert.equal(schemaF.backend.warmCount(), 0);
+  assert.equal(schemaF.children[0].child.exitCode, 0);
+
+  // noTools
+  const noToolsF = await antigravityFixture(t, { raw: JSON.stringify({ event: 'result', result: { conversation_id: 'agy-fixture-session', status: 'SUCCESS', response: 'ok', num_turns: 1 } }) + '\n' });
+  await noToolsF.backend.run({ ...turn(cwd), access: 'read-only', noTools: true });
+  assert.equal(noToolsF.backend.warmCount(), 0);
+  assert.equal(noToolsF.children[0].child.exitCode, 0);
+
+  // Failed turn
+  const failF = await antigravityFixture(t, { resultStatus: 'ERROR', resultError: 'boom' });
+  await assert.rejects(failF.backend.run(turn(cwd)), /ERROR/);
+  assert.equal(failF.backend.warmCount(), 0);
+  assert.equal(failF.children[0].child.exitCode, 0);
+
+  // Aborted & timed-out turns
+  const waitF = await antigravityFixture(t, { wait: true });
+  const ac = new AbortController();
+  const p = waitF.backend.run({ ...turn(cwd), signal: ac.signal });
+  await new Promise(r => setImmediate(r));
+  ac.abort();
+  await assert.rejects(p, { name: 'AbortError' });
+  assert.equal(waitF.backend.warmCount(), 0);
+  assert.equal(waitF.children[0].child.exitCode, 0);
+
+  await assert.rejects(waitF.backend.run({ ...turn(cwd), timeoutMs: 5 }), /timed out/);
+  assert.equal(waitF.backend.warmCount(), 0);
+  assert.equal(waitF.children[1].child.exitCode, 0);
+});
+
+test('a parked Antigravity host that exits or emits unsolicited stdout while idle is dropped and replaced', async t => {
+  const cwd = workspace(t), f = await antigravityFixture(t);
+  const first = await f.backend.run(turn(cwd));
+  assert.equal(f.backend.warmCount(), 1);
+
+  // Unexpected stdout while parked drops and closes it
+  f.children[0].child.stdout.write('unsolicited noise\n');
+  await new Promise(r => setImmediate(r));
+  assert.equal(f.backend.warmCount(), 0);
+  assert.equal(f.children[0].child.exitCode, 0);
+
+  const second = await f.backend.run({ ...turn(cwd), resume: first.session_id });
+  assert.equal(f.children.length, 2, 'spawns a fresh process when parked host was dropped');
+  assert.equal(f.backend.warmCount(), 1);
+
+  // Unexpected crash/exit while parked drops it
+  f.children[1].child.kill();
+  await new Promise(r => setImmediate(r));
+  assert.equal(f.backend.warmCount(), 0);
+
+  await f.backend.run({ ...turn(cwd), resume: second.session_id });
+  assert.equal(f.children.length, 3);
+  assert.equal(f.backend.warmCount(), 1);
+});
+
+test('at most three Antigravity processes stay warm across bots, expire after 10 minutes, and close() stops only owned ones', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const cwd = workspace(t);
+  const a = await antigravityFixture(t), b = await antigravityFixture(t);
+
+  await a.backend.run({ ...turn(cwd), resume: 'sess-1' });
+  await a.backend.run({ ...turn(cwd), resume: 'sess-2' });
+  await b.backend.run({ ...turn(cwd), resume: 'sess-3' });
+  await b.backend.run({ ...turn(cwd), resume: 'sess-4' });
+
+  assert.equal(a.backend.warmCount() + b.backend.warmCount(), 3, 'global cap of 3 warm processes across instances');
+  assert.equal(a.children[0].child.exitCode, 0, 'oldest entry is evicted and closed first');
+  assert.equal(a.backend.warmCount(), 1);
+  assert.equal(b.backend.warmCount(), 2);
+
+  await a.backend.close();
+  assert.equal(a.backend.warmCount(), 0);
+  assert.equal(a.children[1].child.exitCode, 0);
+  assert.equal(b.backend.warmCount(), 2, 'closing one instance leaves other instances warm');
+
+  t.mock.timers.tick(10 * 60 * 1000);
+  await new Promise(r => setImmediate(r));
+  assert.equal(b.backend.warmCount(), 0, 'idle warm processes expire after 10 minutes');
+  assert.ok(b.children.every(rec => rec.child.exitCode === 0));
 });

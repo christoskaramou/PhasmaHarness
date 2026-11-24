@@ -21,6 +21,41 @@ function googleAccount(home = os.homedir()) {
 
 const LABEL = 'Antigravity CLI';
 const LIMIT = 16 * 1024 * 1024;
+// agy hard-truncates a single user message from the tail around ~256 KiB (observed 2026-11-23: 257,546 bytes kept).
+// Reject above 200 KiB pre-flight instead of letting agy silently drop newest history and the live prompt.
+const MAX_MESSAGE_BYTES = 200 * 1024;
+const preflight = message => Object.assign(new Error(message), { preserveSession: true });
+
+// A finished poolable worker turn keeps its agy process running for the conversation's next turn, which then skips
+// CLI startup and MCP server spawns. Like Claude/Cursor: at most three stay warm across all bots, each for 10 minutes
+// after its last turn, oldest first. Turns with other cwd/model/effort/access/helpers, tool-free turns, or images start fresh.
+const WARM = new Map();
+const WARM_MS = 10 * 60 * 1000, WARM_MAX = 3;
+
+function dropWarm(sessionId, stop = true) {
+  const entry = WARM.get(sessionId);
+  if (!entry) return null;
+  clearTimeout(entry.timer);
+  if (entry.onClose) entry.child.removeListener('close', entry.onClose);
+  if (entry.onError) entry.child.removeListener('error', entry.onError);
+  if (entry.onStdinError) entry.child.stdin?.removeListener('error', entry.onStdinError);
+  if (entry.onStdout) entry.child.stdout?.removeListener('data', entry.onStdout);
+  WARM.delete(sessionId);
+  if (stop) {
+    const stopping = entry.owner.closeHost(entry.host);
+    stopping.catch(() => {});
+    return { entry, stopping };
+  }
+  return { entry, stopping: null };
+}
+
+function helperSignature(helpers) {
+  if (!helpers) return null;
+  const env = helpers.env && typeof helpers.env === 'object'
+    ? Object.entries(helpers.env).filter(([key]) => key !== 'ELECTRON_RUN_AS_NODE').sort(([a], [b]) => a.localeCompare(b))
+    : [];
+  return [helpers.serverName || null, helpers.command || null, Array.isArray(helpers.args) ? helpers.args : [], env];
+}
 
 function agentText(name, mcpServers) {
   const definition = { name, description: 'Current PhasmaHarness worker', mainAgent: true, subagent: false,
@@ -120,6 +155,7 @@ class AntigravityCLI {
   }
 
   async closeHost(host) {
+    this.hosts.add(host);
     const survivors = await stopTree(host.child), agent = host.agent;
     if (!survivors.length) this.hosts.delete(host);
     // agy reads its agent file at startup, so the generated file goes even when the process tree outlives the stop.
@@ -127,6 +163,34 @@ class AntigravityCLI {
     agent?.remove();
     if (survivors.length) throw new Error('Antigravity cleanup is not confirmed. Resolve its running process before retrying.');
   }
+
+  park(sessionId, entry) {
+    dropWarm(sessionId, true);
+    const host = entry.host, child = host.child;
+    const warm = {
+      ...entry,
+      owner: this,
+      child,
+      onClose: () => { if (WARM.get(sessionId) === warm) dropWarm(sessionId, true); },
+      onError: () => { if (WARM.get(sessionId) === warm) dropWarm(sessionId, true); },
+      onStdinError: () => { if (WARM.get(sessionId) === warm) dropWarm(sessionId, true); },
+      onStdout: text => {
+        if (typeof text === 'string' && !text.trim()) return;
+        if (WARM.get(sessionId) === warm) dropWarm(sessionId, true);
+      },
+    };
+    child.once('close', warm.onClose);
+    child.on('error', warm.onError);
+    child.stdin?.on('error', warm.onStdinError);
+    child.stdout?.on('data', warm.onStdout);
+    warm.timer = setTimeout(() => { if (WARM.get(sessionId) === warm) dropWarm(sessionId, true); }, WARM_MS);
+    warm.timer.unref?.();
+    WARM.set(sessionId, warm);
+    this.hosts.delete(host);
+    while (WARM.size > WARM_MAX) dropWarm(WARM.keys().next().value, true);
+  }
+
+  warmCount() { return [...WARM.values()].filter(entry => entry.owner === this).length; }
 
   async metadata(args) {
     const host = this.start(args, os.tmpdir());
@@ -174,19 +238,22 @@ class AntigravityCLI {
   async run(options) {
     // A second call waits for the first; a stop whose cleanup was never confirmed still refuses (see the finally below).
     const release = await takeTurn(this, options.signal, LABEL);
-    if (this.hosts.size) { release(); throw new Error('Antigravity already has an active process or pending cleanup.'); }
-    // A Hub or routing reply is tool-free (a tool step below rejects it), so only worker turns need Full access.
-    if (!options.schema && options.access !== 'danger-full-access') { release(); throw new Error('Antigravity currently requires Full access. Ask and Workspace permissions are not verified for its headless interface.'); }
+    if (this.hosts.size) { release(); throw preflight('Antigravity already has an active process or pending cleanup.'); }
+    // A Hub/routing reply (schema) or cancelled-result acknowledgement (noTools) is tool-free (a tool step below rejects it),
+    // so only tool-using worker turns need Full access.
+    const toolFree = !!options.schema || !!options.noTools;
+    if (!toolFree && options.access !== 'danger-full-access') { release(); throw preflight('Antigravity currently requires Full access. Ask and Workspace permissions are not verified for its headless interface.'); }
     let parsedImages = [];
     if (options.images?.length) {
-      if (options.schema) { release(); throw new Error('Antigravity structured tool-free replies cannot inspect direct image attachments; use a worker turn or Jev image assist.'); }
+      if (toolFree) { release(); throw preflight('Antigravity structured tool-free replies cannot inspect direct image attachments; use a worker turn or Jev image assist.'); }
       try { parsedImages = options.images.map(imageData); }
-      catch (error) { release(); throw error; }
+      catch (error) { release(); throw Object.assign(error, { preserveSession: true }); }
     }
     if (options.signal?.aborted) { release(); throw Object.assign(new Error('Antigravity stopped.'), { name: 'AbortError' }); }
-    let host, agent, imageDir = null, imagePaths = [], succeeded = false;
+    let host, agent, imageDir = null, imagePaths = [], succeeded = false, trailingBuffer = false, cleanupListeners = null, resolvedSessionId = null;
+    const poolable = !toolFree && !parsedImages.length;
+    let signature = null;
     try {
-      agent = agentFile(options.cwd, options.helpers);
       if (parsedImages.length) {
         imageDir = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-agy-img-'));
         try { fs.chmodSync(imageDir, 0o700); } catch { /* Windows ignores POSIX mode bits */ }
@@ -197,39 +264,69 @@ class AntigravityCLI {
           return file;
         });
       }
-      // A tool-free reply runs without auto-approve, so a tool agy reaches for asks (agy 2026-10-31: "request-review") instead of running.
-      const args = ['--agent', agent.name, '--input-format', 'stream-json', '--output-format', 'stream-json',
-        '--disable-slash-commands', ...(options.schema ? [] : ['--dangerously-skip-permissions'])];
-      if (imageDir) args.push('--add-dir', imageDir);
-      if (options.model) args.push('--model', options.model);
-      if (options.resume) args.push('--conversation', options.resume);
-      if (options.effort) args.push('--effort', options.effort);
-      host = this.start(args, options.cwd, options.helpers?.env);
-      host.agent = agent;
+      const imageNote = imagePaths.length
+        ? `Attached image files (inspect with read_file or view_file):\n${imagePaths.map(file => `- ${file}`).join('\n')}` : '';
+      const modeNote = options.schema && !(options.resume && options.schemaInHistory)
+        ? `Return only a JSON object matching this schema. No tools are available.\n${JSON.stringify(options.schema)}`
+        : options.noTools && !options.schema ? 'No tools are available for this turn. Reply in text only.' : '';
+      const content = [options.instructions, toolFree ? '' : options.helpers?.instructions, modeNote,
+        options.prompt, imageNote].filter(Boolean).join('\n\n');
+      const contentBytes = Buffer.byteLength(content, 'utf8');
+      if (contentBytes > MAX_MESSAGE_BYTES) {
+        throw preflight(`Message (${contentBytes.toLocaleString('en-US')} bytes) exceeds Antigravity CLI's safe single-message limit (${MAX_MESSAGE_BYTES.toLocaleString('en-US')} bytes) and would be truncated. Shorten the message or start a new chat.`);
+      }
+      if (poolable) {
+        signature = JSON.stringify([fs.realpathSync(options.cwd), options.model || null, options.effort || null, options.access, helperSignature(options.helpers)]);
+      }
+      const existingWarm = options.resume && WARM.get(options.resume)?.owner === this
+        ? dropWarm(options.resume, false)?.entry
+        : null;
+      const canReuse = Boolean(
+        existingWarm &&
+        poolable &&
+        existingWarm.signature === signature &&
+        existingWarm.host.child.exitCode === null &&
+        !existingWarm.host.child.killed &&
+        existingWarm.host.child.stdin?.writable &&
+        !existingWarm.host.child.stdin?.writableEnded
+      );
+      if (existingWarm && !canReuse) await this.closeHost(existingWarm.host);
+      const reused = canReuse;
+      if (reused) {
+        host = existingWarm.host;
+        this.hosts.add(host);
+      } else {
+        agent = agentFile(options.cwd, toolFree ? null : options.helpers);
+        // A tool-free reply runs without auto-approve, so a tool agy reaches for asks (agy 2026-10-31: "request-review") instead of running.
+        const args = ['--agent', agent.name, '--input-format', 'stream-json', '--output-format', 'stream-json',
+          '--disable-slash-commands', ...(toolFree ? [] : ['--dangerously-skip-permissions'])];
+        if (imageDir) args.push('--add-dir', imageDir);
+        if (options.model) args.push('--model', options.model);
+        if (options.resume) args.push('--conversation', options.resume);
+        if (options.effort) args.push('--effort', options.effort);
+        host = this.start(args, options.cwd, toolFree ? {} : options.helpers?.env);
+        host.agent = agent;
+      }
       const result = await deadline(new Promise((resolve, reject) => {
-        let buffer = '', received = 0, initialized = false, sessionId, settled = false;
+        let buffer = '', received = 0, initialized = reused, sessionId = reused ? options.resume : undefined, settled = false;
         const finish = (error, value) => {
           if (settled) return;
           settled = true;
           error ? reject(error) : resolve(value);
         };
         const tools = new Set(), onEvent = options.onEvent || (() => {});
-        host.child.stdin.on('error', error => finish(error)); host.child.once('error', error => finish(error));
-        host.child.once('close', () => finish(new Error('Antigravity exited before confirming a result. Review its saved session before retrying.')));
-        host.child.stderr.on('data', () => {});
+        const onStdinError = error => finish(error);
+        const onError = error => finish(error);
+        const onClose = () => finish(new Error('Antigravity exited before confirming a result. Review its saved session before retrying.'));
+        const onStderr = () => {};
         const event = value => {
           if (options.signal?.aborted) throw Object.assign(new Error('Antigravity stopped.'), { name: 'AbortError' });
           if (value.event === 'init') {
-            if (initialized || value.init?.agent !== agent.name || value.init?.permission_mode !== (options.schema ? 'request-review' : 'always-proceed') ||
+            if (initialized || value.init?.agent !== agent?.name || value.init?.permission_mode !== (toolFree ? 'request-review' : 'always-proceed') ||
                 typeof value.conversation_id !== 'string' || !value.conversation_id ||
                 (options.resume && value.conversation_id !== options.resume)) throw new Error('Antigravity did not confirm the requested worker, session and permission mode.');
             initialized = true; sessionId = value.conversation_id;
             onEvent({ type: 'system', session_id: sessionId });
-            const imageNote = imagePaths.length
-              ? `Attached image files (inspect with read_file or view_file):\n${imagePaths.map(file => `- ${file}`).join('\n')}` : '';
-            const content = [options.instructions, options.helpers?.instructions,
-              options.schema && !(options.resume && options.schemaInHistory) ? `Return only a JSON object matching this schema. No tools are available.\n${JSON.stringify(options.schema)}` : '',
-              options.prompt, imageNote].filter(Boolean).join('\n\n');
             host.child.stdin.write(JSON.stringify({ event: 'user', message: { content } }) + '\n');
           } else if (value.event === 'step_update') {
             const step = value.step_update;
@@ -237,8 +334,9 @@ class AntigravityCLI {
             if (step.step_type === 'agent_response' && typeof step.text_delta === 'string') onEvent({ type: 'stream_event',
               event: { type: 'content_block_delta', delta: { type: 'text_delta', text: step.text_delta } } });
             if (step.step_type === 'tool' && typeof step.tool_name === 'string' && Number.isSafeInteger(step.step_index)) {
-              // A Hub or routing reply is tool-free, as for every provider: a reply that uses a tool is not accepted (cursor.cjs).
+              // A Hub/routing reply or noTools turn is tool-free, as for every provider: a reply that uses a tool is not accepted (cursor.cjs).
               if (options.schema) throw invalidResponse();
+              if (options.noTools) throw preflight('Antigravity cannot use tools during a read-only cancelled-result reply.');
               const id = sessionId + ':' + step.step_index;
               if (!tools.has(id)) {
                 tools.add(id);
@@ -268,8 +366,11 @@ class AntigravityCLI {
               cacheUsageUnknown: !usage || result.usage.cache_read_tokens === undefined });
           } else throw new Error('Unsupported Antigravity stream event. Update the adapter before continuing.');
         };
-        host.child.stdout.on('data', text => {
-          if (settled) return;
+        const onStdout = text => {
+          if (settled) {
+            if (typeof text === 'string' && text.trim()) trailingBuffer = true;
+            return;
+          }
           try {
             received += text.length; buffer += text;
             if (received > LIMIT * 2 || buffer.length > LIMIT) throw new Error('Antigravity output is too large.');
@@ -278,16 +379,69 @@ class AntigravityCLI {
               const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
               if (line.trim()) event(JSON.parse(line));
             }
+            if (settled && buffer.trim()) trailingBuffer = true;
           } catch (error) { finish(error); }
-        });
+        };
+        cleanupListeners = () => {
+          host.child.stdin.removeListener('error', onStdinError);
+          host.child.removeListener('error', onError);
+          host.child.removeListener('close', onClose);
+          host.child.stderr.removeListener('data', onStderr);
+          host.child.stdout.removeListener('data', onStdout);
+        };
+        host.child.stdin.on('error', onStdinError);
+        host.child.on('error', onError);
+        host.child.on('close', onClose);
+        host.child.stderr.on('data', onStderr);
+        host.child.stdout.on('data', onStdout);
+        if (reused) {
+          try {
+            if (options.signal?.aborted) throw Object.assign(new Error('Antigravity stopped.'), { name: 'AbortError' });
+            onEvent({ type: 'system', session_id: sessionId });
+            host.child.stdin.write(JSON.stringify({ event: 'user', message: { content } }) + '\n');
+          } catch (error) {
+            finish(error);
+          }
+        }
       }), options.timeoutMs || 30 * 60 * 1000, LABEL, options.signal);
+      resolvedSessionId = result.session_id;
       succeeded = true;
       return result;
     } finally {
+      cleanupListeners?.();
+      const canPark = Boolean(
+        succeeded &&
+        poolable &&
+        host &&
+        resolvedSessionId &&
+        !options.signal?.aborted &&
+        !trailingBuffer &&
+        host.child.exitCode === null &&
+        !host.child.killed &&
+        host.child.stdin?.writable &&
+        !host.child.stdin?.writableEnded
+      );
       // A confirmed result stands; an unconfirmed stop keeps the host pending, so the next run refuses until it is resolved.
-      try { if (host) await this.closeHost(host); else agent?.remove(); }
-      catch (error) { if (!succeeded) throw error; }
-      finally {
+      try {
+        if (host) {
+          if (canPark) {
+            const pendingAgent = host.agent;
+            host.agent = null;
+            try { pendingAgent?.remove(); }
+            catch (error) {
+              await this.closeHost(host);
+              throw error;
+            }
+            this.park(resolvedSessionId, { host, signature });
+          } else {
+            await this.closeHost(host);
+          }
+        } else {
+          agent?.remove();
+        }
+      } catch (error) {
+        if (!succeeded) throw error;
+      } finally {
         if (imageDir) try { fs.rmSync(imageDir, { recursive: true, force: true }); } catch { /* Best-effort temp image cleanup. */ }
         release();
       }
@@ -350,11 +504,18 @@ class AntigravityCLI {
 
   async login() { throw new Error('Run agy in your terminal to complete its native sign-in, then reconnect in Harness.'); }
   close() {
+    const warmStops = [];
+    for (const [id, entry] of [...WARM]) {
+      if (entry.owner !== this) continue;
+      const dropped = dropWarm(id, true);
+      if (dropped?.stopping) warmStops.push(dropped.stopping);
+    }
     return Promise.all([
+      ...warmStops,
       ...[...this.hosts].map(host => this.closeHost(host)),
       ...[...this.usageHosts].map(host => this.closeUsageHost(host)),
     ]);
   }
 }
 
-module.exports = { AntigravityCLI, sweepAgentFiles, googleAccount, contextWindow };
+module.exports = { AntigravityCLI, sweepAgentFiles, googleAccount, contextWindow, MAX_MESSAGE_BYTES };
