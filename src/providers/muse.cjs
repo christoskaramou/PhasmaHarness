@@ -7,6 +7,29 @@ const { invalidResponse } = require('./structured.cjs');
 
 const LABEL = 'Muse Code CLI';
 
+// A finished worker turn leaves its `muse serve` process running for the conversation's next turn, skipping spawn,
+// initialize, permissionProfile/list, session/resume and unchanged model setup. At most three stay warm across all bots,
+// each for 10 idle minutes, oldest first; another cwd, access level or MCP helper config starts a fresh process.
+const WARM = new Map();
+const WARM_MS = 10 * 60 * 1000, WARM_MAX = 3;
+
+function dropWarm(sessionId, stop = true) {
+  const entry = WARM.get(sessionId);
+  if (!entry) return null;
+  clearTimeout(entry.timer);
+  entry.host.child.removeListener('close', entry.onClose);
+  if (entry.host.parkedSessionId === sessionId) entry.host.parkedSessionId = null;
+  WARM.delete(sessionId);
+  if (stop) return entry.owner.closeHost(entry.host);
+  return entry;
+}
+
+function helperSignature(helpers) {
+  if (!helpers) return null;
+  const env = helpers.env ? Object.entries(helpers.env).sort(([a], [b]) => a.localeCompare(b)) : null;
+  return { serverName: helpers.serverName, command: helpers.command, args: helpers.args || [], env };
+}
+
 function metaLink(value) {
   try {
     const { protocol, hostname } = new URL(value);
@@ -39,9 +62,14 @@ class MuseCLI {
     const executable = this.find();
     const child = spawnOwned(this.launch, executable.command, [...executable.args, 'serve', '--disable-request-user-input'], {
       cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],    });
-    const host = { child, sdk, session: null, held: [], opening: false, context: null, reported: new Map(), tokenEvents: new Map() };
+    const host = { child, sdk, session: null, held: [], opening: false, context: null, reported: new Map(), tokenEvents: new Map(), failed: false, appliedModelKey: null, closing: null };
     // The code stays: INVALID_STRUCTURED_RESPONSE (a Hub reply that used a tool) gets the router's one retry.
-    host.failure = new Promise((_, reject) => { host.fail = error => reject(Object.assign(new Error(error.message || 'Muse protocol failed.'), error.code ? { code: error.code } : {})); });
+    host.failure = new Promise((_, reject) => {
+      host.fail = error => {
+        host.failed = true;
+        reject(Object.assign(new Error(error.message || 'Muse protocol failed.'), error.code ? { code: error.code } : {}));
+      };
+    });
     host.failure.catch(() => {});
     this.hosts.add(host);
     child.stdout.setEncoding('utf8');
@@ -74,11 +102,15 @@ class MuseCLI {
 
   async closeHost(host) {
     if (!host || !this.hosts.has(host)) return;
-    const remaining = await stopTree(host.child);
-    if (remaining.length) throw new Error('Muse cleanup is not confirmed. Resolve its process before retrying.');
-    host.session?.hostExited({ kind: 'transportEof' });
-    await host.rpc.close();
-    this.hosts.delete(host);
+    if (host.closing) return host.closing;
+    host.closing = (async () => {
+      const remaining = await stopTree(host.child);
+      if (remaining.length) throw new Error('Muse cleanup is not confirmed. Resolve its process before retrying.');
+      host.session?.hostExited({ kind: 'transportEof' });
+      await host.rpc.close();
+      this.hosts.delete(host);
+    })().catch(error => { host.closing = null; throw error; });
+    return host.closing;
   }
 
   async refresh() {
@@ -142,9 +174,10 @@ class MuseCLI {
     host.session.onGapError(() => host.fail(new Error('Muse history is incomplete. Review the session before continuing.')));
     host.opening = false;
     for (const event of host.held.splice(0)) this.notification(host, event);
-    const profileId = this.models.find(model => model.model === options.model)?.profileId;
+    const profileId = this.models.find(model => model.model === options.model)?.profileId || null;
     await this.call(host, 'session/setModel', { sessionId: host.session.sessionId,
       model: { providerId: 'meta', modelId: options.model, ...(profileId ? { profileId } : {}) } }, options.signal, true);
+    host.appliedModelKey = JSON.stringify([options.model, profileId]);
     return host.session;
   }
 
@@ -194,15 +227,38 @@ class MuseCLI {
   }
 
   async run(options) {
-    // Every call has its own process; a tool-free reply (a Secondary read, routing) runs beside a turn, turns take turns.
+    // A tool-free structured one-off (a Secondary read, routing) runs in its own process beside a turn; worker turns take turns.
     const release = options.schema ? () => {} : await takeTurn(this, options.signal, LABEL);
-    let host;
+    const poolable = !options.schema;
+    const signature = poolable ? JSON.stringify([options.cwd, options.access, helperSignature(options.helpers)]) : null;
+    const profileId = this.models.find(model => model.model === options.model)?.profileId || null;
+    const modelKey = JSON.stringify([options.model, profileId]);
+    let host, succeeded = false;
     try {
-      host = await this.createHost(options.cwd, options.signal);
-      // A Hub or routing reply runs read-only, as DeepSeek's does.
-      const session = await this.openSession(host, options.schema ? { ...options, access: 'read-only' } : options);
-      host.context = options;
-      options.onEvent?.({ type: 'system', session_id: session.sessionId });
+      const warm = poolable && options.resume && WARM.get(options.resume)?.owner === this ? dropWarm(options.resume, false) : null;
+      const reused = warm && warm.signature === signature && !warm.host.failed && warm.host.child.exitCode === null
+        && !warm.host.child.killed && warm.host.session?.sessionId === options.resume ? warm : null;
+      if (warm && !reused) await this.closeHost(warm.host);
+      let session;
+      if (reused) {
+        host = reused.host;
+        session = host.session;
+        host.reported.clear();
+        host.tokenEvents.clear();
+        host.context = options;
+        options.onEvent?.({ type: 'system', session_id: session.sessionId });
+        if (host.appliedModelKey !== modelKey) {
+          await this.call(host, 'session/setModel', { sessionId: session.sessionId,
+            model: { providerId: 'meta', modelId: options.model, ...(profileId ? { profileId } : {}) } }, options.signal, true);
+          host.appliedModelKey = modelKey;
+        }
+      } else {
+        host = await this.createHost(options.cwd, options.signal);
+        // A Hub or routing reply runs read-only, as DeepSeek's does.
+        session = await this.openSession(host, options.schema ? { ...options, access: 'read-only' } : options);
+        host.context = options;
+        options.onEvent?.({ type: 'system', session_id: session.sessionId });
+      }
       const input = [{ type: 'text', text: [options.instructions, options.helpers?.instructions,
         options.schema && !(options.resume && options.schemaInHistory) ? `Return only a JSON object matching this schema. No tools are available.\n${JSON.stringify(options.schema)}` : '',
         options.prompt].filter(Boolean).join('\n\n') }];
@@ -277,10 +333,17 @@ class MuseCLI {
       const usage = counts.length && counts.length === events.length ? counts.reduce((total, event) => ({ input_tokens: total.input_tokens + event.promptTokens,
         output_tokens: total.output_tokens + event.usage.outputTokens }), { input_tokens: 0, output_tokens: 0 }) : null;
       const contextWindow = this.models.find(model => model.model === options.model)?.contextWindow;
-      return { session_id: session.sessionId, result: text, ...(usage ? { usage, cacheUsageUnknown: true } : {}), ...(contextWindow ? { contextWindow } : {}) };
+      const result = { session_id: session.sessionId, result: text, ...(usage ? { usage, cacheUsageUnknown: true } : {}), ...(contextWindow ? { contextWindow } : {}) };
+      succeeded = true;
+      return result;
     } finally {
-      try { if (host) await this.closeHost(host); }
-      finally { release(); }
+      if (host) host.context = null;
+      try {
+        const canPark = succeeded && poolable && !options.signal?.aborted && host && !host.failed
+          && host.child.exitCode === null && !host.child.killed && host.session?.sessionId;
+        if (canPark) this.park(host.session.sessionId, { host, signature });
+        else if (host) await this.closeHost(host);
+      } finally { release(); }
     }
   }
 
@@ -360,8 +423,32 @@ class MuseCLI {
     }
   }
 
+  park(sessionId, entry) {
+    dropWarm(sessionId, true)?.catch(() => {});
+    entry.owner = this;
+    entry.host.parkedSessionId = sessionId;
+    entry.onClose = () => { if (WARM.get(sessionId) === entry) dropWarm(sessionId, true)?.catch(() => {}); };
+    entry.host.child.once('close', entry.onClose);
+    if (!entry.host.watchedFailure) {
+      entry.host.watchedFailure = true;
+      entry.host.failure.catch(() => {
+        const id = entry.host.parkedSessionId;
+        if (id && WARM.get(id)?.host === entry.host) dropWarm(id, true)?.catch(() => {});
+      });
+    }
+    entry.timer = setTimeout(() => { if (WARM.get(sessionId) === entry) dropWarm(sessionId, true)?.catch(() => {}); }, WARM_MS);
+    entry.timer.unref?.();
+    WARM.set(sessionId, entry);
+    while (WARM.size > WARM_MAX) dropWarm(WARM.keys().next().value, true)?.catch(() => {});
+  }
+
+  warmCount() {
+    return [...WARM.values()].filter(entry => entry.owner === this).length;
+  }
+
   close() {
     return Promise.all([
+      ...[...WARM].filter(([, entry]) => entry.owner === this).map(([id]) => dropWarm(id, true)),
       ...[...this.hosts].map(host => this.closeHost(host)),
       ...[...this.usageChildren].map(async child => {
         if (!(await stopTree(child)).length) this.usageChildren.delete(child);

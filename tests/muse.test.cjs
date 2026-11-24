@@ -70,7 +70,7 @@ test('Muse sign-in opens only the Meta approval link it prints', async () => {
   assert.deepEqual(opened, ['https://auth.meta.com/device?user_code=ABCD-1234']);
 });
 
-test('Muse streams folded public items, ignores reasoning and does not invent usage', async t => {
+test('Muse streams folded public items, ignores reasoning and keeps the host warm until closed', async t => {
   const { backend, children } = await fixture(t);
   const events = [];
   const result = await backend.run({ ...runOptions(), onEvent: event => events.push(event) });
@@ -79,7 +79,11 @@ test('Muse streams folded public items, ignores reasoning and does not invent us
   assert.equal(Object.hasOwn(result, 'usage'), false);
   assert.doesNotMatch(JSON.stringify(events), /PRIVATE_REASONING/);
   assert.ok(events.some(event => event.message?.content?.some(part => part.text === 'Hello')));
+  assert.equal(children[0].child.exitCode, null, 'finished worker turn stays warm');
+  assert.equal(backend.warmCount(), 1);
+  await backend.close();
   assert.equal(children[0].child.exitCode, 0);
+  assert.equal(backend.warmCount(), 0);
 });
 
 test('Muse resumes with the selected profile and session-bound MCP helpers', async t => {
@@ -226,4 +230,181 @@ test('Muse returns the model catalog context limit as the context window', async
   const undeclared = await fixture(t, { contextLimit: null });
   await undeclared.backend.refresh();
   assert.equal(Object.hasOwn(await undeclared.backend.run(runOptions()), 'contextWindow'), false, 'no window when the catalog declares none');
+});
+
+test('a resumed Muse worker turn reuses its warm host when launch settings match and skips redundant setup', async t => {
+  const answers = ['First reply', 'Second reply', 'Third reply'];
+  const { backend, calls, children } = await fixture(t, { onPrompt: async () => answers.shift() });
+  const helpers = { serverName: 'phasma_harness', command: 'node', args: ['bridge.cjs'], env: { A: '1', B: '2' }, instructions: 'Turn 1' };
+  const events1 = [];
+  const first = await backend.run({ ...runOptions(), helpers, onEvent: event => events1.push(event) });
+  assert.equal(first.result, 'First reply');
+  assert.equal(children.length, 1);
+  assert.equal(backend.warmCount(), 1);
+  const callsAfterFirst = calls.length;
+
+  // Same cwd/access/helpers (with reordered env keys, changed helpers.instructions and effort) + same model -> reuse & skip setModel.
+  const events2 = [];
+  const helpers2 = { serverName: 'phasma_harness', command: 'node', args: ['bridge.cjs'], env: { B: '2', A: '1' }, instructions: 'Turn 2' };
+  const second = await backend.run({ ...runOptions(), resume: first.session_id, helpers: helpers2, effort: 'high', onEvent: event => events2.push(event) });
+  assert.equal(second.result, 'Second reply');
+  assert.equal(children.length, 1, 'no second process spawned');
+  assert.equal(backend.warmCount(), 1);
+  const secondCalls = calls.slice(callsAfterFirst).map(([method]) => method);
+  assert.deepEqual(secondCalls, ['turn/start'], 'skips initialize, permissionProfile/list, session/resume and unchanged session/setModel');
+  assert.ok(events2.some(event => event.message?.content?.some(part => part.text === 'Second reply')), 'streams Turn 2 items cleanly');
+
+  // Even when a fixture reuses itemId "answer" across turns, clearing host.reported lets Turn 2 stream to onEvent.
+  const plain = await fixture(t);
+  const plainEvents1 = [], plainEvents2 = [];
+  const r1 = await plain.backend.run({ ...runOptions(), onEvent: e => plainEvents1.push(e) });
+  await plain.backend.run({ ...runOptions(), resume: r1.session_id, onEvent: e => plainEvents2.push(e) });
+  assert.equal(plain.children.length, 1);
+  assert.ok(plainEvents2.some(e => e.message?.content?.some(part => part.text === 'Hello world')));
+});
+
+test('changing Muse model reuses the warm host with session/setModel; changing cwd, access or helpers respawns', async t => {
+  const { backend, calls, children } = await fixture(t, { onPrompt: async ({ params }) => `ok:${params.input[0].text}` });
+  const helpers = { serverName: 'phasma_harness', command: 'node', args: ['bridge.cjs'], env: { TOKEN: 'one' } };
+  const { session_id: id } = await backend.run({ ...runOptions(), helpers });
+  assert.equal(children.length, 1);
+
+  // Model change reuses the same process and sends session/setModel.
+  const beforeModel = calls.length;
+  await backend.run({ ...runOptions(), resume: id, model: 'model-b', helpers });
+  assert.equal(children.length, 1);
+  assert.deepEqual(calls.slice(beforeModel).map(([m]) => m), ['session/setModel', 'turn/start']);
+
+  // Changing access closes the warm process and spawns a fresh one with session/resume.
+  await backend.run({ ...runOptions(), resume: id, model: 'model-b', access: 'danger-full-access', helpers });
+  assert.equal(children.length, 2);
+  assert.equal(children[0].child.exitCode, 0);
+  assert.equal(calls.filter(([m]) => m === 'session/resume').length, 1);
+
+  // Changing helpers closes the warm process and spawns a fresh one.
+  await backend.run({ ...runOptions(), resume: id, model: 'model-b', access: 'danger-full-access',
+    helpers: { ...helpers, env: { TOKEN: 'two' } } });
+  assert.equal(children.length, 3);
+  assert.equal(children[1].child.exitCode, 0);
+
+  // Changing cwd closes the warm process and spawns a fresh one.
+  await backend.run({ ...runOptions(), cwd: require('node:os').tmpdir(), resume: id, model: 'model-b', access: 'danger-full-access',
+    helpers: { ...helpers, env: { TOKEN: 'two' } } });
+  assert.equal(children.length, 4);
+  assert.equal(children[2].child.exitCode, 0);
+});
+
+test('failed, aborted and schema Muse turns are never parked', async t => {
+  const failed = await fixture(t, { terminal: 'failed' });
+  await assert.rejects(failed.backend.run(runOptions()), /did not complete/);
+  assert.equal(failed.backend.warmCount(), 0);
+  assert.equal(failed.children[0].child.exitCode, 0);
+
+  const aborted = await fixture(t, { wait: true });
+  const controller = new AbortController();
+  const running = aborted.backend.run({ ...runOptions(), signal: controller.signal });
+  for (let i = 0; i < 100 && !aborted.calls.some(([m]) => m === 'turn/start'); i++) await new Promise(r => setTimeout(r, 5));
+  controller.abort();
+  await assert.rejects(running, /stopped/);
+  assert.equal(aborted.backend.warmCount(), 0);
+  assert.equal(aborted.children[0].child.exitCode, 0);
+
+  const oneOff = await fixture(t, { onPrompt: async () => '{"ok":true}' });
+  const { access: _, ...hubCall } = runOptions();
+  await oneOff.backend.run({ ...hubCall, schema: { type: 'object' } });
+  assert.equal(oneOff.backend.warmCount(), 0);
+  assert.equal(oneOff.children[0].child.exitCode, 0);
+});
+
+test('a parked Muse host ignores late notifications, denies late approvals and recovers if it dies while parked', async t => {
+  const { backend, children } = await fixture(t, { onPrompt: async () => 'Turn 1' });
+  const events = [];
+  const { session_id: id } = await backend.run({ ...runOptions(), approve: async () => true, onEvent: e => events.push(e) });
+  const seen = events.length;
+  const [host] = [...backend.hosts];
+  assert.equal(host.context, null);
+
+  // Late item notification while parked must not reach the finished turn's onEvent.
+  backend.notification(host, { method: 'item/completed', params: { sessionId: id,
+    item: { itemId: 'late-1', turnId: 't-late', kind: 'agentMessage', revision: 1, status: 'completed', text: 'late text' } } });
+  assert.equal(events.length, seen);
+
+  // Late approval while parked must reject safely without invoking approve().
+  const choice = await backend.permission(host, { toolName: 'shell', rawArgs: 'rm', availableChoices: [
+    { choiceId: 'allow', decision: 'approved', scope: 'once' },
+    { choiceId: 'deny', decision: 'denied', scope: 'once' },
+  ] });
+  assert.deepEqual(choice, { choiceId: 'deny' });
+
+  // Simulate parked host dying before next resumed turn -> dropped cleanly and replaced transparently.
+  children[0].child.kill();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(backend.warmCount(), 0);
+  const recovered = await backend.run({ ...runOptions(), resume: id });
+  assert.equal(recovered.result, 'Turn 1');
+  assert.equal(children.length, 2);
+  assert.equal(backend.warmCount(), 1);
+});
+
+test('at most three Muse processes stay warm across bots, expire after 10 idle minutes and close per owner', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { EXPECTED_SCHEMA_FINGERPRINT } = await import('@muse-code/sdk');
+  const { EventEmitter } = require('node:events');
+  const { PassThrough } = require('node:stream');
+  const { MuseCLI } = require('../src/providers/muse.cjs');
+  // Use distinct session IDs across turns so each run parks its own session in WARM.
+  let counter = 0;
+  const makeUnique = () => {
+    const base = { calls: [], children: [] };
+    const launch = (cmd, args, opts) => {
+      const sid = `sess-${++counter}`;
+      const child = new EventEmitter();
+      child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+      child.exitCode = null; child.signalCode = null;
+      child.kill = () => { if (child.exitCode === null) { child.exitCode = 0; child.stdin.end(); child.stdout.end(); child.stderr.end(); child.emit('exit', 0); child.emit('close', 0); } };
+      base.children.push({ child, args, opts });
+      let buf = '';
+      const send = m => child.stdout.write(JSON.stringify(m) + '\n');
+      child.stdin.on('data', chunk => {
+        buf += chunk;
+        for (let nl; (nl = buf.indexOf('\n')) >= 0;) {
+          const req = JSON.parse(buf.slice(0, nl)); buf = buf.slice(nl + 1);
+          base.calls.push([req.method, req.params]);
+          if (req.id === undefined) continue;
+          let res = {};
+          if (req.method === 'initialize') res = { schema: { version: 1, fingerprint: EXPECTED_SCHEMA_FINGERPRINT }, serverInfo: { name: 'muse', version: '1.4.10' }, experimentalApi: true, grantedCapabilities: ['sessionMcp'], sessionDurability: 'durable', sandboxAvailability: 'available' };
+          if (req.method === 'permissionProfile/list') res = { profiles: [{ profileId: ':read-only', available: true }] };
+          if (req.method === 'session/start' || req.method === 'session/resume') res = { session: { sessionId: sid, activeTurnId: null, permissionState: { profileId: ':read-only', reviewerAuthority: 'human' } }, viewCursor: 'c' };
+          if (req.method === 'turn/start') {
+            const turnId = req.params.commandId;
+            res = { commandId: turnId, disposition: 'started', startedNewTurn: true, status: 'accepted', turnId };
+            send({ jsonrpc: '2.0', id: req.id, result: res });
+            send({ jsonrpc: '2.0', method: 'turn/started', params: { sessionId: sid, viewCursor: 'c', turnId } });
+            send({ jsonrpc: '2.0', method: 'item/completed', params: { sessionId: sid, viewCursor: 'c', item: { itemId: `ans-${turnId}`, turnId, kind: 'agentMessage', revision: 1, status: 'completed', text: 'ok' } } });
+            send({ jsonrpc: '2.0', method: 'turn/completed', params: { sessionId: sid, viewCursor: 'c', turnId, terminal: 'completed' } });
+            continue;
+          }
+          send({ jsonrpc: '2.0', id: req.id, result: res });
+        }
+      });
+      return child;
+    };
+    const backend = new MuseCLI(launch, () => ({ command: 'muse', args: [] }));
+    t.after(() => backend.close());
+    return { backend, ...base };
+  };
+  const botA = makeUnique(), botB = makeUnique();
+  await botA.backend.run(runOptions());
+  await botA.backend.run(runOptions());
+  await botB.backend.run(runOptions());
+  await botB.backend.run(runOptions());
+  assert.equal(botA.backend.warmCount() + botB.backend.warmCount(), 3, 'global warm cap of 3');
+  assert.equal(botA.children[0].child.exitCode, 0, 'oldest warm host evicted and closed');
+  await botA.backend.close();
+  assert.equal(botA.backend.warmCount(), 0);
+  assert.equal(botB.backend.warmCount(), 2, 'closing botA leaves botB warm');
+  t.mock.timers.tick(10 * 60 * 1000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(botB.backend.warmCount(), 0, 'idle timer expires after 10 minutes');
+  assert.ok([...botA.children, ...botB.children].every(c => c.child.exitCode === 0));
 });
