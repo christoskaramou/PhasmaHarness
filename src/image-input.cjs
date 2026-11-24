@@ -99,18 +99,41 @@ async function jevImage(url) {
   return { type: 'image', format: 'jpeg', data_base64: (await canvas.encode('jpeg', 85)).toString('base64') };
 }
 
+// Codex imageGeneration returns either a data URL or raw base64 (PNG, JPEG, WebP or GIF).
+function generatedImageUrl(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const dataUrl = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=\s]+)$/i.exec(trimmed);
+  if (dataUrl) {
+    const clean = dataUrl[2].replace(/\s+/g, '');
+    return clean ? `data:${dataUrl[1].toLowerCase()};base64,${clean}` : null;
+  }
+  const clean = trimmed.replace(/\s+/g, '');
+  if (clean.length < 16 || !/^[A-Za-z0-9+/]+={0,2}$/.test(clean)) return null;
+  const head = Buffer.from(clean.slice(0, 24), 'base64');
+  const mime = head.length >= 8 && head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47 &&
+      head[4] === 0x0d && head[5] === 0x0a && head[6] === 0x1a && head[7] === 0x0a ? 'image/png'
+    : head.length >= 3 && head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff ? 'image/jpeg'
+    : head.length >= 12 && head.subarray(0, 4).toString('ascii') === 'RIFF' && head.subarray(8, 12).toString('ascii') === 'WEBP' ? 'image/webp'
+    : head.length >= 6 && /^GIF8[79]a$/.test(head.subarray(0, 6).toString('ascii')) ? 'image/gif'
+    : null;
+  return mime ? `data:${mime};base64,${clean}` : null;
+}
+
 // State snapshots leave inline images on the runner (null keeps counts); the UI fetches a shown image on demand.
 function withoutImages(value, key) {
   if (typeof value === 'string') return (key === 'url' || key === 'images') && value.startsWith('data:image/') ? null : value;
   if (!value || typeof value !== 'object') return value;
   // Tool results carry base64 images as { data, media_type } (Claude) or { data, mimeType } (MCP).
   const base64Image = typeof value.data === 'string' && /^image\//.test(value.media_type || value.mimeType || '');
+  const generatedImage = value.type === 'imageGeneration' && typeof value.result === 'string' && value.result.length > 0;
   let copy = null;
   for (const name of Array.isArray(value) ? value.keys() : Object.keys(value)) {
-    const next = base64Image && name === 'data' ? null : withoutImages(value[name], Array.isArray(value) ? key : name);
+    const next = (base64Image && name === 'data') || (generatedImage && name === 'result') ? null : withoutImages(value[name], Array.isArray(value) ? key : name);
     if (next !== value[name]) (copy ||= Array.isArray(value) ? [...value] : { ...value })[name] = next;
   }
   return copy || value;
 }
 
-module.exports = { normalizeImage, imageData, jevImage, withoutImages };
+module.exports = { normalizeImage, imageData, jevImage, withoutImages, generatedImageUrl };

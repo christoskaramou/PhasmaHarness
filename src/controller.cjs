@@ -34,7 +34,7 @@ const skillPackages = require('./skill-packages.cjs');
 const { setupFingerprint, textHash, skillHashes, checksHash } = require('./setup-fingerprint.cjs');
 const { projectRules, loadsRulesItself } = require('./workspace/project-instructions.cjs');
 const { stripTaskStatus } = require('./routing/task-state.cjs');
-const { withoutImages } = require('./image-input.cjs');
+const { withoutImages, generatedImageUrl } = require('./image-input.cjs');
 const { EFFORT_CAPS, DEFAULT_EFFORT_CAP } = require('./routing/effort-cap.cjs');
 // Below this, Jev's assessment gets the smart router's second opinion (send); providers/jev.cjs marks it low confidence.
 const JEV_UNSURE = 0.5;
@@ -55,6 +55,7 @@ const { normalizedUsage } = require('./job-budgets.cjs');
 const STEP_SUBJECTS = ['description', 'command', 'file_path', 'path', 'pattern', 'url', 'query', 'prompt'];
 const stepSubjects = new WeakMap();
 function stateItem(item) {
+  if (item.type === 'imageGeneration') return { ...withoutImages(item), hasImage: !!generatedImageUrl(item.result) };
   if (item.type !== 'mcpToolCall') return withoutImages(item);
   const input = item.arguments && typeof item.arguments === 'object' ? item.arguments : null;
   let subject = input ? stepSubjects.get(input) : '';
@@ -542,6 +543,11 @@ class Controller extends EventEmitter {
   image(id, itemId, index) {
     if (typeof itemId !== 'string' || !Number.isInteger(index) || index < 0) throw new Error('Invalid image request.');
     const session = this.session(id), item = [...session.items, session.pendingMessage].find(entry => entry?.id === itemId);
+    if (item?.type === 'imageGeneration' && index === 0) {
+      const url = generatedImageUrl(item.result);
+      if (url) return url;
+      throw new Error('This image is no longer available.');
+    }
     const part = item?.content?.filter(part => part.type === 'image')[index];
     if (typeof part?.url !== 'string' || !part.url.startsWith('data:image/')) throw new Error('This image is no longer available.');
     return part.url;
@@ -1475,12 +1481,6 @@ class Controller extends EventEmitter {
       instructionHash = createHash('sha256').update(JSON.stringify([fullInstructions, helpers?.instructions, session.workspace, session.access])).digest('hex');
       // These CLIs keep instructions as conversation messages. Claude/API instead need their stable system prefix on each request.
       const keptInstructions = !api && backend !== 'claude' && session[sessionKey] && session[backend + 'InstructionHash'] === instructionHash;
-      const bridge = api ? { tools: [...AGENT_TOOLS, ...CONNECTOR_TOOLS, HELPER_TOOLS.find(tool => tool.name === 'router_read_output'), ...(contextEnabled ? [CONTEXT_TOOL] : [])],
-        call: (name, args, signal) => this.bridgeTool(session.id, name, args, signal) } : undefined;
-      const result = await runtime.run({
-        provider: selected.provider, bridge,
-        ...(capabilities(selected.provider).liveQueue || capabilities(selected.provider).liveSteer ? { onInput: (input, control) => {
-          if (session.submission !== submission) return;
       if (maxMessageBytes) {
         // Reserve budget for instructions + current prompt first so history trims oldest-first and never truncates the live request.
         const sentInstructions = keptInstructions ? '' : fullInstructions;
@@ -1492,6 +1492,12 @@ class Controller extends EventEmitter {
         const boundedHistory = handoff(history, Math.max(0, maxMessageBytes - overhead), numbered, { trim: true });
         prompt = this.withTaskLessons(task, (cold?.text || '') + boundedHistory + contextText, text);
       }
+      const bridge = api ? { tools: [...AGENT_TOOLS, ...CONNECTOR_TOOLS, HELPER_TOOLS.find(tool => tool.name === 'router_read_output'), ...(contextEnabled ? [CONTEXT_TOOL] : [])],
+        call: (name, args, signal) => this.bridgeTool(session.id, name, args, signal) } : undefined;
+      const result = await runtime.run({
+        provider: selected.provider, bridge,
+        ...(capabilities(selected.provider).liveQueue || capabilities(selected.provider).liveSteer ? { onInput: (input, control) => {
+          if (session.submission !== submission) return;
           this.liveInput = input;
           this.liveControl = input && control || null;
           this.liveInputCaps = capabilities(selected.provider);

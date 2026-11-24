@@ -37,6 +37,11 @@ function conversationMarkdown(session, batchReports = {}) {
     } else if (item.type === 'toolStep') {
       title = 'Step';
       text = [item.title, ...(item.lines || [])].join('\n');
+    } else if (item.type === 'imageGeneration') {
+      title = 'Generated image';
+      const failure = item.failure ? (item.failure.type === 'usageLimitExceeded' ? 'Image generation limit reached.' : 'Image generation failed.') : '';
+      text = [failure, item.savedPath ? `Saved to: ${item.savedPath}` : '', item.revisedPrompt ? `Prompt: ${item.revisedPrompt}` : ''].filter(Boolean).join('\n\n')
+        || (item.result ? '[Generated image omitted]' : '');
     } else if (item.type === 'agentMessage' || item.type === 'plan') {
       title = item.type === 'plan' ? 'Plan' : item.groupSpeaker?.name || (item.phase === 'commentary' ? 'Assistant · progress' : 'Assistant');
       text = stripTaskStatus(item.text || '');

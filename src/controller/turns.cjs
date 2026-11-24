@@ -11,7 +11,7 @@ const { normalizedUsage } = require('../job-budgets.cjs');
 
 module.exports = {
   visible(item) {
-    return item && ['userMessage', 'agentMessage', 'plan', 'commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall', 'webSearch', 'contextCompaction'].includes(item.type);
+    return item && ['userMessage', 'agentMessage', 'plan', 'commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall', 'webSearch', 'imageGeneration', 'contextCompaction'].includes(item.type);
   },
 
   beginSubmission(session, fields) {

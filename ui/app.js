@@ -771,7 +771,7 @@ function stepImage(step) {
 // State snapshots omit inline images; each shown image is fetched once and cached.
 const imageCache = new Map();
 function showImage(image, url, sessionId, itemId, index) {
-  const valid = value => /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value || '');
+  const valid = value => /^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(value || '');
   const key = `${sessionId}\n${itemId}\n${index}`;
   if (valid(url)) {
     image.src = url;
@@ -1811,7 +1811,7 @@ let agentRenderKey = '';
 const BELL_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>';
 const ALERT_LEVELS = ['info', 'warning', 'error'];
 const ALERT_FAILED = /fail|error/i;
-const ALERT_TOOLS = new Set(['commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall', 'webSearch']);
+const ALERT_TOOLS = new Set(['commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall', 'webSearch', 'imageGeneration']);
 const storedAlerts = name => { try { return JSON.parse(localStorage.getItem(name)) || {}; } catch { return {}; } };
 const botAlerts = { popover: $('#bot-alerts'), id: null, seen: storedAlerts('botAlertsSeen'), read: storedAlerts('botAlertsRead'),
   cleared: storedAlerts('botAlertsCleared') };
@@ -1886,7 +1886,7 @@ function toolAlertTitle(item, level) {
   return `${item.tool}${subject ? ' · ' + subject.replace(/\s+/g, ' ').trim().slice(0, 200) : ''}${status}`;
 }
 function alertOf(item) {
-  const failed = ALERT_FAILED.test(item.status || '') || !!item.error;
+  const failed = ALERT_FAILED.test(item.status || '') || !!item.error || !!item.failure;
   const level = failed ? 'error' : item.status === 'declined' ? 'warning' : 'info';
   switch (item.type) {
     case 'commandExecution': return { level: item.exitCode ? 'error' : level, title: `${item.status === 'inProgress' ? 'Running' : item.exitCode || failed ? 'Failed' : 'Ran'} · ${item.command}` };
@@ -1919,6 +1919,18 @@ function chatAlertEntries(chat) {
     at = Math.max(at, item.createdAt || 0);
     const alert = !item.internal && alertOf(item);
     // Tool calls show only when they fail or are declined; messages, notices and Harness's own steps show in grey.
+function imageGenerationFailureText(failure) {
+  if (!failure) return 'Image generation failed.';
+  if (failure.type === 'usageLimitExceeded') {
+    if (Number.isFinite(failure.resetsAt)) {
+      const ms = failure.resetsAt < 1e12 ? failure.resetsAt * 1000 : failure.resetsAt;
+      return `Image generation limit reached (resets ${new Date(ms).toLocaleString()}).`;
+    }
+    return 'Image generation limit reached.';
+  }
+  return failure.message || 'Image generation failed.';
+}
+const IMAGE_GEN_RUNNING = new Set(['inProgress', 'in_progress', 'generating', 'running', 'pending']);
     if (alert?.title && !(ALERT_TOOLS.has(item.type) && alert.level === 'info')) entries.push({ ...alert, key: item.id, at, chat: chat.title });
   }
   const result = { title: chat.title, created: chat.created, entries, at };
@@ -1927,6 +1939,9 @@ function chatAlertEntries(chat) {
 }
 function allAlertEntries(id) {
   const worker = fleetState?.agentStates?.[id] || state, background = fleetState?.executionStates?.[id];
+    case 'imageGeneration': return { level, title: failed ? imageGenerationFailureText(item.failure)
+      : IMAGE_GEN_RUNNING.has(item.status) ? 'Generating image…'
+      : `Generated image${item.revisedPrompt ? ' · ' + item.revisedPrompt.replace(/\s+/g, ' ').trim().slice(0, 160) : ''}` };
   const key = [worker.sessions, worker.sessions.length, background?.sessions, background?.sessions.length, !!worker.requests?.length, worker.connection, worker.error];
   const kept = botAlertLists.get(id);
   if (kept?.key.every((value, index) => value === key[index])) return kept.entries;
@@ -3299,8 +3314,8 @@ function refreshMessageTimes() {
 setInterval(refreshMessageTimes, 30000);
 document.addEventListener('visibilitychange', refreshMessageTimes);
 
-// What a chat shows with Hide tool and helper steps on: the conversation itself.
-const CHAT_ITEM_TYPES = new Set(['userMessage', 'agentMessage', 'plan', 'agentResult', 'agentArtifact']);
+// What a chat shows with tool and helper steps off: the conversation itself.
+const CHAT_ITEM_TYPES = new Set(['userMessage', 'agentMessage', 'plan', 'agentResult', 'agentArtifact', 'imageGeneration']);
 
 // A queue action: Send now, Edit or Remove on a queued message, Remove on a step the Secondary model split off, or Send
 // again and Edit on one that ended without running. Edit moves the message into the composer.
@@ -3369,6 +3384,62 @@ function renderMessages(session) {
     const signature = JSON.stringify(parts);
     if (entry?.signature === signature) { entry.parts = parts; continue; }
     if (!entry) {
+function renderImageGeneration(item, node, session, who) {
+  const detailsOpened = node.querySelector('details')?.open || false;
+  node.className = 'message assistant';
+  node.tabIndex = 0;
+  const label = element('div', 'message-label', who);
+  if (item.routeLabel) label.append(element('span', 'model-label', item.routeLabel));
+  const body = element('div', 'message-body');
+  const failed = ALERT_FAILED.test(item.status || '') || !!item.failure;
+  const inProgress = !failed && IMAGE_GEN_RUNNING.has(item.status);
+  const hasInline = !!(item.hasImage || /^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(item.result || ''));
+  if (failed) {
+    body.append(element('p', 'routing-status', imageGenerationFailureText(item.failure)));
+  } else if (inProgress && !hasInline && !item.savedPath) {
+    body.append(element('p', 'muted', 'Generating image…'));
+  } else if (hasInline || item.savedPath) {
+    const image = element('img');
+    image.alt = item.revisedPrompt || 'Generated image';
+    if (item.savedPath) {
+      const link = element('a', 'linked-image');
+      link.href = '#'; link.dataset.path = encodeURIComponent(item.savedPath); link.title = item.savedPath;
+      link.append(image); body.append(link);
+    } else {
+      body.append(imageThumb(image, 'image-thumb generated-image', 'View generated image'));
+    }
+    if (hasInline) {
+      showImage(image, item.result, session.id, item.id, 0);
+    } else {
+      const images = (node.linkedImages ??= new Map());
+      if (!images.has(item.savedPath)) images.set(item.savedPath, api.linkImage(item.savedPath));
+      images.get(item.savedPath).then(url => { image.src = url; }, () => { image.alt = 'Image unavailable'; });
+    }
+  } else {
+    body.append(element('p', 'muted', 'Generated image unavailable.'));
+  }
+  if (item.revisedPrompt || item.savedPath) {
+    const details = element('details', 'activity');
+    details.open = detailsOpened;
+    details.append(element('summary', '', item.revisedPrompt ? 'Prompt' : 'Image file'));
+    if (item.revisedPrompt) details.append(element('pre', '', item.revisedPrompt));
+    if (item.savedPath) {
+      const p = element('p', 'muted');
+      const fileLink = element('a', '', item.savedPath);
+      fileLink.href = '#'; fileLink.dataset.path = encodeURIComponent(item.savedPath); fileLink.title = item.savedPath;
+      p.append(fileLink); details.append(p);
+    }
+    body.append(details);
+  }
+  const actions = element('div', 'message-actions');
+  if (item.createdAt) {
+    const time = element('time', '', elapsedMessageTime(item.createdAt));
+    time.dateTime = new Date(item.createdAt).toISOString(); time.title = new Date(item.createdAt).toLocaleString();
+    actions.append(time);
+  }
+  node.replaceChildren(label, body, ...(actions.childNodes.length ? [actions] : []));
+}
+
       const node = document.createElement('div');
       entry = { node }; messageNodes.set(item.id, entry); $('#messages').append(node);
     }
@@ -3397,7 +3468,8 @@ function renderMessages(session) {
       node.className = 'message';
       node.replaceChildren(element('div', 'message-label', 'Artifact available'), renderArtifacts([item.artifact], session.id, item.id));
     }
-    else if (item.type === 'userMessage' || item.type === 'agentMessage' || item.type === 'plan' || item.tldr || item.advisor) {
+    else if (item.type === 'imageGeneration') renderImageGeneration(item, node, session, who);
+    else if (item.type === 'userMessage' || item.type === 'agentMessage' || item.type === 'plan' || item.tldr || item.advisor || item.commandFailure) {
       const user = item.type === 'userMessage';
       node.className = `message ${user ? 'user' : item.phase === 'commentary' ? 'commentary' : 'assistant'}`;
       node.tabIndex = 0;

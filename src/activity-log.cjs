@@ -19,7 +19,7 @@ const cut = (text, limit) => {
 const json = value => { try { return JSON.stringify(value); } catch { return String(value); } };
 const userText = item => item.fileMessage?.displayText ?? (item.content || []).filter(part => part.type === 'text').map(part => part.text).join('\n');
 const images = item => (item.content || []).filter(part => part.type === 'image').length;
-const running = status => ['inProgress', 'in_progress', 'running', 'pending'].includes(status);
+const running = status => ['inProgress', 'in_progress', 'generating', 'running', 'pending'].includes(status);
 
 // One item as [kind, text]; null leaves it out (internal items).
 function describe(item, bot) {
@@ -43,6 +43,12 @@ function describe(item, bot) {
       return [`Tool ${item.server}.${item.tool} [${item.status || 'done'}]`, `${cut(json(item.arguments || {}), OUTPUT_LIMIT)}\n${cut(json(item.error || item.result), OUTPUT_LIMIT)}`];
     case 'dynamicToolCall': return [`Tool ${item.tool} [${item.status || 'done'}]`, cut(json(item.arguments || item.contentItems || {}), OUTPUT_LIMIT)];
     case 'webSearch': return ['Web search', item.query || item.action?.query || ''];
+    case 'imageGeneration': {
+      const failure = item.failure ? (item.failure.type === 'usageLimitExceeded'
+        ? `Usage limit exceeded${Number.isFinite(item.failure.resetsAt) ? ` (resets ${new Date(item.failure.resetsAt < 1e12 ? item.failure.resetsAt * 1000 : item.failure.resetsAt).toISOString()})` : ''}`
+        : json(item.failure)) : '';
+      return [`Image generation [${item.status || 'done'}]`, cut([failure, item.savedPath, item.revisedPrompt].filter(Boolean).join('\n'), OUTPUT_LIMIT)];
+    }
     case 'toolStep': return [`Step: ${item.title || ''}`, cut((item.lines || []).join('\n'), OUTPUT_LIMIT)];
     case 'notice': return ['Notice', cut(item.text, TEXT_LIMIT)];
     case 'agentResult': return [`Result from ${item.agentName || 'a bot'} [${item.status || 'done'}]`, cut(item.text, TEXT_LIMIT)];

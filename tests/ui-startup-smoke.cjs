@@ -880,6 +880,66 @@ app.whenReady().then(async () => {
     loaded: ['C:\\tmp\\shot.png'], viewed: 'data:image/gif;', image: 'data:image/gif;', images: 1, remote: 'remote',
     real: { image: 'data:image/png;base64,', missing: true } });
   console.log('Chat file links, linked images and web image links passed');
+  const imgGen = await window.webContents.executeJavaScript(String.raw`(async () => {
+    const saved = { image: api.image, linkImage: api.linkImage, hideSteps: state.settings.hideSteps };
+    state.settings.hideSteps = true;
+    const fetched = [], linked = [];
+    const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+    api.image = async (sid, iid, idx) => { fetched.push([sid, iid, idx]); return png; };
+    api.linkImage = async target => { linked.push(target); return png; };
+    const session = {
+      id: 'imggen-smoke',
+      routes: [],
+      items: [
+        { id: 'ig-run', type: 'imageGeneration', status: 'in_progress', revisedPrompt: null, failure: null, hasImage: false, createdAt: Date.now() },
+        { id: 'ig-inline', type: 'imageGeneration', status: 'completed', revisedPrompt: 'Smiling Labrador', failure: null, hasImage: true, result: null, routeLabel: 'Sol · low', createdAt: Date.now() },
+        { id: 'ig-file', type: 'imageGeneration', status: 'completed', revisedPrompt: 'Saved Labrador', savedPath: 'C:\\tmp\\lab.png', failure: null, hasImage: false, createdAt: Date.now() },
+        { id: 'ig-fail', type: 'imageGeneration', status: 'failed', revisedPrompt: null, failure: { type: 'usageLimitExceeded', limitId: 'img', resetsAt: 1795450000 }, hasImage: false, createdAt: Date.now() },
+      ],
+    };
+    renderMessages(session);
+    await new Promise(r => setTimeout(r, 20));
+    const cards = [...document.querySelectorAll('#messages .message.assistant')];
+    const inlineImg = cards[1]?.querySelector('.generated-image img');
+    const inlineMaxWidth = inlineImg ? getComputedStyle(inlineImg).maxWidth : null;
+    cards[1]?.querySelector('.generated-image')?.click();
+    const viewer = document.querySelector('#image-dialog');
+    const inlineViewerOpen = viewer.open && viewer.querySelector('.image-file').hidden === true;
+    viewer.close();
+    cards[2]?.querySelector('.linked-image')?.click();
+    const fileViewerOpen = viewer.open && viewer.querySelector('.image-file').hidden === false;
+    viewer.close();
+    const failAlert = alertOf(session.items[3]);
+    state.settings.hideSteps = saved.hideSteps;
+    api.image = saved.image; api.linkImage = saved.linkImage;
+    return {
+      count: cards.length,
+      runningText: cards[0]?.querySelector('.message-body')?.textContent.trim(),
+      inlineSrc: inlineImg?.src.slice(0, 22),
+      inlineMaxWidth,
+      inlinePrompt: cards[1]?.querySelector('details pre')?.textContent,
+      inlineViewerOpen,
+      fileSrc: cards[2]?.querySelector('.linked-image img')?.src.slice(0, 22),
+      fileViewerOpen,
+      failText: cards[3]?.querySelector('.routing-status')?.textContent,
+      failAlertLevel: failAlert?.level,
+      fetched,
+      linked,
+    };
+  })()`);
+  assert.equal(imgGen.count, 4);
+  assert.equal(imgGen.runningText, 'Generating image…');
+  assert.equal(imgGen.inlineSrc, 'data:image/png;base64,');
+  assert.notEqual(imgGen.inlineMaxWidth, '140px', 'generated image uses full size rather than 140px thumbnail cap');
+  assert.equal(imgGen.inlinePrompt, 'Smiling Labrador');
+  assert.equal(imgGen.inlineViewerOpen, true);
+  assert.equal(imgGen.fileSrc, 'data:image/png;base64,');
+  assert.equal(imgGen.fileViewerOpen, true);
+  assert.match(imgGen.failText, /^Image generation limit reached/);
+  assert.equal(imgGen.failAlertLevel, 'error');
+  assert.deepEqual(imgGen.fetched, [['imggen-smoke', 'ig-inline', 0]]);
+  assert.deepEqual(imgGen.linked, ['C:\\tmp\\lab.png']);
+  console.log('Codex imageGeneration UI (in-progress, inline, savedPath, viewer, limit failure, hideSteps) passed');
   const codePaths = await window.webContents.executeJavaScript(String.raw`(async () => {
     const saved = api.openFile, opened = [];
     api.openFile = async target => { opened.push(target); };

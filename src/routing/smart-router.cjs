@@ -506,7 +506,7 @@ class SmartRouter {
       if (['item/agentMessage/delta', 'item/reasoning/summaryTextDelta', 'item/reasoning/textDelta'].includes(method) && p.delta) onActivity?.();
       if (method === 'thread/tokenUsage/updated') usage = p.tokenUsage.last;
       if (method === 'item/completed' && p.item.type === 'agentMessage') output = p.item.text;
-      if (method === 'item/started' && ['commandExecution', 'fileChange', 'mcpToolCall', 'webSearch'].includes(p.item.type)) fail(new Error('Router attempted tool use.'));
+      if (method === 'item/started' && ['commandExecution', 'fileChange', 'mcpToolCall', 'webSearch', 'imageGeneration'].includes(p.item.type)) fail(new Error('Router attempted tool use.'));
       if (method === 'turn/completed') p.turn.status === 'completed' ? finish(output) : fail(Object.assign(new Error(p.turn.error?.message || 'Routing did not complete.'),
         codexTurnLimited(p.turn.error) ? { limit: { until: null, reason: p.turn.error.message || 'Codex usage limit reached.' } } : {}));
     };

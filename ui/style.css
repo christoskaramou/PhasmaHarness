@@ -859,7 +859,8 @@ h2 {
   text-underline-offset:3px
 }
 
-.message-body .linked-image img {
+.message-body .linked-image img,
+.message-body .generated-image img {
   display:block;
   max-width:min(100%, 640px);
   max-height:480px;
