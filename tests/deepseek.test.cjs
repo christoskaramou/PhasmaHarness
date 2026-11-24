@@ -94,11 +94,15 @@ async function fixture(t, options = {}) {
         const answer = await options.onPrompt?.({ params, helpers });
         await update(params.sessionId, { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'PRIVATE_REASONING' } });
         await update(params.sessionId, { sessionUpdate: 'usage_update', used: 10, size: 100 });
+        for (const messageId of ['msg-2', 'msg-2', 'msg-3']) {
+          await update(params.sessionId, { sessionUpdate: 'agent_thought_chunk', messageId, content: { type: 'text', text: 'PRIVATE_REASONING' } });
+        }
         await update(params.sessionId, { sessionUpdate: 'tool_call', toolCallId: 'tool-2', title: 'read_file', kind: 'other', status: 'in_progress', rawInput: { path: 'a' } });
         await update(params.sessionId, { sessionUpdate: 'tool_call_update', toolCallId: 'tool-2', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'ok' } }] });
         for (const text of answer === undefined ? options.text || ['Hello ', 'world'] : [answer]) {
           await update(params.sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } });
         }
+        await update(params.sessionId, { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'PRIVATE_REASONING' } });
         return { stopReason: options.stopReason || 'end_turn' };
       },
       async cancel(params) { calls.push(['cancel', params]); cancelled = true; cancelPending?.(); seeCancel(); },
@@ -196,6 +200,9 @@ test('DeepSeek streams public text and tools, hides thoughts, keeps a warm sessi
   assert.equal(Object.hasOwn(result, 'usage'), false);
   assert.equal(result.contextWindow, 100, 'usage_update size is the context window');
   assert.doesNotMatch(JSON.stringify(events), /PRIVATE_REASONING/);
+  const info = events.filter(event => event.type === 'info');
+  assert.deepEqual(info.map(event => [event.kind, event.text]), Array(4).fill(['reasoning', '']));
+  assert.equal(new Set(info.map(event => event.id)).size, 4);
   assert.equal(events.find(event => event.type === 'assistant').message.content[0].name, 'read_file');
   assert.equal(events.find(event => event.type === 'user').message.content[0].is_error, false);
   await backend.run({ ...runOptions(), resume: result.session_id });

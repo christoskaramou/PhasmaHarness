@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { CursorCLI } = require('../src/providers/cursor.cjs');
 
 // A fake ACP connection per connect(), recording its calls; Cursor's start-up steps are the ones a warm turn skips.
-function fakeCursor(t) {
+function fakeCursor(t, { emitChild = false } = {}) {
   const cursor = new CursorCLI(), conns = [];
   t.after(() => cursor.close());
   cursor.connect = options => {
@@ -14,11 +14,14 @@ function fakeCursor(t) {
       close() { conn.closed = true; },
       call: async (method, params) => {
         conn.calls.push(method);
+        if (method === 'initialize') conn.capabilities = params.clientCapabilities;
         if (conn.silent) throw new Error('Cursor session/set_mode timed out.');
         if (method === 'session/new') return { sessionId: 'sess-' + conns.indexOf(conn) + '-' + options.cwd };
         if (method === 'session/load') return { sessionId: params.sessionId };
         if (method === 'session/prompt') {
           if (conn.fail) throw new Error('boom');
+          if (emitChild) options.onUpdate({ sessionId: params.sessionId, update: { sessionUpdate: 'subagent_spawned', subagentSessionId: 'native-child',
+            name: 'Reviewer', task: params.prompt[0].text } });
           return { stopReason: 'end_turn' };
         }
         return {};
@@ -50,12 +53,18 @@ test('a conversation\'s next Cursor turn reuses its process, checks it answers, 
 });
 
 test('a parked Cursor process that stops answering is replaced before the prompt', async t => {
-  const { cursor, conns } = fakeCursor(t);
-  const { session_id: id } = await cursor.run({ cwd: 'w', model: 'm', prompt: 'a' });
+  const { cursor, conns } = fakeCursor(t, { emitChild: true });
+  const events = [];
+  const options = { cwd: 'w', model: 'm', instructions: '', onEvent: event => { if (event.type === 'info') events.push(event); } };
+  const { session_id: id } = await cursor.run({ ...options, prompt: 'a' });
+  await cursor.run({ ...options, prompt: 'b', resume: id });
+  assert.equal(conns.length, 1);
   conns[0].silent = true;
-  await cursor.run({ cwd: 'w', model: 'm', prompt: 'b', resume: id });
+  await cursor.run({ ...options, prompt: 'c', resume: id });
   assert.equal(conns[0].closed, true);
   assert.deepEqual(conns[1].calls.slice(0, 2), ['initialize', 'session/load']);
+  for (const conn of conns) assert.equal(conn.capabilities._meta.subagents, true);
+  assert.deepEqual(events.map(event => event.text.split('\n')[0]), ['a', 'b', 'c']);
 });
 
 test('a failed or stopped Cursor turn is not kept, and a parked connection ignores late messages', async t => {

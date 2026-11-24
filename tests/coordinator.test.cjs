@@ -14,6 +14,23 @@ const { structuredResponse } = require('../src/providers/structured.cjs');
 
 const answer = reply => ({ reply, action: null });
 
+test('Hub foreground provider Info is saved on the answer turn but excluded from its next model context', async t => {
+  const { hub, session, calls, send } = await setup(t);
+  const complete = hub.smartRouter.complete.bind(hub.smartRouter);
+  hub.smartRouter.complete = async (request, ...rest) => {
+    if (request.schema.properties.action) request.onInfo({ type: 'info', kind: 'reasoning', id: 'summary', title: 'Thinking', text: 'Only in Info' });
+    return complete(request, ...rest);
+  };
+  await send('First question');
+  const row = session.items.find(i => i.type === 'info');
+  assert.ok(row?.turnId);
+  assert.equal(row.turnId, session.items.findLast(i => i.type === 'agentMessage').turnId);
+  assert.equal(row.text, 'Only in Info');
+  await send('Second question');
+  assert.doesNotMatch(calls.findLast(c => c.request.schema.properties.action).request.prompt, /Only in Info/);
+  assert.equal(session.items.filter(i => i.type === 'info').length, 2);
+});
+
 test('Main Bot receives the current AGENTS.md without worker-only defaults, and nothing is written', async t => {
   const { hub, session, calls, send, root } = await setup(t);
   hub.wikiStore = new (require('../src/workspace/wiki-store.cjs').WikiStore)(path.join(root, 'Wikis'));

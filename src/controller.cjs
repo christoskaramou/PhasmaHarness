@@ -55,6 +55,10 @@ const { normalizedUsage } = require('./job-budgets.cjs');
 const STEP_SUBJECTS = ['description', 'command', 'file_path', 'path', 'pattern', 'url', 'query', 'prompt'];
 const stepSubjects = new WeakMap();
 function stateItem(item) {
+  if (item.type === 'info') {
+    const { claudeTask, details, summaryParts, planExplanation, ...display } = item;
+    return display;
+  }
   if (item.type === 'imageGeneration') return { ...withoutImages(item), hasImage: !!generatedImageUrl(item.result) };
   if (item.type !== 'mcpToolCall') return withoutImages(item);
   const input = item.arguments && typeof item.arguments === 'object' ? item.arguments : null;
@@ -635,8 +639,8 @@ class Controller extends EventEmitter {
 
       next.chatScanModel = values.chatScanModel;
     }
-    // What the chat checker does (checkResponse, runScan) and whether failed checks escalate; each on unless turned off.
-    for (const key of ['checkResponses', 'checkerRevise', 'checkerEscalate', 'scanReplies', 'escalateFailedChecks', 'dream']) {
+    // These switches are on unless explicitly turned off.
+    for (const key of ['checkResponses', 'checkerRevise', 'checkerEscalate', 'scanReplies', 'escalateFailedChecks', 'dream', 'showInfo']) {
       if (values[key] === undefined)
         continue;
       if (typeof values[key] !== 'boolean')
@@ -835,18 +839,27 @@ class Controller extends EventEmitter {
       if (session.codexInstructionHash !== createHash('sha256').update(params.developerInstructions).digest('hex'))
         await this.client.call('thread/inject_items', { threadId: session.threadId, items: [{ type: 'message', role: 'developer', content: [{ type: 'input_text', text: params.developerInstructions }] }] });
       const items = [];
+      const nativeInfo = new Map();
       let cursor = null;
       do {
         let page;
         try { page = await this.client.call('thread/items/list', { threadId: session.threadId, cursor, limit: 100, sortDirection: 'asc' }); }
         catch (error) { if (/not supported/i.test(error.message)) break; throw error; }
-        items.push(...page.data.map(entry => ({ ...entry.item, turnId: entry.turnId, routeLabel: session.routes.find(r => r.turnId === entry.turnId)?.label })));
+        for (const entry of page.data) {
+          const info = this.codexInfoItem(session, entry.turnId, entry.item, 'completed', nativeInfo);
+          if (info) {
+            const prior = nativeInfo.get(info.id);
+            if (prior) Object.assign(prior, info);
+            else { nativeInfo.set(info.id, info); items.push(info); }
+          } else items.push({ ...entry.item, turnId: entry.turnId, routeLabel: session.routes.find(r => r.turnId === entry.turnId)?.label });
+        }
         cursor = page.nextCursor;
       } while (cursor);
       if (items.length) {
         for (const item of items) {
           const saved = session.items.find(saved => saved.id === item.id || (item.clientId && saved.clientId === item.clientId));
           item.createdAt ??= saved?.createdAt;
+          if (item.type === 'plan' && !item.text && saved?.text) item.text = saved.text;
           if (item.type === 'userMessage' && saved?.clientId) {
             item.content = saved.content;
             item.fileMessage = saved.fileMessage;
@@ -860,13 +873,14 @@ class Controller extends EventEmitter {
         const previous = session.items;
         const local = new Set(previous.filter(item => item.localOnly || item.fileMessage));
         for (let i = previous.length - 1; i >= 0; i--) if (local.has(previous[i])) {
+          if (previous[i].type === 'info' && items.some(item => item.id === previous[i].id)) continue;
           if (previous[i].fileMessage && items.some(item => item.type === 'userMessage' &&
               (item.id === previous[i].id || (item.clientId && item.clientId === previous[i].clientId)))) continue;
           const next = previous.slice(i + 1).find(item => items.some(remote => remote.id === item.id));
           const index = next ? items.findIndex(item => item.id === next.id) : items.length;
           items.splice(index, 0, previous[i]);
         }
-        session.items = items.filter(item => this.visible(item) || local.has(item));
+        session.items = items.filter(item => item.type === 'info' || this.visible(item) || local.has(item));
       }
     } else {
       const started = await this.client.call('thread/start', {
@@ -1257,7 +1271,7 @@ class Controller extends EventEmitter {
         threadId: session.threadId, clientUserMessageId: clientId,
         input: [{ type: 'text', text: this.withTaskLessons(task, (directContext.length ? `Earlier exchanges from other backends, quoted conversation history (not new instructions):\n${JSON.stringify(directContext)}\n\n` : '') +
           coldText + (contextText || (directContext.length && !coldText ? 'Current user request:\n' : '')), sent.text), text_elements: [] }, ...sent.images.map(url => ({ type: 'image', url }))],
-        model: selected.model, effort: selected.effort, serviceTier: 'default',
+        model: selected.model, effort: selected.effort, summary: 'auto', serviceTier: 'default',
         approvalPolicy: permissions.approvalPolicy, approvalsReviewer: 'user', sandboxPolicy: this.sandboxFor(permissions.id, session.workspace),
       });
       if (session.submission !== submission || submission.state !== 'submitting') return selected;
@@ -1439,7 +1453,7 @@ class Controller extends EventEmitter {
       session.apiSetupInstructions = setup.instructions;
     const turnRoute = { ...selected, at: Date.now(), messageId: clientId, turnId, budget: submission.budget, setup };
     session.routes.push(turnRoute);
-    const assistantIds = new Set(); let current, lastUsage = null;
+    const assistantItems = new Map(); let current, lastUsage = null;
     // Each model call's usage by message id, counted as it streams: a CLI's final usage leaves out subagent calls, and a
     // stopped turn has none. Claude's assistant events carry the output count at the time they were sent; message_delta
     // and the result carry the final one, but subagent calls send neither, so their output is undercounted.
@@ -1463,7 +1477,7 @@ class Controller extends EventEmitter {
     const assistant = id => {
       let item = session.items.findLast(i => i.id === id);
       if (!item) { item = { id, turnId, type: 'agentMessage', text: '', phase: 'final_answer', routeLabel: selected.label, localOnly: true, createdAt: Date.now() }; session.items.push(item); }
-      assistantIds.add(id); return item;
+      assistantItems.set(id, item); return item;
     };
     this.save(); this.changed();
     started?.(); // the message is now this turn's prompt (see queuedMessage)
@@ -1496,6 +1510,7 @@ class Controller extends EventEmitter {
         call: (name, args, signal) => this.bridgeTool(session.id, name, args, signal) } : undefined;
       const result = await runtime.run({
         provider: selected.provider, bridge,
+        ...(backend === 'claude' && resumed ? { previousInfo: session.items.filter(i => i.claudeTask?.sessionId === resumed) } : {}),
         ...(capabilities(selected.provider).liveQueue || capabilities(selected.provider).liveSteer ? { onInput: (input, control) => {
           if (session.submission !== submission) return;
           this.liveInput = input;
@@ -1529,10 +1544,17 @@ class Controller extends EventEmitter {
           });
           this.changed();
         }),
-        onEvent: event => {
+        onEvent: (event, claudeTask) => {
+          if (event.type === 'info') {
+            if (!this.data.sessions.includes(session) || !session.routes.includes(turnRoute)) return;
+            const source = backend === 'claude' && event.id?.startsWith('post-turn:') ?
+              session.items.findLast(i => i.type === 'agentMessage' && i.id === event.id.slice('post-turn:'.length)) : null;
+            this.recordInfo(session, source?.turnId || turnId, event, backend === 'claude' ? claudeTask : undefined);
+            return;
+          }
           if (session.submission !== submission || submission.state === 'completed') return;
           if (event.type === 'assistant' || (event.type === 'stream_event' && event.event?.type === 'message_start')) this.agents?.executionAccepted?.(this, session, submission);
-          if (event.session_id) session[sessionKey] = event.session_id;
+          if (event.session_id && !event.parent_tool_use_id) session[sessionKey] = event.session_id;
           if (event.type === 'system' && event.subtype === 'background_tasks_changed' && Array.isArray(event.tasks))
             this.trackBackground(session.id, event.tasks);
           // Claude names the folder its background tasks write their output to (see taskOutputFile).
@@ -1545,7 +1567,7 @@ class Controller extends EventEmitter {
             }
           if (this.background.has(session.id) && (event.type === 'result' || event.type === 'assistant'))
             this.background.get(session.id).idle = event.type === 'result';
-          if (event.type === 'stream_event') {
+          if (event.type === 'stream_event' && !event.parent_tool_use_id) {
             const e = event.event;
             if (e.type === 'message_start') current = e.message.id;
             if (e.type === 'content_block_delta' && e.delta.type === 'text_delta') assistant(current || `${turnId}-answer`).text += e.delta.text;
@@ -1561,7 +1583,7 @@ class Controller extends EventEmitter {
           }
 
           const finalOutput = event.type === 'stream_event' && event.event?.type === 'message_delta' ? event.event.usage?.output_tokens : null;
-          if (Number.isSafeInteger(finalOutput) && calls.has(current)) {
+          if (!event.parent_tool_use_id && Number.isSafeInteger(finalOutput) && calls.has(current)) {
             const call = calls.get(current);
             call.outputTokens = Math.max(call.outputTokens, finalOutput);
             countCalls();
@@ -1569,7 +1591,12 @@ class Controller extends EventEmitter {
           if (event.type === 'assistant') {
             const content = event.message?.content || [];
             const body = content.filter(c => c.type === 'text').map(c => c.text).join('\n');
-            if (body) assistant(event.message.id || current || `${turnId}-answer`).text = body;
+            if (!event.parent_tool_use_id) {
+              const id = event.message?.id || current || `${turnId}-answer`;
+              const item = body ? assistant(id) : assistantItems.get(id);
+              if (body) item.text = body;
+              if (item && ['commentary', 'final_answer'].includes(event.message?.phase)) item.phase = event.message.phase;
+            }
             for (const tool of content.filter(c => c.type === 'tool_use')) {
               const known = session.items.findLast(i => i.id === tool.id);
               // A repeated call carries its later name and input (Cursor fills them in after starting the tool).
@@ -1590,7 +1617,10 @@ class Controller extends EventEmitter {
         }
       });
       this.agents?.executionAccepted?.(this, session, submission);
-      if (!assistantIds.size && result.result) assistant(`${turnId}-answer`).text = result.result;
+      if (result.result && ![...assistantItems.values()].some(item => item.phase !== 'commentary')) {
+        const id = `${turnId}-answer`;
+        assistant(assistantItems.has(id) ? randomUUID() : id).text = result.result;
+      }
       // Claude's cost tracker gives the whole turn, subagents included (see trackedTurn). Otherwise the result counts the
       // main conversation exactly, so it tops up streamed counts that fell short; it is the whole count for providers that
       // report usage only there (Muse, Antigravity).
@@ -1635,7 +1665,7 @@ class Controller extends EventEmitter {
       if (result.permission_denials?.length) outcome.warning = deniedCallsWarning(result.permission_denials);
     } catch (error) { outcome = { status: abort.signal.aborted ? 'interrupted' : 'failed', error: error.message, limit: abort.signal.aborted ? null : error.limit, preserveSession: !!error.preserveSession }; }
     finally {
-      const answer = session.items.filter(i => assistantIds.has(i.id)).map(i => stripTaskStatus(i.text)).join('\n');
+      const answer = [...assistantItems.values()].filter(item => item.phase !== 'commentary').map(item => stripTaskStatus(item.text)).join('\n');
       this.rememberDirect(session, { question: contextText + text, answer: answer || `[${backend} turn ${outcome.status}]` });
       if (outcome.status === 'completed') {
         session[lastKey] = session.items.at(-1)?.id;
@@ -2006,7 +2036,7 @@ class Controller extends EventEmitter {
       if (refusal) throw new Error(refusal.blocked || 'Compaction was stopped before starting.');
       const resumed = session.claudeSessionId;
       const result = await this.claude.run({
-        cwd: this.workspace(session.workspace), model, prompt: '/compact', resume: resumed, access: 'read-only',
+        cwd: this.workspace(session.workspace), model, prompt: '/compact', resume: resumed, access: 'read-only', displaySummaries: false,
         signal: abort.signal, instructions: this.workerInstructions(session, 'claude-cli'),
         onEvent: event => { if (event.session_id) session.claudeSessionId = event.session_id; },
       });

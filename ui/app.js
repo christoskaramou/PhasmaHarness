@@ -3353,7 +3353,7 @@ setInterval(refreshMessageTimes, 30000);
 document.addEventListener('visibilitychange', refreshMessageTimes);
 
 // What a chat shows with tool and helper steps off: the conversation itself.
-const CHAT_ITEM_TYPES = new Set(['userMessage', 'agentMessage', 'plan', 'agentResult', 'agentArtifact', 'imageGeneration']);
+const CHAT_ITEM_TYPES = new Set(['userMessage', 'agentMessage', 'plan', 'agentResult', 'agentArtifact', 'imageGeneration', 'info']);
 
 // A queue action: Send now, Edit or Remove on a queued message, Remove on a step the Secondary model split off, or Send
 // again and Edit on one that ended without running. Edit moves the message into the composer.
@@ -3462,6 +3462,7 @@ function renderMessages(session) {
     const maintenance = (session.routes || []).filter(route => route.wikiMaintenanceTaskId);
     // bellOnly: a notification (e.g. the test pool's passed and skipped tests) listed in the bot's bell, not the chat.
     if (item.internal || item.agentReply || item.bellOnly || maintenance.some(route => route.messageId === (item.clientId || item.id) || (route.turnId && route.turnId === item.turnId))) continue;
+    if (item.type === 'info' && state.settings.showInfo === false) continue;
     // A /tldr summary and an advisor's advice show even with steps hidden.
     if (hideSteps && !CHAT_ITEM_TYPES.has(item.type) && !item.tldr && !item.advisor && !item.commandFailure) continue;
     ids.add(item.id);
@@ -3485,7 +3486,15 @@ function renderMessages(session) {
     const node = entry.node;
     const batchOpened = node.querySelector('.batch-report:not(.comparison-card)')?.open || false;
     const comparisonOpened = node.querySelector('.comparison-card')?.open ?? true;
-    if (item.type === 'agentMail') {
+    if (item.type === 'info') {
+      node.className = 'message chat-info';
+      const heading = element('h3', 'chat-info-heading');
+      const infoTitle = { agent: 'Agent', reasoning: 'Reasoning', progress: 'Progress' }[item.kind];
+      heading.append(element('strong', '', 'Info'), element('span', '', item.title || infoTitle || 'Update'));
+      if (item.status) heading.append(element('span', 'muted', item.status));
+      node.replaceChildren(heading);
+      if (item.text) node.append(element('div', 'chat-info-text', item.text));
+    } else if (item.type === 'agentMail') {
       node.className = 'message';
       const details = element('details', 'activity'); details.open = node.querySelector('details')?.open || false;
       details.append(element('summary', '', item.amendment ? `Assignment update from ${item.fromName} · ${item.amendment.state === 'applied' ? 'Applied' : 'Received'} · revision ${item.amendment.revision}`
@@ -5139,6 +5148,7 @@ async function saveSetting(control, key, value, agentId = selectedAgent) {
 }
 // The chat checker's switches (General) and failed-check escalation (Checks), each on unless turned off.
 const ON_SWITCHES = {
+  'settings-chat-info': 'showInfo',
   'settings-check-responses': 'checkResponses', 'settings-checker-revise': 'checkerRevise', 'settings-checker-escalate': 'checkerEscalate',
   'settings-scan-replies': 'scanReplies', 'settings-escalate-failed-checks': 'escalateFailedChecks', 'settings-dream': 'dream',
 };

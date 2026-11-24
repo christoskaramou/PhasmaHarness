@@ -135,6 +135,12 @@ app.whenReady().then(async () => {
   const confirmation = confirmations(window);
   ipcMain.handle('answerConfirmation', (_event, id, accepted) => confirmation.answer(id, accepted));
   await window.loadFile(path.resolve(__dirname, '../ui/index.html'));
+  if (process.argv.includes('--chat-info-only')) {
+    phase = 'chat Info fixture';
+    await require('./chat-info-ui-check.cjs')(window, controller);
+    window.destroy(); controller.close(); clearTimeout(deadline); app.exit(0);
+    return;
+  }
   const titlebar = await window.webContents.executeJavaScript(`(() => {
     const header = document.querySelector('main > header');
     const action = document.querySelector('#browse-session');

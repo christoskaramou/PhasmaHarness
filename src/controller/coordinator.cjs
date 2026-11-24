@@ -567,7 +567,9 @@ module.exports = {
         reviewingResult = true;
         // The chat id keys its kept Codex thread, so later calls send only what changed.
         const { decision, usage } = await this.smartRouter.complete({ instructions: this.projectContextInstructions(session) + '\n\n' + INSTRUCTIONS(this.agents.hubName()), prompt: JSON.stringify(context), schema: SCHEMA, images: seen.images,
-          timeoutMs: 120000, idleTimeout: true, conversation: { key: session.id, context, state: session.coordinatorConversation,
+          timeoutMs: 120000, idleTimeout: true, onInfo: event => {
+            if (!abort.signal.aborted && session.turnId === turnId) this.recordInfo(session, turnId, event);
+          }, conversation: { key: session.id, context, state: session.coordinatorConversation,
             save: value => { session.coordinatorConversation = value; this.save(); } } }, choice, abort);
         abort.signal.throwIfAborted();
         recordUsage(session, usage);

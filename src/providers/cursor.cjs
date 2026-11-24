@@ -263,6 +263,20 @@ class CursorCLI {
     // Each prompt has its own reply id, approval signal and start time (Send now replaces the prompt in this session).
     let sessionId, output = '', segment = '', prompting = false, toolError = null, messageId = randomUUID(), promptAbort = new AbortController(), promptStartedAt = Date.now();
     const tools = new Map();
+    const children = new Map(), thinking = new Set();
+    const childCalls = new Map(), taskDetails = new Map();
+    const reportChild = child => {
+      const parent = children.get(child.parent);
+      const text = [child.task, child.description !== child.task && child.description,
+        child.role && 'Role: ' + child.role, child.model && 'Model: ' + child.model,
+        child.durationMs !== undefined && 'Duration: ' + child.durationMs + ' ms',
+        'Agent: ' + (child.agentId || child.id), 'Parent: ' + (parent?.name || child.parent)].filter(Boolean).join('\n');
+      onEvent({ type: 'info', kind: 'agent', id: 'cursor:agent:' + child.id, title: child.name || 'Cursor agent', text,
+        ...(child.state && { status: child.state }) });
+    };
+    const progress = (id, title, text) => onEvent({ type: 'info', kind: 'progress', id: 'cursor:' + id, title, text });
+    const listText = entries => entries.filter(e => typeof e?.content === 'string' && e.content)
+      .map(e => [e.status, e.priority, e.content].filter(s => typeof s === 'string' && s).join(' · ')).join('\n');
     // The conversation's parked connection is reused when it serves the same folder, tools and model picker.
     const mcpServers = (!schema && helpers?.cursorServers) ? helpers.cursorServers : [];
     const key = JSON.stringify([cwd, !!schema, !!picker, mcpServers]);
@@ -292,8 +306,46 @@ class CursorCLI {
     if (signal?.aborted) rpc.close();
     rpc.route = {
       onUpdate: p => {
-        if (!prompting || p.sessionId !== sessionId) return;
+        if (!prompting || (p.sessionId !== sessionId && !children.has(p.sessionId))) return;
         const u = p.update;
+        if (!schema && ['subagent_spawned', 'subagent_state_update'].includes(u?.sessionUpdate)) {
+          const id = u.subagentSessionId;
+          if (typeof id !== 'string' || !id || id === sessionId) return;
+          const child = children.get(id) || { id, parent: p.sessionId };
+          if (child.parent !== p.sessionId) return;
+          const meta = u._meta?.cursor;
+          for (const [key, value] of Object.entries({ name: u.name, task: u.task, state: u.state, model: meta?.model, agentId: meta?.agentId })) {
+            if (typeof value === 'string' && value) child[key] = value;
+          }
+          if (typeof meta?.toolCallId === 'string' && meta.toolCallId) {
+            childCalls.set(meta.toolCallId, child);
+            if (p.sessionId === sessionId) Object.assign(child, taskDetails.get(meta.toolCallId));
+          }
+          children.set(id, child);
+          reportChild(child);
+          return;
+        }
+        const sender = children.get(p.sessionId);
+        if (u?.sessionUpdate === 'agent_thought_chunk' && !thinking.has(p.sessionId) &&
+            !['completed', 'failed', 'cancelled', 'disconnected'].includes(sender?.state)) {
+          thinking.add(p.sessionId);
+          const name = sender?.name;
+          onEvent({ type: 'info', kind: 'reasoning', id: 'cursor:reasoning:' + randomUUID(), title: name ? 'Reasoning · ' + name : 'Reasoning', text: '' });
+        }
+        if (['agent_message_chunk', 'tool_call'].includes(u?.sessionUpdate)) thinking.delete(p.sessionId);
+        if (p.sessionId !== sessionId) return; // Child replies and tools do not belong to the parent's conversation.
+        if (u?.sessionUpdate === 'plan' && Array.isArray(u.entries)) {
+          const text = listText(u.entries);
+          if (text || !u.entries.length) progress('plan:' + sessionId, 'Plan', text || 'No plan entries.');
+        }
+        if (u?.sessionUpdate === 'tool_call_update' && u.status === 'in_progress' && /^Create Plan(?::|$)/.test(tools.get(u.toolCallId)?.name)) {
+          // Only these messages come from Cursor's plan-file progress presenter; never forward arbitrary tool output.
+          for (const block of Array.isArray(u.content) ? u.content : []) {
+            const text = block?.type === 'content' && block.content?.type === 'text' && block.content.text;
+            if (typeof text === 'string' && /^(Processing plan\.\.\.|Creating plan file\.\.\.|Plan saved to [^\r\n]+)$/.test(text))
+              progress('plan-file:' + u.toolCallId, 'Plan file', text);
+          }
+        }
         if (schema && u?.sessionUpdate === 'tool_call') {
           // Cursor can start read/search tools without a permission request. Never accept a tool-using classifier's result.
           toolError = invalidResponse();
@@ -318,6 +370,28 @@ class CursorCLI {
         if (u?.sessionUpdate === 'tool_call_update' && ['completed', 'failed'].includes(u.status)) onEvent({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: u.toolCallId, is_error: u.status === 'failed', content: toolOutput(u) }] } });
       },
       onRequest: async (method, p) => {
+        // Cursor's presenter uses extension *requests* without a sessionId. Link them only by a current native call.
+        if (method === 'cursor/task' || method === 'cursor/update_todos') {
+          if (schema || !prompting || !p?.toolCallId || (p.sessionId && p.sessionId !== sessionId)) return {};
+          const child = childCalls.get(p.toolCallId);
+          if (method === 'cursor/task' && (child || tools.has(p.toolCallId))) {
+            const details = taskDetails.get(p.toolCallId) || {};
+            if (Number.isSafeInteger(p.durationMs) && p.durationMs >= 0) details.durationMs = p.durationMs;
+            for (const [key, value] of Object.entries({ description: p.description, role: p.subagentType?.custom ?? p.subagentType, model: p.model, agentId: p.agentId })) {
+              if (typeof value === 'string' && value) details[key] = value;
+            }
+            taskDetails.set(p.toolCallId, details);
+            if (child) { Object.assign(child, details); reportChild(child); }
+          } else if (method === 'cursor/update_todos' && tools.has(p.toolCallId) && Array.isArray(p.todos)) {
+            const todos = applied.todos ||= new Map();
+            if (!p.merge) todos.clear();
+            for (const todo of p.todos) {
+              if (typeof todo?.id === 'string' && typeof todo.content === 'string') todos.set(todo.id, todo);
+            }
+            progress('todos:' + sessionId, 'Todos', listText([...todos.values()]) || 'No todos.');
+          }
+          return {};
+        }
         if (method === 'session/request_permission') {
           // Ask and Workspace access both ask the user in the Harness, like Codex and Claude; classifiers never get tools.
           // The prompt's own signal: after Send now a late answer cannot approve the replacement prompt's tools.
@@ -332,7 +406,7 @@ class CursorCLI {
       } };
     try {
       init ??= await rpc.call('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false,
-        ...(picker ? { _meta: { parameterizedModelPicker: true } } : {}) }, clientInfo: { name: 'phasma-harness', version: '0.1.0' } });
+        _meta: { ...(!schema && { subagents: true }), ...(picker && { parameterizedModelPicker: true }) } }, clientInfo: { name: 'phasma-harness', version: '0.1.0' } });
       if (images.length && !init.agentCapabilities?.promptCapabilities?.image) throw new Error('Cursor CLI did not advertise image support.');
       // Authentication is completed by the official login command, never token extraction.
       // Classifiers keep an empty MCP list. Workers get the bundled helper MCP via session mcpServers.
@@ -388,6 +462,7 @@ class CursorCLI {
         return urls.map(url => imageData(url)).map(({ mime, data }) => ({ type: 'image', mimeType: mime, data }));
       };
       const send = parts => {
+        children.clear(); thinking.clear(); tools.clear(); childCalls.clear(); taskDetails.clear();
         promptAbort = new AbortController(); promptStartedAt = Date.now(); messageId = randomUUID(); output = ''; segment = '';
         return rpc.call('session/prompt', { sessionId, prompt: parts }, 0);
       };

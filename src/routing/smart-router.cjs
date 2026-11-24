@@ -1,7 +1,7 @@
 const fs = require('node:fs');
 const { createHash } = require('node:crypto');
 const { pruneCodex, pruneClaude } = require('../providers/conversation-retention.cjs');
-const { CodexClient } = require('../providers/codex.cjs');
+const { CodexClient, codexInfo, appendCodexSummary } = require('../providers/codex.cjs');
 const { isCLI, capabilities } = require('../providers/capabilities.cjs');
 const { codexTurnLimited } = require('../providers/limits.cjs');
 const { PRESETS, ROUTER_PRESETS } = require('./router.cjs');
@@ -404,7 +404,7 @@ class SmartRouter {
     }
   }
 
-  async completeOnce({ instructions, prompt, schema, images = [], conversation = null, onActivity, repair }, choice, abort) {
+  async completeOnce({ instructions, prompt, schema, images = [], conversation = null, onActivity, onInfo, repair }, choice, abort) {
     const withRepair = text => repair ? text + '\n\n' + repair : text;
     const { model, effort } = choice;
     const fingerprint = createHash('sha256').update(JSON.stringify([choice.provider || 'codex', model, effort,
@@ -435,8 +435,9 @@ class SmartRouter {
         resume, persistSession: !!conversation, schemaInHistory: !!resume,
         ...((choice.provider === 'claude-cli' || choice.provider.startsWith('native:')) && effort ? { effort } : {}),
         ...(choice.provider === 'cursor-cli' ? { ...cursorOptions(choice, effort), spare: !conversation && choice.id === this.spareId } : {}),
-        signal: abort.signal, onActivity,
+        signal: abort.signal, onActivity, ...(choice.provider === 'claude-cli' ? { displaySummaries: !!onInfo } : {}),
         onEvent: event => {
+          if (event.type === 'info') { onActivity?.(); onInfo?.(event); return; }
           if (event.session_id) sessionId = event.session_id;
           const delta = event.type === 'stream_event' && event.event?.type === 'content_block_delta' && event.event.delta;
           if (delta && ((delta.type === 'text_delta' && delta.text) || (delta.type === 'thinking_delta' && delta.thinking)) ||
@@ -501,8 +502,41 @@ class SmartRouter {
     const onRequest = message => { client.rejectRequest(message.id, 'The router does not use tools.'); fail(new Error('Router requested a tool.')); };
     const onDisconnect = error => fail(new Error(error));
     let output = '';
+    const summaries = new Map();
+    let infoTurn;
+    const earlyInfo = new Map();
+    const publish = (turnId, info) => {
+      if (infoTurn === turnId) onInfo(info);
+      else if (!infoTurn) earlyInfo.set(info.id, { turnId, info });
+    };
+    function reasoning(method, p) {
+      const itemId = p.item?.id || p.itemId;
+      if (!itemId || !p.turnId) return;
+      const id = JSON.stringify(['codex', p.threadId, p.turnId, itemId]);
+      let summary = summaries.get(id);
+      if (p.item?.type === 'reasoning') {
+        const info = codexInfo(p.item, method === 'item/completed' ? 'completed' : 'inProgress');
+        if (info.text) summary = { parts: { ...p.item.summary }, text: info.text };
+        summaries.set(id, summary || {});
+        publish(p.turnId, { ...info, type: 'info', id, text: summary?.text || '' });
+      } else if (method === 'item/reasoning/summaryTextDelta') {
+        summary = appendCodexSummary(summary?.parts, p.summaryIndex, p.delta);
+        if (!summary) return;
+        summaries.set(id, summary);
+        publish(p.turnId, { type: 'info', id, kind: 'reasoning', title: 'Thinking', text: summary.text, status: 'inProgress' });
+      } else if (!summaries.has(id) && ['item/reasoning/textDelta', 'item/reasoning/summaryPartAdded'].includes(method)) {
+        summaries.set(id, {});
+        publish(p.turnId, { type: 'info', id, kind: 'reasoning', title: 'Thinking', text: '', status: 'inProgress' });
+      }
+    }
     const onNotification = ({ method, params: p }) => {
       if (!threadId || p?.threadId !== threadId) return;
+      if (onInfo) {
+        if (method === 'turn/completed') {
+          for (const item of p.turn.items || []) if (item.type === 'reasoning')
+            reasoning('item/completed', { threadId, turnId: p.turn.id, item });
+        } else if (method.startsWith('item/reasoning/') || (['item/started', 'item/completed'].includes(method) && p.item?.type === 'reasoning')) reasoning(method, p);
+      }
       if (['item/agentMessage/delta', 'item/reasoning/summaryTextDelta', 'item/reasoning/textDelta'].includes(method) && p.delta) onActivity?.();
       if (method === 'thread/tokenUsage/updated') usage = p.tokenUsage.last;
       if (method === 'item/completed' && p.item.type === 'agentMessage') output = p.item.text;
@@ -531,16 +565,21 @@ class SmartRouter {
           threadId = thread.thread.id;
           if (finished) throw new Error('Routing already stopped.');
         };
-        const startTurn = (text, attached) => {
+        const startTurn = async (text, attached) => {
           timing.setupMs = Date.now() - setup;
           timing.inferenceStarted = Date.now();
           abort.signal.throwIfAborted();
-          return client.call('turn/start', {
-            threadId, model, effort, serviceTier: 'default', approvalPolicy: 'never',
+          const started = await client.call('turn/start', {
+            threadId, model, effort, serviceTier: 'default', approvalPolicy: 'never', ...(onInfo ? { summary: 'auto' } : {}),
             sandboxPolicy: { type: 'readOnly', networkAccess: false },
             input: [{ type: 'text', text: withRepair(text), text_elements: [] }, ...attached.map(url => ({ type: 'image', url }))],
             outputSchema: schema,
           });
+          if (onInfo) {
+            infoTurn = started?.turn?.id;
+            for (const entry of earlyInfo.values()) if (entry.turnId === infoTurn) onInfo(entry.info);
+            earlyInfo.clear();
+          }
         };
 
         // A Hub chat continues its kept thread with only the changes; anything that no longer matches starts fresh.

@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { ApiAgent, needsApproval } = require('../src/providers/api-agent.cjs');
+const { Providers } = require('../src/providers/providers.cjs');
 
 const stream = chunks => new Response(new ReadableStream({ start(output) {
   for (const chunk of chunks) output.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(chunk)}\n\n`));
@@ -70,6 +71,69 @@ test('API history preserves reasoning and exact message prefixes across restart,
   assert.equal(requests.length, 2, 'no incomplete conversation reaches the provider');
 });
 
+test('API emits cumulative typed summaries only and replays original provider details unchanged', async t => {
+  const delta = reasoning_details => ({ choices: [{ delta: { reasoning_details, reasoning: 'private-raw' } }] });
+  const first = [
+    { choices: [{ delta: { reasoning_content: 'private-signal' } }] },
+    { choices: [{ delta: { reasoning_content: 'private-second-chunk' } }] },
+    delta([{ type: 'reasoning.text', index: 0, text: 'private-', signature: 'sig-' },
+      { type: 'reasoning.summary', index: 1, summary: 'Checking' }]),
+    delta([{ type: 'reasoning.encrypted', index: 2, data: 'cipher-' },
+      { type: 'reasoning.summary', index: 1, id: 'native', summary: ' inputs.' }]),
+    delta([{ type: 'reasoning.text', index: 0, text: 'text', signature: 'end' },
+      { type: 'reasoning.encrypted', index: 2, data: 'end' }]),
+    call(0, 'read', 'read_file', { path: 'notes.txt' }),
+  ];
+  const { agent, workspace, requests } = fixture(t, [first, [delta([{ type: 'reasoning.summary', index: 1, id: 'native', summary: 'Done.' }]),
+    { choices: [{ delta: { content: 'OK' } }] }]]);
+  const events = [];
+  await agent.run({ provider: 'local', model: 'test', cwd: workspace, access: 'read-only', signal: new AbortController().signal,
+    prompt: 'check', onEvent: e => events.push(e) });
+  const info = events.filter(event => event.type === 'info');
+  assert.deepEqual(info.map(event => [event.kind, event.text]), [['reasoning', ''], ['reasoning', 'Checking'], ['reasoning', 'Checking inputs.'], ['reasoning', 'Done.']]);
+  assert.equal(info[0].id, info[1].id);
+  assert.equal(info[0].id, info[2].id);
+  assert.notEqual(info[0].id, info[3].id);
+  assert.doesNotMatch(JSON.stringify(events), /private-|sig-|cipher-/);
+  assert.deepEqual(requests[1].messages.find(m => m.reasoning_details).reasoning_details,
+    first.flatMap(chunk => chunk.choices[0].delta.reasoning_details || []));
+});
+
+test('OpenRouter requests optional public summaries on worker requests only and reports server tool names without their IO', async t => {
+  const { agent, workspace } = fixture(t, []);
+  const requests = [], info = [];
+  let baseUrl = 'https://openrouter.ai/api/v1';
+  agent.providers = new Providers(workspace, null, () => [{ id: 'custom', name: 'Test', enabled: true, baseUrl }], async (_url, options) => {
+    const body = JSON.parse(options.body);
+    requests.push(body);
+    const details = [{ type: 'reasoning.server_tool_call', tool_name: 'openrouter:fusion', tool_call_id: 'native-tool',
+      arguments: 'private-arguments', result: 'private-result' }];
+    if (body.reasoning?.summary) details.push({ type: 'reasoning.summary', summary: 'Compared two approaches.' });
+    return stream([{ choices: [{ delta: { content: 'Answer', reasoning_details: details } }] }]);
+  });
+  agent.providers.local.inspect = async () => ({ supported: false });
+  const options = { provider: 'custom', model: 'm', effort: 'low', prompt: 'test', cwd: workspace, access: 'read-only',
+    signal: new AbortController().signal, onEvent: event => { if (event.type === 'info') info.push(event); } };
+  await agent.run(options);
+  assert.equal(requests[0].reasoning?.summary, 'auto');
+  assert.equal(requests[0].reasoning_effort, 'low');
+  assert.ok(info.some(e => e.kind === 'reasoning' && e.text === 'Compared two approaches.'));
+  assert.ok(info.some(e => e.kind === 'progress' && e.text === 'openrouter:fusion'));
+  assert.doesNotMatch(JSON.stringify(info), /private-/);
+  for (const region of ['eu', 'us']) {
+    baseUrl = 'https://' + region + '.openrouter.ai/api/v1';
+    await agent.run({ ...options, effort: undefined });
+    assert.deepEqual(requests.at(-1).reasoning, { summary: 'auto' });
+    assert.equal(requests.at(-1).reasoning_effort, undefined);
+  }
+  await agent.providers.modelRequest(options, { model: 'm', stream: false }, { supported: false }, options.signal, 'chat/completions');
+  assert.equal(requests.at(-1).reasoning, undefined);
+  await agent.run({ ...options, effort: 'none' });
+  baseUrl = 'https://openrouter.ai.example.test/api/v1';
+  await agent.run(options);
+  assert.ok(requests.slice(-2).every(body => !body.reasoning));
+});
+
 test('a missing usage report in a tool loop marks the total as incomplete', async t => {
   const { agent, workspace } = fixture(t, [
     [call(0, 'read', 'read_file', { path: 'notes.txt' })],
@@ -78,6 +142,83 @@ test('a missing usage report in a tool loop marks the total as incomplete', asyn
   const result = await run(agent, workspace, 'read-only', []);
   assert.equal(result.usageIncomplete, true);
   assert.equal(result.usage.total_input_tokens, 100, 'reported tokens remain a lower bound, not a complete or zero-cost turn');
+});
+
+test('llama.cpp streams one cumulative prompt progress item per model request, even on contentless frames', async t => {
+  const initial = { choices: [], prompt_progress: { processed: 0, total: 120, cache: 0, time_ms: 0 } };
+  const next = { choices: [{ delta: { content: 'Checking.' } }], prompt_progress: { processed: 30, time_ms: 14.5 } };
+  const { agent, workspace, requests } = fixture(t, [
+    [initial, initial, next, { prompt_progress: { processed: null, total: -1, time_ms: 'unknown', internal: 'secret' } },
+      call(0, 'read', 'read_file', { path: 'notes.txt' })],
+    [{ prompt_progress: { cache: 12 } }, { choices: [{ delta: { content: 'Done.' } }] }],
+  ]);
+  agent.providers.local.inspect = async () => ({ supported: true, kind: 'llama.cpp' });
+  const info = [];
+  const result = await agent.run({ provider: 'local', model: 'test', cwd: workspace, access: 'read-only', signal: new AbortController().signal,
+    prompt: 'check', onEvent: event => { if (event.type === 'info') info.push(event); } });
+  assert.ok(requests.every(body => body.return_progress === true));
+  assert.equal(result.result, 'Done.');
+  assert.deepEqual(info.map(e => e.text), ['Processed: 0 tokens · Total: 120 tokens · Cached: 0 tokens · Elapsed: 0 ms',
+    'Processed: 30 tokens · Total: 120 tokens · Cached: 0 tokens · Elapsed: 14.5 ms', 'Cached: 12 tokens']);
+  assert.equal(info[0].id, info[1].id);
+  assert.notEqual(info[0].id, info[2].id);
+  assert.ok(info.every(e => e.kind === 'progress' && !e.status));
+});
+
+test('other compatible providers neither request nor interpret llama.cpp progress', async t => {
+  for (const kind of ['lm-studio', 'ollama', null]) {
+    const { agent, workspace, requests } = fixture(t, [[{ prompt_progress: { processed: 7 }, choices: [{ delta: { content: 'Done.' } }] }]]);
+    agent.providers.local.inspect = async () => ({ supported: !!kind, kind });
+    const info = [];
+    await agent.run({ provider: 'local', model: 'test', cwd: workspace, access: 'read-only', signal: new AbortController().signal,
+      prompt: 'check', onEvent: event => { if (event.type === 'info') info.push(event); } });
+    assert.ok(!Object.hasOwn(requests[0], 'return_progress'));
+    assert.deepEqual(info, []);
+  }
+});
+
+test('LM Studio inline thinking stays out of stream events and final answers without rewriting replay', async t => {
+  const chunks = [' \n<th', 'ink>private', '-trace</thi', 'nk>Public ', 'example: <think>.'];
+  const reply = texts => texts.map(content => ({ choices: [{ delta: { content } }] }));
+  const { agent, workspace, requests } = fixture(t, [reply(chunks), reply(['<think>private-unfinished'])]);
+  agent.providers.local.inspect = async () => ({ supported: true, kind: 'lm-studio' });
+  const events = [];
+  const options = { provider: 'local', model: 'test', cwd: workspace, access: 'read-only', signal: new AbortController().signal,
+    prompt: 'check', onEvent: event => events.push(event) };
+  const first = await agent.run(options);
+  assert.equal(first.result, 'Public example: <think>.');
+  const second = await agent.run({ ...options, resume: first.session_id });
+  assert.equal(second.result, '');
+  assert.equal(requests[1].messages.find(m => m.role === 'assistant').content, chunks.join(''));
+  assert.doesNotMatch(JSON.stringify(events), /private|trace/);
+  assert.equal(events.filter(e => e.kind === 'reasoning').length, 2);
+});
+
+test('usage-only reasoning is visible once without speculative events on zero tokens', async t => {
+  const usage = count => ({ choices: [], usage: { completion_tokens_details: { reasoning_tokens: count } } });
+  const { agent, workspace, requests } = fixture(t, [[call(0, 'read', 'read_file', { path: 'notes.txt' }), usage(6)],
+    [{ choices: [{ delta: { content: 'OK' } }] }, usage(0)]]);
+  const events = [];
+  await agent.run({ provider: 'local', model: 'test', cwd: workspace, access: 'read-only', signal: new AbortController().signal,
+    prompt: 'check', onEvent: event => events.push(event) });
+  assert.deepEqual(events.filter(e => e.type === 'info').map(e => [e.kind, e.text]), [['reasoning', '6 reasoning tokens this step']]);
+  assert.ok(requests.every(r => !Object.hasOwn(r, 'reasoning_format')));
+});
+
+test('an ID-only summary delta cannot replace a different native index binding', async t => {
+  const part = (summary, identity) => ({ type: 'reasoning.summary', summary, ...identity });
+  const chunks = [
+    [part('First', { id: 'a', index: 0 }), part('Second', { id: 'b', index: 1 })],
+    [part(' task', { id: 'b' })], [part(' task', { index: 0 })],
+  ].map(reasoning_details => ({ choices: [{ delta: { reasoning_details } }] }));
+  const { agent, workspace, requests } = fixture(t, [[...chunks, { choices: [{ delta: { content: 'OK' } }] }]]);
+  agent.providers.local.inspect = async () => ({ supported: true, kind: 'llama.cpp' });
+  const info = [];
+  await agent.run({ provider: 'local', model: 'test', cwd: workspace, access: 'read-only', signal: new AbortController().signal,
+    prompt: 'check', onEvent: event => { if (event.type === 'info') info.push(event); } });
+  assert.deepEqual(info.map(event => event.text), ['First', 'Second', 'Second task', 'First task']);
+  assert.equal(info[0].id, info[3].id);
+  assert.equal(requests[0].reasoning_format, 'deepseek');
 });
 
 // 2026-10-30: image_read returns an image, which an API tool message cannot carry.

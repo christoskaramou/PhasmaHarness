@@ -5,6 +5,60 @@ const fs = require('node:fs'), path = require('node:path'), os = require('node:o
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 
+test('Cursor surfaces only correlated native child metadata and status-only reasoning episodes', async t => {
+  const cursor = new CursorCLI(), events = [];
+  t.after(() => cursor.close());
+  cursor.connect = ({ onUpdate, onRequest }) => ({ close() {}, call: async (method, params) => {
+    if (method === 'initialize') {
+      assert.deepEqual(params.clientCapabilities, { fs: { readTextFile: false, writeTextFile: false }, terminal: false, _meta: { subagents: true } });
+    }
+    if (method === 'session/new') return { sessionId: 'parent' };
+    if (method === 'session/prompt') {
+      const send = (sessionId, sessionUpdate, fields) => onUpdate({ sessionId, update: { sessionUpdate, ...fields } });
+      const thought = { content: { type: 'text', text: 'private' } };
+      send('foreign', 'subagent_spawned', { subagentSessionId: 'stray' });
+      send('parent', 'subagent_spawned', { subagentSessionId: 'child', name: 'Reviewer', task: 'Check imports',
+        _meta: { cursor: { agentId: 'worker', model: 'model-x', toolCallId: 'task-1' } } });
+      send('child', 'subagent_spawned', { subagentSessionId: 'nested', name: 'Nested' });
+      await onRequest('cursor/task', { toolCallId: 'task-1', subagentType: { custom: 'auditor' }, description: 'Inspect dependencies', durationMs: 1200, prompt: 'private' });
+      send('parent', 'plan', { entries: [{ status: 'in_progress', content: 'Review imports', priority: 'high' }] });
+      send('parent', 'tool_call', { toolCallId: 'todo-1', title: 'Update Todos' });
+      await onRequest('cursor/update_todos', { toolCallId: 'todo-1', todos: [{ id: 'i', content: 'Inspect files', status: 'pending' }], merge: false });
+      await onRequest('cursor/update_todos', { toolCallId: 'todo-1', todos: [{ id: 'j', content: 'Test imports', status: 'completed' }], merge: true });
+      await onRequest('cursor/update_todos', { toolCallId: 'foreign', todos: [{ id: 'k', content: 'stray', status: 'pending' }] });
+      send('parent', 'tool_call', { toolCallId: 'plan-1', title: 'Create Plan: Imports' });
+      send('parent', 'tool_call_update', { toolCallId: 'plan-1', status: 'in_progress', content: [{ type: 'content', content: { type: 'text', text: 'Creating plan file...' } }] });
+      send('parent', 'tool_call_update', { toolCallId: 'todo-1', status: 'in_progress', content: [{ type: 'content', content: { type: 'text', text: 'private-tool-output' } }] });
+      send('child', 'agent_message_chunk', thought);
+      send('parent', 'agent_thought_chunk', thought);
+      send('parent', 'agent_thought_chunk', thought);
+      send('parent', 'agent_message_chunk', { content: { type: 'text', text: 'Answer' } });
+      send('parent', 'agent_thought_chunk', thought);
+      send('parent', 'subagent_state_update', { subagentSessionId: 'child', state: 'completed' });
+      send('child', 'agent_thought_chunk', thought); // A finished native run cannot start another episode.
+      return { stopReason: 'end_turn' };
+    }
+    return {};
+  } });
+  const result = await cursor.run({ model: 'm', prompt: 'x', onEvent: event => events.push(event) });
+  assert.equal(result.result, 'Answer');
+  assert.doesNotMatch(JSON.stringify(events), /private|stray/);
+  const children = events.filter(event => event.kind === 'agent');
+  assert.equal(children[0].id, children.at(-1).id);
+  assert.equal(children.at(-1).status, 'completed');
+  assert.match(children.at(-1).text, /Duration: 1200 ms/);
+  for (const value of ['Check imports', 'worker', 'model-x', 'auditor', 'Inspect dependencies']) assert.ok(children.at(-1).text.includes(value), value);
+  assert.match(children.find(event => event.title === 'Nested').text, /Reviewer/);
+  const progress = events.filter(event => event.kind === 'progress');
+  assert.match(progress[0].text, /in_progress.*high.*Review imports/);
+  assert.equal(progress[1].id, progress[2].id);
+  assert.match(progress[2].text, /Inspect files[\s\S]*Test imports/);
+  assert.equal(progress[3].text, 'Creating plan file...');
+  const reasoning = events.filter(event => event.kind === 'reasoning');
+  assert.deepEqual(reasoning.map(event => event.text), ['', '']);
+  assert.notEqual(reasoning[0].id, reasoning[1].id);
+});
+
 test('Cursor Main resumes with no repeated schema while validation and tool denial stay enabled', async () => {
   const cursor = new CursorCLI(), sent = [], schema = { type: 'object', properties: { reply: { type: 'string' } }, required: ['reply'] };
   cursor.connect = options => {

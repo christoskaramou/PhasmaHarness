@@ -56,7 +56,7 @@ test('Cursor run sets the chosen reasoning level through the parameterized picke
   // A model from the old variant list keeps the previous handshake: no picker capability, no config option.
   calls = fake(cursor);
   await cursor.run({ model: 'gpt-5.5-high', prompt: 'x', access: 'read-only' });
-  assert.equal(calls[0].params.clientCapabilities._meta, undefined);
+  assert.deepEqual(calls[0].params.clientCapabilities._meta, { subagents: true });
   assert.equal(calls.some(c => c.method === 'session/set_config_option'), false);
   // A parameterized model without levels declares the picker but sets no option.
   calls = fake(cursor);

@@ -20,6 +20,17 @@ function googleAccount(home = os.homedir()) {
 }
 
 const LABEL = 'Antigravity CLI';
+const STEP_LABELS = new Map([['checkpoint', 'Checkpoint'], ['system_message', 'System update'],
+  ['error_message', 'Agent error'], ['finish', 'Response finish'], ['agent_response', 'Agent response'], ['subagent', 'Subagent step']]);
+
+// References are displayed, never opened. Do not copy URI credentials, queries or opaque payloads into chat.
+function displayReference(value) {
+  if (typeof value !== 'string') return '';
+  try {
+    const uri = new URL(value);
+    return ['file:', 'https:', 'http:'].includes(uri.protocol) ? uri.protocol + '//' + uri.host + uri.pathname : '';
+  } catch { return ''; }
+}
 const LIMIT = 16 * 1024 * 1024;
 // agy hard-truncates a single user message from the tail around ~256 KiB (observed 2026-11-23: 257,546 bytes kept).
 // Reject above 200 KiB pre-flight instead of letting agy silently drop newest history and the live prompt.
@@ -314,7 +325,9 @@ class AntigravityCLI {
           settled = true;
           error ? reject(error) : resolve(value);
         };
-        const tools = new Set(), onEvent = options.onEvent || (() => {});
+        const tools = new Set(), children = new Map(), childIds = new Map(), steps = new Map(), onEvent = options.onEvent || (() => {});
+        const responseIds = new Map();
+        let responseId, stepThinkingReported = false;
         const onStdinError = error => finish(error);
         const onError = error => finish(error);
         const onClose = () => finish(new Error('Antigravity exited before confirming a result. Review its saved session before retrying.'));
@@ -331,8 +344,54 @@ class AntigravityCLI {
           } else if (value.event === 'step_update') {
             const step = value.step_update;
             if (!initialized || step?.conversation_id !== sessionId) throw new Error('Antigravity returned an unrelated step.');
-            if (step.step_type === 'agent_response' && typeof step.text_delta === 'string') onEvent({ type: 'stream_event',
-              event: { type: 'content_block_delta', delta: { type: 'text_delta', text: step.text_delta } } });
+            const thinkingTokens = step.usage?.thinking_tokens;
+            if (Number.isSafeInteger(step.step_index) && Number.isSafeInteger(thinkingTokens) && thinkingTokens > 0) {
+              stepThinkingReported = true;
+              onEvent({ type: 'info', kind: 'reasoning', id: 'reasoning:' + step.step_index,
+                title: 'Reasoning', text: thinkingTokens + (thinkingTokens === 1 ? ' thinking token' : ' thinking tokens') });
+            }
+            if (step.step_type === 'agent_response' && typeof step.text_delta === 'string' && step.text_delta) {
+              const index = step.step_index ?? 0;
+              if (!responseIds.has(index)) responseIds.set(index, randomUUID());
+              if (responseId !== responseIds.get(index)) {
+                if (responseId) onEvent({ type: 'assistant', message: { id: responseId, phase: 'commentary', content: [] } });
+                responseId = responseIds.get(index);
+                onEvent({ type: 'stream_event', event: { type: 'message_start', message: { id: responseId } } });
+              }
+              onEvent({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: step.text_delta } } });
+            }
+            const title = STEP_LABELS.get(step.step_type);
+            const timed = Number.isFinite(step.duration_seconds) && step.duration_seconds >= 0;
+            const timingOnly = step.step_type === 'agent_response' || step.step_type === 'subagent';
+            if (title && Number.isSafeInteger(step.step_index) && (!timingOnly || timed)) {
+              const id = 'step:' + step.step_index;
+              const prior = steps.get(id);
+              const status = typeof step.state === 'string' && step.state || prior?.status;
+              const text = timed ? 'Duration: ' + step.duration_seconds + ' s' : prior?.text || '';
+              if (!prior || status !== prior.status || text !== prior.text) {
+                steps.set(id, { text, status });
+                onEvent({ type: 'info', kind: 'progress', id, title, text, ...(status ? { status } : {}) });
+              }
+            }
+            if (Array.isArray(step.subagent_info?.subagents)) for (const child of step.subagent_info.subagents) {
+              const conversation = typeof child?.conversation_id === 'string' ? child.conversation_id : '';
+              const log = displayReference(child?.log_uri);
+              const id = childIds.get(conversation) || childIds.get(log) || conversation || log;
+              if (!id) continue;
+              if (log) childIds.set(log, id);
+              if (conversation) childIds.set(conversation, id);
+              const known = children.get(id) || {};
+              const type = typeof child.type_name === 'string' && child.type_name || known.type;
+              const role = typeof child.role === 'string' && child.role || known.role;
+              const workspaces = Array.isArray(child.workspace_uris) ? child.workspace_uris.map(displayReference).filter(Boolean) : [];
+              const next = { type, role, conversation: conversation || known.conversation, log: log || known.log,
+                workspaces: workspaces.length ? workspaces : known.workspaces };
+              const text = [role, next.conversation, next.log && 'Log: ' + next.log,
+                ...(next.workspaces || []).map(uri => 'Workspace: ' + uri)].filter(Boolean).join('\n');
+              if (text === known.text && type === known.type) continue;
+              children.set(id, { ...next, text });
+              onEvent({ type: 'info', kind: 'agent', id, title: type || 'Subagent', text });
+            }
             if (step.step_type === 'tool' && typeof step.tool_name === 'string' && Number.isSafeInteger(step.step_index)) {
               // A Hub/routing reply or noTools turn is tool-free, as for every provider: a reply that uses a tool is not accepted (cursor.cjs).
               if (options.schema) throw invalidResponse();
@@ -360,7 +419,11 @@ class AntigravityCLI {
             if (typeof result.response !== 'string') throw new Error('Antigravity returned no response.');
             // Resumed-session counters may include older turns; keep usage unknown until verified.
             const usage = !options.resume && result.num_turns === 1 ? usageCounts(result.usage) : null;
-            onEvent({ type: 'assistant', message: { content: [{ type: 'text', text: result.response }] } });
+            const turnThinking = result.usage?.thinking_tokens;
+            if (!options.resume && result.num_turns === 1 && !stepThinkingReported && Number.isSafeInteger(turnThinking) && turnThinking > 0)
+              onEvent({ type: 'info', kind: 'reasoning', id: 'reasoning:turn', title: 'Reasoning',
+                text: turnThinking + (turnThinking === 1 ? ' thinking token' : ' thinking tokens') });
+            onEvent({ type: 'assistant', message: { id: responseId, phase: 'final_answer', content: [{ type: 'text', text: result.response }] } });
             const window = contextWindow(options.model);
             finish(null, { result: result.response, session_id: sessionId, ...(usage ? { usage } : {}), ...(window ? { contextWindow: window } : {}),
               cacheUsageUnknown: !usage || result.usage.cache_read_tokens === undefined });

@@ -64,6 +64,7 @@ function dropWarm(sessionId, stop = true) {
   if (!entry) return null;
   clearTimeout(entry.timer);
   entry.child.removeListener('close', entry.onClose);
+  if (entry.onParkedData) entry.child.stdout.removeListener('data', entry.onParkedData);
   WARM.delete(sessionId);
   if (stop) {
     stopTree(entry.child);
@@ -75,6 +76,195 @@ function dropWarm(sessionId, stop = true) {
 function executable() {
   const native = path.join(os.homedir(), '.local', 'bin', process.platform === 'win32' ? 'claude.exe' : 'claude');
   return fs.existsSync(native) ? native : 'claude';
+}
+
+// Anthropic documents summary (not raw) thinking for these model families. Never infer
+// the actual model from a launch alias: a message can come from a fallback model.
+function summaryModel(model) {
+  return typeof model === 'string' && /^claude-(?:(?:opus|sonnet|haiku|fable|mythos)-[45](?:-\d+)*|mythos-preview)(?:\[1m\])?$/.test(model);
+}
+
+// One parser per run: stream indexes are local to a model message (including nested agents).
+function claudeDisplayEvents(emit, resume, previousInfo = [], display = {}) {
+  const messages = new Map(), thinking = new Map(), tasks = new Map(), agentTools = new Map();
+  let foregroundModel;
+  for (const { claudeTask } of previousInfo)
+    if (claudeTask && claudeTask.sessionId === resume) tasks.set(claudeTask.taskId, claudeTask);
+  let background = new Set();
+  let checkpoint, summaryId, goalId, lastThinking, tokenMarker, tokenPrompt, tokenTitle;
+  const list = new Map();
+  function taskEvent(task, snapshot = false, sessionId) {
+    if (!task.task_id || task.ambient || task.skip_transcript) return;
+    const known = tasks.get(task.task_id);
+    const type = task.task_type || known?.taskType;
+    if (type && !['local_agent', 'remote_agent', 'in_process_teammate', 'local_workflow', 'mcp_task'].includes(type)) return;
+    const tool = agentTools.get(task.tool_use_id);
+    const agent = [tool?.name, task.subagent_type || tool?.role].filter(Boolean).filter((s, i, a) => a.indexOf(s) === i).join(' · ');
+    if (!known && !agent && !tool && !task.task_type && !task.handback && !task.summary_is_report) return;
+    if (known?.run && task.run_id && task.run_id < known.run) return;
+    const prior = known?.run && task.run_id && task.run_id !== known.run ? null : known;
+    const patch = task.patch || {};
+    const run = task.run_id || prior?.run;
+    const id = prior?.id || 'claude-task:' + JSON.stringify([sessionId || resume || '', task.task_id, run || '']);
+    const kind = ['mcp_task', 'local_workflow'].includes(type) ? 'progress' : prior?.kind || 'agent';
+    const title = agent ? agent + ' · ' + task.task_id : prior?.title || (task.workflow_name || (kind === 'agent' ? 'Agent' : type)) + ' · ' + task.task_id;
+    const report = task.handback_report;
+    const handback = report && typeof report.text === 'string' && [report.warning, report.text].filter(s => typeof s === 'string' && s).join('\n');
+    const description = handback || (task.handback !== 'withheld' && task.summary) || patch.error || patch.description || (snapshot && prior?.description) || task.description || prior?.description || '';
+    const parent = task.parent_task_id || prior?.parent;
+    const lastTool = task.last_tool_name || prior?.lastTool;
+    const backgrounded = patch.is_backgrounded ?? task.is_backgrounded ?? (snapshot || prior?.backgrounded);
+    const status = task.status || patch.status || (snapshot && prior?.status === 'no longer listed' ? 'running' : prior?.status) || 'running';
+    const prompt = task.prompt || prior?.prompt, depth = task.spawn_depth ?? prior?.depth;
+    const toolUses = task.usage?.tool_uses ?? prior?.toolUses, elapsed = task.usage?.duration_ms ?? prior?.elapsed;
+    const awaited = task.awaited ?? prior?.awaited, offHost = task.off_host ?? prior?.offHost;
+    const state = { id, run, title, description, parent, lastTool, backgrounded, status, kind, taskType: type, prompt, depth,
+      toolUses, elapsed, awaited, offHost, taskId: task.task_id, sessionId: sessionId || prior?.sessionId || resume };
+    tasks.set(task.task_id, state);
+    const text = [description, prompt && prompt !== description && 'Task: ' + prompt, parent && 'Parent: ' + parent,
+      Number.isInteger(depth) && 'Depth: ' + depth, lastTool && 'Last tool: ' + lastTool,
+      Number.isFinite(toolUses) && 'Tool uses: ' + toolUses,
+      Number.isFinite(elapsed) && 'Duration: ' + elapsed + ' ms', awaited && 'Caller waiting', offHost && 'Running off host',
+      task.reason === 'worker_restart' && 'Worker restarted',
+      backgrounded && 'Background task'].filter(Boolean).join('\n');
+    emit({ type: 'info', kind, id, title, text, status }, state);
+    return task.task_id;
+  }
+  return event => {
+    const child = event.parent_tool_use_id || '';
+    if (!child && event.type === 'system' && event.subtype === 'init') display.firstParty = event.served_by_anthropic === true;
+    const frame = event.type === 'stream_event' ? event.event : null;
+    if (frame?.type === 'message_start') {
+      if (!child && frame.message?.id !== messages.get(child)) lastThinking = null;
+      if (!child) foregroundModel = frame.message?.model;
+      messages.set(child, frame.message?.id);
+    }
+    const message = event.message || frame?.message;
+    const mid = message?.id || messages.get(child);
+    function reason(index, status, value, append = false) {
+      const key = JSON.stringify(['thinking', child, mid, index]);
+      const previous = thinking.get(key);
+      const id = previous?.id || (!child && tokenMarker) || key;
+      if (!child) tokenMarker = null;
+      let text = previous?.text || '';
+      const model = message?.model || (mid && mid === messages.get('') ? foregroundModel : undefined);
+      if (display.enabled && display.firstParty && !child && summaryModel(model) && typeof value === 'string' && (append ? value : value.trim()))
+        text = append ? text + value : value;
+      if (text === previous?.text && status === previous?.status) return;
+      const info = { type: 'info', kind: 'reasoning', id, title: (!child && tokenTitle) || 'Thinking', text, status };
+      thinking.set(key, info);
+      if (!child) lastThinking = info;
+      emit(info);
+    }
+    function rememberAgentTool(block) {
+      if (block?.type === 'tool_use' && ['Agent', 'Task'].includes(block.name))
+        agentTools.set(block.id, { name: block.input?.name, role: block.input?.subagent_type });
+    }
+    if (frame?.type === 'content_block_start') rememberAgentTool(frame.content_block);
+    if (message && Array.isArray(message.content) && (event.type === 'assistant' || frame?.type === 'message_start')) {
+      message.content = message.content.filter((block, index) => {
+        if (['thinking', 'redacted_thinking'].includes(block.type)) {
+          reason(index, frame ? 'inProgress' : 'completed', block.type === 'thinking' ? block.thinking : undefined); return false;
+        }
+        rememberAgentTool(block);
+        return !child;
+      });
+    }
+    if (frame?.type === 'content_block_start' && ['thinking', 'redacted_thinking'].includes(frame.content_block?.type)) {
+      reason(frame.index, 'inProgress', frame.content_block.type === 'thinking' ? frame.content_block.thinking : undefined); return;
+    }
+    if (child && frame?.type === 'content_block_start' && frame.content_block?.type === 'text') return;
+    if (frame?.type === 'content_block_delta' && frame.delta?.type === 'thinking_delta') {
+      reason(frame.index, 'inProgress', frame.delta.thinking, true); return;
+    }
+    if (frame?.type === 'content_block_delta' && (frame.delta?.type === 'signature_delta' || (child && frame.delta?.type === 'text_delta'))) return;
+    if (frame?.type === 'content_block_stop' && thinking.has(JSON.stringify(['thinking', child, mid, frame.index]))) {
+      reason(frame.index, 'completed'); return;
+    }
+    if (child && event.type !== 'system' && event.type !== 'assistant' && frame?.type !== 'message_start') return;
+    const progress = (id, title, text, status) => emit({ type: 'info', kind: 'progress', id, title, text, status });
+    const publishList = () => progress('task-list', 'Task progress', [...list].map(([id, status]) => id + ': ' + status).join('\n'));
+    const update = event.type === 'user' && !child && event.tool_use_result;
+    if (update?.success === true && list.has(update.taskId) && typeof update.statusChange?.to === 'string') {
+      if (update.statusChange.to === 'deleted') list.delete(update.taskId);
+      else list.set(update.taskId, update.statusChange.to);
+      publishList();
+    }
+    if (event.type === 'tool_use_summary' && !child && event.summary && event.uuid) {
+      progress(event.uuid, 'Work summary', event.summary); return;
+    }
+    if (event.type === 'active_goal') {
+      if (event.value?.condition) {
+        goalId = 'claude-goal:' + event.value.set_at;
+        progress(goalId, 'Goal', [event.value.condition, event.value.last_reason,
+          Number.isInteger(event.value.iterations) && 'Iterations: ' + event.value.iterations].filter(Boolean).join('\n'));
+      } else if (goalId) { progress(goalId, 'Goal', undefined, 'cleared'); goalId = null; }
+      return;
+    }
+    if (event.type === 'system') {
+      if (event.subtype === 'thinking_tokens' || event.subtype === 'thinking') {
+        if (!child && event.user_message_uuid) {
+          if (tokenPrompt && event.user_message_uuid !== tokenPrompt) { lastThinking = null; tokenMarker = null; tokenTitle = null; }
+          tokenPrompt = event.user_message_uuid;
+        }
+        if (!child && (event.subtype === 'thinking' || event.estimated_tokens_delta > 0)) {
+          if (Number.isSafeInteger(event.estimated_tokens) && event.estimated_tokens > 0)
+            tokenTitle = 'Thinking · ~' + event.estimated_tokens + ' tokens this turn';
+          if (lastThinking) {
+            if (tokenTitle && lastThinking.title !== tokenTitle) emit({ ...lastThinking, title: tokenTitle });
+          } else {
+            tokenMarker ||= 'thinking-activity:' + (event.user_message_uuid || mid || event.uuid);
+            emit({ type: 'info', kind: 'reasoning', id: tokenMarker, title: tokenTitle || 'Thinking', text: '' });
+          }
+        }
+        return; // system/thinking.content is rendered thinking, not a designated public summary.
+      }
+      if (event.subtype === 'post_turn_summary' && event.summarizes_uuid && !child) {
+        progress('post-turn:' + event.summarizes_uuid, 'Turn summary',
+          [event.status_detail, event.needs_action].filter(Boolean).join('\n'), event.status_category); return;
+      }
+      if (event.subtype === 'away_summary' && event.content && !child) { progress(event.uuid, 'While away', event.content); return; }
+      if (event.subtype === 'agents_killed') { progress(event.uuid, 'Background agents', 'Background agents terminated'); return; }
+      if (event.subtype === 'file_snapshot' && Array.isArray(event.snapshot_files)) {
+        progress(event.uuid, 'Session checkpoint', event.snapshot_files.map(f => f.key).filter(k => ['plan', 'todo'].includes(k)).join(', ')); return;
+      }
+      if (event.subtype === 'files_persisted' && Array.isArray(event.files) && Array.isArray(event.failed)) {
+        progress(event.uuid, 'File checkpoint', event.files.length + ' saved · ' + event.failed.length + ' failed'); return;
+      }
+      if (event.subtype === 'task_summary') {
+        if (event.detail) progress(summaryId ||= event.uuid, 'Progress', event.detail);
+        else summaryId = null;
+        return;
+      }
+      if (event.subtype === 'task_list_statuses' && Array.isArray(event.statuses)) {
+        for (const entry of event.statuses) if (entry.id && entry.status) list.set(entry.id, entry.status);
+        if (list.size) publishList();
+        return;
+      }
+      if (event.subtype === 'status' && (event.status === 'compacting' || event.compact_result)) {
+        if (event.status === 'compacting') checkpoint = event.uuid || randomUUID();
+        progress(checkpoint ||= event.uuid || randomUUID(), 'Context compaction', event.compact_error || undefined, event.compact_result || 'compacting');
+        return;
+      }
+      if (event.subtype === 'compact_boundary') {
+        const m = event.compact_metadata;
+        progress(checkpoint ||= event.uuid || randomUUID(), 'Context compaction', [m?.trigger, Number.isFinite(m?.pre_tokens) && m.pre_tokens + ' tokens before',
+          Number.isFinite(m?.post_tokens) && m.post_tokens + ' tokens after'].filter(Boolean).join(' · '), 'completed');
+        return;
+      }
+      if (['task_started', 'task_progress', 'task_updated', 'task_notification'].includes(event.subtype)) {
+        taskEvent(event, false, event.session_id); return;
+      }
+      if (event.subtype === 'background_tasks_changed' && Array.isArray(event.tasks)) {
+        const live = new Set(event.tasks.map(task => taskEvent(task, true, event.session_id)).filter(Boolean));
+        for (const id of background) {
+          if (!live.has(id) && tasks.get(id)?.status === 'running') taskEvent({ task_id: id, status: 'no longer listed' });
+        }
+        background = live;
+      }
+    }
+    emit(event);
+  };
 }
 
 class ClaudeCLI {
@@ -253,13 +443,15 @@ class ClaudeCLI {
     }
     return await this.refresh();
   }
-  run({ cwd, model, effort, prompt, images = [], resume, access, signal, onEvent = () => {}, approve, schema, helpers, onInput, instructions = WORKER_INSTRUCTIONS, managedInstructions = false, persistSession = false, noSubagents = false }) {
+  run({ cwd, model, effort, prompt, images = [], resume, previousInfo, access, signal, onEvent = () => {}, approve, schema, displaySummaries = !schema, helpers, onInput, instructions = WORKER_INSTRUCTIONS, managedInstructions = false, persistSession = false, noSubagents = false }) {
     let promptDirectory, kept = false;
     const self = this;
     return new Promise((resolve, reject) => {
       if (signal?.aborted) return reject(new Error('Claude stopped.'));
       const args = ['-p', '--verbose', '--input-format', 'stream-json', '--output-format', 'stream-json', '--include-partial-messages', '--model', model,
         ...withoutPersonalSetup()];
+      const summarized = displaySummaries && summaryModel(this.models.find(m => m.aliases?.includes(model))?.model || model);
+      if (summarized) args.push('--thinking-display', 'summarized');
       if (onInput && !schema) args.push('--replay-user-messages');
       if (EFFORTS.includes(effort)) args.push('--effort', effort);
       // With an approval callback, the Harness access setting applies: pre-approved tools run, anything else asks the user in the Harness.
@@ -326,7 +518,7 @@ class ClaudeCLI {
       const reused = warm && warm.owner === this && warm.signature === signature && warm.child.exitCode === null && !warm.child.killed ? warm : null;
       if (warm && !reused) { stopTree(warm.child); if (warm.promptDirectory) fs.rmSync(warm.promptDirectory, { recursive: true, force: true }); }
       if (reused && promptDirectory) { fs.rmSync(promptDirectory, { recursive: true, force: true }); promptDirectory = reused.promptDirectory; }
-      const child = reused ? reused.child : this.start(args, cwd); let buffer = '', result, stderr = '';
+      const child = reused ? reused.child : this.start(args, cwd); let buffer = reused?.remainder?.() || '', result, stderr = '';
       // The whole tree: Claude's tool commands and MCP servers would otherwise outlive it.
       const abort = () => stopTree(child); signal?.addEventListener('abort', abort, { once: true });
       if (!reused) child.stdin.on('error', () => {});
@@ -417,6 +609,8 @@ class ClaudeCLI {
       };
       const onStderr = d => { stderr = (stderr + d).slice(-2000); };
       child.stderr.on('data', onStderr);
+      const display = reused?.display || { enabled: displaySummaries, firstParty: false };
+      const displayEvent = claudeDisplayEvents(onEvent, resume, previousInfo, display);
       const onStdout = d => {
         buffer += d;
         if (settled) return;
@@ -459,6 +653,7 @@ class ClaudeCLI {
             if (!background && idle)
               settleInput();
           }
+          if (event.type === 'result' && event.parent_tool_use_id) continue;
           if (event.type === 'result') {
             // usage covers one result's calls; total_cost_usd and modelUsage are the session's running totals, so the
             // last result already holds them.
@@ -478,7 +673,7 @@ class ClaudeCLI {
             this.onUsageChange?.();
           }
           if (event.type === 'assistant' && event.error === 'rate_limit') rateLimited = true;
-          onEvent(event);
+          displayEvent(event);
         }
         watchDeliveries();
       };
@@ -512,7 +707,22 @@ class ClaudeCLI {
         signal?.removeEventListener('abort', abort);
         for (const cancel of pending.values()) cancel.abort();
         kept = true;
-        self.park(result.session_id, { child, signature, promptDirectory, sendNow });
+        // The foreground result does not retire a task's notification stream. Consume only
+        // its lifecycle while parked, never turn a late child message into the next answer.
+        const onParkedData = chunk => {
+          buffer += chunk;
+          if (buffer.length > 16 * 1024 * 1024) { dropWarm(result.session_id); return; }
+          let end;
+          while ((end = buffer.indexOf('\n')) >= 0) {
+            const line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
+            let event;
+            try { event = JSON.parse(line); } catch { continue; }
+            if (event.type === 'system' && ['task_started', 'task_updated', 'task_progress', 'task_notification',
+              'task_list_statuses', 'post_turn_summary', 'away_summary', 'agents_killed', 'background_tasks_changed'].includes(event.subtype)) displayEvent(event);
+          }
+        };
+        child.stdout.on('data', onParkedData);
+        self.park(result.session_id, { child, signature, promptDirectory, sendNow, display, onParkedData, remainder: () => buffer });
         done(resolve, result);
       }
       const message = JSON.stringify({ type: 'user', uuid: promptId, parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'text', text: prompt }, ...images.map(url => imageData(url)).map(({ mime, data }) => ({ type: 'image', source: { type: 'base64', media_type: mime, data } }))] } }) + '\n';
@@ -689,4 +899,4 @@ function handoff(items, maxLength = 1000000, images = null, { trim = false } = {
   }
   return out;
 }
-module.exports = { ClaudeCLI, handoff, EFFORTS };
+module.exports = { ClaudeCLI, handoff, EFFORTS, claudeDisplayEvents };

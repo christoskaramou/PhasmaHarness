@@ -252,4 +252,46 @@ class CodexClient extends EventEmitter {
   }
 }
 
-module.exports = { CodexClient, findCodex, codexVersion, parseCodexVersion, compareCodexVersions, withoutPersonalSetup };
+// Only the public summary is displayable. Never copy the reasoning item or its content/encrypted fields.
+function codexChildText(meta) {
+  return [meta.name, meta.role, meta.path, meta.model, meta.effort, meta.state,
+    meta.parent && 'Parent: ' + meta.parent, meta.depth != null && 'Depth: ' + meta.depth].filter(Boolean).join(' · ');
+}
+function codexDetailsText(details) {
+  return Object.entries(details).map(([key, value]) => typeof value === 'string' ? value : key.startsWith('thread:') ? codexChildText(value) :
+    [value.id, value.status, value.message].filter(Boolean).join(' · ')).join('\n');
+}
+function appendCodexSummary(previous, index = 0, delta) {
+  if (!Number.isSafeInteger(index) || index < 0 || typeof delta !== 'string') return null;
+  const parts = { ...previous, [index]: (previous?.[index] || '') + delta };
+  return { parts, text: Object.values(parts).join('\n\n') };
+}
+
+function codexInfo(item, fallbackStatus, previous, children) {
+  if (!item?.id) return null;
+  if (item.type === 'reasoning') {
+    const summary = Array.isArray(item.summary) && item.summary.filter(s => typeof s === 'string').join('\n\n');
+    return { id: item.id, kind: 'reasoning', title: 'Thinking', text: summary && summary.trim() ? summary : undefined, status: fallbackStatus };
+  }
+  if (!['collabAgentToolCall', 'subAgentActivity'].includes(item.type)) return null;
+  const details = { ...previous?.details };
+  for (const key of ['prompt', 'model', 'reasoningEffort', 'senderThreadId', 'agentPath', 'agentThreadId', 'kind']) {
+    if (typeof item[key] === 'string' && item[key]) details[key] = item[key];
+  }
+  for (const id of item.receiverThreadIds || []) details['agent:' + id] ??= { id };
+  for (const [id, state] of Object.entries(item.agentsStates || {})) {
+    const agent = { ...details['agent:' + id], id };
+    if (typeof state?.status === 'string') agent.status = state.status;
+    if (typeof state?.message === 'string') agent.message = state.message;
+    details['agent:' + id] = agent;
+  }
+  const title = item.tool || (item.type === 'subAgentActivity' ? 'Subagent' : previous?.title || 'Agent');
+  for (const id of [item.agentThreadId, ...(item.receiverThreadIds || []), ...Object.keys(item.agentsStates || {})]) {
+    if (children?.has(id)) details['thread:' + id] = children.get(id);
+  }
+  const text = codexDetailsText(details);
+  return { id: item.id, kind: 'agent', title, details, text,
+    status: item.status || (item.type === 'subAgentActivity' ? item.kind : fallbackStatus) };
+}
+
+module.exports = { CodexClient, findCodex, codexVersion, parseCodexVersion, compareCodexVersions, withoutPersonalSetup, codexInfo, codexDetailsText, appendCodexSummary };

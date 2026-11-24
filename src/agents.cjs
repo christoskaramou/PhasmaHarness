@@ -1036,7 +1036,7 @@ class Agents extends EventEmitter {
     // so changing them never waits for agents to stop.
     const local = Object.keys(values).every(key => ['workspace', 'mode', 'access', 'replySuggestions', 'chatScanModel', 'checkResponses',
       'checkerRevise', 'checkerEscalate', 'scanReplies', 'escalateFailedChecks', 'dream', 'dreamModel', 'advisorModel', 'workerModel', 'reviewerModel', 'secondaryModel', 'router', 'effortCap', 'showTips',
-      'hideSteps', 'coldStartMinutes', 'coldStartPercent'].includes(key));
+      'hideSteps', 'showInfo', 'coldStartMinutes', 'coldStartPercent'].includes(key));
     if (!local && this.busy) throw new Error('Stop all agents before changing shared settings.');
     if (agentId !== 'main' && ['router', 'secondaryModel', 'advisorModel', 'workerModel', 'reviewerModel', 'effortCap'].some(key => values[key] !== undefined))
       throw new Error('Change a bot’s Router, Secondary model, Advisor, Workers, Reviewer and Effort cap in its Edit dialog.');
@@ -1070,7 +1070,7 @@ class Agents extends EventEmitter {
       if (!c.busy) this.sync(c);
       // A busy agent keeps its turn's settings; reply suggestions and tips only affect the window, so they apply at once.
       else {
-        for (const key of ['replySuggestions', 'showTips', 'hideSteps', 'coldStartMinutes', 'coldStartPercent']) {
+        for (const key of ['replySuggestions', 'showTips', 'hideSteps', 'showInfo', 'coldStartMinutes', 'coldStartPercent']) {
           if (values[key] !== undefined)
             c.data.settings[key] = this.primary.data.settings[key];
         }

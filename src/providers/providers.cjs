@@ -91,6 +91,11 @@ class Providers {
   }
   async modelRequest(choice, body, local, signal, endpoint, cacheKey) {
     const p = this.provider(choice.provider);
+    // OpenRouter ChatRequest supports reasoning.summary; this requests public text without selecting an effort.
+    if (endpoint === 'chat/completions' && body.stream && body.reasoning_effort !== 'none' &&
+        ['https://openrouter.ai/api/v1', 'https://us.openrouter.ai/api/v1', 'https://eu.openrouter.ai/api/v1'].includes(p.baseUrl)) {
+      body = { ...body, reasoning: { summary: 'auto', ...body.reasoning } };
+    }
     let loaded;
     if (local.supported) {
       // Image bytes are not text tokens; context is reserved for the actual prompt and schema.

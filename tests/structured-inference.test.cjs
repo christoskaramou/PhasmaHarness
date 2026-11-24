@@ -42,6 +42,47 @@ function adapter(provider, respond) {
   return { router, calls, choice };
 }
 
+test('foreground structured Codex requests and forwards only its public summaries; internal inference does not request them', async t => {
+  const calls = [], events = [], client = new EventEmitter();
+  client.start = async () => {}; client.close = () => {};
+  client.call = async (method, params) => {
+    if (method === 'config/read') return { config: {} };
+    if (method === 'thread/start') return { thread: { id: 'hub' } };
+    if (method !== 'turn/start') return {};
+    calls.push(params);
+    const emit = (method, p) => client.emit('notification', { method, params: { threadId: 'hub', turnId: 't', ...p } });
+    emit('item/reasoning/summaryTextDelta', { turnId: 'old', itemId: 'r', delta: 'STALE' });
+    emit('item/reasoning/textDelta', { itemId: 'r', delta: 'PRIVATE' });
+    emit('item/reasoning/summaryTextDelta', { itemId: 'r', delta: 'Public' });
+    emit('item/reasoning/summaryTextDelta', { itemId: 'r', delta: ' summary' });
+    emit('item/completed', { item: { id: 'r', type: 'reasoning', summary: [], content: ['PRIVATE'] } });
+    emit('item/completed', { item: { type: 'agentMessage', text: JSON.stringify(valid) } });
+    emit('turn/completed', { turn: { id: 't', status: 'completed' } });
+    return { turn: { id: 't' } };
+  };
+  const router = new SmartRouter(__dirname, () => client);
+  t.after(() => router.close());
+  for (const extra of [{ onInfo: event => events.push(event) }, {}]) {
+    const result = await router.complete({ ...request, ...extra }, { provider: 'codex', model: 'test' }, new AbortController());
+    assert.deepEqual(result.decision, valid);
+  }
+  assert.deepEqual(calls.map(p => p.summary), ['auto', undefined]);
+  assert.deepEqual(events.map(e => [e.text, e.status]), [['Public summary', 'completed']]);
+  assert.doesNotMatch(JSON.stringify(events), /STALE|PRIVATE/);
+});
+
+test('foreground structured Claude opts into summaries without enabling them for routing calls', async () => {
+  const events = [];
+  const { router, choice, calls } = adapter('claude-cli', async (_n, opts) => {
+    opts.onEvent({ type: 'info', id: 's', kind: 'reasoning', title: 'Thinking', text: 'A public summary' });
+    return { decision: valid };
+  });
+  for (const extra of [{ onInfo: event => events.push(event) }, {}])
+    await router.complete({ ...request, ...extra }, choice, new AbortController());
+  assert.deepEqual(calls.map(o => o.displaySummaries), [true, false]);
+  assert.deepEqual(events.map(e => e.text), ['A public summary']);
+});
+
 test('CLI and local responses get one format retry, preserve the request and count both calls', async t => {
   for (const provider of ['cursor-cli', 'claude-cli', 'local']) await t.test(provider, async () => {
     const { router, calls, choice } = adapter(provider, async (n, _options, signal) => {

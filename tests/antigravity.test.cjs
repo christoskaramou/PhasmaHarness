@@ -219,6 +219,72 @@ test('Antigravity context table: published sizes by model family, none for an un
   assert.equal(contextWindow(undefined), undefined);
 });
 
+test('Antigravity projects each identified child without treating the parent step as its lifecycle', async t => {
+  const session = 'agy-fixture-session', events = [];
+  const step = subagents => ({ event: 'step_update', step_update: { conversation_id: session,
+    step_index: 2, state: 'DONE', subagent_info: { subagents }, text_delta: 'PRIVATE_THOUGHT' } });
+  const raw = [step([{ conversation_id: 'one', type_name: 'Explorer', role: 'Find tests', initial_prompt: 'PRIVATE_PROMPT' },
+    { conversation_id: 'two', type_name: 'Explorer' }, { role: 'Unknown child' }]),
+    step([{ conversation_id: 'one' }, { conversation_id: 'two', role: 'Read docs' }]),
+    { event: 'step_update', step_update: { conversation_id: session, step_index: 3, state: 'DONE',
+      step_type: 'agent_response', usage: { thinking_tokens: 42 } } },
+    { event: 'result', result: { conversation_id: session, status: 'SUCCESS', response: 'OK' } }]
+    .map(value => JSON.stringify(value) + '\n').join('');
+  const { backend } = await antigravityFixture(t, { raw });
+  await backend.run({ ...turn(workspace(t)), onEvent: value => events.push(value) });
+  assert.deepEqual(events.filter(e => e.type === 'info'), [
+    { type: 'info', kind: 'agent', id: 'one', title: 'Explorer', text: 'Find tests\none' },
+    { type: 'info', kind: 'agent', id: 'two', title: 'Explorer', text: 'two' },
+    { type: 'info', kind: 'agent', id: 'two', title: 'Explorer', text: 'Read docs\ntwo' },
+    { type: 'info', kind: 'reasoning', id: 'reasoning:3', title: 'Reasoning', text: '42 thinking tokens' },
+  ]);
+  assert.doesNotMatch(JSON.stringify(events), /PRIVATE|Unknown child/);
+});
+
+test('Antigravity keeps distinct response steps and fresh turn-only reasoning counts', async t => {
+  const conversation_id = 'agy-fixture-session', events = [];
+  const raw = [
+    ...['Reviewing the files.', 'Two files changed.'].map((text_delta, step_index) => ({ event: 'step_update',
+      step_update: { conversation_id, step_type: 'agent_response', step_index, text_delta } })),
+    { event: 'result', result: { conversation_id, num_turns: 1, status: 'SUCCESS', response: 'Two files changed.', usage: { thinking_tokens: 3 } } },
+  ].map(value => JSON.stringify(value) + '\n').join('');
+  const { backend } = await antigravityFixture(t, { raw });
+  await backend.run({ ...turn(workspace(t)), onEvent: e => events.push(e) });
+  const ids = events.filter(e => e.event?.type === 'message_start').map(e => e.event.message.id);
+  assert.equal(new Set(ids).size, 2);
+  assert.deepEqual(events.filter(e => e.message?.phase).map(e => [e.message.id, e.message.phase]),
+    [[ids[0], 'commentary'], [ids[1], 'final_answer']]);
+  assert.equal(events.find(e => e.kind === 'reasoning').text, '3 thinking tokens');
+});
+
+test('Antigravity keeps child file references and records public checkpoint and timing without reading nested contents', async t => {
+  const conversation_id = 'agy-fixture-session', events = [];
+  const step = (step_type, step_index, fields) => ({ event: 'step_update',
+    step_update: { conversation_id, step_type, step_index, state: 'DONE', ...fields } });
+  const log = 'file:///tmp/child.json';
+  const raw = [step('subagent', 1, { subagent_info: { subagents: [{ log_uri: log + '?token=PRIVATE',
+    workspace_uris: ['file:///tmp/work', 'data:text/plain,PRIVATE'], initial_prompt: 'PRIVATE'.repeat(10000) }] } }),
+    step('subagent', 1, { subagent_info: { subagents: [{ log_uri: log, conversation_id: 'child', role: 'Reader' }] } }),
+    step('subagent', 1, { subagent_info: { subagents: [{ conversation_id: 'child', type_name: 'Explorer' }] } }),
+    ...Array.from({ length: 2 }, () => step('subagent', 10, { subagent_info: { subagents: Array.from({ length: 256 }, (_, i) =>
+      ({ conversation_id: 'batch-' + i, role: 'Review', initial_prompt: 'PRIVATE'.repeat(80) })) } })),
+    step('checkpoint', 2, { state: 'ACTIVE' }), step('checkpoint', 2, { duration_seconds: 2.5, text_delta: 'PRIVATE' }),
+    step('system_message', 3, { text_delta: 'PRIVATE' }), step('agent_response', 4, { duration_seconds: 0 }),
+    { event: 'result', result: { conversation_id, status: 'SUCCESS', response: 'OK' } }].map(x => JSON.stringify(x) + '\n').join('');
+  const { backend } = await antigravityFixture(t, { raw });
+  await backend.run({ ...turn(workspace(t)), onEvent: e => events.push(e) });
+  const children = events.filter(e => e.kind === 'agent' && !e.id.startsWith('batch-'));
+  assert.equal(events.filter(e => e.id?.startsWith('batch-')).length, 256, 'one row per child across repeated large snapshots');
+  assert.deepEqual(children.map(e => e.id), [log, log, log]);
+  assert.match(children.at(-1).text, /Reader\nchild\nLog: file:\/\/\/tmp\/child.json\nWorkspace: file:\/\/\/tmp\/work/);
+  assert.equal(children.at(-1).status, undefined);
+  assert.deepEqual(events.filter(e => e.kind === 'progress').map(e => [e.id, e.title, e.status, e.text]), [
+    ['step:2', 'Checkpoint', 'ACTIVE', ''], ['step:2', 'Checkpoint', 'DONE', 'Duration: 2.5 s'],
+    ['step:3', 'System update', 'DONE', ''], ['step:4', 'Agent response', 'DONE', 'Duration: 0 s'],
+  ]);
+  assert.doesNotMatch(JSON.stringify(events), /PRIVATE/);
+});
+
 test('failed Antigravity tool steps emit is_error tool_result events with readable error text', async t => {
   const cwd = workspace(t), session = 'agy-fixture-session', events = [];
   const line = value => JSON.stringify(value) + '\n';

@@ -37,6 +37,33 @@ function fake({ echoPrompt = true } = {}) {
 }
 const flag = (args, name) => args.includes(name) ? args[args.indexOf(name) + 1] : undefined;
 
+test('Claude worker requests summarized display and streams only first-party supported foreground summaries', async () => {
+  const { cli, state, send } = fake(), events = [];
+  const run = cli.run({ model: 'claude-sonnet-5', prompt: 'test', onEvent: event => events.push(event) });
+  const frame = (event, child = null) => send({ type: 'stream_event', event, parent_tool_use_id: child });
+  const summary = (id, model, value, child = null) => {
+    frame({ type: 'message_start', message: { id, model } }, child);
+    frame({ type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } }, child);
+    frame({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: value } }, child);
+    frame({ type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'PRIVATE' } }, child);
+    frame({ type: 'content_block_stop', index: 0 }, child);
+    send({ type: 'assistant', parent_tool_use_id: child, message: { id, model, content: [{ type: 'thinking', thinking: '', signature: 'PRIVATE' }] } });
+  };
+  send({ type: 'system', subtype: 'init', served_by_anthropic: true });
+  summary('safe', 'claude-sonnet-5', 'Inspect the schema');
+  send({ type: 'system', subtype: 'thinking_tokens', user_message_uuid: 'q', estimated_tokens: 128, estimated_tokens_delta: 128 });
+  summary('old', 'claude-3-7-sonnet-20250219', 'PRIVATE');
+  summary('child', 'claude-sonnet-5', 'PRIVATE', 'agent-tool');
+  send({ type: 'system', subtype: 'init', served_by_anthropic: false });
+  summary('proxy', 'claude-sonnet-5', 'PRIVATE');
+  send({ type: 'result', result: 'done' });
+  await run;
+  assert.equal(flag(state.args, '--thinking-display'), 'summarized');
+  assert.equal(events.filter(e => e.type === 'info' && e.id.includes('safe')).at(-1)?.text, 'Inspect the schema');
+  assert.match(events.filter(e => e.type === 'info' && e.id.includes('safe')).at(-1)?.title, /~128 tokens this turn/);
+  assert.doesNotMatch(JSON.stringify(events), /PRIVATE/);
+});
+
 test('Claude Main continuations persist and resume while retaining the tool-free contract', async () => {
   const { cli, state, send } = fake();
   const run = cli.run({ model: 'test', prompt: 'Continue.', schema: { type: 'object' }, resume: 'kept-main', persistSession: true });
@@ -546,4 +573,31 @@ test('a finished worker turn keeps its Claude process for the chat’s next turn
   assert.equal(started[0].killed, true, 'and the old one is stopped');
   cli.close();
   assert.deepEqual([started[1].killed, cli.warmCount()], [true, 0], 'closing stops the warm process');
+});
+
+test('parked Claude worker still publishes native task reports on the original event callback without forwarding child text', async t => {
+  const { cli, state, send } = fake();
+  t.after(() => cli.close());
+  const events = [];
+  const turn = cli.run({ model: 'test', prompt: 'Start', access: 'read-only', noSubagents: true,
+    onInput() {}, onEvent: e => events.push(e) });
+  await new Promise(setImmediate);
+  assert.equal(flag(state.args, '--output-format'), 'stream-json');
+  assert.ok(state.args.includes('--include-partial-messages') && state.args.includes('--replay-user-messages'));
+  assert.equal(state.args.includes('--forward-subagent-text'), false);
+  assert.match(flag(state.args, '--disallowedTools'), /Agent/);
+  assert.equal(state.input.some(m => m.request?.agentProgressSummaries), false);
+  send({ type: 'system', subtype: 'task_started', session_id: 'parked-info', task_type: 'local_agent',
+    task_id: 'agent-1', run_id: 'run-1', subagent_type: 'Explore', description: 'Inspect tests' });
+  send({ type: 'result', session_id: 'parked-info', result: 'Foreground response' });
+  assert.equal((await turn).result, 'Foreground response');
+  assert.equal(cli.warmCount(), 1);
+  send({ type: 'system', subtype: 'thinking', content: 'PRIVATE', session_id: 'parked-info' });
+  send({ type: 'system', subtype: 'task_notification', session_id: 'parked-info', task_id: 'agent-1',
+    run_id: 'run-1', status: 'completed', summary: 'PRIVATE model-facing handback', handback: 'send',
+    handback_report: { warning: 'Review needed', text: 'Two fixtures verified' } });
+  const info = events.filter(e => e.type === 'info');
+  assert.equal(info.length, 2); assert.equal(info[1].id, info[0].id);
+  assert.equal(info[1].text, 'Review needed\nTwo fixtures verified');
+  assert.doesNotMatch(JSON.stringify(events), /PRIVATE/);
 });

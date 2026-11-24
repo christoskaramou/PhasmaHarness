@@ -10,6 +10,9 @@ const { spawnOwned, stopTree } = require('../process-tree.cjs');
 const RG = path.join(__dirname, '..', '..', 'tools', 'bin', process.platform === 'win32' ? 'rg.exe' : 'rg');
 const MAX_STEPS = 100;
 const OUTPUT_LIMIT = 30000;
+const PROMPT_PROGRESS = [
+  ['processed', 'Processed', 'tokens'], ['total', 'Total', 'tokens'], ['cache', 'Cached', 'tokens'], ['time_ms', 'Elapsed', 'ms'],
+];
 const READS = new Set(['read_file', 'list_files', 'search']);
 const SHELL = process.platform === 'win32' ? 'PowerShell' : 'bash';
 
@@ -144,20 +147,92 @@ class ApiAgent {
     fs.renameSync(file + '.tmp', file);
   }
 
-  async complete(choice, body, signal, onText, cacheKey) {
+  async complete(choice, body, signal, onText, cacheKey, onSummary, onServerTool, onPromptProgress) {
     const local = await this.providers.local.inspect(choice, signal);
+    const llama = local.kind === 'llama.cpp';
+    if (llama) {
+      // llama.cpp's legacy/none formats can put the private trace in ordinary content.
+      body.reasoning_format = 'deepseek';
+      body.return_progress = true;
+    }
     const response = await this.providers.modelRequest(choice, body, local, signal, 'chat/completions', cacheKey);
     if (!response.ok) throw new Error((await response.json().catch(() => null))?.error?.message || `Provider request failed (HTTP ${response.status}).`);
     const message = { role: 'assistant', content: '' }, calls = [];
-    let usage = null, reasoning = '';
+    const summaries = [], byId = new Map(), byIndex = new Map(), byPosition = new Map();
+    const progress = {};
+    let usage = null, reasoning = '', reportedThinking = false;
+    // LM Studio can return the leading <think> envelope inside content instead of a separate reasoning field.
+    // Retain the exact native message for replay; stream only the answer, even when a delimiter spans chunks.
+    let phase = ['lm-studio', 'llama.cpp'].includes(local.kind) ? 'prefix' : 'answer', searchFrom = 0, answerStart = 0;
+    const emitContent = text => {
+      message.content += text;
+      if (phase === 'answer') { onText(text); return; }
+      if (phase === 'prefix') {
+        const prefix = message.content.trimStart();
+        if (!prefix.startsWith('<think>')) {
+          if ('<think>'.startsWith(prefix)) return;
+          phase = 'answer'; onText(message.content); return;
+        }
+        phase = 'thinking';
+        if (!reportedThinking && !summaries.length) { reportedThinking = true; onSummary?.(0, ''); }
+      }
+      const end = message.content.indexOf('</think>', searchFrom);
+      if (end < 0) { searchFrom = Math.max(0, message.content.length - 7); return; }
+      phase = 'answer'; answerStart = end + '</think>'.length;
+      if (answerStart < message.content.length) onText(message.content.slice(answerStart));
+    };
     for await (const chunk of events(response.body)) {
       if (chunk.usage) usage = chunk.usage;
+      if (llama && chunk.prompt_progress) {
+        let changed = false;
+        for (const [key] of PROMPT_PROGRESS) {
+          const value = chunk.prompt_progress[key];
+          const valid = key === 'time_ms' ? Number.isFinite(value) : Number.isSafeInteger(value);
+          if (valid && value >= 0 && value !== progress[key]) { progress[key] = value; changed = true; }
+        }
+        if (changed) {
+          const text = PROMPT_PROGRESS.filter(([key]) => progress[key] !== undefined)
+            .map(([key, label, unit]) => `${label}: ${progress[key]} ${unit}`).join(' · ');
+          onPromptProgress?.(text);
+        }
+      }
       const delta = chunk.choices?.[0]?.delta;
       if (!delta) continue;
-      if (delta.content) { message.content += delta.content; onText(delta.content); }
+      if (delta.content) emitContent(delta.content);
       if (delta.reasoning_content) reasoning += delta.reasoning_content;
       if (delta.reasoning) message.reasoning = (message.reasoning || '') + delta.reasoning;
-      if (Array.isArray(delta.reasoning_details)) (message.reasoning_details ||= []).push(...delta.reasoning_details);
+      if (Array.isArray(delta.reasoning_details)) {
+        // Preserve the provider's original details for replay; only public summary deltas feed Info.
+        (message.reasoning_details ||= []).push(...delta.reasoning_details);
+        for (const [position, part] of delta.reasoning_details.entries()) {
+          if (part?.type === 'reasoning.server_tool_call' && typeof part.tool_name === 'string' && part.tool_name) {
+            onServerTool?.(part.tool_call_id ?? part.id ?? part.index ?? position, part.tool_name);
+          }
+          if (part?.type !== 'reasoning.summary' || typeof part.summary !== 'string' || !part.summary) continue;
+          const positional = byPosition.get(position);
+          let slot = byId.get(part.id) ?? byIndex.get(part.index);
+          if (slot === undefined && (part.index == null || summaries[positional]?.index == null)) slot = positional;
+          if (slot === undefined || (part.id && summaries[slot].id && summaries[slot].id !== part.id)) {
+            slot = summaries.push({ text: '', id: part.id }) - 1;
+          }
+          byPosition.set(position, slot);
+          if (part.index != null) {
+            summaries[slot].index = part.index;
+            byIndex.set(part.index, slot);
+          }
+          if (part.id) {
+            summaries[slot].id = part.id;
+            byId.set(part.id, slot);
+          }
+          summaries[slot].text += part.summary;
+          onSummary?.(slot, summaries[slot].text);
+        }
+      }
+      if (!reportedThinking && !summaries.length && (delta.reasoning_content || delta.reasoning ||
+          (Array.isArray(delta.reasoning_details) && delta.reasoning_details.some(part => part?.type === 'reasoning.text' || part?.type === 'reasoning.encrypted')))) {
+        reportedThinking = true;
+        onSummary?.(0, ''); // The first public summary, if one follows, updates this same row.
+      }
       for (const call of delta.tool_calls || []) {
         const slot = calls[call.index ?? calls.length] ||= { id: '', type: 'function', function: { name: '', arguments: '' } };
         if (call.id) slot.id = call.id;
@@ -165,11 +240,17 @@ class ApiAgent {
         if (call.function?.arguments) slot.function.arguments += call.function.arguments;
       }
     }
+    const reasoningTokens = usage?.completion_tokens_details?.reasoning_tokens;
+    if (Number.isSafeInteger(reasoningTokens) && reasoningTokens > 0) {
+      const count = reasoningTokens + (reasoningTokens === 1 ? ' reasoning token this step' : ' reasoning tokens this step');
+      onSummary?.(0, [summaries[0]?.text, count].filter(Boolean).join('\n\n'));
+    }
     const toolCalls = calls.filter(Boolean).map(call => ({ ...call, id: call.id || `call_${randomUUID()}` }));
     if (toolCalls.length) message.tool_calls = toolCalls;
     if (reasoning) message.reasoning_content = reasoning;
     if (message.reasoning_details?.length) delete message.reasoning;
-    return { message, usage };
+    if (phase === 'prefix' && message.content) onText(message.content);
+    return { message, usage, publicText: phase === 'thinking' ? '' : message.content.slice(answerStart) };
   }
 
   async tool(call, { cwd, access, approve, bridge, signal }) {
@@ -275,8 +356,11 @@ class ApiAgent {
     const messageId = randomUUID();
     onEvent({ type: 'stream_event', event: { type: 'message_start', message: { id: messageId } } });
     const body = { model, messages, tools, stream: true, stream_options: { include_usage: true }, ...(effort ? { reasoning_effort: effort } : {}) };
-    const { message, usage } = await this.complete({ provider, model }, body, signal,
-      text => onEvent({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text } } }), cacheKey);
+    const { message, usage, publicText } = await this.complete({ provider, model }, body, signal,
+      text => onEvent({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text } } }), cacheKey,
+      (slot, text) => onEvent({ type: 'info', id: `api:reasoning:${messageId}:${slot}`, kind: 'reasoning', title: 'Reasoning', text }),
+      (id, name) => onEvent({ type: 'info', id: `api:server-tool:${messageId}:${id}`, kind: 'progress', title: 'Provider tool', text: name }),
+      text => onEvent({ type: 'info', id: `api:prompt-progress:${messageId}`, kind: 'progress', title: 'Prompt processing', text }));
     const counts = cacheUsage(usage);
     const stepUsage = counts ? { total_input_tokens: counts.inputTokens, input_tokens: counts.inputTokens - (counts.cachedInputTokens || 0) - (counts.cacheWriteInputTokens || 0),
       output_tokens: counts.outputTokens, cache_read_input_tokens: counts.cachedInputTokens, cache_creation_input_tokens: counts.cacheWriteInputTokens } : null;
@@ -286,7 +370,7 @@ class ApiAgent {
 
     const calls = message.tool_calls || [];
     onEvent({ type: 'assistant', message: { id: messageId, ...(stepUsage ? { usage: stepUsage } : {}), content: [
-      ...(message.content ? [{ type: 'text', text: message.content }] : []),
+      ...(publicText ? [{ type: 'text', text: publicText }] : []),
       ...calls.map(call => ({ type: 'tool_use', id: call.id, name: call.function.name, input: (() => { try { return JSON.parse(call.function.arguments || '{}'); } catch { return call.function.arguments; } })() })),
     ] } });
     messages.push(message);
@@ -299,7 +383,7 @@ class ApiAgent {
     }
     if (pictures.length) messages.push({ role: 'user', content: [{ type: 'text', text: 'The images your tool calls returned:' }, ...pictures.map(url => ({ type: 'image_url', image_url: { url } }))] });
 
-    return { reported: !!stepUsage, final: calls.length ? null : message };
+    return { reported: !!stepUsage, final: calls.length ? null : { content: publicText } };
   }
 }
 

@@ -6,6 +6,117 @@ const { imageData } = require('../image-input.cjs');
 const { invalidResponse } = require('./structured.cjs');
 
 const LABEL = 'Muse Code CLI';
+const SUMMARY_PART = /^summary\.(0|[1-9]\d*)$/;
+const progressTitles = new Map(Object.entries({
+  workflow: 'Workflow', monitorFeed: 'Monitor event', compaction: 'Context compaction', hookRun: 'Hook',
+  scheduledFire: 'Scheduled task', systemNotice: 'System notice', backgroundTerminalCompletion: 'Background task',
+  overdueNotice: 'Overdue task', bodyCompletion: 'Completion receipt', sideChat: 'Side chat',
+  reminderChild: 'Reminder agent', subagentInput: 'Subagent input', subagentResult: 'Subagent result',
+  peerMessage: 'Peer message', webSearch: 'Web search', skillRead: 'Skill read', toolCall: 'Tool progress',
+}));
+const childItems = new Set(['reminderChild', 'subagentInput', 'subagentResult', 'peerMessage', 'sideChat']);
+const publicValue = v => typeof v === 'string' ? v : Number.isFinite(v) ? String(v) : '';
+const joinFacts = (...values) => values.map(publicValue).filter(Boolean).join(' · ');
+function listed(value) { return Array.isArray(value) ? value.map(publicValue).filter(Boolean).join(', ') : ''; }
+function references(refs) {
+  if (!Array.isArray(refs)) return '';
+  return refs.filter(ref => typeof ref === 'string').map(ref => {
+    if (/^[a-z]:[\\/]/i.test(ref) || !/^[a-z][\w+.-]*:/i.test(ref)) return ref.split(/[?#]/, 1)[0];
+    try {
+      const url = new URL(ref);
+      if (['file:', 'https:', 'http:'].includes(url.protocol)) return url.protocol + '//' + url.host + url.pathname;
+    } catch {}
+    return '';
+  }).filter(Boolean).join(', ');
+}
+
+// Persist only display fields. A partial notification never replaces a known fact with undefined.
+function reportFacts(host, id, kind, title, facts, status) {
+  let known = host.publicItems.get(id);
+  if (!known) host.publicItems.set(id, known = { rows: new Map() });
+  for (const [label, value] of Object.entries(facts)) {
+    const text = publicValue(value);
+    if (text) known.rows.set(label, label ? label + ': ' + text : text);
+  }
+  if (publicValue(status)) known.status = status;
+  const text = [...known.rows.values()].join('\n');
+  const info = { type: 'info', id, kind, title, text, ...(known.status ? { status: known.status } : {}) };
+  const signature = JSON.stringify(info);
+  if (known.signature === signature) return;
+  known.signature = signature;
+  host.context.onEvent?.(info);
+}
+
+function reportSessionPlan(host, method, p) {
+  if (method === 'session/todoListChanged' && Array.isArray(p.items)) {
+    const text = p.items.map(todo => joinFacts(todo?.status, todo?.text, todo?.activeForm !== todo?.text && todo?.activeForm)).join('\n');
+    reportFacts(host, 'todos:' + p.sessionId, 'progress', 'Plan', { '': text || 'No tasks' });
+  }
+  if (method === 'session/goalChanged') {
+    const g = p.goal;
+    const text = g ? [g.objective, g.currentWork, g.nextWork, Number.isFinite(g.percentComplete) && g.percentComplete + '%']
+      .map(publicValue).filter(Boolean).join('\n') : 'Goal cleared';
+    reportFacts(host, 'goal:' + p.sessionId, 'progress', 'Goal', { '': text }, g ? g.status : 'cleared');
+  }
+}
+
+function progressItem(host, item) {
+  const title = progressTitles.get(item.kind);
+  if (!title || typeof item.itemId !== 'string' || !item.itemId) return;
+  const id = 'activity:' + item.itemId;
+  const facts = {};
+  let status = item.status;
+  switch (item.kind) {
+    case 'workflow':
+      Object.assign(facts, { Run: item.workflowRunId, Script: item.scriptId, Entry: item.entryId, Phase: item.declaredPhase,
+        Plan: Array.isArray(item.phasePlan) && item.phasePlan.map(phase => publicValue(phase?.title)).filter(Boolean).join(' → '),
+        Summary: item.finalSummary, Message: item.message, 'Duration (ms)': item.durationMs, 'Token budget': item.tokenBudget?.total,
+        Trigger: item.triggerSource, 'Plan unavailable': item.phasePlanUnreadable });
+      if (item.paused === true) status = 'paused';
+      if (Array.isArray(item.children)) for (const child of item.children) {
+        if (!child?.childId || !Number.isSafeInteger(child.attempt)) continue;
+        const childKey = 'workflow-child:' + JSON.stringify([item.itemId, child.childId, child.attempt]);
+        reportFacts(host, childKey, 'agent', 'Workflow child', { Child: child.childId, Attempt: child.attempt,
+          Label: child.label, Phase: child.phase, 'Failure kind': child.failureKind, Reason: child.failureReason,
+          'Duration (ms)': child.durationMs, Workflow: item.workflowRunId, Result: references([child.resultRef]) },
+        child.failureKind && child.terminal === 'completed' ? 'failed' : child.terminal || child.status);
+      }
+      break;
+    case 'toolCall': {
+      const { statusProgress: p, statusStep: step, statusAttempt: a, statusChildren: c, statusHealth: h } = item;
+      Object.assign(facts, { '': item.statusLine, Phase: item.statusPhase,
+        Progress: p && joinFacts([p.current, p.total].map(publicValue).filter(Boolean).join('/'), p.unit),
+        Step: step && joinFacts(step.label, [step.index, step.total].map(publicValue).filter(Boolean).join('/')),
+        Attempt: a && joinFacts(a.system, a.operation, [a.attempt, a.maxAttempts].map(publicValue).filter(Boolean).join('/'), a.errorKind),
+        'Retry delay (ms)': a?.retryDelayMs, 'Next attempt': a?.nextAttempt,
+        Children: c && ['active', 'completed', 'failed', 'cancelled', 'total'].filter(k => Number.isFinite(c[k])).map(k => c[k] + ' ' + k).join(', '),
+        Health: h && joinFacts(h.level, h.reason), Background: item.backgroundStatus });
+      if (!Object.values(facts).some(publicValue) && !host.publicItems.has(id)) return;
+      break;
+    }
+    case 'monitorFeed': Object.assign(facts, { Monitor: item.monitorId, Description: item.monitorDescription }); break;
+    case 'systemNotice': Object.assign(facts, { '': item.text, Subject: item.noticeSubject?.label, Origin: item.noticeOrigin,
+      Severity: item.noticeSeverity, Kind: item.noticeKind }); break;
+    case 'hookRun': Object.assign(facts, { Hook: item.label || item.hookKey, Event: item.event, Reason: item.reason }); status = item.runStatus || status; break;
+    case 'compaction': Object.assign(facts, { Trigger: item.trigger, Outcome: item.outcome, Reason: item.reason,
+      'Tokens before': item.tokensBefore, 'Tokens after': item.tokensAfter }); break;
+    case 'scheduledFire': Object.assign(facts, { Job: item.jobId, Delivery: item.deliveryNumber }); break;
+    case 'reminderChild': Object.assign(facts, { Agent: item.reminderAgentId, Session: item.childSessionId, Task: item.taskId }); break;
+    case 'sideChat': facts.Session = item.sideSessionId; break;
+    case 'peerMessage': facts.Sender = item.peerMessage?.senderLabel; facts.Session = item.peerMessage?.senderSessionId; break;
+    case 'subagentInput': case 'subagentResult':
+      Object.assign(facts, { Agent: item.subagentId, Parent: item.parentSubagentId, Session: item.childSessionId });
+      status = item.inputPhase || item.resultStatus || status;
+      break;
+    case 'webSearch': Object.assign(facts, { Action: item.action, Query: item.query, Matches: item.results?.length }); status = item.providerStatus || status; break;
+    case 'skillRead': Object.assign(facts, { Skill: item.selector, Source: item.source }); break;
+    case 'backgroundTerminalCompletion': facts.Call = item.backgroundTerminalCompletion?.toolCallId; status = item.backgroundTerminalCompletion?.terminalStatus || status; break;
+    case 'bodyCompletion': facts.Summary = item.bodyCompletion?.resultSummary; status = item.bodyCompletion?.status || status; break;
+  }
+  // Generic fallback is for display, but some families may embed command output or a private child message.
+  if (['overdueNotice', 'compaction', 'systemNotice'].includes(item.kind) && !facts['']) facts[''] = item.fallbackText;
+  reportFacts(host, id, childItems.has(item.kind) ? 'agent' : 'progress', title, facts, status);
+}
 
 // A finished worker turn leaves its `muse serve` process running for the conversation's next turn, skipping spawn,
 // initialize, permissionProfile/list, session/resume and unchanged model setup. At most three stay warm across all bots,
@@ -62,7 +173,8 @@ class MuseCLI {
     const executable = this.find();
     const child = spawnOwned(this.launch, executable.command, [...executable.args, 'serve', '--disable-request-user-input'], {
       cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],    });
-    const host = { child, sdk, session: null, held: [], opening: false, context: null, reported: new Map(), tokenEvents: new Map(), failed: false, appliedModelKey: null, closing: null };
+    const host = { child, sdk, session: null, held: [], opening: false, context: null, reported: new Map(),
+      publicItems: new Map(), messages: new Map(), summaryCursors: new Set(), tokenEvents: new Map(), failed: false, appliedModelKey: null, closing: null };
     // The code stays: INVALID_STRUCTURED_RESPONSE (a Hub reply that used a tool) gets the router's one retry.
     host.failure = new Promise((_, reject) => {
       host.fail = error => {
@@ -202,21 +314,159 @@ class MuseCLI {
         return;
       }
       if (!host.session || event.params?.sessionId !== host.session.sessionId) return;
-      host.session.apply(event).io.catch(error => host.fail(error));
+      const { viewCursor, field } = event.params;
+      const summaryDelta = event.method === 'item/delta' && SUMMARY_PART.test(field);
+      if (host.context && summaryDelta && viewCursor) {
+        if (host.summaryCursors.has(viewCursor)) return;
+        host.summaryCursors.add(viewCursor);
+      }
+      const { fold, io } = host.session.apply(event);
+      io.catch(error => host.fail(error));
       if (event.method === 'session/tokenUsage') host.tokenEvents.set(event.params.viewCursor, event.params);
-      if (!host.context || !event.method.startsWith('item/')) return;
+      if (!host.context) return;
+      // The SDK applies view/page and the buffered live tail internally: those recovered
+      // items never hit onNotification again. Project just changed items, not resumed history.
+      if (fold.kind === 'deliveryGap' && !host.gapView) {
+        const { items, sessionState } = host.session.fold;
+        const before = new Map(items.list().map(item => [item.itemId, item]));
+        const plans = ['session/todoListChanged', 'session/goalChanged'].map(method => [method, sessionState.get(method)]);
+        const context = host.context;
+        host.gapView = io.then(() => {
+          if (host.context !== context || !host.session.fold.current) return;
+          for (const item of items.list()) {
+            const changed = before.get(item.itemId) !== item;
+            if (changed || (item.kind === 'reasoning' && host.publicItems.has(item.itemId) && item.status === 'inProgress'))
+              this.projectItem(host, item, changed, !changed);
+          }
+          for (const [method, previous] of plans) {
+            const projected = sessionState.get(method);
+            if (projected && projected !== previous) reportSessionPlan(host, method, projected);
+          }
+        }).catch(error => host.fail(error)).finally(() => { host.gapView = null; });
+        return;
+      }
+      if (!event.method.startsWith('item/')) {
+        const p = event.params;
+        if (fold.kind === 'sessionState' && fold.outcome.applied) reportSessionPlan(host, event.method, p);
+        if (fold.kind === 'turn' && ['turn/retryScheduled', 'turn/modelRetryScheduled'].includes(event.method)) {
+          reportFacts(host, [event.method, p.turnId, p.nextAttempt].join(':'), 'progress', 'Retry scheduled', {
+            Attempt: p.nextAttempt, Maximum: p.maxAttempts, 'Delay (ms)': p.retryDelayMs, Reason: p.reason || p.errorKind,
+            System: p.system, 'HTTP status': p.httpStatus, 'Error kind': p.reason && p.errorKind !== p.reason && p.errorKind });
+        }
+        if (fold.kind === 'turn' && event.method === 'turn/foregroundCompleted')
+          reportFacts(host, 'foreground:' + p.turnId, 'progress', 'Foreground completed', { 'Blocking agents': listed(p.blockingAgents) });
+        if (fold.kind === 'monitorInbox' && p.itemId) {
+          const key = 'monitor-inbox:' + p.itemId;
+          if (event.method === 'monitor/inboxItemAdmitted') reportFacts(host, key, 'progress', 'Monitor notification',
+            { Monitor: p.taskId, Event: p.eventKind }, 'queued');
+          if (event.method === 'monitor/inboxItemDrained' && p.deliveryVisible)
+            reportFacts(host, key, 'progress', 'Monitor notification', {}, 'delivered');
+          if (event.method === 'monitor/inboxItemVoided') reportFacts(host, key, 'progress', 'Monitor notification', {}, 'voided');
+        }
+        return;
+      }
       const itemId = event.params.item?.itemId || event.params.itemId;
       const item = host.session.fold.items.get(itemId);
-      if (!item || host.reported.get(itemId) === JSON.stringify(item)) return;
-      host.reported.set(itemId, JSON.stringify(item));
-      this.item(host, item);
+      const snapshot = fold.kind === 'item' && fold.outcome.kind !== 'ignoredStaleRevision';
+      if (item && (snapshot || (fold.kind === 'itemDelta' && summaryDelta) || item.kind === 'agentMessage' || item.kind === 'toolCall'))
+        this.projectItem(host, item, snapshot, summaryDelta);
     } catch (error) { host.fail(error); }
+  }
+
+  projectItem(host, item, snapshot, summaryDelta) {
+    if (snapshot) progressItem(host, item);
+    if (item.kind === 'reasoning' || item.kind === 'subagent') {
+      if ((summaryDelta && item.status === 'inProgress') || snapshot) this.publicItem(host, item, snapshot);
+      return;
+    }
+    if (item.kind !== 'agentMessage' && item.kind !== 'toolCall') return;
+    const signature = JSON.stringify(item);
+    if (host.reported.get(item.itemId) === signature) return;
+    host.reported.set(item.itemId, signature);
+    this.item(host, item);
+  }
+
+  publicItem(host, item, snapshot) {
+    const id = item.itemId;
+    if (typeof id !== 'string' || !id) return;
+    const known = host.publicItems.get(id) || {};
+    host.publicItems.set(id, known);
+    const remember = (key, value) => { if (typeof value === 'string' && value) known[key] = value; };
+    let title, text;
+    if (item.kind === 'subagent') {
+      remember('role', item.role);
+      remember('child', item.subagentId);
+      remember('session', item.childSessionId);
+      remember('objective', item.objective);
+      remember('summary', item.result?.summary);
+      remember('result', item.result?.text);
+      remember('failure', item.failureReason);
+      remember('definition', references([item.agentPath]));
+      remember('parent', item.parentSubagentId);
+      remember('workflow', item.workflowRunId);
+      remember('placement', item.workspacePlacement);
+      remember('duration', publicValue(item.durationMs));
+      remember('depth', publicValue(item.depth));
+      remember('outcome', item.result?.errorKind);
+      remember('fallback', item.fallbackText);
+      remember('truncated', item.truncated === true && 'Provider truncated this item');
+      remember('drained', item.result?.drained === true && 'Result consumed');
+      remember('artifacts', references(item.result?.artifactRefs));
+      remember('evidence', references(item.result?.evidenceRefs));
+      if (item.result) known.superseded = item.result.superseded === true;
+      if (item.controlStatus || !known.status || item.status !== 'inProgress')
+        remember('status', item.controlStatus || item.status);
+      title = known.role || 'Subagent';
+      text = [...new Set([known.child || known.session, known.objective, known.summary, known.result, known.failure,
+        known.child && known.session && 'Session: ' + known.session, known.parent && 'Parent: ' + known.parent,
+        known.definition && 'Agent definition: ' + known.definition, known.workflow && 'Workflow: ' + known.workflow,
+        known.placement && 'Workspace: ' + known.placement, known.depth && 'Depth: ' + known.depth,
+        known.duration && 'Duration: ' + known.duration + ' ms', known.outcome, known.drained,
+        known.artifacts && 'Artifacts: ' + known.artifacts, known.evidence && 'Evidence: ' + known.evidence,
+        known.superseded && 'Result superseded', known.fallback, known.truncated].filter(Boolean))].join('\n\n');
+    } else {
+      // MSP snapshots include text through that revision. The SDK indexes subsequent
+      // deltas separately by summary part; only append text not covered by the snapshot.
+      const store = host.session.fold.items;
+      const parts = known.parts ||= new Map();
+      if (snapshot && Array.isArray(item.summary)) item.summary.forEach((value, i) => {
+        if (typeof value === 'string' && value) parts.set(i, { base: value, offset: store.accumulated(id, 'summary.' + i)?.length || 0 });
+      });
+      for (const field of store.accumulatedFields(id)) {
+        const match = SUMMARY_PART.exec(field);
+        if (!match) continue;
+        const i = Number(match[1]);
+        if (!Number.isSafeInteger(i)) continue;
+        if (!parts.has(i)) parts.set(i, { base: '', offset: 0 });
+      }
+      text = [...parts].sort(([a], [b]) => a - b).map(([i, part]) =>
+        part.base + (store.accumulated(id, 'summary.' + i) || '').slice(part.offset)).filter(Boolean).join('\n\n');
+      // MSP permits a one-line display fallback on any item. reasoning.text is a different, raw surface.
+      remember('fallback', item.fallbackText);
+      if (!text.trim()) text = known.fallback || '';
+      title = text ? 'Reasoning summary' : 'Reasoning';
+      if (item.truncated === true) known.truncated = true;
+      if (known.truncated) text = [text, 'Provider truncated this item'].filter(Boolean).join('\n\n');
+      remember('status', item.status);
+    }
+    const info = { type: 'info', id, kind: item.kind === 'subagent' ? 'agent' : 'reasoning', title, text,
+      ...(known.status ? { status: known.status } : {}) };
+    const signature = JSON.stringify(info);
+    if (host.reported.get(id) === signature) return;
+    host.reported.set(id, signature);
+    host.context.onEvent?.(info);
   }
 
   item(host, item) {
     const onEvent = host.context.onEvent || (() => {});
-    if (item.kind === 'agentMessage' && typeof item.text === 'string') onEvent({ type: 'assistant',
-      message: { id: item.itemId, content: [{ type: 'text', text: item.text }] } });
+    if (item.kind === 'agentMessage') {
+      const prior = host.messages.get(item.itemId);
+      const phase = item.messagePhase === 'commentary' ? 'commentary' : item.messagePhase === 'finalAnswer' ? 'final_answer' : prior?.phase;
+      const text = typeof item.text === 'string' && item.text || prior?.text || '';
+      host.messages.set(item.itemId, { phase, text });
+      if (phase || typeof item.text === 'string') onEvent({ type: 'assistant',
+        message: { id: item.itemId, ...(phase ? { phase } : {}), content: [{ type: 'text', text }] } });
+    }
     if (item.kind !== 'toolCall') return;
     // A Hub or routing reply is tool-free, as for every provider: a reply that uses a tool is not accepted (cursor.cjs).
     if (host.context.schema) return host.fail(invalidResponse());
@@ -244,6 +494,9 @@ class MuseCLI {
         host = reused.host;
         session = host.session;
         host.reported.clear();
+        host.publicItems.clear();
+        host.messages.clear();
+        host.summaryCursors.clear();
         host.tokenEvents.clear();
         host.context = options;
         options.onEvent?.({ type: 'system', session_id: session.sessionId });
@@ -323,7 +576,10 @@ class MuseCLI {
         waiting.clear();
       }
 
-      const text = session.fold.items.list().filter(item => item.turnId === last.turnId && item.kind === 'agentMessage').map(item => item.text || '').join('\n\n');
+      if (host.gapView) await deadline(Promise.race([host.gapView, host.failure]), options.timeoutMs || 30 * 60 * 1000, LABEL, options.signal);
+      const text = session.fold.items.list().filter(item => item.turnId === last.turnId && item.kind === 'agentMessage'
+        && (host.messages.get(item.itemId)?.phase || item.messagePhase) !== 'commentary')
+        .map(item => host.messages.get(item.itemId)?.text || item.text || '').join('\n\n');
       // Raw cache conventions vary; use Muse's counted-once per-completion projection.
       const ids = new Set(turns.map(known => known.turnId));
       const events = [...host.tokenEvents.values()].filter(event => ids.has(event.turnId));

@@ -158,6 +158,12 @@ class DeepSeekCLI {
   update(host, notification) {
     const context = host.context, event = notification?.update;
     if (!context || notification.sessionId !== context.sessionId || !event) return;
+    // dsh projects committed assistant messages. Two consecutive messages need not have visible text between them.
+    if (event.sessionUpdate === 'agent_thought_chunk' && (!context.thinking || (event.messageId && context.thinking !== event.messageId))) {
+      context.thinking = event.messageId || true;
+      context.onEvent({ type: 'info', kind: 'reasoning', id: 'deepseek:reasoning:' + randomUUID(), title: 'Reasoning', text: '' });
+    }
+    if (event.sessionUpdate === 'agent_message_chunk' || event.sessionUpdate === 'tool_call') context.thinking = false;
     if (event.sessionUpdate === 'agent_message_chunk' && event.content?.type === 'text' && typeof event.content.text === 'string') {
       context.text += event.content.text;
       context.onEvent({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: event.content.text } } });
@@ -244,6 +250,7 @@ class DeepSeekCLI {
 
   // Each prompt gets its own signal for approvals and its own start time for cleanup.
   prompt(host, context, options, parts) {
+    context.thinking = false;
     context.promptAbort = new AbortController();
     context.signal = options.signal ? AbortSignal.any([options.signal, context.promptAbort.signal]) : context.promptAbort.signal;
     context.promptStartedAt = Date.now();

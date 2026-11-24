@@ -8,8 +8,176 @@ const { FINAL } = require('../tasks.cjs');
 const { SUBMISSION_EVENT_LIMIT } = require('./shared.cjs');
 const { readTaskStatus, stripTaskStatus } = require('../routing/task-state.cjs');
 const { normalizedUsage } = require('../job-budgets.cjs');
+const { codexInfo, codexDetailsText, appendCodexSummary } = require('../providers/codex.cjs');
+
+function infoId(turnId, id) { return 'info:' + JSON.stringify([turnId, id]); }
 
 module.exports = {
+  infoItem(turnId, event, saved) {
+    if (!turnId || typeof event.id !== 'string' || !event.id || !['agent', 'reasoning', 'progress'].includes(event.kind)) return null;
+    return { ...saved, type: 'info', id: infoId(turnId, event.id), turnId, kind: event.kind,
+      title: event.title || saved?.title || ({ agent: 'Agent', reasoning: 'Thinking', progress: 'Progress' })[event.kind],
+      text: typeof event.text === 'string' ? event.text : saved?.text || '',
+      status: event.status || saved?.status, localOnly: true, createdAt: saved?.createdAt ?? Date.now() };
+  },
+
+  recordInfo(session, turnId, event, claudeTask) {
+    const key = infoId(turnId, event.id);
+    const saved = session.items.findLast(item => item.type === 'info' && (item.id === key || (claudeTask && item.claudeTask?.id === event.id)));
+    const item = this.infoItem(saved?.turnId || turnId, event, saved);
+    if (item && claudeTask) item.claudeTask = claudeTask;
+    this.storeInfo(session, item);
+  },
+
+  codexSummaryDelta(session, turnId, id, p, title) {
+    if (!id || !turnId || typeof p.delta !== 'string') return;
+    const key = infoId(turnId, id);
+    const saved = session.items.findLast(i => i.id === key);
+    const summary = appendCodexSummary(saved?.summaryParts, p.summaryIndex, p.delta);
+    if (!summary) return;
+    const item = this.infoItem(turnId, { id, kind: 'reasoning', title, text: summary.text, status: 'inProgress' }, saved);
+    this.storeInfo(session, { ...item, summaryParts: summary.parts });
+  },
+
+  storeInfo(session, item) {
+    if (!item) return;
+    const index = session.items.findLastIndex(i => i.id === item.id && i.type === 'info');
+    let older = index >= 0 && index !== session.items.length - 1;
+    if (index < 0) {
+      const end = session.submission?.turnId === item.turnId ? -1 : session.items.findLastIndex(i => i.turnId === item.turnId);
+      if (end >= 0 && end < session.items.length - 1) {
+        session.items = session.items.slice(); session.items.splice(end + 1, 0, item); older = true;
+      } else session.items.push(item);
+    }
+    else {
+      // A long-running child may finish outside the journal and window's streaming tails.
+      if (older) session.items = session.items.slice();
+      session.items[index] = item;
+    }
+    session.updated = Date.now(); this.changed(older ? undefined : session);
+    if (item.details && this.pendingChildInfo?.size) {
+      for (const [child, events] of this.pendingChildInfo) {
+        if (item.details.agentThreadId !== child && !item.details['agent:' + child]) continue;
+        this.pendingChildInfo.delete(child);
+        for (const event of events) this.codexChildProgress(event.method, event.p);
+      }
+    }
+  },
+
+  codexInfoItem(session, turnId, native, status, history) {
+    if (['enteredReviewMode', 'exitedReviewMode'].includes(native?.type)) {
+      const id = 'review-mode';
+      const saved = history?.get(infoId(turnId, id)) || session.items.findLast(i => i.id === infoId(turnId, id));
+      // The exit item can repeat the full review answer. Keep it in the answer lane only.
+      return this.infoItem(turnId, { id, kind: 'progress', title: 'Code review', text: native.type === 'enteredReviewMode' ? native.review : undefined,
+        status: native.type === 'enteredReviewMode' ? 'inProgress' : 'completed' }, saved);
+    }
+    if (!['reasoning', 'subAgentActivity', 'collabAgentToolCall'].includes(native?.type)) return null;
+    const id = native.type === 'subAgentActivity' && native.agentThreadId ? 'child:' + native.agentThreadId : native.id;
+    const child = native.type === 'subAgentActivity' && native.agentThreadId;
+    const origin = child && (session.items.find(item => item.details?.agentThreadId === child) ||
+      (history && [...history.values()].find(item => item.details?.agentThreadId === child)));
+    turnId = origin?.turnId || turnId;
+    const key = infoId(turnId, id);
+    const saved = history?.get(key) || origin || session.items.findLast(item => item.id === key);
+    const event = codexInfo(native, status, saved, this.codexChildMetadata);
+    const item = event && this.infoItem(turnId, { ...event, id }, saved);
+    if (item && event.details) item.details = event.details;
+    if (item && native.type === 'reasoning') {
+      if (status === 'inProgress' && event.text && Array.isArray(native.summary))
+        item.summaryParts = { ...native.summary.filter(part => typeof part === 'string') };
+      if (status !== 'inProgress') delete item.summaryParts;
+    }
+    return item;
+  },
+
+  codexChildNotification(method, p) {
+    const thread = p.thread;
+    const id = thread?.id || p.threadId;
+    const spawn = thread?.source?.subAgent?.thread_spawn;
+    const parent = thread?.parentThreadId || spawn?.parent_thread_id;
+    const cached = this.codexChildMetadata?.get(id);
+    if (!id || (!parent && method === 'thread/started')) return;
+    // No child transcript subscription. Join metadata only on an explicit parent/receiver relationship.
+    for (const session of this.data.sessions) {
+      if (parent && parent !== session.threadId && !session.items.some(i => i.details?.agentThreadId === parent)) continue;
+      const owns = i => i.type === 'info' && (i.details?.agentThreadId === id || i.details?.['agent:' + id]);
+      const saved = session.items.find(i => i.details?.agentThreadId === id) || session.items.find(owns);
+      if (!saved && !parent && !cached) continue;
+      if (cached && cached.session !== session.id) continue;
+      const meta = { ...saved?.details?.['thread:' + id], ...cached, session: session.id };
+      const status = p.status || thread?.status;
+      for (const [key, value] of Object.entries({ parent, name: thread?.agentNickname || spawn?.agent_nickname,
+        role: thread?.agentRole || spawn?.agent_role, path: spawn?.agent_path, depth: spawn?.depth,
+        model: thread?.model, effort: thread?.reasoningEffort, state: status?.type && [status.type, ...(status.activeFlags || [])].join(' · ') })) {
+        if (typeof value === 'string' || typeof value === 'number') meta[key] = value;
+      }
+      (this.codexChildMetadata ||= new Map()).set(id, meta);
+      if (saved) {
+        const details = { ...saved.details, ['thread:' + id]: meta };
+        this.storeInfo(session, { ...saved, details, text: codexDetailsText(details) });
+      }
+      return;
+    }
+  },
+
+  codexChildProgress(method, p) {
+    const summary = ['item/reasoning/summaryTextDelta', 'item/reasoning/summaryPartAdded', 'item/reasoning/textDelta'].includes(method);
+    const native = ['item/started', 'item/completed'].includes(method) && p.item;
+    if (!p.turnId || (!summary && !['reasoning', 'collabAgentToolCall', 'subAgentActivity'].includes(native?.type) && method !== 'turn/plan/updated')) return;
+    for (const session of this.data.sessions) {
+      const origin = session.items.find(i => i.details?.agentThreadId === p.threadId) ||
+        session.items.find(i => i.details?.['agent:' + p.threadId]);
+      if (!origin) continue;
+      const title = this.codexChildMetadata?.get(p.threadId)?.name || origin.details?.agentPath || p.threadId;
+      const id = JSON.stringify(['child', p.threadId, p.turnId, p.itemId || native?.id || method]);
+      if (method === 'item/reasoning/summaryTextDelta') this.codexSummaryDelta(session, origin.turnId, id, p, title + ' · Thinking');
+      else if (summary) {
+        if (!session.items.findLast(i => i.id === infoId(origin.turnId, id)))
+          this.recordInfo(session, origin.turnId, { id, title: title + ' · Thinking', kind: 'reasoning', status: 'inProgress' });
+      } else if (native) {
+        const info = this.codexInfoItem(session, origin.turnId, { ...native, id }, method === 'item/started' ? 'inProgress' : 'completed');
+        if (info) this.storeInfo(session, { ...info, title: info.title.startsWith(title + ' · ') ? info.title : title + ' · ' + info.title });
+      } else this.codexPlanProgress(session, origin.turnId, id, title + ' · Plan progress', p);
+      return;
+    }
+    // thread/started can precede the parent's spawn receipt. Keep public activity, not the
+    // child's transcript, until that receipt gives it a turn. Never guess the active turn.
+    if (!this.codexChildMetadata?.has(p.threadId)) return;
+    const pending = this.pendingChildInfo ||= new Map();
+    const events = pending.get(p.threadId) || [];
+    const safe = { threadId: p.threadId, turnId: p.turnId, itemId: p.itemId, summaryIndex: p.summaryIndex };
+    if (method === 'item/reasoning/summaryTextDelta') {
+      const last = events.at(-1);
+      if (last?.method === method && last.p.turnId === p.turnId && last.p.itemId === p.itemId && last.p.summaryIndex === p.summaryIndex) {
+        last.p.delta += p.delta; return;
+      }
+      safe.delta = p.delta;
+    } else if (summary) {
+      method = 'item/reasoning/summaryPartAdded';
+      if (events.some(e => e.method === method && e.p.turnId === p.turnId && e.p.itemId === p.itemId)) return;
+    } else if (native?.type === 'reasoning') safe.item = { type: native.type, id: native.id,
+      summary: Array.isArray(native.summary) ? native.summary.filter(s => typeof s === 'string') : [] };
+    else if (native) {
+      safe.item = Object.fromEntries(['id', 'type', 'tool', 'prompt', 'model', 'reasoningEffort', 'senderThreadId',
+        'agentPath', 'agentThreadId', 'kind', 'status', 'receiverThreadIds'].map(k => [k, native[k]]));
+      safe.item.agentsStates = Object.fromEntries(Object.entries(native.agentsStates || {}).map(([id, state]) =>
+        [id, { status: state?.status, message: state?.message }]));
+    } else { safe.explanation = p.explanation; safe.plan = p.plan?.map(({ step, status }) => ({ step, status })); }
+    if (events.length >= SUBMISSION_EVENT_LIMIT) events.shift();
+    events.push({ method, p: safe }); pending.set(p.threadId, events);
+  },
+
+  codexPlanProgress(session, turnId, id, title, p) {
+    if (!Array.isArray(p.plan)) return;
+    const key = infoId(turnId, id);
+    const saved = session.items.findLast(item => item.id === key);
+    const explanation = p.explanation || saved?.planExplanation;
+    const steps = p.plan.filter(s => typeof s?.step === 'string').map(s => s.status + ': ' + s.step);
+    const item = this.infoItem(turnId, { id, kind: 'progress', title, text: [explanation, ...steps].filter(Boolean).join('\n') }, saved);
+    if (item) this.storeInfo(session, { ...item, planExplanation: explanation });
+  },
+
   visible(item) {
     return item && ['userMessage', 'agentMessage', 'plan', 'commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall', 'webSearch', 'imageGeneration', 'contextCompaction'].includes(item.type);
   },
@@ -82,7 +250,7 @@ module.exports = {
   },
 
   turnEvent(method) {
-    return method === 'turn/started' || method === 'turn/completed' || method === 'thread/compacted' ||
+    return method === 'turn/started' || method === 'turn/completed' || method === 'turn/plan/updated' || method === 'thread/compacted' ||
       method === 'thread/tokenUsage/updated' || method === 'model/rerouted' || method === 'error' ||
       (typeof method === 'string' && method.startsWith('item/'));
   },
@@ -227,10 +395,64 @@ module.exports = {
     }
     if (method === 'serverRequest/resolved') { this.requests.delete(p.requestId); this.changed(); return; }
     if (method === 'account/rateLimits/updated') { this.codexUsage(p.rateLimits, true); this.changed(); return; }
-    const session = this.data.sessions.find(s => s.threadId === p?.threadId);
-    if (!session) return;
+    if (method === 'thread/started') { this.codexChildNotification(method, p); return; }
+    if (!p?.threadId) return;
+    const session = this.data.sessions.find(s => s.threadId === p.threadId);
+    if (!session && method === 'thread/status/changed') this.codexChildNotification(method, p);
+    if (!session) { if (p?.threadId) this.codexChildProgress(method, p); return; }
+    // The pre-acknowledgement buffer can itself be saved. Strip private fields before buffering.
+    if (['rawResponseItem/completed', 'rawResponse/completed'].includes(method)) return;
+    const review = method === 'item/autoApprovalReview/started' || method === 'item/autoApprovalReview/completed';
+    if (review) p = { threadId: p.threadId, turnId: p.turnId, reviewId: p.reviewId, review: { status: p.review?.status,
+      riskLevel: p.review?.riskLevel, rationale: p.review?.rationale } };
+    if (method === 'item/reasoning/textDelta') {
+      method = 'item/reasoning/summaryPartAdded';
+      p = { threadId: p.threadId, turnId: p.turnId, itemId: p.itemId };
+      const duplicate = session.submission?.buffer?.some(e => e.method === method && e.params.turnId === p.turnId && e.params.itemId === p.itemId);
+      if (duplicate) return;
+    }
+    const publicItem = item => item.type === 'reasoning' ? { id: item.id, type: 'reasoning',
+      summary: Array.isArray(item.summary) ? item.summary.filter(part => typeof part === 'string') : [] } : item;
+    if (p.item?.type === 'reasoning') p = { ...p, item: publicItem(p.item) };
+    if (Array.isArray(p.turn?.items)) p = { ...p, turn: { ...p.turn, items: p.turn.items
+      .filter(i => ['reasoning', 'collabAgentToolCall', 'subAgentActivity', 'enteredReviewMode', 'exitedReviewMode', 'plan'].includes(i.type)).map(publicItem) } };
+    if (['item/started', 'item/completed'].includes(method) && (p.turnId !== session.submission?.turnId || session.submission?.state === 'completed') &&
+        ['subAgentActivity', 'collabAgentToolCall'].includes(p.item?.type)) {
+      const info = this.codexInfoItem(session, p.turnId, p.item, method === 'item/completed' ? 'completed' : 'inProgress');
+      if (info && (this.knownTurn(session, p.turnId) || session.items.some(item => item.id === info.id))) {
+        this.storeInfo(session, info); return;
+      }
+    }
     if (this.bufferEarly(session, { method, params: p })) return;
     if (this.ignoredTurnEvent(session, method, p)) return;
+    if (review && p.reviewId) {
+      const text = [p.review.riskLevel && 'Risk: ' + p.review.riskLevel, p.review.rationale].filter(Boolean).join('\n');
+      this.recordInfo(session, p.turnId, { id: 'approval-review:' + p.reviewId, title: 'Approval review', kind: 'progress',
+        text: text || undefined, status: p.review.status }); return;
+    }
+    if (method === 'turn/plan/updated' && Array.isArray(p.plan)) {
+      this.codexPlanProgress(session, p.turnId, 'turn-plan', 'Plan progress', p); return;
+    }
+    if (method === 'item/mcpToolCall/progress' && typeof p.message === 'string' && p.itemId) {
+      this.recordInfo(session, p.turnId, { id: 'mcp-progress:' + p.itemId, kind: 'progress', title: 'Tool progress', text: p.message }); return;
+    }
+    if (method === 'item/reasoning/summaryPartAdded') {
+      const id = infoId(p.turnId, p.itemId);
+      if (!session.items.findLast(item => item.id === id)) this.recordInfo(session, p.turnId, { id: p.itemId, kind: 'reasoning', status: 'inProgress' });
+      return;
+    }
+    if (method === 'thread/goal/updated' && p.goal?.objective && Number.isFinite(p.goal.createdAt)) {
+      const id = 'goal:' + p.goal.createdAt;
+      const saved = session.items.findLast(item => item.type === 'info' && item.id === infoId(item.turnId, id));
+      if (saved || p.turnId) this.recordInfo(session, saved?.turnId || p.turnId, { id, title: 'Goal', kind: 'progress', text: p.goal.objective, status: p.goal.status });
+      return;
+    }
+    if (method === 'thread/goal/cleared') {
+      const goal = session.items.findLast(item => item.kind === 'progress' && item.title === 'Goal' && item.id.startsWith('info:') &&
+        item.id.includes(',"goal:'));
+      if (goal) this.storeInfo(session, { ...goal, status: 'cleared' });
+      return;
+    }
     if (method === 'turn/started') {
       const submission = session.submission;
       if (submission?.kind === 'compaction' && !submission.turnId) submission.turnId = p.turn.id;
@@ -267,6 +489,10 @@ module.exports = {
     if (method === 'thread/compacted') this.finishTurn(session, session.submission, { status: 'completed', error: null });
     if (method === 'turn/completed') {
       const status = ['completed', 'failed', 'interrupted'].includes(p.turn.status) ? p.turn.status : 'failed';
+      for (const item of p.turn.items || []) {
+        if (item.type === 'plan') this.notification({ method: 'item/completed', params: { threadId: p.threadId, turnId: p.turn.id, item } });
+        else this.storeInfo(session, this.codexInfoItem(session, p.turn.id, item, status));
+      }
       const submission = session.submission, messageId = submission?.messageId;
       const route = session.routes.find(r => r.turnId === p.turn.id) || session.routes.at(-1);
       const provider = route?.provider || 'codex';
@@ -281,6 +507,16 @@ module.exports = {
         this.coldStartLogged(session, route, { record: route.coldStartPending.record, step: session.items.find(item => item.id === route.coldStartPending.stepId) },
           route, status);
     }
+    if (method === 'item/reasoning/summaryTextDelta' && typeof p.delta === 'string' && p.itemId) {
+      this.codexSummaryDelta(session, p.turnId, p.itemId, p, 'Thinking');
+      return;
+    }
+    if (method === 'item/started' || method === 'item/completed') {
+      const info = this.codexInfoItem(session, p.turnId, p.item, method === 'item/started' ? 'inProgress' : 'completed');
+      if (info) {
+        this.storeInfo(session, info); return;
+      }
+    }
     if ((method === 'item/started' || method === 'item/completed') && this.visible(p.item)) {
       if (method === 'item/completed' && p.item.type === 'contextCompaction') {
         session.lastCompactedAt = Date.now();
@@ -290,6 +526,7 @@ module.exports = {
       p.item.routeLabel = session.routes.at(-1)?.label;
       // findLastIndex: a turn's items sit at the chat's end; a forward search cost 50 µs per step on 5,600 items (2026-11-14).
       const index = session.items.findLastIndex(i => i.id === p.item.id || (p.item.clientId && i.clientId === p.item.clientId));
+      if (index >= 0 && p.item.type === 'plan' && !p.item.text) p.item.text = session.items[index].text;
       p.item.createdAt = (index >= 0 ? session.items[index].createdAt : null) || Date.now();
       if (index < 0) session.items.push(p.item);
       else session.items[index] = {
@@ -300,9 +537,9 @@ module.exports = {
       };
     }
     // findLast: streamed items sit at the chat's end (see the Claude turn's assistant()).
-    if (method === 'item/agentMessage/delta') {
+    if (method === 'item/agentMessage/delta' || method === 'item/plan/delta') {
       let item = session.items.findLast(i => i.id === p.itemId);
-      if (!item) { item = { id: p.itemId, turnId: p.turnId, type: 'agentMessage', text: '', routeLabel: session.routes.at(-1)?.label, createdAt: Date.now() }; session.items.push(item); }
+      if (!item) { item = { id: p.itemId, turnId: p.turnId, type: method === 'item/plan/delta' ? 'plan' : 'agentMessage', text: '', routeLabel: session.routes.at(-1)?.label, createdAt: Date.now() }; session.items.push(item); }
       item.text += p.delta;
     }
     if (method === 'item/commandExecution/outputDelta') {
@@ -313,7 +550,7 @@ module.exports = {
     // Streamed text, command output, a step's start or end and token usage touch only this chat (its newest messages, its
     // current route): scoped, a push compares only that chat's tail instead of every message of every chat of the bot
     // (7.4 ms on a 5,600-message chat, 2026-11-13). Other events can change the bot's own state too.
-    const streamed = ['item/agentMessage/delta', 'item/commandExecution/outputDelta', 'item/started', 'item/completed', 'thread/tokenUsage/updated'].includes(method);
+    const streamed = ['item/agentMessage/delta', 'item/plan/delta', 'item/commandExecution/outputDelta', 'item/started', 'item/completed', 'thread/tokenUsage/updated'].includes(method);
     session.updated = Date.now(); this.changed(streamed ? session : undefined);
   },
 

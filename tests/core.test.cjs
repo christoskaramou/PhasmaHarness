@@ -3568,6 +3568,27 @@ test('task status lines stay out of handoffs to another provider', async t => {
   assert.ok(!JSON.stringify(session.directContext).includes('[task:'), JSON.stringify(session.directContext));
 });
 
+test('CLI commentary phases survive late snapshots but stay out of final handoffs', async t => {
+  const { controller } = await setup(t);
+  controller.data.settings.claudeEnabled = true;
+  controller.claude.status = { installed: true, loggedIn: true };
+  const session = controller.create();
+  session.helperTools = false;
+  controller.claude.run = async ({ onEvent }) => {
+    const message = (id, content, phase) => onEvent({ type: 'assistant', message: { id, content, phase } });
+    message('progress', [{ type: 'text', text: 'Still checking.' }]);
+    message('progress', [], 'commentary');
+    message('tool-only', [{ type: 'tool_use', id: 'call', name: 'read', input: {} }], 'commentary');
+    return { result: 'Verified.' };
+  };
+  await controller.send({ id: session.id, text: 'Check the file', mode: 'claude-cli:sonnet', task: 'off' });
+  await flush();
+  assert.deepEqual(session.items.filter(i => i.type === 'agentMessage').map(i => [i.phase, i.text]),
+    [['commentary', 'Still checking.'], ['final_answer', 'Verified.']]);
+  assert.match(JSON.stringify(session.directContext), /Verified/);
+  assert.doesNotMatch(JSON.stringify(session.directContext), /Still checking/);
+});
+
 test('CLI follow-ups include delegated history arriving during a turn exactly once', async t => {
   const { controller } = await setup(t);
   controller.data.settings.claudeEnabled = true;

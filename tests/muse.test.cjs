@@ -70,7 +70,7 @@ test('Muse sign-in opens only the Meta approval link it prints', async () => {
   assert.deepEqual(opened, ['https://auth.meta.com/device?user_code=ABCD-1234']);
 });
 
-test('Muse streams folded public items, ignores reasoning and keeps the host warm until closed', async t => {
+test('Muse streams folded public items, ignores raw reasoning and keeps the host warm until closed', async t => {
   const { backend, children } = await fixture(t);
   const events = [];
   const result = await backend.run({ ...runOptions(), onEvent: event => events.push(event) });
@@ -84,6 +84,130 @@ test('Muse streams folded public items, ignores reasoning and keeps the host war
   await backend.close();
   assert.equal(children[0].child.exitCode, 0);
   assert.equal(backend.warmCount(), 0);
+});
+
+test('Muse projects native child lifecycle and only SDK-folded public summary parts', async t => {
+  const events = [];
+  const { backend } = await fixture(t, { onPrompt: () => {
+    const [host] = backend.hosts;
+    const emit = (method, params) => backend.notification(host, { method, params: { sessionId: host.session.sessionId, ...params } });
+    const child = { itemId: 'job', turnId: 't', kind: 'subagent' };
+    emit('item/started', { item: { ...child, revision: 1, role: 'Reviewer', objective: 'Read tests', subagentId: 'native-child', controlStatus: 'running' } });
+    emit('item/completed', { item: { ...child, revision: 2, controlStatus: 'resultReady', result: { text: 'Checked', summary: 'Done', structuredData: { private: 'PRIVATE' } } } });
+    const reason = { itemId: 'r', turnId: 't', kind: 'reasoning', status: 'inProgress', text: 'PRIVATE' };
+    emit('item/started', { item: { ...reason, revision: 1, summary: ['First'] } });
+    const delta = (field, delta, viewCursor) => emit('item/delta', { itemId: 'r', field, delta, viewCursor });
+    delta('summary.0', ' part', 'c1');
+    delta('summary.0', ' part', 'c1');
+    delta('encryptedContent', 'PRIVATE', 'c2');
+    emit('item/updated', { item: { ...reason, revision: 2, summary: ['First part'] } });
+    delta('summary.1', 'Second', 'c3');
+    emit('item/updated', { item: { ...reason, revision: 1, summary: ['stale'] } });
+    emit('item/completed', { item: { ...reason, revision: 3, status: 'completed', summary: ['First part', 'Second'] } });
+    return 'OK';
+  } });
+  await backend.run({ ...runOptions(), onEvent: e => events.push(e) });
+  assert.deepEqual(events.filter(e => e.kind === 'agent'), [
+    { type: 'info', id: 'job', kind: 'agent', title: 'Reviewer', text: 'native-child\n\nRead tests', status: 'running' },
+    { type: 'info', id: 'job', kind: 'agent', title: 'Reviewer', text: 'native-child\n\nRead tests\n\nDone\n\nChecked', status: 'resultReady' },
+  ]);
+  assert.deepEqual(events.filter(e => e.kind === 'reasoning').map(e => [e.id, e.text, e.status]), [
+    ['r', 'First', 'inProgress'], ['r', 'First part', 'inProgress'],
+    ['r', 'First part\n\nSecond', 'inProgress'], ['r', 'First part\n\nSecond', 'completed'],
+    ['private', '', 'completed'],
+  ]);
+  assert.doesNotMatch(JSON.stringify(events), /PRIVATE/);
+});
+
+test('Muse SDK wire surfaces native progress, child provenance and commentary without exposing tool IO or private child bodies', async t => {
+  const events = [];
+  const { backend, children } = await fixture(t, { onPrompt: ({ params }) => {
+    const send = (method, payload) => children[0].child.stdout.write(JSON.stringify({ jsonrpc: '2.0', method,
+      params: { sessionId: params.sessionId, ...payload } }) + '\n');
+    const item = (kind, itemId, fields) => send('item/updated', { item: { kind, itemId, turnId: params.commandId,
+      revision: 1, status: 'inProgress', ...fields } });
+    const delta = (field, text, cursor) => send('item/delta', { itemId: 'reason', field, delta: text, viewCursor: cursor });
+    delta('summary.1', 'Second', 'before-start');
+    item('reasoning', 'reason', { summary: ['First'], signature: 'PRIVATE' });
+    delta('summary.1', 'Second', 'before-start');
+    item('reasoning', 'reason', { revision: 2, summary: ['First', 'Final second'], status: 'completed' });
+    delta('summary.1', 'LATE', 'after-done');
+    item('reasoning', 'fallback', { summary: [], fallbackText: 'Reviewing options', text: 'PRIVATE' });
+    item('reasoning', 'fallback', { revision: 2, summary: ['Checking the selected option'], truncated: true });
+    item('reasoning', 'fallback', { revision: 3, status: 'completed', text: 'PRIVATE' });
+    send('turn/modelRetryScheduled', { turnId: params.commandId, viewCursor: 'retry', attempt: 1, nextAttempt: 2,
+      maxAttempts: 3, retryDelayMs: 1000, system: 'meta', httpStatus: 429, errorKind: 'rateLimit' });
+    item('workflow', 'wf', { workflowRunId: 'run', phasePlan: [{ key: 'p', title: 'Audit' }], children: [
+      { childId: 'unit', attempt: 1, label: 'Lint', status: 'running' }] });
+    item('workflow', 'wf', { revision: 2, status: 'completed', finalSummary: 'Finished', children: [
+      { childId: 'unit', attempt: 1, terminal: 'completed', durationMs: 10 }] });
+    item('subagent', 'job', { subagentId: 'child', parentSubagentId: 'parent', workspacePlacement: 'isolated', objective: 'Check',
+      result: { evidenceRefs: ['https://user:PRIVATE@example.test/check?token=PRIVATE'], artifactRefs: ['report.txt'] } });
+    item('toolCall', 'tool', { tool: 'read', statusLine: 'Reading', statusProgress: { current: 1, total: 3, unit: 'files' } });
+    item('monitorFeed', 'monitor', { monitorId: 'monitor-tool', monitorDescription: 'Build watcher', text: 'PRIVATE' });
+    send('monitor/inboxItemAdmitted', { itemId: 'notice', taskId: 'watch', eventKind: 'line', body: 'PRIVATE' });
+    send('monitor/inboxItemDrained', { itemId: 'notice', deliveryVisible: true });
+    item('subagentInput', 'input', { subagentId: 'child', inputPhase: 'delivered', text: 'PRIVATE' });
+    item('peerMessage', 'peer', { peerMessage: { senderLabel: 'Worker', body: 'PRIVATE' } });
+    send('session/todoListChanged', { viewCursor: 'todos', items: [{ status: 'inProgress', text: 'Check API' }] });
+    send('session/goalChanged', { viewCursor: 'goal', goal: { objective: 'Verify', currentWork: 'Testing', percentComplete: 51, status: 'active' } });
+    item('agentMessage', 'comment', { text: 'Investigating.', messagePhase: 'commentary', status: 'completed' });
+    item('agentMessage', 'comment', { revision: 2, status: 'completed' });
+    item('agentMessage', 'late-phase', { text: 'Checking the other path.' });
+    item('agentMessage', 'late-phase', { revision: 2, status: 'completed', messagePhase: 'commentary' });
+    return 'Final.';
+  } });
+  const result = await backend.run({ ...runOptions(), onEvent: e => events.push(e) });
+  assert.equal(result.result, 'Final.');
+  assert.equal(events.find(e => e.message?.id === 'comment').message.phase, 'commentary');
+  const phaseUpdates = events.filter(e => e.message?.id === 'late-phase').map(e => e.message);
+  assert.deepEqual(phaseUpdates.map(m => [m.phase, m.content[0].text]), [
+    [undefined, 'Checking the other path.'], ['commentary', 'Checking the other path.'],
+  ]);
+  const infos = events.filter(e => e.type === 'info');
+  assert.doesNotMatch(JSON.stringify(infos), /PRIVATE|LATE/);
+  const last = key => infos.findLast(e => e.id === key);
+  assert.match(infos.find(e => e.title === 'Retry scheduled').text, /Reason: rateLimit\nSystem: meta\nHTTP status: 429/);
+  assert.deepEqual(infos.filter(e => e.id === 'reason').map(e => e.text), ['First\n\nSecond', 'First\n\nFinal second']);
+  assert.deepEqual(infos.filter(e => e.id === 'fallback').map(e => [e.text, e.status]), [
+    ['Reviewing options', 'inProgress'],
+    ['Checking the selected option\n\nProvider truncated this item', 'inProgress'],
+    ['Checking the selected option\n\nProvider truncated this item', 'completed'],
+  ]);
+  assert.match(last('job').text, /Parent: parent/);
+  assert.match(last('job').text, /Evidence: https:\/\/example.test\/check/);
+  assert.match(last('activity:wf').text, /Plan: Audit[\s\S]*Summary: Finished/);
+  const child = infos.filter(e => e.title === 'Workflow child');
+  assert.equal(child.length, 2);
+  assert.equal(child[0].id, child[1].id);
+  assert.match(child[1].text, /Lint/);
+  assert.equal(child[1].status, 'completed');
+  assert.match(last('activity:monitor').text, /Build watcher/);
+  assert.equal(last('monitor-inbox:notice').status, 'delivered');
+  assert.match(last('activity:tool').text, /1\/3 · files/);
+  assert.equal(last('activity:input').status, 'delivered');
+  assert.match(last('activity:peer').text, /Worker/);
+  assert.ok(infos.some(e => e.title === 'Plan' && e.text.includes('Check API')));
+  assert.ok(infos.some(e => e.title === 'Goal' && e.text.includes('51%')));
+});
+
+test('Muse projects an Info item recovered only by the SDK gap-fill page, once', async t => {
+  const events = [];
+  const { backend } = await fixture(t, { onPrompt: async ({ params }) => {
+    const [host] = backend.hosts;
+    const request = host.rpc.request.bind(host.rpc);
+    const recovered = { method: 'item/completed', params: { sessionId: params.sessionId, viewCursor: 'next',
+      item: { kind: 'reasoning', itemId: 'gap-summary', turnId: params.commandId, revision: 3,
+        status: 'completed', summary: ['Recovered public summary'], text: 'PRIVATE' } } };
+    host.rpc.request = (method, args) => method === 'view/page' ? Promise.resolve({ events: [recovered], nextCursor: null }) : request(method, args);
+    backend.notification(host, { method: 'view/gap', params: { sessionId: params.sessionId, after: 'before', next: 'next' } });
+    await host.gapView;
+    backend.notification(host, recovered); // late live twin of the served page
+    return 'OK';
+  } });
+  await backend.run({ ...runOptions(), onEvent: e => events.push(e) });
+  assert.deepEqual(events.filter(e => e.id === 'gap-summary').map(e => e.text), ['Recovered public summary']);
+  assert.doesNotMatch(JSON.stringify(events), /PRIVATE/);
 });
 
 test('Muse resumes with the selected profile and session-bound MCP helpers', async t => {
